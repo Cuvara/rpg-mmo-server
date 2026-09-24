@@ -3,6 +3,8 @@ package smoke
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -51,6 +54,28 @@ type Runner struct {
 	// sealedBindingVerified is surfaced in the game-server step's detail line.
 	sealedBindingVerified bool
 
+	// serverPublicKey is the game server's Ed25519 identity key as the gateway
+	// delivered it in EnterWorldResponse (ADR-25). Empty against a pre-ADR-25
+	// gateway or game server, which is reported and NOT treated as a failure --
+	// the smoke test must stay green against an older backend.
+	serverPublicKey []byte
+
+	// sealedIdentityChecked records that the server's identity signature verified
+	// under serverPublicKey.
+	//
+	// It is deliberately NOT named "verified". The smoke test reaches the gateway
+	// over plaintext HTTP/TCP like every environment today, so the key it checked
+	// against is one an attacker on its path could have chosen. Checking the
+	// signature therefore proves the gameplay peer holds THAT key -- not that the
+	// key is the real server's. The strong claim needs ADR-23's gateway TLS, and
+	// sealedIdentityHopAuthenticated is the field that would carry it.
+	sealedIdentityChecked bool
+
+	// sealedIdentityHopAuthenticated is whether the hop that delivered the key was
+	// authenticated. False everywhere today; it is reported rather than omitted so
+	// that a green run says WHY the strong claim is absent.
+	sealedIdentityHopAuthenticated bool
+
 	// runStart is the wall clock at Run(); every persisted row this run asserts
 	// on must be newer than it, which is what stops a stale row from passing.
 	runStart     time.Time
@@ -62,8 +87,39 @@ type Runner struct {
 }
 
 // NewRunner builds a Runner for cfg, writing progress to out.
-func NewRunner(cfg Config, out io.Writer) *Runner {
-	return &Runner{cfg: cfg, out: out, hc: &http.Client{Timeout: cfg.Timeout}, enc: encodingFor(cfg.Encoding)}
+func NewRunner(cfg Config, out io.Writer) (*Runner, error) {
+	hc := &http.Client{Timeout: cfg.Timeout}
+
+	// The meta hop (ADR-24). Set together or refused: a pin against a plaintext
+	// URL protects nothing while reading as though it does, and an https URL with
+	// no pin fails deep inside an x509 message several steps from the cause --
+	// Nakama's certificate is self-signed BY DESIGN and is pinned, never trusted
+	// through a CA.
+	//
+	// This exists because the suite failed with "context deadline exceeded"
+	// against a perfectly healthy Nakama the first time the flag was on: a
+	// plaintext GET to a TLS listener does not get refused, it hangs, and the
+	// timeout names the wrong thing entirely.
+	if cfg.NakamaTLSCert != "" && !strings.HasPrefix(cfg.NakamaURL, "https://") {
+		return nil, fmt.Errorf(
+			"nakama-tls-cert was given but nakama-url is not https (%s): a pin on a "+
+				"plaintext hop protects nothing", cfg.NakamaURL)
+	}
+	if strings.HasPrefix(cfg.NakamaURL, "https://") {
+		if cfg.NakamaTLSCert == "" {
+			return nil, fmt.Errorf(
+				"nakama-url is https (%s) but no nakama-tls-cert was given; Nakama's "+
+					"meta-hop certificate is self-signed by design (ADR-24 decision 4) "+
+					"and is PINNED, never trusted through a CA", cfg.NakamaURL)
+		}
+		tlsConfig, err := PinnedTLSConfig(cfg.NakamaTLSCert, cfg.NakamaURL)
+		if err != nil {
+			return nil, fmt.Errorf("nakama pin: %w", err)
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: tlsConfig}
+	}
+
+	return &Runner{cfg: cfg, out: out, hc: hc, enc: encodingFor(cfg.Encoding)}, nil
 }
 
 // encodingFor maps the configured name onto a wire encoding.
@@ -305,6 +361,10 @@ func (r *Runner) stepGatewayAuthEnter() (string, error) {
 	}
 	r.serverAddr = enterResp.ServerAddr
 	r.joinToken = enterResp.JoinToken
+	// ADR-25. Kept even when empty: sealSession decides from its length whether to
+	// require identity, and an empty key against an older backend must leave the
+	// run green rather than refuse the join.
+	r.serverPublicKey = enterResp.ServerPublicKey
 	// The gateway tells us which transport the target game server speaks; an
 	// omitted field means TCP (servers registered before the field existed).
 	r.serverTrans = transport.Normalize(enterResp.Transport)
@@ -467,6 +527,20 @@ drain:
 		// confidentiality for authenticity, which is exactly the conflation
 		// ADR-21 was written about.
 		detail += fmt.Sprintf(" sealed=true binding_verified=%v", r.sealedBindingVerified)
+
+		// ADR-25, reported as THREE facts rather than one, because collapsing them
+		// is the exact mistake decision 6 forbids. "identity_checked" says a
+		// signature verified under the key we were given; "key_hop_authenticated"
+		// says whether that key arrived over a hop we could trust; and
+		// "server_identity_verified" -- the only one that means "this is the real
+		// game server" -- is their conjunction. While the gateway hop is plaintext
+		// a passing run prints checked=true, authenticated=false, verified=false,
+		// and that is the honest result, not a degraded one.
+		detail += fmt.Sprintf(
+			" identity_key=%v identity_checked=%v key_hop_authenticated=%v server_identity_verified=%v",
+			len(r.serverPublicKey) > 0, r.sealedIdentityChecked,
+			r.sealedIdentityHopAuthenticated,
+			r.sealedIdentityChecked && r.sealedIdentityHopAuthenticated)
 	}
 	return detail, nil
 }
@@ -478,8 +552,30 @@ drain:
 // whose address is operator-supplied local config (GATEWAY_ADDR, ":8000" by
 // default) rather than something a server advertised — strict address mode
 // therefore does not apply to it.
+// dial connects to the GATEWAY, wrapping the socket in TLS when a pin is
+// configured (ADR-23). Only this path does so: dialServer below reaches the game
+// server, whose hop is protected by the sealed session instead, and wrapping
+// that one in TLS as well would be two mechanisms claiming the same job.
 func (r *Runner) dial(kind, addr string) (net.Conn, error) {
-	return r.dialTarget(kind, NormalizeDialAddr(addr))
+	target := NormalizeDialAddr(addr)
+	conn, err := r.dialTarget(kind, target)
+	if err != nil {
+		return nil, err
+	}
+	if r.cfg.GatewayTLSCertPath == "" {
+		return conn, nil
+	}
+
+	host, _, splitErr := net.SplitHostPort(target)
+	if splitErr != nil {
+		host = target
+	}
+	tlsConn, err := WrapGatewayTLS(conn, r.cfg.GatewayTLSCertPath, host, r.cfg.Timeout)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
 }
 
 // dialServer connects to a game server address the gateway advertised. Under
@@ -591,7 +687,19 @@ func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
 	}
 
 	result, err := sealed.RunClientHandshake(
-		sealed.ClientHandshakeConfig{JTI: claims.Jti},
+		sealed.ClientHandshakeConfig{
+			JTI: claims.Jti,
+			// The key the real gateway just handed us, exactly as a shipped client
+			// gets it. Non-empty makes the handshake REQUIRE a verifying signature,
+			// so a forged or missing one ends the run rather than being reported.
+			ServerPublicKey: r.serverPublicKey,
+			// FALSE, hard-coded, and it must stay false until ADR-23's gateway TLS
+			// is on AND this client validates the certificate. The smoke test talks
+			// plaintext to the gateway, so asserting otherwise here would fabricate
+			// the one field anyone would trust. This is the line to change when the
+			// hop changes -- not before.
+			KeyHopAuthenticated: false,
+		},
 		func(pub []byte) error {
 			env, err := messages.NewEnvelopeAs(r.enc, messages.MsgSealedClientHello,
 				messages.SealedClientHello{PublicKey: pub})
@@ -600,19 +708,19 @@ func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
 			}
 			return r.send(conn, env)
 		},
-		func() ([]byte, []byte, string, error) {
+		func() ([]byte, []byte, []byte, string, error) {
 			env, err := r.recv(conn)
 			if err != nil {
-				return nil, nil, "", err
+				return nil, nil, nil, "", err
 			}
 			if env.Type != messages.MsgSealedServerHello {
-				return nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
+				return nil, nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
 			}
 			var hello messages.SealedServerHello
 			if err := env.UnmarshalPayload(&hello); err != nil {
-				return nil, nil, "", err
+				return nil, nil, nil, "", err
 			}
-			return hello.PublicKey, hello.Binding, hello.Error, nil
+			return hello.PublicKey, hello.Binding, hello.ServerSignature, hello.Error, nil
 		},
 	)
 	if err != nil {
@@ -622,6 +730,8 @@ func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
 	r.sealedConn, r.sealedOut, r.sealedIn = conn, result.Outbound, result.Inbound
 
 	r.sealedBindingVerified = result.BindingVerified
+	r.sealedIdentityChecked = result.IdentityChecked
+	r.sealedIdentityHopAuthenticated = result.IdentityKeyHopAuthenticated
 	return nil
 }
 
@@ -656,4 +766,40 @@ func truncate(b []byte, n int) string {
 		return s[:n] + "..."
 	}
 	return s
+}
+
+// PinnedTLSConfig trusts exactly one certificate -- the leaf, compared byte for
+// byte against what Nakama presents.
+//
+// InsecureSkipVerify is true and is not what it sounds like: it disables the
+// DEFAULT verifier so VerifyPeerCertificate is the only thing that decides, which
+// is how Go expresses "replace verification", not "remove it". Pinning is
+// STRICTER than the public trust store: a certificate signed by any CA on earth
+// is refused unless it is this exact one.
+func PinnedTLSConfig(pemPath, nakamaURL string) (*tls.Config, error) {
+	pinned, err := LoadPinnedCertificate(pemPath)
+	if err != nil {
+		return nil, err
+	}
+	host := ""
+	if u, uerr := url.Parse(nakamaURL); uerr == nil {
+		host = u.Hostname()
+	}
+	return &tls.Config{
+		ServerName:         host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // replaced by the pin below, not removed
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("nakama presented no certificate")
+			}
+			// The LEAF only: a pin that matched anywhere in the chain would accept a
+			// certificate ISSUED BY the pinned one, a different guarantee entirely.
+			if !bytes.Equal(rawCerts[0], pinned) {
+				return fmt.Errorf("nakama certificate does not match the pin (presented %d bytes, pinned %d)",
+					len(rawCerts[0]), len(pinned))
+			}
+			return nil
+		},
+	}, nil
 }

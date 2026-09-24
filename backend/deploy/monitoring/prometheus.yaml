@@ -44,6 +44,14 @@ global:
   external_labels:
     env: dev
 
+# Alerting rules (alerts.yaml, mounted beside this file). Absent until 2026-09-13:
+# every number this stack collected was visible only to someone already looking at
+# a dashboard, which ADR-24 §8.1 named as the reason a quietly broken reward path
+# was only ever found by a human reading pod logs. There is no Alertmanager here,
+# so a firing rule surfaces on Prometheus' Alerts page and in Grafana.
+rule_files:
+  - /otel-lgtm/alerts.yaml
+
 scrape_configs:
   # Nakama meta server — runs in this compose project, reachable by service name.
   - job_name: nakama

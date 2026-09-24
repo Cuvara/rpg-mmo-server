@@ -1,24 +1,77 @@
 namespace GameServer.Scaffolding;
 
 /// <summary>
-/// Tuning constants for the enemy AI, shared by the three systems that need them.
-/// Values are unchanged from the single-method spawner they were extracted from —
-/// stage 2 is a restructuring, and a changed constant here would move every enemy on
-/// the wire.
+/// Compiled-in <b>defaults</b> for the enemy AI.
+///
+/// <para><b>These are no longer the values the systems read.</b> They are the fallbacks
+/// <see cref="EnemyAiSettings"/> uses for a knob nobody configured; the systems read the
+/// settings object they were constructed with. The indirection is what makes the fight
+/// tunable from a deployment instead of from a release — see that type for why every one
+/// of them parses strictly.</para>
+///
+/// <para>Every value below is unchanged from the single-method spawner these were
+/// extracted from, and the two <c>PerPlayer</c> additions are zero-valued on an empty
+/// server, so a server with nothing configured and nobody online is bit-for-bit the
+/// server that shipped. <c>EnemyAiCharacterizationTests</c> is what holds that claim
+/// up.</para>
 /// </summary>
 internal static class EnemyAiTuning
 {
-    /// <summary>World-unit radius enemies spawn at (from center).</summary>
+    /// <summary>
+    /// World-unit distance enemies spawn at, from whatever they are anchored to: a live
+    /// player when there is one, the origin when there is not. At the origin it is the
+    /// ring the pre-change spawner always used, which is why the number is unchanged.
+    /// </summary>
     public const float SpawnRadius = 13.0f;
 
-    /// <summary>Enemies per wave.</summary>
+    /// <summary>
+    /// Closest an enemy is placed to <i>any</i> live player. 8 units is far enough that a
+    /// player has roughly (13-8)/2.5 ~ 2s of warning in the worst crowding case and the
+    /// enemy is outside <c>GameConstants.AttackRange</c> (3.0) on arrival, so nothing ever
+    /// materialises already in contact.
+    /// </summary>
+    public const float MinSpawnDistance = 8.0f;
+
+    /// <summary>
+    /// How close a chaser closes before it stops advancing. Inside
+    /// <c>GameConstants.AttackRange</c> (3.0) so the player can hit what is on them, and
+    /// non-zero so a ring of chasers does not jitter across the target's exact position
+    /// every tick.
+    /// </summary>
+    public const float ContactRange = 1.0f;
+
+    /// <summary>
+    /// Whether enemies chase by default. On: the whole point of the change, and it is an
+    /// improvement rather than a behaviour break because an enemy with no player to chase
+    /// falls back to the pre-change walk-to-origin step, bit for bit.
+    /// </summary>
+    public const bool ChaseByDefault = true;
+
+    /// <summary>Enemies per wave with nobody online. The pre-change wave.</summary>
     public const int EnemiesPerWave = 2;
+
+    /// <summary>
+    /// Extra enemies per wave, per live player. Sized against the cap, not chosen by
+    /// taste: the additional 45-per-player population has to be reachable in a time a
+    /// player will wait. At 6 per player per 1.5s wave, one player's 75-enemy cap fills in
+    /// about 14 seconds; at the pre-change 2 it would take 56.
+    /// </summary>
+    public const int EnemiesPerWavePerPlayer = 6;
 
     /// <summary>Seconds between waves.</summary>
     public const float WaveIntervalSec = 1.5f;
 
-    /// <summary>Maximum simultaneous enemies in the world.</summary>
+    /// <summary>Maximum simultaneous enemies with nobody online. The pre-change cap.</summary>
     public const int MaxEnemies = 30;
+
+    /// <summary>
+    /// Extra simultaneous enemies allowed per live player. This is the number the owner's
+    /// "threadbare" complaint is actually about: 30 was the whole world's budget however
+    /// many players shared it, so every player who joined made the fight thinner. 45 puts
+    /// a solo player in a 75-enemy world and a four-player group in a 210-enemy one, which
+    /// is the crowd a battle-royale feel needs, while an empty server stays at 30.
+    /// </summary>
+    public const int MaxEnemiesPerPlayer = 45;
 
     /// <summary>
     /// Sized so the demo combat loop can actually complete. The arithmetic that ruled the
@@ -34,13 +87,76 @@ internal static class EnemyAiTuning
     public const int EnemyAttack = 5;
     public const int EnemyDefense = 2;
 
-    /// <summary>Movement speed toward center (world units per second).</summary>
+    /// <summary>Movement speed toward the current target (world units per second).</summary>
     public const float EnemySpeed = 2.5f;
 
-    /// <summary>Radius around (0,0) at which enemies despawn (reached the center).</summary>
+    /// <summary>
+    /// Radius around (0,0) at which a <b>targetless</b> enemy despawns.
+    ///
+    /// <para>Targetless is the whole condition, and it is what makes the change additive
+    /// rather than a replacement. An enemy with a player to chase is never reaped for
+    /// where it is standing — reaching a point is not a reason to stop existing when the
+    /// point is wherever the fight happens to be, and a player who walked to the origin
+    /// would otherwise watch everything attacking them evaporate. An enemy with nothing to
+    /// chase walks to the origin and despawns there, exactly as every enemy did before.</para>
+    /// </summary>
     public const float DespawnRadius = 2.5f;
 
     public const float DespawnRadiusSq = DespawnRadius * DespawnRadius;
+
+    // ── Enemy-side combat ────────────────────────────────────────────────────
+
+    /// <summary>Whether enemies attack back by default. On: the point of the change.</summary>
+    public const bool AttacksByDefault = true;
+
+    /// <summary>
+    /// Seconds between one player's incoming-damage windows, and therefore the period the
+    /// whole survivability bound is expressed over.
+    ///
+    /// <para>0.5s is the server's own <c>GameConstants.AttackCooldownMs</c>, deliberately:
+    /// an enemy attacks through the ordinary input path, so its swing is gated by the same
+    /// per-entity cooldown a player's is. A window SHORTER than that cooldown cannot
+    /// produce more attacks — it only produces enemies that are decided against and then
+    /// found to be on cooldown — so the effective interval is
+    /// <c>max(this, AttackCooldownMs)</c>. Stated here because the knob otherwise looks
+    /// like it goes lower than it goes.</para>
+    /// </summary>
+    public const float AttackIntervalSec = 0.5f;
+
+    /// <summary>
+    /// How many enemy attacks may LAND on one player per <see cref="AttackIntervalSec"/>,
+    /// however many enemies are standing on them.
+    ///
+    /// <para><b>This is the number that makes 327 enemies a fight instead of a delete.</b>
+    /// A per-enemy cooldown does not bound anything on its own: three hundred enemies each
+    /// respecting a 500ms cooldown still deliver three hundred hits every 500ms, and at
+    /// the default stats that is a dead player in well under a second. The bound has to be
+    /// per TARGET, because the target is what is being protected.</para>
+    ///
+    /// <para><b>The arithmetic at the defaults.</b> Damage per hit is
+    /// <c>max(1, EnemyAttack 5 − player defense 5) = 1</c>
+    /// (<c>CombatLogic.CalculateDamage</c>, floored at <c>GameConstants.MinDamage</c>).
+    /// Three hits per 0.5s window is 6 damage per second, so a player at the default 100
+    /// HP survives <b>16.7 seconds</b> of being completely surrounded — and survives
+    /// exactly as long surrounded by 327 enemies as by 3, which is the property the cap
+    /// exists to give. Raising <c>GAMESERVER_ENEMY_ATTACK</c> moves this: at attack 20 the
+    /// hit is 15 and the same 3-per-window cap kills in 1.1s.</para>
+    /// </summary>
+    public const int AttackersPerTarget = 3;
+
+    /// <summary>
+    /// Whether a player whose HP reaches 0 is returned to the map at the spawn point with
+    /// full HP, on the next world tick.
+    ///
+    /// <para>On by default because enemy attacks make player death reachable for the first
+    /// time and the pre-existing consequences of reaching it are not a design, they are an
+    /// absence: nothing reaps a dead player, every input is refused for the life of the
+    /// process, and <c>AsyncSaver</c> persists <c>hp = 0</c> — which
+    /// <c>PlayerSpawn.Resolve</c> then restores verbatim on the next join, so the character
+    /// is dead permanently and across servers (docs/DESIGN.md has carried this as a known
+    /// gap since 2026-08). Turning this off restores that behaviour exactly.</para>
+    /// </summary>
+    public const bool RespawnPlayersByDefault = true;
 }
 
 /// <summary>
@@ -67,14 +183,45 @@ internal enum EnemyAiPhase
     /// </summary>
     Spawn = 0,
 
-    /// <summary>Move every living enemy one step toward the origin.</summary>
+    /// <summary>
+    /// Move every living enemy one step toward its target: the nearest live player, or
+    /// the origin when there is none.
+    /// </summary>
     Move = 1,
 
     /// <summary>
+    /// Decide which enemies swing, and at whom, after <see cref="Move"/> has put them
+    /// where they are this tick.
+    ///
+    /// <para><b>Why a fourth phase was added when a previous change considered one and
+    /// declined.</b> That decision was about a "centre-zone damage" step the old comments
+    /// claimed and no code implemented — deleting a phantom, not refusing a real one. The
+    /// ordering argument in this enum does not forbid an attack step; it is what places
+    /// it. Range is measured against a position, so the decision must come after the
+    /// system that produces this tick's position, and it must come before
+    /// <see cref="Reap"/> for the reason <see cref="Reap"/> already gives: reaping never
+    /// runs before the thing that kills.</para>
+    ///
+    /// <para>This phase kills nothing itself. It records decisions, and the flush after
+    /// the write scope turns them into ordinary queued input — so the damage, the events
+    /// and the death all happen on the next critical tick inside <c>InputHandler</c>,
+    /// down the one combat path this server has.</para>
+    /// </summary>
+    Attack = 2,
+
+    /// <summary>
+    /// Return dead players to the map. After <see cref="Attack"/> so a player killed by
+    /// the input this tick emitted is revived by the NEXT world tick and not the same one
+    /// — the death has to be observable, and a revival in the same pass that dealt the
+    /// killing blow would erase it before any snapshot sampled it.
+    /// </summary>
+    Respawn = 3,
+
+    /// <summary>
     /// Reap last, and never before the thing that kills. It removes enemies that are
-    /// dead or that have arrived at the centre, and "arrived" is a fact produced by
-    /// <see cref="Move"/> earlier in this same tick. Reaping first would let an enemy be
+    /// dead or that have arrived at the centre with nothing to chase, and "arrived" is a
+    /// fact produced by <see cref="Move"/> earlier in this same tick. Reaping first would let an enemy be
     /// visible inside the despawn zone for a tick, and would defer every kill by one.
     /// </summary>
-    Reap = 2,
+    Reap = 4,
 }

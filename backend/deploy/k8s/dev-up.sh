@@ -53,6 +53,21 @@ COMPOSE_REDIS_CONTAINER="${COMPOSE_REDIS_CONTAINER:-rpg-redis}"
 LEGACY_FLEET_NS="${LEGACY_FLEET_NS:-rpg-realtime}"
 LEGACY_FLEET="${LEGACY_FLEET:-map-servers-dotnet-dev}"
 K8S_FLEET="${K8S_FLEET:-map-servers-dotnet-k8s}"
+# The dungeon fleet is pinned by the SAME resolved image as the map fleet --
+# one binary, two modes. It is a separate variable only so the pin below can
+# name it; there is no scenario where the two fleets should run different
+# builds.
+K8S_FLEET_DUNGEON="${K8S_FLEET_DUNGEON:-dungeon-servers-dotnet-k8s}"
+# Spare instances so dungeon entry does not pay a cold pod start inside the
+# client's EnterWorld budget. Safe above 1 only because these pods claim no map
+# (ADR-26 decision 8); set to 0 to take dungeons out of service without
+# touching the manifest.
+K8S_DUNGEON_REPLICAS="${K8S_DUNGEON_REPLICAS:-2}"
+# The buffer FleetAutoscaler on that fleet (app/70-fleetautoscaler-dungeon.yaml).
+# Named here only so the K8S_DUNGEON_REPLICAS=0 path can delete it by name --
+# leaving a minReplicas floor in place would scale the fleet back up within one
+# sync interval and make "out of service" a state that does not hold.
+K8S_FLEET_DUNGEON_AUTOSCALER="${K8S_FLEET_DUNGEON_AUTOSCALER:-dungeon-servers-dotnet-k8s-buffer}"
 # Floor of the Agones dynamic port range. Everything BELOW it in k3d's
 # published 7000-7100 is reserved for infrastructure (gateway 7000, nakama
 # 7001). See app/40-gateway.yaml.
@@ -131,8 +146,30 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
       # hoc on this host, and a tag left behind by an earlier build is
       # indistinguishable by name from a fresh one. Compare the stamped
       # revision against the commit we are pinning, and refuse on a mismatch.
-      rev=$(docker image inspect "$img" \
-        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)
+      # Retried, and failing LOUDLY. This was a bare `rev=$(docker ... 2>/dev/null)`
+      # under `set -e`: when the Docker Desktop shim flaked on this one call, the
+      # assignment failed, the script exited, and 2>/dev/null had already thrown
+      # away the only message -- CD logged the heading above and then exit 1 with
+      # nothing between. The inspect in the `if` one line up had just succeeded,
+      # so the image was there; only the shim was not.
+      # stdout only into rev: shim noise on stderr must never become the revision,
+      # or it would trip the mismatch refusal below on an image that is correct.
+      rev=""; rev_ok=0; rev_err="$(mktemp)"
+      for _attempt in 1 2 3 4 5; do
+        if rev=$(docker image inspect "$img" \
+             --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>"$rev_err"); then
+          rev_ok=1; break
+        fi
+        sleep 2
+      done
+      if [ "$rev_ok" != 1 ]; then
+        echo "::error::could not read the revision label of $img after 5 attempts: $(tr '\n' ' ' < "$rev_err")" >&2
+        echo "  The image exists (the inspect just above succeeded), so this is the docker" >&2
+        echo "  CLI failing, not a missing build. Re-run the job." >&2
+        rm -f "$rev_err"
+        exit 1
+      fi
+      rm -f "$rev_err"
       if [ -n "$rev" ] && [ "$rev" != "unknown" ] && [ "$rev" != "$GIT_SHA" ]; then
         echo "::error::$img is stamped with revision $rev but this run pins $GIT_SHA." >&2
         echo "  Rebuild it, or pass GATEWAY_IMAGE/GAMESERVER_IMAGE explicitly." >&2
@@ -317,7 +354,49 @@ if [ "${nk_rebuilt:-0}" = "1" ]; then
   say "restarting nakama to pick up the rebuilt plugin"
   $K rollout restart -n rpg-k8s-data deploy/nakama
 fi
-$K rollout status -n rpg-k8s-data deploy/nakama             --timeout=300s
+# PREFLIGHT: the leaderboard the plugin refuses to boot against.
+#
+# `kills_alltime` must be authoritative -- a client-writable kill leaderboard is a
+# client that can write its own kill count -- and the Go plugin FAILS INIT rather
+# than accept one. The failure is invisible where it is read: Nakama crash-loops,
+# `rollout status` times out 300s later, and CD prints
+# `error: timed out waiting for the condition` with nothing about leaderboards.
+# The cause is only in the pod log, one `kubectl logs` away from a reader who does
+# not yet know to look.
+#
+# This defect lives in each ENVIRONMENT'S DATABASE, not in the image, so a green
+# dev deploy predicts nothing: dev was fixed by hand on 2026-09-10 and staging
+# failed the identical way on 2026-09-12. Production has never been deployed and
+# will hit it on its first run unless this gate is here.
+#
+# Skipped, not failed, when the table does not exist yet: a first-ever deploy runs
+# the Nakama migration in an init container, so there is nothing to inspect and
+# nothing wrong.
+lb_auth=$($K exec -n rpg-k8s-data postgres-meta-0 -- \
+  psql -U nakama -d nakama -tAc \
+  "SELECT authoritative FROM leaderboard WHERE id = 'kills_alltime';" 2>/dev/null | tr -d '[:space:]' || true)
+if [ "$lb_auth" = "f" ]; then
+  echo "ERROR: leaderboard kills_alltime has authoritative=false on this cluster." >&2
+  echo "  The Nakama Go plugin refuses to start against it, so Nakama will crash-loop" >&2
+  echo "  and the rollout below would time out after 300s naming only a timeout." >&2
+  echo "  Fix, keeping every existing record:" >&2
+  echo "    kubectl --context $KUBE_CONTEXT -n rpg-k8s-data exec postgres-meta-0 -- \\" >&2
+  echo "      psql -U nakama -d nakama -c \"UPDATE leaderboard SET authoritative = true WHERE id = 'kills_alltime';\"" >&2
+  echo "  Then re-run this deploy. To discard the records instead, set LEADERBOARD_MIGRATE=recreate." >&2
+  exit 1
+fi
+if [ -n "$lb_auth" ]; then
+  echo "checked: leaderboard kills_alltime is authoritative (clients cannot write their own scores)"
+fi
+
+# If the rollout fails anyway, say WHY. Without this the operator sees only
+# `timed out waiting for the condition`; the actual reason is a fatal line in the
+# pod log, and it is worth the four lines here to put it in the same output.
+if ! $K rollout status -n rpg-k8s-data deploy/nakama --timeout=300s; then
+  echo "ERROR: nakama did not become Ready. Its last log lines:" >&2
+  $K logs -n rpg-k8s-data deploy/nakama --tail=20 2>&1 | sed 's/^/  /' >&2 || true
+  exit 1
+fi
 
 # Read the images the cluster is ALREADY running, before `apply` overwrites the
 # specs with whatever tag the manifests carry. Comparing after the apply always
@@ -326,6 +405,40 @@ $K rollout status -n rpg-k8s-data deploy/nakama             --timeout=300s
 # including a no-op one.
 pre_gs=$($K get fleet "$K8S_FLEET" -n rpg-k8s-realtime \
   -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+pre_dungeon=$($K get fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+pre_gw=$($K get deploy gateway -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+
+# Render a manifest with its moving `:develop` image replaced by the image the cluster
+# is ALREADY running (or the pinned one, on a first deploy), so `apply` is image-neutral.
+#
+# Applying the raw manifests wrote `:develop` into the LIVE objects on every re-deploy,
+# and `:develop` is a hand-retagged image that lags the branch -- in the node it was
+# 307f1e8, 2026-08-17, five weeks old and older than dungeon-mode registration. The
+# dungeon manifest's `replicas: 0` only guards a FIRST deploy: once the fleet and its
+# Buffer autoscaler exist, the autoscaler holds the floor, so Agones rolled real pods
+# onto that image before the pin below. A five-week-old dungeon pod registers map_01
+# like a map server, and its registry entry outlives the pod until the heartbeat
+# expires -- a split world during every deploy. CD caught it once: the smoke test was
+# routed to dungeon-servers-...-7vh8n on map_01 and its join died with EOF, three
+# seconds before that entry expired. The gateway had the same shape.
+#
+# The pin logic below is unchanged and still owns every image CHANGE; this only stops
+# `apply` from making one of its own.
+render_image() {  # render_image <manifest> <moving-image> <image-to-use>
+  local out
+  out=$(sed "s|image: $2\$|image: $3|" "$1")
+  if ! grep -q "image: $3\$" <<<"$out"; then
+    echo "ERROR: $1 has no 'image: $2' line to pin; refusing to apply it unpinned." >&2
+    return 1
+  fi
+  if [ "$2" != "$3" ] && grep -q "image: $2\$" <<<"$out"; then
+    echo "ERROR: $1 still names $2 after pinning; refusing to apply a second moving image." >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
 
 say "apply the app tier (rpg-k8s-realtime)"
 # The Secret is NOT in the repo. It must already exist, or be applied from a
@@ -333,6 +446,36 @@ say "apply the app tier (rpg-k8s-realtime)"
 for f in 00-namespace.yaml 05-agones-sdk-rbac.yaml 10-rbac.yaml 20-configmaps.yaml; do
   [ -f "$HERE/app/$f" ] && $K apply -f "$HERE/app/$f"
 done
+# --- the meta hop's opt-in has to SURVIVE this apply ------------------------
+# `20-configmaps.yaml` above is repo state and carries the plaintext defaults, so
+# every deploy resets `nakama-url` and `nakama-tls-pin` -- while `nakama-config`
+# in rpg-k8s-data is cluster-only and survives untouched. That asymmetry silently
+# half-disables the flag: Nakama keeps terminating TLS and the game server is told
+# to speak plaintext to it.
+#
+# It is worse than it looks, because it does not show up until something unrelated
+# happens. Environment variables are fixed at pod creation, so the RUNNING game
+# servers keep the values they started with and everything keeps working -- until
+# the next pod is created, whenever that is, by a crash or a scale or a rollout
+# nobody connected to this. Measured 2026-09-13: a CD run reset the ConfigMap, a
+# probe still reported REWARDED off the stale pods, and the cluster was one pod
+# replacement away from every reward RPC failing.
+#
+# So `nakama-config` is the ONE source of truth, and the game server's half is
+# derived from it here rather than maintained in parallel and checked later.
+nk_on=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+if [ -n "$nk_on" ]; then
+  cur_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+  # Swap the scheme rather than hardcode a host: the host belongs to the manifest
+  # and must keep coming from there.
+  https_url="https://${cur_url#http://}"
+  case "$cur_url" in https://*) https_url="$cur_url" ;; esac
+  $K patch configmap gameserver-config -n rpg-k8s-realtime --type=merge \
+    -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
+  echo "restored: the meta hop is on in this cluster, so gameserver-config was moved back to"
+  echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
+fi
+
 if ! $K get secret rpg-app-secrets -n rpg-k8s-realtime >/dev/null 2>&1; then
   echo "ERROR: secret rpg-k8s-realtime/rpg-app-secrets is absent." >&2
   echo "Fill a copy of app/30-secret-template.yaml OUTSIDE the repo and apply it first." >&2
@@ -428,7 +571,138 @@ if [ -z "$gs_nakama_url" ]; then
   exit 1
 fi
 echo "checked: the game server will reach Nakama at $gs_nakama_url"
-$K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml"
+
+# GATEWAY-HOP TLS (ADR-23): refuse the half-configured shapes here, because the
+# pod cannot explain them and the client cannot either.
+#
+# Three ways this goes wrong, all silent somewhere:
+#   - one path set, not both  -> the gateway exits at startup, correctly, but the
+#     event is a CrashLoopBackOff rather than a sentence.
+#   - paths set, no Secret    -> the optional volume is absent, so the paths point
+#     at nothing and the gateway exits on an unreadable file.
+#   - Secret present, no paths -> TLS is silently OFF while someone believes they
+#     turned it on. This is the dangerous one: everything is healthy and the hop
+#     is plaintext.
+# A TLS listener cannot answer a plaintext client in a language it understands, so
+# the third case is indistinguishable from success from the gateway's side.
+tls_cert_path=$($K get configmap gateway-config -n rpg-k8s-realtime -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+tls_key_path=$($K get configmap gateway-config -n rpg-k8s-realtime -o 'jsonpath={.data.tls-key-path}' 2>/dev/null || true)
+tls_secret=$($K get secret gateway-tls -n rpg-k8s-realtime -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
+
+if { [ -n "$tls_cert_path" ] && [ -z "$tls_key_path" ]; } || { [ -z "$tls_cert_path" ] && [ -n "$tls_key_path" ]; }; then
+  echo "ERROR: gateway-config has exactly one of tls-cert-path / tls-key-path." >&2
+  echo "  The gateway treats one-without-the-other as a startup error on purpose." >&2
+  echo "  Set both, or neither." >&2
+  exit 1
+fi
+
+if [ -n "$tls_cert_path" ] && [ -z "$tls_secret" ]; then
+  echo "ERROR: gateway-config names TLS paths but the gateway-tls Secret is absent." >&2
+  echo "  The volume is optional, so those paths would point at nothing and the" >&2
+  echo "  gateway would exit on an unreadable certificate." >&2
+  echo "  Create it (PEM files in the current directory):" >&2
+  echo "    kubectl --context $KUBE_CONTEXT -n rpg-k8s-realtime create secret generic gateway-tls \\" >&2
+  echo "      --from-file=tls.crt=tls.crt --from-file=tls.key=tls.key" >&2
+  exit 1
+fi
+
+if [ -z "$tls_cert_path" ] && [ -n "$tls_secret" ]; then
+  echo "WARNING: a gateway-tls Secret exists but gateway-config names no TLS paths," >&2
+  echo "         so THE GATEWAY HOP IS PLAINTEXT. Nothing about a healthy gateway" >&2
+  echo "         distinguishes this from TLS being on -- which is why it is said here." >&2
+  echo "         To turn it on:" >&2
+  echo "           kubectl --context $KUBE_CONTEXT -n rpg-k8s-realtime patch configmap gateway-config \\" >&2
+  echo "             --type=merge -p '{\"data\":{\"tls-cert-path\":\"/etc/gateway/tls/tls.crt\",\"tls-key-path\":\"/etc/gateway/tls/tls.key\"}}'" >&2
+fi
+
+if [ -n "$tls_cert_path" ]; then
+  # Write the pin out of the cluster's OWN Secret, so every client this deploy
+  # hands it to pins what the gateway actually serves. A copy kept anywhere else
+  # is a copy that can go stale, and a stale pin fails in the one way that does
+  # not name itself (a closed socket).
+  mkdir -p "$RUN_DIR"
+  gw_pin="$RUN_DIR/gateway-tls.crt"
+  if ! $K get secret gateway-tls -n rpg-k8s-realtime -o 'jsonpath={.data.tls\.crt}' 2>/dev/null | base64 -d > "$gw_pin"; then
+    echo "ERROR: could not read tls.crt out of the gateway-tls Secret." >&2
+    exit 1
+  fi
+  if ! grep -q "BEGIN CERTIFICATE" "$gw_pin"; then
+    echo "ERROR: the gateway-tls Secret's tls.crt is not a PEM certificate." >&2
+    exit 1
+  fi
+  echo "checked: the gateway hop terminates TLS ($tls_cert_path); pin written to $gw_pin"
+  echo "          every client needs it: -cuvara-gateway-tls 1 -cuvara-gateway-tls-cert $gw_pin"
+  export VERIFY_GATEWAY_TLS_CERT="$gw_pin"
+else
+  echo "checked: the gateway hop is plaintext (no TLS paths in gateway-config) -- ADR-23's default"
+fi
+# --- the meta hop's TLS (ADR-24) -------------------------------------------
+# The same three states as the gateway above, and the third is worse here: a
+# plaintext game server against a TLS-only Nakama fails EVERY reward RPC while
+# the game itself keeps working perfectly. Measured 2026-09-13 on this cluster --
+# `BadRequest code=-1 Client sent an HTTP request to an HTTPS server`, logged as a
+# warning, with no counter and no alert. Nobody notices until a player asks where
+# their gold went.
+nk_cert_path=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+nk_key_path=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-key-path}' 2>/dev/null || true)
+nk_secret=$($K get secret nakama-tls -n rpg-k8s-data -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
+nk_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+nk_pin=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-tls-pin}' 2>/dev/null || true)
+nk_pin_secret=$($K get secret nakama-tls-pin -n rpg-k8s-realtime -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
+
+if { [ -n "$nk_cert_path" ] && [ -z "$nk_key_path" ]; } || { [ -z "$nk_cert_path" ] && [ -n "$nk_key_path" ]; }; then
+  echo "ERROR: nakama-config has exactly one of tls-cert-path / tls-key-path." >&2
+  echo "  Nakama's entrypoint treats one-without-the-other as a startup error." >&2
+  exit 1
+fi
+
+if [ -n "$nk_cert_path" ] && [ -z "$nk_secret" ]; then
+  echo "ERROR: nakama-config names TLS paths but the nakama-tls Secret is absent." >&2
+  echo "  The volume is optional, so those paths point at an empty directory." >&2
+  echo "  See k8s/data/README.md \"Turning the meta hop's TLS on\"." >&2
+  exit 1
+fi
+
+if [ -n "$nk_cert_path" ]; then
+  # Nakama terminates TLS. Every consumer must have moved WITH it.
+  case "$nk_url" in
+    https://*) ;;
+    *)
+      echo "ERROR: Nakama terminates TLS but gameserver-config nakama-url is '$nk_url'." >&2
+      echo "  Every reward RPC would fail with 'Client sent an HTTP request to an" >&2
+      echo "  HTTPS server' while the game kept working. Nothing alerts on it." >&2
+      exit 1
+      ;;
+  esac
+  if [ -z "$nk_pin" ]; then
+    echo "ERROR: nakama-url is https but gameserver-config nakama-tls-pin is empty." >&2
+    echo "  Nakama's certificate is self-signed by design, so .NET's own validation" >&2
+    echo "  correctly refuses it and every reward RPC fails on the certificate." >&2
+    exit 1
+  fi
+  if [ -z "$nk_pin_secret" ]; then
+    echo "ERROR: nakama-tls-pin names $nk_pin but the nakama-tls-pin Secret is absent" >&2
+    echo "  in rpg-k8s-realtime, so that path is an empty directory." >&2
+    exit 1
+  fi
+  echo "checked: the meta hop terminates TLS ($nk_cert_path), the game server dials"
+  echo "          $nk_url and pins $nk_pin"
+else
+  if [ -n "$nk_pin" ]; then
+    echo "ERROR: gameserver-config sets nakama-tls-pin but Nakama terminates no TLS." >&2
+    echo "  The game server refuses to start on a pin against a plaintext URL --" >&2
+    echo "  a pin on a plaintext hop protects nothing while reading as though it does." >&2
+    exit 1
+  fi
+  echo "checked: the meta hop is plaintext (no TLS paths in nakama-config) -- ADR-24's default"
+fi
+
+render_image "$HERE/app/40-gateway.yaml" "rpg-mmo/gateway:develop" "${pre_gw:-$GATEWAY_IMAGE}" \
+  | $K apply -f -
+render_image "$HERE/app/50-fleet-map.yaml" "rpg-mmo/gameserver-dotnet:develop" "${pre_gs:-$GAMESERVER_IMAGE}" \
+  | $K apply -f -
+render_image "$HERE/app/60-fleet-dungeon.yaml" "rpg-mmo/gameserver-dotnet:develop" "${pre_dungeon:-$GAMESERVER_IMAGE}" \
+  | $K apply -f -
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is
 # scaled to 0 across the image change on purpose: every replica registers the
@@ -451,6 +725,60 @@ else
   $K patch fleet "$K8S_FLEET" -n rpg-k8s-realtime --type=json \
     -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/template/spec/containers/0/image\",\"value\":\"$GAMESERVER_IMAGE\"}]" >/dev/null
   echo "game server image unchanged ($GAMESERVER_IMAGE); fleet left running"
+fi
+
+# PIN THE DUNGEON FLEET TOO.
+#
+# It was missed when the fleet was added, and the failure was not subtle: the
+# manifest carries the moving `:develop` tag, so the pods ran an image that
+# predated dungeon-mode registration, self-registered into servers:map:map_01
+# like a map server, and put THREE live servers on map_01. verify.sh caught it
+# (registry.one_server FAILED) -- after the pods were already live.
+#
+# Unlike the map fleet there is no drain-on-change dance here, and the reason is
+# the same property that makes this fleet able to carry spares: its pods claim
+# no map, so old and new replicas running together is not a split world. They
+# are interchangeable instances, and a party allocated to an old one keeps it
+# until the run ends.
+dungeon_pre=$($K get fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+if [ -n "$dungeon_pre" ]; then
+  $K patch fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/template/spec/containers/0/image\",\"value\":\"$GAMESERVER_IMAGE\"}]" >/dev/null
+  echo "dungeon fleet image pinned (${dungeon_pre} -> $GAMESERVER_IMAGE)"
+  # Scale up only NOW, after the pin. The manifest ships replicas: 0 precisely
+  # so that `apply` cannot create a pod on the moving tag before this line runs.
+  $K scale fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime --replicas="$K8S_DUNGEON_REPLICAS" >/dev/null
+  echo "dungeon fleet scaled to $K8S_DUNGEON_REPLICAS"
+
+  # THE BUFFER AUTOSCALER IS APPLIED HERE, AND NOWHERE EARLIER (ADR-14 stage 7).
+  #
+  # It is deliberately absent from the bulk `apply` above. A Buffer autoscaler
+  # carries a minReplicas floor, so applying it beside the Fleet drives the
+  # replica count off zero within one sync interval -- BEFORE the image pin --
+  # which is the precise race the manifest's `replicas: 0` exists to prevent,
+  # and which on 2026-09-12 put three live servers on map_01.
+  #
+  # It is legal on THIS fleet and illegal on the map fleet: these pods pin no
+  # GAMESERVER_MAP_ID and register no map (ADR-26 decision 8), so a spare Ready
+  # pod is an idle instance rather than a second live server for a map
+  # (ADR-18 decision 4). verify.sh's cluster.autoscaler sweeps both fleets and
+  # says so.
+  #
+  # K8S_DUNGEON_REPLICAS=0 means "take dungeons out of service", and a floor of
+  # 2 would undo that within 30s -- so that case DELETES the autoscaler instead
+  # of applying it. The two must not be left to fight; whichever ran last would
+  # win, and the observable result would be a fleet that scales back up by
+  # itself for no visible reason.
+  if [ "$K8S_DUNGEON_REPLICAS" -gt 0 ]; then
+    $K apply -f "$HERE/app/70-fleetautoscaler-dungeon.yaml"
+  else
+    $K delete fleetautoscaler "$K8S_FLEET_DUNGEON_AUTOSCALER" -n rpg-k8s-realtime \
+      --ignore-not-found >/dev/null
+    echo "dungeon autoscaler removed (K8S_DUNGEON_REPLICAS=0 takes dungeons out of service)"
+  fi
+else
+  echo "no dungeon fleet present; nothing to pin"
 fi
 
 say "wait for the gateway"
@@ -492,8 +820,12 @@ say "stop the compose dev stack (containers and volumes are KEPT)"
 # and the naive loop spent minutes here.
 running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 to_stop=""
+# A here-string, not `printf ... | grep -q`. Under pipefail that pipe reports a
+# MATCH as failure: grep -q exits on the first hit, printf takes SIGPIPE writing the
+# rest, and the pipeline status is printf's. A running container then read as not
+# running and was never stopped -- CD logged "printf: write error: Broken pipe" here.
 for c in $COMPOSE_DEV_CONTAINERS; do
-  printf '%s\n' "$running" | grep -qx "$c" && to_stop="$to_stop $c"
+  grep -qx "$c" <<<"$running" && to_stop="$to_stop $c"
 done
 if [ -n "$to_stop" ]; then
   echo "stopping:$to_stop"
@@ -503,7 +835,7 @@ fi
 running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 still_up=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  printf '%s\n' "$running" | grep -qx "$c" && still_up="$still_up $c"
+  grep -qx "$c" <<<"$running" && still_up="$still_up $c"
 done
 if [ -n "$still_up" ]; then
   echo "ERROR: compose dev containers still running:$still_up" >&2
@@ -548,11 +880,48 @@ done
 # NOTE: a bare TCP connect is NOT proof here -- the k3d serverlb accepts on
 # every mapped port whether or not anything is behind it. Nakama's /healthcheck
 # is an application-level answer, so it is what gets asserted.
-if ! curl -fsS --max-time 5 "http://127.0.0.1:${PUBLISHED_NAKAMA_PORT}/healthcheck" >/dev/null 2>&1; then
-  echo "ERROR: Nakama does not answer /healthcheck on the published port ${PUBLISHED_NAKAMA_PORT}." >&2
+# The SCHEME follows the meta hop's flag, from the same source of truth the game
+# server's half is derived from above. Hardcoding http:// here meant this check
+# failed the whole deploy the first time the flag was on -- Nakama was healthy,
+# answering TLS on that exact port, and the script said it did not answer at all.
+# A probe that has not moved with the thing it probes reports the wrong cause.
+nk_probe_scheme="http"
+nk_probe_args=""
+if [ -n "$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)" ]; then
+  # Written out of the cluster's OWN Secret, like the gateway pin above: a copy
+  # kept anywhere else is a copy that can go stale, and a stale pin fails in the
+  # one way that does not name itself.
+  mkdir -p "$RUN_DIR"
+  nk_pin="$RUN_DIR/nakama-tls.crt"
+  if ! $K get secret nakama-tls -n rpg-k8s-data -o 'jsonpath={.data.tls\.crt}' 2>/dev/null | base64 -d > "$nk_pin"; then
+    echo "ERROR: the meta hop is on but tls.crt could not be read out of the nakama-tls Secret." >&2
+    exit 1
+  fi
+  if ! grep -q "BEGIN CERTIFICATE" "$nk_pin"; then
+    echo "ERROR: the nakama-tls Secret's tls.crt is not a PEM certificate." >&2
+    exit 1
+  fi
+  nk_probe_scheme="https"
+  # --cacert, NOT -k: this verifies against the pin. Skipping verification would
+  # make the probe pass against anything at all, which is the failure it exists
+  # to catch. The certificate carries IP:127.0.0.1 as a SAN for exactly this.
+  nk_probe_args="--cacert $nk_pin"
+  export VERIFY_NAKAMA_TLS_CERT="$nk_pin"
+fi
+
+if ! curl -fsS --max-time 5 $nk_probe_args "${nk_probe_scheme}://127.0.0.1:${PUBLISHED_NAKAMA_PORT}/healthcheck" >/dev/null 2>&1; then
+  echo "ERROR: Nakama does not answer /healthcheck on ${nk_probe_scheme}://127.0.0.1:${PUBLISHED_NAKAMA_PORT}." >&2
+  if [ "$nk_probe_scheme" = "https" ]; then
+    echo "  The meta hop is on, so this was a TLS request verified against the pin at" >&2
+    echo "  $nk_pin. A plaintext Nakama would fail here too, and so would a" >&2
+    echo "  certificate that is not the one in the nakama-tls Secret." >&2
+  fi
   exit 1
 fi
-echo "nakama http answers on 127.0.0.1:${PUBLISHED_NAKAMA_PORT}"
+echo "nakama answers ${nk_probe_scheme} on 127.0.0.1:${PUBLISHED_NAKAMA_PORT}"
+if [ "$nk_probe_scheme" = "https" ]; then
+  echo "          clients need the pin: -cuvara-nakama-scheme https -cuvara-nakama-tls-cert $nk_pin"
+fi
 echo "gateway published on 127.0.0.1:${PUBLISHED_GATEWAY_PORT}"
 
 # The ONLY forward that remains, and it is not part of the deployment: the

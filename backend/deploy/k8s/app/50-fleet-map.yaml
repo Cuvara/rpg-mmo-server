@@ -211,6 +211,50 @@ spec:
                   value: "15"
                 - name: SIM_BACKGROUND_HZ
                   value: "5"
+                # Area-of-interest radius in world units. The largest single lever on
+                # downstream bandwidth: population inside a circle grows with the SQUARE
+                # of it, so halving this quarters the expected entity count per snapshot,
+                # which no budget downstream of it can match. 50 is the compiled-in
+                # default, set explicitly here so it is visible and so changing it is a
+                # one-line edit rather than a code change.
+                # An unparseable or non-positive value exits 2 at startup; it is NOT
+                # silently replaced by the default. A radius that reaches the map's
+                # diagonal logs a warning and disables interest filtering entirely.
+                - name: GAMESERVER_AOI_RADIUS
+                  value: "50"
+                # Replication importance: which entities are emitted FIRST when the
+                # per-connection downlink budget bites. It never changes how many bytes
+                # go out (GAMESERVER_MAX_SNAPSHOT_BYTES) nor which entities are
+                # candidates at all (GAMESERVER_AOI_RADIUS).
+                # 
+                # "legacy" (default) is every factor zero, i.e. the ordering that shipped
+                # before importance existed: self, then longest-deferred, then nearest.
+                # "balanced" additionally ranks on visible-state change, combat, entity
+                # type and distance. Deferral age stays DOMINANT in both, because the
+                # starvation bound depends on it.
+                # 
+                # Per-factor overrides: GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,
+                # COMBAT}. Weighting a factor this server has no data for (PARTY, PVP,
+                # BOSS, QUEST, VISIBILITY, ZONE, INTERACTION) exits 2 rather than being
+                # ignored. Read importance_profile off /status to see what a pod runs.
+                - name: GAMESERVER_IMPORTANCE
+                  value: "legacy"
+                # Per-importance send intervals: how often an entity of a given
+                # importance is RE-SENT. "off" (default) means every dirty entity is due
+                # every world tick. "tiered" withholds lower-importance entities for a
+                # configured interval (score>=8 every tick, >=3 for 133ms, else 266ms).
+                # 
+                # Intervals are configured in MILLISECONDS and converted through
+                # SIM_WORLD_HZ, so the same setting holds the same wall time at any world
+                # rate. "tiered" without GAMESERVER_IMPORTANCE weights exits 2.
+                # 
+                # Read replication_schedule, snapshot_deferred_by_interval and
+                # snapshot_max_state_age off /status. The last is NOT
+                # snapshot_max_shed_age: that counts byte-budget deferrals, this counts
+                # schedule ones, and a schedule deferral never touches the budget's
+                # bookkeeping. See ADR-27.
+                - name: GAMESERVER_REPLICATION_SCHEDULE
+                  value: "off"
                 # -----------------------------------------------------------
                 # ADMISSION LIMIT — 100 IS NOW A DECISION, NOT A DEFAULT.
                 # -----------------------------------------------------------
@@ -308,6 +352,26 @@ spec:
                     configMapKeyRef:
                       name: gameserver-config
                       key: nakama-url
+                # The certificate this pod PINS for that hop, when nakama-url is
+                # https and Nakama's certificate is self-signed (ADR-24). Empty
+                # -- the committed value -- means .NET's own validation, which is
+                # right for http:// and for a CA-issued certificate, and which
+                # REFUSES a self-signed one. `optional: true` here and NOT on
+                # nakama-url above, because an absent pin has a defined meaning
+                # and an absent URL does not.
+                #
+                # Setting it is part of README.md §"Turning the meta hop's TLS
+                # on", and needs NO edit to this file: the volume at the bottom is
+                # already here and already optional. An earlier draft said to
+                # uncomment it, which was true of a mechanism that no longer
+                # exists -- the value is a PATH, and that volume is what puts a
+                # file there.
+                - name: NAKAMA_TLS_PIN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: nakama-tls-pin
+                      optional: true
                 # Must equal NAKAMA_HTTP_KEY in the `nakama` Secret in
                 # rpg-k8s-data. Two Secrets in two namespaces holding one value,
                 # because a Secret cannot cross a namespace; dev-up.sh asserts
@@ -318,6 +382,317 @@ spec:
                     secretKeyRef:
                       name: rpg-app-secrets
                       key: nakama-http-key
+
+                # ===========================================================================
+                # TUNING KNOBS -- forwarded from the `gameserver-config` ConfigMap.
+                # ===========================================================================
+                # Every entry below is `optional: true`, so an absent key is not an error: the
+                # container starts and the server keeps its own compiled-in default. That is
+                # deliberate, and it is what lets ONE manifest set serve dev and staging while
+                # each cluster opts in to only the values it wants to change -- a cluster that
+                # sets nothing behaves exactly as it did before this block existed.
+                #
+                # WHY EACH NAME IS WRITTEN OUT rather than pulled in wholesale with `envFrom`.
+                # A container receives nothing its spec did not name, so the NAME is the
+                # passthrough. `envFrom` would forward whatever the ConfigMap happens to hold,
+                # which reads as more flexible and is strictly worse here: nothing in the
+                # repository would then state which knobs a fleet supports, FleetEnvPassthroughTests
+                # would have no list to check against, and a key misspelled in the ConfigMap would
+                # be silently dropped rather than failing. It would also add a precedence trap,
+                # since an explicit `env:` entry overrides an `envFrom` value without saying so.
+                #
+                # An empty ConfigMap value means NOT CONFIGURED, not "set to empty": Env() in
+                # Program.cs maps "" back to null, so clearing a key restores the default.
+                #
+                # Adding a knob to the server means adding it here AND to both compose services in
+                # the same change. That is not a convention anyone has to remember -- declaring its
+                # name as a const in ServerEnv makes both gates demand it.
+
+                # ------------------------------------------------------------
+                # REPLICATION AND DOWNLINK BUDGET
+                # ------------------------------------------------------------
+                # GAMESERVER_MAX_SNAPSHOT_BYTES is the knob whose absence from compose was the
+                # sixth passthrough instance and the first to produce a VISIBLE defect: the
+                # compiled-in 8192 truncated every keyframe at the shipped enemy population,
+                # and because SnapshotMerger clears its entity set on a full snapshot the whole
+                # crowd blinked out and back every two seconds (#404). It was unreachable on a
+                # cluster for the same reason it was unreachable under compose.
+                #
+                # The four _W_ weights appeared in this file only as the PREFIX FRAGMENT
+                # `GAMESERVER_IMPORTANCE_W_` inside a comment, never as four complete names.
+                # That is the same concealment that hid them from reflection through three
+                # incidents (#398): a fragment is not a declaration and forwards nothing.
+                - name: GAMESERVER_MAX_SNAPSHOT_BYTES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: max-snapshot-bytes
+                      optional: true
+                - name: GAMESERVER_KEYFRAME_INTERVAL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: keyframe-interval
+                      optional: true
+                - name: GAMESERVER_FIELD_DELTA
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: field-delta
+                      optional: true
+                - name: GAMESERVER_IMPORTANCE_W_DISTANCE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: importance-w-distance
+                      optional: true
+                - name: GAMESERVER_IMPORTANCE_W_CHANGE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: importance-w-change
+                      optional: true
+                - name: GAMESERVER_IMPORTANCE_W_TYPE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: importance-w-type
+                      optional: true
+                - name: GAMESERVER_IMPORTANCE_W_COMBAT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: importance-w-combat
+                      optional: true
+
+                # ------------------------------------------------------------
+                # ADMISSION, PRE-JOIN AND INGESTION BOUNDS
+                # ------------------------------------------------------------
+                # GAMESERVER_CAPACITY above bounds AUTHENTICATED players; these bound the phase
+                # before that -- how many accepted sockets may sit in the handshake, and how long
+                # each may take to deliver a complete join frame -- plus the input-ingestion and
+                # AOI-gather limits. Every one ran on a compiled-in default no cluster could change.
+                - name: GAMESERVER_MAX_PENDING_HANDSHAKES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: max-pending-handshakes
+                      optional: true
+                - name: GAMESERVER_HANDSHAKE_TIMEOUT_MS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: handshake-timeout-ms
+                      optional: true
+                - name: GAMESERVER_MIN_PROTOCOL_VERSION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: min-protocol-version
+                      optional: true
+                - name: GAMESERVER_MAX_INPUTS_PER_TICK
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: max-inputs-per-tick
+                      optional: true
+                - name: GAMESERVER_MAX_PENDING_INPUTS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: max-pending-inputs
+                      optional: true
+                - name: GAMESERVER_GATHER_WORKERS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: gather-workers
+                      optional: true
+
+                # ------------------------------------------------------------
+                # REGISTRATION LIFECYCLE
+                # ------------------------------------------------------------
+                # Agones only, and therefore meaningful HERE and excluded from the compose gate:
+                # it holds the registry entry back until Agones reports this GameServer
+                # Allocated, instead of publishing it right after Ready. OFF by default, so a
+                # fleet that has not been migrated behaves exactly as it did before.
+                - name: GAMESERVER_REGISTER_ON_ALLOCATED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: register-on-allocated
+                      optional: true
+
+                # ------------------------------------------------------------
+                # ENEMY AI AND COMBAT (Scaffolding)
+                # ------------------------------------------------------------
+                # The whole enemy-AI and combat surface. None of it was reachable on a cluster:
+                # a staging or production fleet ran the built-in defaults -- enemies attacking,
+                # respawn on, and a 30 + 45/player population -- with no way to change any of it
+                # short of editing this file (#400).
+                #
+                # GAMESERVER_ENEMY_MAX_PER_PLAYER is one half of the pair behind #404: it sets
+                # how many entities an observer's AOI can hold, and GAMESERVER_MAX_SNAPSHOT_BYTES
+                # above sets how many of them fit in a keyframe. The two defaults were each
+                # reasonable when set and were never reconciled. Change either with the other in
+                # view, and read backend/docs/MEASUREMENT.md before raising the budget.
+                - name: GAMESERVER_ENEMIES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemies
+                      optional: true
+                - name: GAMESERVER_ENEMY_MAX
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-max
+                      optional: true
+                - name: GAMESERVER_ENEMY_MAX_PER_PLAYER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-max-per-player
+                      optional: true
+                - name: GAMESERVER_ENEMY_WAVE_SIZE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-wave-size
+                      optional: true
+                - name: GAMESERVER_ENEMY_WAVE_SIZE_PER_PLAYER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-wave-size-per-player
+                      optional: true
+                - name: GAMESERVER_ENEMY_WAVE_INTERVAL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-wave-interval
+                      optional: true
+                - name: GAMESERVER_ENEMY_SPAWN_DISTANCE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-spawn-distance
+                      optional: true
+                - name: GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-min-spawn-distance
+                      optional: true
+                - name: GAMESERVER_ENEMY_CONTACT_RANGE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-contact-range
+                      optional: true
+                - name: GAMESERVER_ENEMY_CHASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-chase
+                      optional: true
+                - name: GAMESERVER_ENEMY_HP
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-hp
+                      optional: true
+                - name: GAMESERVER_ENEMY_ATTACK
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-attack
+                      optional: true
+                - name: GAMESERVER_ENEMY_DEFENSE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-defense
+                      optional: true
+                - name: GAMESERVER_ENEMY_SPEED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-speed
+                      optional: true
+                - name: GAMESERVER_ENEMY_ATTACKS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-attacks
+                      optional: true
+                - name: GAMESERVER_ENEMY_ATTACK_INTERVAL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-attack-interval
+                      optional: true
+                - name: GAMESERVER_ENEMY_ATTACKERS_PER_TARGET
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-attackers-per-target
+                      optional: true
+                - name: GAMESERVER_PLAYER_RESPAWN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: player-respawn
+                      optional: true
+
+                # ------------------------------------------------------------
+                # BOTS (Scaffolding)
+                # ------------------------------------------------------------
+                # Synthetic players. GAMESERVER_BOT_{HP,ATTACK,DEFENSE,SPEED} were the THIRD
+                # passthrough instance -- they reached neither compose service and had not done
+                # so since the day they were added.
+                - name: GAMESERVER_BOTS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bots
+                      optional: true
+                - name: GAMESERVER_BOT_SPREAD
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-spread
+                      optional: true
+                - name: GAMESERVER_BOT_ENGAGE_RANGE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-engage-range
+                      optional: true
+                - name: GAMESERVER_BOT_HP
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-hp
+                      optional: true
+                - name: GAMESERVER_BOT_ATTACK
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-attack
+                      optional: true
+                - name: GAMESERVER_BOT_DEFENSE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-defense
+                      optional: true
+                - name: GAMESERVER_BOT_SPEED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-speed
+                      optional: true
               # Sized from backend/docs/BENCHMARK.md: ~30 MiB idle, ~82 MiB at
               # 200 players (the highest figure ever recorded there); 47.3% of
               # one core at 200 players, i.e. inside a 500m limit only by
@@ -338,6 +713,18 @@ spec:
               # load, not at idle. Both requests are now above measured peak,
               # which is the property that was missing, and neither is a guess
               # about a player count nobody has run.
+              # Meta-hop TLS (ADR-24), the game server's end. Uncomment
+              # TOGETHER with `nakama-tls-pin` in 20-configmaps.yaml and the
+              # pod-level `volumes:` block below; the configmap value is the
+              # path this mount creates.
+              #
+              # The Secret holds ONLY the public certificate -- the same PEM
+              # Nakama presents. The private key stays in the `nakama-tls`
+              # Secret in rpg-k8s-data and must not be copied here.
+              volumeMounts:
+                - name: nakama-tls-pin
+                  mountPath: /etc/nakama-tls
+                  readOnly: true
               resources:
                 requests:
                   memory: "128Mi"
@@ -345,3 +732,17 @@ spec:
                 limits:
                   memory: "256Mi"
                   cpu: "1000m"
+          # Meta-hop TLS (ADR-24), pod level. Uncomment with the volumeMount in
+          # the container above. `nakama-tls-pin` is created by the recipe in
+          # k8s/data/README.md and lives in THIS namespace -- a Secret cannot
+          # cross one, which is the same reason NAKAMA_HTTP_KEY exists twice.
+          volumes:
+            - name: nakama-tls-pin
+              secret:
+                secretName: nakama-tls-pin
+                # optional: this manifest is applied unchanged to dev and staging,
+                # and a required Secret would wedge every pod in the cluster that
+                # has not opted in. Absent Secret + empty `nakama-tls-pin` in
+                # gameserver-config is the flag off, which is the default.
+                optional: true
+                defaultMode: 0444

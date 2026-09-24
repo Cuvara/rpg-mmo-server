@@ -98,13 +98,36 @@ spec:
             # k8s/app/40-gateway.yaml: an absent variable is indistinguishable
             # from an unconsidered one, and this is a security setting.
             #
-            # To turn on: mount a PEM pair (a Secret volume) and point these at
-            # the in-container paths. NAKAMA_URL for any client of this hop must
-            # move to https:// in the same change.
+            # To turn on: follow the recipe in README.md §"Turning the meta hop's
+            # TLS on". It is TWO kubectl commands and NO edit to this file -- an
+            # earlier draft of this comment said four coordinated edits, which was
+            # true of a mechanism that no longer exists. Create the `nakama-tls`
+            # Secret and set the two keys in the `nakama-config` ConfigMap; the
+            # mount below is already here and already optional. `nakama-url` in
+            # ../app/20-configmaps.yaml moves to https:// in the same act, with
+            # the game server's pin -- a plaintext NAKAMA_URL against a TLS-only
+            # Nakama fails every reward RPC, silently.
+            #
+            # The PROBES need no change: they were moved off :7350 onto the
+            # metrics listener precisely so this flag has one less thing to break.
+            # Per-CLUSTER, not per-manifest: this file is applied unchanged to dev
+            # and staging, so a hardcoded path here would turn TLS on in both or
+            # neither. `optional: true` means an absent ConfigMap or an absent key
+            # leaves these empty, which is the flag off -- the same shape the
+            # gateway's own TLS opt-in uses (ADR-23), and the reason neither needs
+            # a per-environment overlay.
             - name: NAKAMA_TLS_CERT
-              value: ""
+              valueFrom:
+                configMapKeyRef:
+                  name: nakama-config
+                  key: tls-cert-path
+                  optional: true
             - name: NAKAMA_TLS_KEY
-              value: ""
+              valueFrom:
+                configMapKeyRef:
+                  name: nakama-config
+                  key: tls-key-path
+                  optional: true
           # Do NOT set LEADERBOARD_MIGRATE=recreate here: it deletes every
           # kills_alltime record. If the plugin refuses to load with
           # "leaderboard kills_alltime exists with authoritative=false", use
@@ -166,37 +189,88 @@ spec:
             - { name: http,    containerPort: 7350, hostPort: 7001 }
             - { name: console, containerPort: 7351 }
             - { name: metrics, containerPort: 9100 }
-          # Compose runs `/nakama/nakama healthcheck`, which is an HTTP GET of
-          # THESE PROBES DO NOT FOLLOW THE TLS DECISION, AND THAT IS A BUG WAITING
-          # FOR WHOEVER TURNS IT ON. `httpGet` with no `scheme` means HTTP. Set
-          # NAKAMA_TLS_CERT/_KEY and Nakama answers TLS on this same port, so all
-          # three probes start failing with
+          # THE PROBES DELIBERATELY DO NOT TOUCH :7350, BECAUSE :7350 IS THE ONE
+          # PORT WHOSE PROTOCOL CHANGES. They GET the Prometheus listener on
+          # :9100 instead, which `--socket.ssl_certificate` does not cover
+          # (ADR-24 §4) and which is therefore plain HTTP whether the meta hop
+          # is on or off. One spec, both modes, no overlay needed.
+          #
+          # This replaced `httpGet: { path: /healthcheck, port: http }`, which
+          # was HTTP against the port Nakama moves to TLS: with the flag on, all
+          # three probes failed with
           #
           #   http: TLS handshake error ... client sent an HTTP request to an HTTPS server
           #
-          # and the pod NEVER becomes Ready -- measured on k3d-rpg-dev 2026-09-12,
-          # the rollout timed out with the container itself healthy. There is no
-          # per-environment overlay to vary this in (dev and staging apply the same
-          # files), so a fix has to be one spec that works both ways: `scheme: HTTPS`
-          # is wrong when TLS is off, and an exec probe needs a shell and curl in the
-          # Nakama image. Decide it as part of enabling TLS, not after.
+          # and the pod NEVER became Ready -- measured on k3d-rpg-dev 2026-09-12,
+          # the rollout timing out with the container itself perfectly healthy.
           #
-          # /healthcheck against itself. Doing it as an httpGet probe is the same
-          # check without forking a second copy of a 200MB binary every 10s.
+          # The three alternatives, and why each was rejected -- measured, not
+          # reasoned about, because two of them look obviously right:
+          #
+          #   * `scheme: HTTPS` on :7350. Correct with TLS on, WRONG with it off,
+          #     and off is the default at every deploy path. It would trade a
+          #     broken opt-in for a broken default.
+          #   * exec `/nakama/nakama healthcheck`. Nakama v3.40.0's healthcheck
+          #     subcommand is hardcoded to `http.Get("http://localhost:" + port)`
+          #     (main.go) -- it has NO TLS branch, so it breaks under TLS exactly
+          #     like the httpGet did. It also forks a 200MB binary every 10s.
+          #   * exec curl/wget. The image has neither. Measured inside the running
+          #     pod on k3d-rpg-dev 2026-09-13: heroiclabs/nakama:3.40.0 is Debian
+          #     12 with no curl, no wget, no nc, no python3 and no openssl.
+          #   * `tcpSocket`. Works in both modes, and answers a different question:
+          #     "is something accepting connections", not "is Nakama serving". A
+          #     probe that cannot tell a wedged Nakama from a healthy one is worse
+          #     than the bug it replaces.
+          #
+          # WHAT THIS GIVES UP, stated rather than glossed: :9100 is a different
+          # `http.Server` in the same process than the client API on :7350, so
+          # these probes prove the PROCESS is alive and serving HTTP, not that the
+          # client-API mux still answers. The gap is narrow because the old target
+          # was narrow too -- Nakama's /healthcheck is a static 200 (`{}` on the
+          # wire, measured) that checks no dependency, so the only failure now
+          # missed is a wedge confined to the API mux while the metrics mux still
+          # answers. A cert the operator got wrong is NOT in that gap: Nakama
+          # cannot read it, exits at startup, and the pod crash-loops visibly.
+          #
+          # `path: /` rather than `/metrics`: the Prometheus handler is mounted at
+          # the root of this listener and both answer 200 (measured through the
+          # API-server proxy, 2026-09-13); the root is the shorter promise.
           startupProbe:
-            httpGet: { path: /healthcheck, port: http }
+            httpGet: { path: /, port: metrics }
             periodSeconds: 5
             failureThreshold: 24   # up to 2 min for migrate + plugin load
           readinessProbe:
-            httpGet: { path: /healthcheck, port: http }
+            httpGet: { path: /, port: metrics }
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
-            httpGet: { path: /healthcheck, port: http }
+            httpGet: { path: /, port: metrics }
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 6
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { memory: 1Gi }
+          # Meta-hop TLS (ADR-24). Always mounted and never edited: the volume
+          # below is `optional`, so on a cluster with no `nakama-tls` Secret this
+          # is an empty directory that nothing reads. The paths the two
+          # NAKAMA_TLS_* ConfigMap keys name are the ones this mount creates.
+          volumeMounts:
+            - name: nakama-tls
+              mountPath: /nakama/tls
+              readOnly: true
+      # Meta-hop TLS (ADR-24). `secretName: nakama-tls` is created by the recipe;
+      # `defaultMode: 0400` keeps the private key unreadable by anything but the
+      # container's own user -- which is uid 0 here, with an empty securityContext,
+      # so 0400 is readable rather than a crash-loop (measured, not assumed).
+      volumes:
+        - name: nakama-tls
+          secret:
+            secretName: nakama-tls
+            # optional: an absent Secret mounts an empty directory instead of
+            # wedging the pod in ContainerCreating. With no Secret the two
+            # NAKAMA_TLS_* values are empty too, so nothing reads the directory
+            # and the flag is simply off.
+            optional: true
+            defaultMode: 0400

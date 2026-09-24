@@ -177,7 +177,7 @@ check_registry_stack_identity() {
   live_gs=$(k get gs -n "$ns" -l "agones.dev/fleet=$fleet" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
   for entry in "${REG_LIVE[@]}"; do
     sid=$(echo "$entry" | awk '{print $1}')
-    if printf '%s\n' "$live_gs" | grep -qx "$sid"; then owned+=("$sid"); else foreign+=("$sid"); fi
+    if grep -qx "$sid" <<<"$live_gs"; then owned+=("$sid"); else foreign+=("$sid"); fi
   done
   if [ ${#foreign[@]} -gt 0 ]; then
     fail "the registered server does not belong to the fleet under test" \

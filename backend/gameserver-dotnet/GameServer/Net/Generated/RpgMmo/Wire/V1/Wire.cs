@@ -28,65 +28,80 @@ namespace RpgMmo.Wire.V1 {
             "eXBlGAEgASgNEg8KB3BheWxvYWQYAiABKAwiNgoLQXV0aFJlcXVlc3QSDQoF",
             "dG9rZW4YASABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgCIAEoDSJUCgxBdXRo",
             "UmVzcG9uc2USCgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJv",
-            "chgDIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAQgASgNIiMKEUVudGVyV29y",
-            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCSJyChJFbnRlcldvcmxkUmVzcG9u",
-            "c2USEwoLc2VydmVyX2FkZHIYASABKAkSEgoKam9pbl90b2tlbhgCIAEoCRIR",
-            "Cgl0cmFuc3BvcnQYAyABKAkSDQoFZXJyb3IYBCABKAlKBAgFEAZSC3Nlc3Np",
-            "b25fa2V5IjsKEEpvaW5Ub2tlblJlcXVlc3QSDQoFdG9rZW4YASABKAkSGAoQ",
-            "cHJvdG9jb2xfdmVyc2lvbhgCIAEoDSJsChFKb2luVG9rZW5SZXNwb25zZRIK",
-            "CgJvaxgBIAEoCBIPCgd1c2VyX2lkGAIgASgJEg0KBWVycm9yGAMgASgJEhEK",
-            "CXRpY2tfcmF0ZRgEIAEoDRIYChBwcm90b2NvbF92ZXJzaW9uGAUgASgNIlYK",
-            "DElucHV0TWVzc2FnZRIMCgR0aWNrGAEgASgEEg4KBm1vdmVfeBgCIAEoAhIO",
-            "CgZtb3ZlX3kYAyABKAISGAoQYXR0YWNrX3RhcmdldF9pZBgEIAEoCSLtAQoO",
-            "RW50aXR5U25hcHNob3QSCgoCaWQYASABKAkSEQoJdHlwZV9uYW1lGAIgASgJ",
-            "EgkKAXgYAyABKAISCQoBeRgEIAEoAhIKCgJocBgFIAEoBRIOCgZtYXhfaHAY",
-            "BiABKAUSKAoEdHlwZRgHIAEoDjIaLnJwZ21tby53aXJlLnYxLkVudGl0eVR5",
-            "cGUSDgoGaGFuZGxlGAggASgNEg0KBXNwZWVkGAkgASgCEhMKC2ZhY2luZ19i",
-            "cmFkGAogASgNEiwKBmFjdGlvbhgLIAEoDjIcLnJwZ21tby53aXJlLnYxLkVu",
-            "dGl0eUFjdGlvbiKCAQoPU25hcHNob3RNZXNzYWdlEgwKBHRpY2sYASABKAQS",
-            "EAoIYWNrX3RpY2sYAiABKAQSDAoEZnVsbBgDIAEoCBIwCghlbnRpdGllcxgE",
-            "IAMoCzIeLnJwZ21tby53aXJlLnYxLkVudGl0eVNuYXBzaG90Eg8KB3JlbW92",
-            "ZWQYBSADKAkiIwoRRGlzY29ubmVjdE1lc3NhZ2USDgoGcmVhc29uGAEgASgJ",
-            "Ig8KDVJlc3luY1JlcXVlc3QiJAoSVHJhbnNmZXJNYXBSZXF1ZXN0Eg4KBm1h",
-            "cF9pZBgBIAEoCSIwChNUcmFuc2Zlck1hcFJlc3BvbnNlEgoKAm9rGAEgASgI",
-            "Eg0KBWVycm9yGAIgASgJIiAKC1BpbmdNZXNzYWdlEhEKCXRpbWVzdGFtcBgB",
-            "IAEoAyI1CgtQb25nTWVzc2FnZRIRCgl0aW1lc3RhbXAYASABKAMSEwoLc2Vy",
-            "dmVyX3RpbWUYAiABKAMiHQoLS2lja01lc3NhZ2USDgoGcmVhc29uGAEgASgJ",
-            "IicKEVNlYWxlZENsaWVudEhlbGxvEhIKCnB1YmxpY19rZXkYASABKAwiRwoR",
-            "U2VhbGVkU2VydmVySGVsbG8SEgoKcHVibGljX2tleRgBIAEoDBIPCgdiaW5k",
-            "aW5nGAIgASgMEg0KBWVycm9yGAMgASgJKs8DCgdNc2dUeXBlEhgKFE1TR19U",
-            "WVBFX1VOU1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVUSBABEhYKEk1TR19U",
-            "WVBFX0FVVEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVSX1dPUkxEEAMSHQoZ",
-            "TVNHX1RZUEVfRU5URVJfV09STERfUkVTUBAEEhcKE01TR19UWVBFX0pPSU5f",
-            "VE9LRU4QBRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JFU1AQBhISCg5NU0df",
-            "VFlQRV9JTlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9UEAgSFwoTTVNHX1RZ",
-            "UEVfRElTQ09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lOQxAKEhkKFU1TR19U",
-            "WVBFX1RSQU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RSQU5TRkVSX01BUF9S",
-            "RVNQEA4SEQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19UWVBFX1BPTkcQDBIR",
-            "Cg1NU0dfVFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VBTEVEX0NMSUVOVF9I",
-            "RUxMTxAQEiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJfSEVMTE8QESqdAQoK",
-            "RW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVO",
-            "VElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VO",
-            "VElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJ",
-            "VFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJ",
-            "VFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExF",
-            "EAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9O",
-            "X0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVBRBAEQkZaM2dpdGh1",
-            "Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFyZWQvcHJvdG8vZ2VuO3dpcmVw",
-            "YqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
+            "chgDIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAQgASgNIjUKEUVudGVyV29y",
+            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCRIQCghwYXJ0eV9pZBgCIAEoCSKN",
+            "AQoSRW50ZXJXb3JsZFJlc3BvbnNlEhMKC3NlcnZlcl9hZGRyGAEgASgJEhIK",
+            "CmpvaW5fdG9rZW4YAiABKAkSEQoJdHJhbnNwb3J0GAMgASgJEg0KBWVycm9y",
+            "GAQgASgJEhkKEXNlcnZlcl9wdWJsaWNfa2V5GAYgASgMSgQIBRAGUgtzZXNz",
+            "aW9uX2tleSI7ChBKb2luVG9rZW5SZXF1ZXN0Eg0KBXRva2VuGAEgASgJEhgK",
+            "EHByb3RvY29sX3ZlcnNpb24YAiABKA0ibAoRSm9pblRva2VuUmVzcG9uc2US",
+            "CgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJvchgDIAEoCRIR",
+            "Cgl0aWNrX3JhdGUYBCABKA0SGAoQcHJvdG9jb2xfdmVyc2lvbhgFIAEoDSKj",
+            "AQoMSW5wdXRNZXNzYWdlEgwKBHRpY2sYASABKAQSDgoGbW92ZV94GAIgASgC",
+            "Eg4KBm1vdmVfeRgDIAEoAhIYChBhdHRhY2tfdGFyZ2V0X2lkGAQgASgJEhIK",
+            "CmFiaWxpdHlfaWQYBSABKA0SGQoRYWJpbGl0eV90YXJnZXRfaWQYBiABKAkS",
+            "DQoFYWltX3gYByABKAISDQoFYWltX3kYCCABKAIimQIKDkVudGl0eVNuYXBz",
+            "aG90EgoKAmlkGAEgASgJEhEKCXR5cGVfbmFtZRgCIAEoCRIJCgF4GAMgASgC",
+            "EgkKAXkYBCABKAISCgoCaHAYBSABKAUSDgoGbWF4X2hwGAYgASgFEigKBHR5",
+            "cGUYByABKA4yGi5ycGdtbW8ud2lyZS52MS5FbnRpdHlUeXBlEg4KBmhhbmRs",
+            "ZRgIIAEoDRINCgVzcGVlZBgJIAEoAhITCgtmYWNpbmdfYnJhZBgKIAEoDRIs",
+            "CgZhY3Rpb24YCyABKA4yHC5ycGdtbW8ud2lyZS52MS5FbnRpdHlBY3Rpb24S",
+            "EgoKYWN0aW9uX3NlcRgMIAEoDRIWCg5jaGFuZ2VkX2ZpZWxkcxgNIAEoDSKx",
+            "AQoJR2FtZUV2ZW50EisKBHR5cGUYASABKA4yHS5ycGdtbW8ud2lyZS52MS5H",
+            "YW1lRXZlbnRUeXBlEg4KBnNvdXJjZRgCIAEoDRIOCgZ0YXJnZXQYAyABKA0S",
+            "DgoGYW1vdW50GAQgASgREhIKCmFiaWxpdHlfaWQYBSABKA0SDQoFZmxhZ3MY",
+            "BiABKA0SEQoJc291cmNlX2lkGAcgASgJEhEKCXRhcmdldF9pZBgIIAEoCSKt",
+            "AQoPU25hcHNob3RNZXNzYWdlEgwKBHRpY2sYASABKAQSEAoIYWNrX3RpY2sY",
+            "AiABKAQSDAoEZnVsbBgDIAEoCBIwCghlbnRpdGllcxgEIAMoCzIeLnJwZ21t",
+            "by53aXJlLnYxLkVudGl0eVNuYXBzaG90Eg8KB3JlbW92ZWQYBSADKAkSKQoG",
+            "ZXZlbnRzGAYgAygLMhkucnBnbW1vLndpcmUudjEuR2FtZUV2ZW50IiMKEURp",
+            "c2Nvbm5lY3RNZXNzYWdlEg4KBnJlYXNvbhgBIAEoCSIPCg1SZXN5bmNSZXF1",
+            "ZXN0IiQKElRyYW5zZmVyTWFwUmVxdWVzdBIOCgZtYXBfaWQYASABKAkiMAoT",
+            "VHJhbnNmZXJNYXBSZXNwb25zZRIKCgJvaxgBIAEoCBINCgVlcnJvchgCIAEo",
+            "CSIgCgtQaW5nTWVzc2FnZRIRCgl0aW1lc3RhbXAYASABKAMiNQoLUG9uZ01l",
+            "c3NhZ2USEQoJdGltZXN0YW1wGAEgASgDEhMKC3NlcnZlcl90aW1lGAIgASgD",
+            "Ih0KC0tpY2tNZXNzYWdlEg4KBnJlYXNvbhgBIAEoCSInChFTZWFsZWRDbGll",
+            "bnRIZWxsbxISCgpwdWJsaWNfa2V5GAEgASgMImEKEVNlYWxlZFNlcnZlckhl",
+            "bGxvEhIKCnB1YmxpY19rZXkYASABKAwSDwoHYmluZGluZxgCIAEoDBINCgVl",
+            "cnJvchgDIAEoCRIYChBzZXJ2ZXJfc2lnbmF0dXJlGAQgASgMKs8DCgdNc2dU",
+            "eXBlEhgKFE1TR19UWVBFX1VOU1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVU",
+            "SBABEhYKEk1TR19UWVBFX0FVVEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVS",
+            "X1dPUkxEEAMSHQoZTVNHX1RZUEVfRU5URVJfV09STERfUkVTUBAEEhcKE01T",
+            "R19UWVBFX0pPSU5fVE9LRU4QBRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JF",
+            "U1AQBhISCg5NU0dfVFlQRV9JTlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9U",
+            "EAgSFwoTTVNHX1RZUEVfRElTQ09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lO",
+            "QxAKEhkKFU1TR19UWVBFX1RSQU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RS",
+            "QU5TRkVSX01BUF9SRVNQEA4SEQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19U",
+            "WVBFX1BPTkcQDBIRCg1NU0dfVFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VB",
+            "TEVEX0NMSUVOVF9IRUxMTxAQEiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJf",
+            "SEVMTE8QESqdAQoKRW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJ",
+            "RklFRBAAEhYKEkVOVElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBF",
+            "X01PQhACEhMKD0VOVElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lU",
+            "RU0QBBIaChZFTlRJVFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFj",
+            "dGlvbhIdChlFTlRJVFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZ",
+            "X0FDVElPTl9JRExFEAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdF",
+            "TlRJVFlfQUNUSU9OX0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVB",
+            "RBAEKt4BCg1HYW1lRXZlbnRUeXBlEh8KG0dBTUVfRVZFTlRfVFlQRV9VTlNQ",
+            "RUNJRklFRBAAEhoKFkdBTUVfRVZFTlRfVFlQRV9EQU1BR0UQARIYChRHQU1F",
+            "X0VWRU5UX1RZUEVfSEVBTBACEhkKFUdBTUVfRVZFTlRfVFlQRV9ERUFUSBAD",
+            "EiAKHEdBTUVfRVZFTlRfVFlQRV9BQklMSVRZX0NBU1QQBBIbChdHQU1FX0VW",
+            "RU5UX1RZUEVfWFBfR0FJThAFEhwKGEdBTUVfRVZFTlRfVFlQRV9MRVZFTF9V",
+            "UBAGQkZaM2dpdGh1Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFyZWQvcHJv",
+            "dG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
-          new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), }, null, new pbr::GeneratedClrTypeInfo[] {
+          new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), typeof(global::RpgMmo.Wire.V1.GameEventType), }, null, new pbr::GeneratedClrTypeInfo[] {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.Envelope), global::RpgMmo.Wire.V1.Envelope.Parser, new[]{ "Type", "Payload" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthRequest), global::RpgMmo.Wire.V1.AuthRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthResponse), global::RpgMmo.Wire.V1.AuthResponse.Parser, new[]{ "Ok", "UserId", "Error", "ProtocolVersion" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId", "PartyId" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error", "ServerPublicKey" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId", "AbilityId", "AbilityTargetId", "AimX", "AimY" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq", "ChangedFields" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.GameEvent), global::RpgMmo.Wire.V1.GameEvent.Parser, new[]{ "Type", "Source", "Target", "Amount", "AbilityId", "Flags", "SourceId", "TargetId" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed", "Events" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.DisconnectMessage), global::RpgMmo.Wire.V1.DisconnectMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.ResyncRequest), global::RpgMmo.Wire.V1.ResyncRequest.Parser, null, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.TransferMapRequest), global::RpgMmo.Wire.V1.TransferMapRequest.Parser, new[]{ "MapId" }, null, null, null, null),
@@ -95,7 +110,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.PongMessage), global::RpgMmo.Wire.V1.PongMessage.Parser, new[]{ "Timestamp", "ServerTime" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.KickMessage), global::RpgMmo.Wire.V1.KickMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SealedClientHello), global::RpgMmo.Wire.V1.SealedClientHello.Parser, new[]{ "PublicKey" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SealedServerHello), global::RpgMmo.Wire.V1.SealedServerHello.Parser, new[]{ "PublicKey", "Binding", "Error" }, null, null, null, null)
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SealedServerHello), global::RpgMmo.Wire.V1.SealedServerHello.Parser, new[]{ "PublicKey", "Binding", "Error", "ServerSignature" }, null, null, null, null)
           }));
     }
     #endregion
@@ -245,6 +260,65 @@ namespace RpgMmo.Wire.V1 {
     [pbr::OriginalName("ENTITY_ACTION_MOVING")] Moving = 2,
     [pbr::OriginalName("ENTITY_ACTION_ATTACKING")] Attacking = 3,
     [pbr::OriginalName("ENTITY_ACTION_DEAD")] Dead = 4,
+  }
+
+  /// <summary>
+  /// GameEventType enumerates the EDGE-TRIGGERED things that happen in the world.
+  ///
+  /// Numbers are FROZEN once shipped. Append only; never renumber.
+  ///
+  /// WHY AN EVENT CHANNEL EXISTS AT ALL. Everything else the server sends a client
+  /// is LEVEL-triggered state: where an entity is, how much HP it has, what it is
+  /// doing. That is the right shape for state, and it is the wrong shape for
+  /// occurrences. "This entity took 12 damage" is not recoverable from two HP
+  /// values a tick apart — a heal and a hit in the same tick net out, a delta
+  /// snapshot may not carry the entity at all if it also regenerated back, and an
+  /// entity that leaves the AOI mid-fight simply stops reporting. A client that
+  /// infers damage numbers from HP deltas is wrong in exactly the cases a player
+  /// notices, and it is wrong silently.
+  ///
+  /// ZERO IS RESERVED and means "not sent / unknown", following the same rule as
+  /// EntityType and EntityAction. A receiver MUST ignore an event it does not
+  /// recognise rather than guessing: events are presentation, so dropping an
+  /// unknown one costs a missing damage number, while guessing costs a wrong one.
+  /// </summary>
+  public enum GameEventType {
+    [pbr::OriginalName("GAME_EVENT_TYPE_UNSPECIFIED")] Unspecified = 0,
+    /// <summary>
+    /// `target` took `amount` damage from `source`. `amount` is the damage
+    /// APPLIED, after mitigation — the number a player expects to see float off a
+    /// head, not the pre-defense roll.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_DAMAGE")] Damage = 1,
+    /// <summary>
+    /// `target` was healed `amount` by `source`.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_HEAL")] Heal = 2,
+    /// <summary>
+    /// `target` died. `source` is the killer, or 0 when nothing killed it (a
+    /// despawn, a zone, a disconnect).
+    ///
+    /// This is NOT redundant with EntityAction.Dead, and the difference is the
+    /// whole reason the event channel exists: `Dead` is a state that persists for
+    /// as long as the corpse does, so a client joining afterwards sees Dead and
+    /// cannot tell whether the death just happened. The event says it happened
+    /// now, which is what a death animation, a sound and a kill feed all need.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_DEATH")] Death = 3,
+    /// <summary>
+    /// `source` successfully cast `ability_id`. Emitted when the cast RESOLVES on
+    /// the server, which is the only moment both sides agree on.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_ABILITY_CAST")] AbilityCast = 4,
+    /// <summary>
+    /// `target` gained `amount` experience. Sent only to the entity's own
+    /// connection — see the visibility note on GameEvent.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_XP_GAIN")] XpGain = 5,
+    /// <summary>
+    /// `target` reached level `amount`.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_LEVEL_UP")] LevelUp = 6,
   }
 
   #endregion
@@ -1068,7 +1142,20 @@ namespace RpgMmo.Wire.V1 {
   }
 
   /// <summary>
-  /// EnterWorldRequest asks the gateway to assign a map server.
+  /// EnterWorldRequest asks the gateway to assign a game server.
+  ///
+  /// `party_id` selects between the two things this one message can ask for, and
+  /// ADR-26 decision 1 is the reason there is only one message:
+  ///
+  ///   empty     -> a MAP server for `map_id`, the flow that has always existed.
+  ///   non-empty -> a DUNGEON INSTANCE of the content named by `map_id`, for this
+  ///                party. The first member's request allocates a pod; every later
+  ///                member is handed the SAME address, because the instance is
+  ///                keyed by the party and not by the content (ADR-26 decision 2).
+  ///
+  /// The gateway verifies the caller really is a member of the named party against
+  /// Nakama, once per entry (ADR-26 decision 3). A client that names a party it is
+  /// not in is refused; it is not quietly given a map.
   /// </summary>
   [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
   public sealed partial class EnterWorldRequest : pb::IMessage<EnterWorldRequest>
@@ -1106,6 +1193,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public EnterWorldRequest(EnterWorldRequest other) : this() {
       mapId_ = other.mapId_;
+      partyId_ = other.partyId_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1127,6 +1215,18 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "party_id" field.</summary>
+    public const int PartyIdFieldNumber = 2;
+    private string partyId_ = "";
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string PartyId {
+      get { return partyId_; }
+      set {
+        partyId_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1143,6 +1243,7 @@ namespace RpgMmo.Wire.V1 {
         return true;
       }
       if (MapId != other.MapId) return false;
+      if (PartyId != other.PartyId) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1151,6 +1252,7 @@ namespace RpgMmo.Wire.V1 {
     public override int GetHashCode() {
       int hash = 1;
       if (MapId.Length != 0) hash ^= MapId.GetHashCode();
+      if (PartyId.Length != 0) hash ^= PartyId.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1173,6 +1275,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(MapId);
       }
+      if (PartyId.Length != 0) {
+        output.WriteRawTag(18);
+        output.WriteString(PartyId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1187,6 +1293,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(MapId);
       }
+      if (PartyId.Length != 0) {
+        output.WriteRawTag(18);
+        output.WriteString(PartyId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1199,6 +1309,9 @@ namespace RpgMmo.Wire.V1 {
       int size = 0;
       if (MapId.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(MapId);
+      }
+      if (PartyId.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(PartyId);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1214,6 +1327,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.MapId.Length != 0) {
         MapId = other.MapId;
+      }
+      if (other.PartyId.Length != 0) {
+        PartyId = other.PartyId;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1238,6 +1354,10 @@ namespace RpgMmo.Wire.V1 {
             MapId = input.ReadString();
             break;
           }
+          case 18: {
+            PartyId = input.ReadString();
+            break;
+          }
         }
       }
     #endif
@@ -1259,6 +1379,10 @@ namespace RpgMmo.Wire.V1 {
             break;
           case 10: {
             MapId = input.ReadString();
+            break;
+          }
+          case 18: {
+            PartyId = input.ReadString();
             break;
           }
         }
@@ -1313,6 +1437,7 @@ namespace RpgMmo.Wire.V1 {
       joinToken_ = other.joinToken_;
       transport_ = other.transport_;
       error_ = other.error_;
+      serverPublicKey_ = other.serverPublicKey_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1370,6 +1495,47 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "server_public_key" field.</summary>
+    public const int ServerPublicKeyFieldNumber = 6;
+    private pb::ByteString serverPublicKey_ = pb::ByteString.Empty;
+    /// <summary>
+    /// The game server's Ed25519 IDENTITY public key, 32 bytes (ADR-25).
+    ///
+    /// Generated by the pod at startup, never persisted, never configured; it
+    /// reaches this message by travelling pod -> Redis registry entry -> gateway.
+    /// It is the key that verifies `SealedServerHello.server_signature` on the
+    /// gameplay hop, and it is a NEW field number because field 5 is reserved
+    /// forever -- see above for why that reservation is not negotiable.
+    ///
+    /// WHAT A CLIENT MAY CONCLUDE FROM IT, WHICH IS LESS THAN IT LOOKS. This
+    /// message crosses the GATEWAY hop, which is plaintext in every environment
+    /// today (ADR-23's TLS is implemented and defaults off). An attacker able to
+    /// man-in-the-middle the gameplay hop is on the same network path as this hop,
+    /// so he substitutes this key and then forges a signature that verifies
+    /// against it. Checking the signature therefore proves the gameplay peer holds
+    /// the key NAMED HERE -- nothing more -- and that is only an identity claim
+    /// when this message itself arrived authenticated.
+    ///
+    /// So a client MUST report two different things: that it checked the
+    /// signature, and whether the hop that delivered this key was authenticated.
+    /// Only the conjunction is `server_identity_verified` (ADR-25 decision 6). An
+    /// instrument that reports the strong claim on the weak evidence is worse than
+    /// no instrument.
+    ///
+    /// Empty means the gateway has no key for that server -- an older game server,
+    /// or a registry entry written before this field existed. A client that
+    /// REQUIRES identity must refuse the join rather than continue unverified:
+    /// there is no negotiation and no fallback (ADR-22 decision 3).
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString ServerPublicKey {
+      get { return serverPublicKey_; }
+      set {
+        serverPublicKey_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1389,6 +1555,7 @@ namespace RpgMmo.Wire.V1 {
       if (JoinToken != other.JoinToken) return false;
       if (Transport != other.Transport) return false;
       if (Error != other.Error) return false;
+      if (ServerPublicKey != other.ServerPublicKey) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1400,6 +1567,7 @@ namespace RpgMmo.Wire.V1 {
       if (JoinToken.Length != 0) hash ^= JoinToken.GetHashCode();
       if (Transport.Length != 0) hash ^= Transport.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (ServerPublicKey.Length != 0) hash ^= ServerPublicKey.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1434,6 +1602,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(Error);
       }
+      if (ServerPublicKey.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteBytes(ServerPublicKey);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1460,6 +1632,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(Error);
       }
+      if (ServerPublicKey.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteBytes(ServerPublicKey);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1481,6 +1657,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Error.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (ServerPublicKey.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(ServerPublicKey);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1505,6 +1684,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Error.Length != 0) {
         Error = other.Error;
+      }
+      if (other.ServerPublicKey.Length != 0) {
+        ServerPublicKey = other.ServerPublicKey;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1541,6 +1723,10 @@ namespace RpgMmo.Wire.V1 {
             Error = input.ReadString();
             break;
           }
+          case 50: {
+            ServerPublicKey = input.ReadBytes();
+            break;
+          }
         }
       }
     #endif
@@ -1574,6 +1760,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 34: {
             Error = input.ReadString();
+            break;
+          }
+          case 50: {
+            ServerPublicKey = input.ReadBytes();
             break;
           }
         }
@@ -2245,6 +2435,10 @@ namespace RpgMmo.Wire.V1 {
       moveX_ = other.moveX_;
       moveY_ = other.moveY_;
       attackTargetId_ = other.attackTargetId_;
+      abilityId_ = other.abilityId_;
+      abilityTargetId_ = other.abilityTargetId_;
+      aimX_ = other.aimX_;
+      aimY_ = other.aimY_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -2302,6 +2496,97 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "ability_id" field.</summary>
+    public const int AbilityIdFieldNumber = 5;
+    private uint abilityId_;
+    /// <summary>
+    /// Content id of the ability the player is trying to use this tick, as defined
+    /// in the content set served at /content (ADR-19). ZERO MEANS "NO ABILITY",
+    /// which is why ability ids are allocated from 1 in the content validator: a
+    /// proto3 zero is elided, so id 0 and "this client sent no ability" would be
+    /// the same bytes and the server could not tell a missing field from a real
+    /// ability.
+    ///
+    /// This is a REQUEST, not a result. The server validates it against the
+    /// content set, the caster's state and its cooldown, and the only thing the
+    /// client learns about the outcome is what comes back in the snapshot: a
+    /// GAME_EVENT_TYPE_ABILITY_CAST event if it resolved, nothing if it did not.
+    /// There is deliberately no per-input acknowledgement — an input that failed
+    /// is already described by the world not changing, and a rejection channel
+    /// would be a second, contradictable account of the same fact.
+    ///
+    /// Abilities are NOT client-predicted. Prediction covers movement only
+    /// (Documentation~/PREDICTION.md): movement is a pure function of input the
+    /// client already has, while an ability outcome depends on cooldowns, content
+    /// and other entities' state that the client can only guess at. A mispredicted
+    /// ability is visible as a cast that plays and then un-happens, which is worse
+    /// than a cast that starts one round trip late.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint AbilityId {
+      get { return abilityId_; }
+      set {
+        abilityId_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "ability_target_id" field.</summary>
+    public const int AbilityTargetIdFieldNumber = 6;
+    private string abilityTargetId_ = "";
+    /// <summary>
+    /// Target entity for a targeted ability, empty for self- and ground-targeted
+    /// ones. Same id space as `attack_target_id` — the server-side entity id, not
+    /// a handle, because input travels client -> server and the interning table is
+    /// built by the SERVER for its own outbound snapshots. A client has no handle
+    /// to send that the server would recognise.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string AbilityTargetId {
+      get { return abilityTargetId_; }
+      set {
+        abilityTargetId_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    /// <summary>Field number for the "aim_x" field.</summary>
+    public const int AimXFieldNumber = 7;
+    private float aimX_;
+    /// <summary>
+    /// Aim point in world coordinates for a ground-targeted ability. Ignored for
+    /// self- and entity-targeted ones.
+    ///
+    /// Sent as a plain pair of floats rather than being folded into move_x/move_y:
+    /// they are different quantities (a POINT in world space against a DIRECTION),
+    /// and an input that both moves and aims elsewhere is ordinary — a player
+    /// strafing while dropping an area effect behind them.
+    ///
+    /// Zero is a legitimate aim point (world origin), so a receiver must not read
+    /// (0,0) as "not aimed". `ability_id` is what says whether any of this is
+    /// meaningful: aim fields are only read when it is non-zero.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float AimX {
+      get { return aimX_; }
+      set {
+        aimX_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "aim_y" field.</summary>
+    public const int AimYFieldNumber = 8;
+    private float aimY_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float AimY {
+      get { return aimY_; }
+      set {
+        aimY_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -2321,6 +2606,10 @@ namespace RpgMmo.Wire.V1 {
       if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(MoveX, other.MoveX)) return false;
       if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(MoveY, other.MoveY)) return false;
       if (AttackTargetId != other.AttackTargetId) return false;
+      if (AbilityId != other.AbilityId) return false;
+      if (AbilityTargetId != other.AbilityTargetId) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(AimX, other.AimX)) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(AimY, other.AimY)) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -2332,6 +2621,10 @@ namespace RpgMmo.Wire.V1 {
       if (MoveX != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(MoveX);
       if (MoveY != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(MoveY);
       if (AttackTargetId.Length != 0) hash ^= AttackTargetId.GetHashCode();
+      if (AbilityId != 0) hash ^= AbilityId.GetHashCode();
+      if (AbilityTargetId.Length != 0) hash ^= AbilityTargetId.GetHashCode();
+      if (AimX != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(AimX);
+      if (AimY != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(AimY);
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -2366,6 +2659,22 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(AttackTargetId);
       }
+      if (AbilityId != 0) {
+        output.WriteRawTag(40);
+        output.WriteUInt32(AbilityId);
+      }
+      if (AbilityTargetId.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteString(AbilityTargetId);
+      }
+      if (AimX != 0F) {
+        output.WriteRawTag(61);
+        output.WriteFloat(AimX);
+      }
+      if (AimY != 0F) {
+        output.WriteRawTag(69);
+        output.WriteFloat(AimY);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -2392,6 +2701,22 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(AttackTargetId);
       }
+      if (AbilityId != 0) {
+        output.WriteRawTag(40);
+        output.WriteUInt32(AbilityId);
+      }
+      if (AbilityTargetId.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteString(AbilityTargetId);
+      }
+      if (AimX != 0F) {
+        output.WriteRawTag(61);
+        output.WriteFloat(AimX);
+      }
+      if (AimY != 0F) {
+        output.WriteRawTag(69);
+        output.WriteFloat(AimY);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -2413,6 +2738,18 @@ namespace RpgMmo.Wire.V1 {
       }
       if (AttackTargetId.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(AttackTargetId);
+      }
+      if (AbilityId != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(AbilityId);
+      }
+      if (AbilityTargetId.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(AbilityTargetId);
+      }
+      if (AimX != 0F) {
+        size += 1 + 4;
+      }
+      if (AimY != 0F) {
+        size += 1 + 4;
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -2437,6 +2774,18 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.AttackTargetId.Length != 0) {
         AttackTargetId = other.AttackTargetId;
+      }
+      if (other.AbilityId != 0) {
+        AbilityId = other.AbilityId;
+      }
+      if (other.AbilityTargetId.Length != 0) {
+        AbilityTargetId = other.AbilityTargetId;
+      }
+      if (other.AimX != 0F) {
+        AimX = other.AimX;
+      }
+      if (other.AimY != 0F) {
+        AimY = other.AimY;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -2473,6 +2822,22 @@ namespace RpgMmo.Wire.V1 {
             AttackTargetId = input.ReadString();
             break;
           }
+          case 40: {
+            AbilityId = input.ReadUInt32();
+            break;
+          }
+          case 50: {
+            AbilityTargetId = input.ReadString();
+            break;
+          }
+          case 61: {
+            AimX = input.ReadFloat();
+            break;
+          }
+          case 69: {
+            AimY = input.ReadFloat();
+            break;
+          }
         }
       }
     #endif
@@ -2506,6 +2871,22 @@ namespace RpgMmo.Wire.V1 {
           }
           case 34: {
             AttackTargetId = input.ReadString();
+            break;
+          }
+          case 40: {
+            AbilityId = input.ReadUInt32();
+            break;
+          }
+          case 50: {
+            AbilityTargetId = input.ReadString();
+            break;
+          }
+          case 61: {
+            AimX = input.ReadFloat();
+            break;
+          }
+          case 69: {
+            AimY = input.ReadFloat();
             break;
           }
         }
@@ -2578,6 +2959,8 @@ namespace RpgMmo.Wire.V1 {
       speed_ = other.speed_;
       facingBrad_ = other.facingBrad_;
       action_ = other.action_;
+      actionSeq_ = other.actionSeq_;
+      changedFields_ = other.changedFields_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -2825,6 +3208,104 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "action_seq" field.</summary>
+    public const int ActionSeqFieldNumber = 12;
+    private uint actionSeq_;
+    /// <summary>
+    /// Retrigger counter for `action`, incremented by the server every time the
+    /// entity ENTERS an action, including re-entering the one it is already in.
+    ///
+    /// WHY THIS EXISTS. `action` is level-triggered and says so at length above: it
+    /// reports the state an entity is in, not that a state was entered. Two attacks
+    /// in a row therefore put identical bytes on the wire for both of them, and a
+    /// renderer driving an animator from `action` alone plays the attack once and
+    /// then holds — the second swing never fires. That is not a renderer bug and no
+    /// amount of client-side edge detection on `action` can fix it, because the
+    /// edge genuinely is not in the data.
+    ///
+    /// The enum's own documentation calls this out and defers it as "an animation
+    /// system concern". It is not: the server is the only party that knows an
+    /// action was re-entered, so the edge has to be MANUFACTURED here or it does
+    /// not exist anywhere. This field is that edge, in one varint.
+    ///
+    /// SEMANTICS. A receiver retriggers when the value CHANGES, not when it
+    /// increases. It is a per-entity counter that wraps at 2^32 and is reset when
+    /// the server restarts or the entity respawns, so "greater than" is not a safe
+    /// test and a receiver that uses one stops retriggering for 4 billion actions
+    /// after a single wrap. Inequality has no such failure mode.
+    ///
+    /// ZERO MEANS "NOT SENT". The counter is allocated from 1 for the same reason
+    /// as every other zero-reserving field in this file: a server that predates
+    /// this field and an entity whose counter happens to be zero must not look the
+    /// same. A receiver seeing zero keeps its existing behaviour — drive the
+    /// animator from `action` alone and accept that repeats do not retrigger —
+    /// rather than treating it as an edge, which would retrigger every animation on
+    /// every snapshot from an old server.
+    ///
+    /// Sent on every mention of an entity, never interned, for the same reason as
+    /// `speed` and `facing_brad`: a receiver that resolves a handle expects
+    /// complete state.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ActionSeq {
+      get { return actionSeq_; }
+      set {
+        actionSeq_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "changed_fields" field.</summary>
+    public const int ChangedFieldsFieldNumber = 13;
+    private uint changedFields_;
+    /// <summary>
+    /// Field-level delta mask. Non-zero on a DELTA (full=false) snapshot means this
+    /// entity entry is a PARTIAL UPDATE: only the fields whose bit is set are
+    /// present, and the receiver MUST keep its last-known value for every unset
+    /// field rather than resetting it to the proto3 default (zero).
+    ///
+    /// Bit assignments:
+    ///   0x0001 → x          (field 3)
+    ///   0x0002 → y          (field 4)
+    ///   0x0004 → hp         (field 5)
+    ///   0x0008 → max_hp     (field 6)
+    ///   0x0010 → type / type_name (fields 7 / 2)
+    ///   0x0020 → speed      (field 9)
+    ///   0x0040 → facing_brad (field 10)
+    ///   0x0080 → action     (field 11)
+    ///   0x0100 → action_seq (field 12)
+    ///
+    /// ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
+    /// delta never sets this field; a receiver that sees 0 MUST apply the same rule
+    /// as on a keyframe — every field takes its wire value (including proto3 defaults
+    /// of zero). That is the safe, backwards-compatible direction: an old sender
+    /// never sets the field, the new receiver treats zero as "all present", and
+    /// behaviour is unchanged. An old receiver ignores the field (proto3 unknown
+    /// fields) and zeros every unset field, which is wrong — that failure is why
+    /// this field is gated behind a protocol version bump (version 2).
+    ///
+    /// NEVER SET ON KEYFRAMES (full=true). A keyframe always carries complete state
+    /// for every entity; the receiver re-establishes its view from scratch on a
+    /// keyframe and field masking would be meaningless.
+    ///
+    /// NEVER SET ON A FIRST INTRODUCTION. When `id` is present (first mention of an
+    /// entity to this connection), the server MUST send all fields so the client can
+    /// construct a complete initial state. A receiver that sees a non-zero mask with
+    /// `id` non-empty is receiving a server-side bug; it SHOULD treat it as a full
+    /// update (mask = 0) rather than attempting to merge against an entity it never
+    /// received.
+    ///
+    /// Introduced in protocol version 2.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ChangedFields {
+      get { return changedFields_; }
+      set {
+        changedFields_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -2851,6 +3332,8 @@ namespace RpgMmo.Wire.V1 {
       if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(Speed, other.Speed)) return false;
       if (FacingBrad != other.FacingBrad) return false;
       if (Action != other.Action) return false;
+      if (ActionSeq != other.ActionSeq) return false;
+      if (ChangedFields != other.ChangedFields) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -2869,6 +3352,8 @@ namespace RpgMmo.Wire.V1 {
       if (Speed != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(Speed);
       if (FacingBrad != 0) hash ^= FacingBrad.GetHashCode();
       if (Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) hash ^= Action.GetHashCode();
+      if (ActionSeq != 0) hash ^= ActionSeq.GetHashCode();
+      if (ChangedFields != 0) hash ^= ChangedFields.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -2931,6 +3416,14 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(88);
         output.WriteEnum((int) Action);
       }
+      if (ActionSeq != 0) {
+        output.WriteRawTag(96);
+        output.WriteUInt32(ActionSeq);
+      }
+      if (ChangedFields != 0) {
+        output.WriteRawTag(104);
+        output.WriteUInt32(ChangedFields);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -2985,6 +3478,14 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(88);
         output.WriteEnum((int) Action);
       }
+      if (ActionSeq != 0) {
+        output.WriteRawTag(96);
+        output.WriteUInt32(ActionSeq);
+      }
+      if (ChangedFields != 0) {
+        output.WriteRawTag(104);
+        output.WriteUInt32(ChangedFields);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -3027,6 +3528,12 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) {
         size += 1 + pb::CodedOutputStream.ComputeEnumSize((int) Action);
+      }
+      if (ActionSeq != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ActionSeq);
+      }
+      if (ChangedFields != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ChangedFields);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -3072,6 +3579,12 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) {
         Action = other.Action;
+      }
+      if (other.ActionSeq != 0) {
+        ActionSeq = other.ActionSeq;
+      }
+      if (other.ChangedFields != 0) {
+        ChangedFields = other.ChangedFields;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -3134,6 +3647,14 @@ namespace RpgMmo.Wire.V1 {
           }
           case 88: {
             Action = (global::RpgMmo.Wire.V1.EntityAction) input.ReadEnum();
+            break;
+          }
+          case 96: {
+            ActionSeq = input.ReadUInt32();
+            break;
+          }
+          case 104: {
+            ChangedFields = input.ReadUInt32();
             break;
           }
         }
@@ -3199,6 +3720,564 @@ namespace RpgMmo.Wire.V1 {
             Action = (global::RpgMmo.Wire.V1.EntityAction) input.ReadEnum();
             break;
           }
+          case 96: {
+            ActionSeq = input.ReadUInt32();
+            break;
+          }
+          case 104: {
+            ChangedFields = input.ReadUInt32();
+            break;
+          }
+        }
+      }
+    }
+    #endif
+
+  }
+
+  /// <summary>
+  /// GameEvent is one edge-triggered occurrence, addressed to entities by the SAME
+  /// interned handles the surrounding snapshot uses.
+  ///
+  /// WHY THIS RIDES SnapshotMessage RATHER THAN BEING ITS OWN MsgType. Three
+  /// reasons, and the first is the load-bearing one:
+  ///
+  ///  1. HANDLES. Entity ids are interned per connection and the table RESETS AT
+  ///     EVERY KEYFRAME (see EntitySnapshot.handle). An event in a separate
+  ///     message would either have to carry full string ids — ~17 bytes per
+  ///     participant, on the one message class that fires hardest during combat —
+  ///     or resolve handles against a table whose lifetime it does not share,
+  ///     which is a race that produces events attributed to the WRONG ENTITY. A
+  ///     wrong damage number is far worse than a missing one. Riding the snapshot
+  ///     makes the handle table and the events that use it the same message, so
+  ///     they cannot disagree.
+  ///
+  ///  2. TICK. Every event belongs to the tick that produced it. The snapshot
+  ///     already carries that tick, so nesting costs zero bytes to say when an
+  ///     event happened, where a separate message pays a uint64 per batch and
+  ///     still has to be ordered against the snapshot stream by the receiver.
+  ///
+  ///  3. ORDERING. One stream, one order, already reliable. No new connection
+  ///     state, no new MsgType, no second thing to reconnect.
+  ///
+  /// The cost is that events only travel when a snapshot does, which for a
+  /// connection receiving snapshots every tick is not a delay anyone can perceive.
+  ///
+  /// VISIBILITY. Events are filtered per connection exactly like entities are: a
+  /// connection is sent an event only when it can see at least one of the
+  /// participants, and private events (XP, level) only when the receiver IS the
+  /// subject. This is the same AOI rule the entity set already obeys, applied to
+  /// occurrences — an event channel that leaked the whole world would be a
+  /// wallhack shipped as a feature.
+  /// </summary>
+  [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
+  public sealed partial class GameEvent : pb::IMessage<GameEvent>
+  #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      , pb::IBufferMessage
+  #endif
+  {
+    private static readonly pb::MessageParser<GameEvent> _parser = new pb::MessageParser<GameEvent>(() => new GameEvent());
+    private pb::UnknownFieldSet _unknownFields;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pb::MessageParser<GameEvent> Parser { get { return _parser; } }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pbr::MessageDescriptor Descriptor {
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[9]; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    pbr::MessageDescriptor pb::IMessage.Descriptor {
+      get { return Descriptor; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public GameEvent() {
+      OnConstruction();
+    }
+
+    partial void OnConstruction();
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public GameEvent(GameEvent other) : this() {
+      type_ = other.type_;
+      source_ = other.source_;
+      target_ = other.target_;
+      amount_ = other.amount_;
+      abilityId_ = other.abilityId_;
+      flags_ = other.flags_;
+      sourceId_ = other.sourceId_;
+      targetId_ = other.targetId_;
+      _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public GameEvent Clone() {
+      return new GameEvent(this);
+    }
+
+    /// <summary>Field number for the "type" field.</summary>
+    public const int TypeFieldNumber = 1;
+    private global::RpgMmo.Wire.V1.GameEventType type_ = global::RpgMmo.Wire.V1.GameEventType.Unspecified;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public global::RpgMmo.Wire.V1.GameEventType Type {
+      get { return type_; }
+      set {
+        type_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "source" field.</summary>
+    public const int SourceFieldNumber = 2;
+    private uint source_;
+    /// <summary>
+    /// Interned handle of the entity that CAUSED this, or 0 for "none / the
+    /// world". Resolved against the same table as EntitySnapshot.handle in the
+    /// snapshot carrying this event.
+    ///
+    /// A handle here may name an entity NOT present in this snapshot's `entities`
+    /// list: a delta only carries entities whose state changed, and the killer of
+    /// something in your AOI need not have moved. That is legal and expected. It
+    /// may NOT name an entity the connection has no binding for — a receiver that
+    /// sees one has lost interning state and must ask for a keyframe, the same
+    /// recovery path EntitySnapshot.id documents.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Source {
+      get { return source_; }
+      set {
+        source_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "target" field.</summary>
+    public const int TargetFieldNumber = 3;
+    private uint target_;
+    /// <summary>
+    /// Interned handle of the entity this HAPPENED TO. 0 for events with no
+    /// subject.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Target {
+      get { return target_; }
+      set {
+        target_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "amount" field.</summary>
+    public const int AmountFieldNumber = 4;
+    private int amount_;
+    /// <summary>
+    /// Magnitude: damage dealt, health restored, experience gained, level reached.
+    /// Meaning is per `type` and is documented on each value above.
+    ///
+    /// SIGNED, and sint32 rather than int32, because the zigzag encoding keeps a
+    /// small negative cheap. Damage and healing are both reported POSITIVE under
+    /// their own event types rather than as one signed quantity — a client that
+    /// colours a number by its sign would show mitigated-to-zero damage and a
+    /// zero heal identically. The sign is available for the cases that genuinely
+    /// need it (an absorb, a level lost) without overloading the common ones.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int Amount {
+      get { return amount_; }
+      set {
+        amount_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "ability_id" field.</summary>
+    public const int AbilityIdFieldNumber = 5;
+    private uint abilityId_;
+    /// <summary>
+    /// Content id of the ability involved, 0 when none. Same id space as
+    /// InputMessage.ability_id, so a damage event can say which ability dealt it.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint AbilityId {
+      get { return abilityId_; }
+      set {
+        abilityId_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "flags" field.</summary>
+    public const int FlagsFieldNumber = 6;
+    private uint flags_;
+    /// <summary>
+    /// Presentation flags: bit 0 = critical, bit 1 = the target was immune or the
+    /// effect was fully mitigated, bit 2 = the effect came from a periodic source
+    /// rather than a direct one.
+    ///
+    /// A bitfield rather than more enum values because these COMBINE — a critical
+    /// periodic tick is one event, not two — and because a receiver that does not
+    /// understand a bit ignores it and still shows a correct number, where an
+    /// unrecognised enum value means the whole event is dropped.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Flags {
+      get { return flags_; }
+      set {
+        flags_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "source_id" field.</summary>
+    public const int SourceIdFieldNumber = 7;
+    private string sourceId_ = "";
+    /// <summary>
+    /// Full entity ids, used ONLY by a receiver that is not interning — the legacy JSON
+    /// encoding, which has no handle table and for which `source`/`target` are always
+    /// zero. Empty on every Protobuf connection.
+    ///
+    /// This mirrors EntitySnapshot's own id/handle duality exactly, and for the same
+    /// reason: the two encodings share one schema, and an encoding without interning
+    /// still has to be able to name an entity. The alternative considered was to send no
+    /// events at all on a JSON connection. It was rejected because a silently
+    /// encoding-dependent feature is the kind of difference that is discovered by a
+    /// player on the wrong client, not by a test — and because "JSON is legacy" is a
+    /// reason to keep it simple, not a licence to make it wrong.
+    ///
+    /// A receiver prefers the handle when it is non-zero and falls back to these
+    /// otherwise, which is the same precedence rule EntitySnapshot documents for
+    /// `type`/`type_name`.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string SourceId {
+      get { return sourceId_; }
+      set {
+        sourceId_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    /// <summary>Field number for the "target_id" field.</summary>
+    public const int TargetIdFieldNumber = 8;
+    private string targetId_ = "";
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string TargetId {
+      get { return targetId_; }
+      set {
+        targetId_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override bool Equals(object other) {
+      return Equals(other as GameEvent);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Equals(GameEvent other) {
+      if (ReferenceEquals(other, null)) {
+        return false;
+      }
+      if (ReferenceEquals(other, this)) {
+        return true;
+      }
+      if (Type != other.Type) return false;
+      if (Source != other.Source) return false;
+      if (Target != other.Target) return false;
+      if (Amount != other.Amount) return false;
+      if (AbilityId != other.AbilityId) return false;
+      if (Flags != other.Flags) return false;
+      if (SourceId != other.SourceId) return false;
+      if (TargetId != other.TargetId) return false;
+      return Equals(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override int GetHashCode() {
+      int hash = 1;
+      if (Type != global::RpgMmo.Wire.V1.GameEventType.Unspecified) hash ^= Type.GetHashCode();
+      if (Source != 0) hash ^= Source.GetHashCode();
+      if (Target != 0) hash ^= Target.GetHashCode();
+      if (Amount != 0) hash ^= Amount.GetHashCode();
+      if (AbilityId != 0) hash ^= AbilityId.GetHashCode();
+      if (Flags != 0) hash ^= Flags.GetHashCode();
+      if (SourceId.Length != 0) hash ^= SourceId.GetHashCode();
+      if (TargetId.Length != 0) hash ^= TargetId.GetHashCode();
+      if (_unknownFields != null) {
+        hash ^= _unknownFields.GetHashCode();
+      }
+      return hash;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override string ToString() {
+      return pb::JsonFormatter.ToDiagnosticString(this);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void WriteTo(pb::CodedOutputStream output) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      output.WriteRawMessage(this);
+    #else
+      if (Type != global::RpgMmo.Wire.V1.GameEventType.Unspecified) {
+        output.WriteRawTag(8);
+        output.WriteEnum((int) Type);
+      }
+      if (Source != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(Source);
+      }
+      if (Target != 0) {
+        output.WriteRawTag(24);
+        output.WriteUInt32(Target);
+      }
+      if (Amount != 0) {
+        output.WriteRawTag(32);
+        output.WriteSInt32(Amount);
+      }
+      if (AbilityId != 0) {
+        output.WriteRawTag(40);
+        output.WriteUInt32(AbilityId);
+      }
+      if (Flags != 0) {
+        output.WriteRawTag(48);
+        output.WriteUInt32(Flags);
+      }
+      if (SourceId.Length != 0) {
+        output.WriteRawTag(58);
+        output.WriteString(SourceId);
+      }
+      if (TargetId.Length != 0) {
+        output.WriteRawTag(66);
+        output.WriteString(TargetId);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(output);
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalWriteTo(ref pb::WriteContext output) {
+      if (Type != global::RpgMmo.Wire.V1.GameEventType.Unspecified) {
+        output.WriteRawTag(8);
+        output.WriteEnum((int) Type);
+      }
+      if (Source != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(Source);
+      }
+      if (Target != 0) {
+        output.WriteRawTag(24);
+        output.WriteUInt32(Target);
+      }
+      if (Amount != 0) {
+        output.WriteRawTag(32);
+        output.WriteSInt32(Amount);
+      }
+      if (AbilityId != 0) {
+        output.WriteRawTag(40);
+        output.WriteUInt32(AbilityId);
+      }
+      if (Flags != 0) {
+        output.WriteRawTag(48);
+        output.WriteUInt32(Flags);
+      }
+      if (SourceId.Length != 0) {
+        output.WriteRawTag(58);
+        output.WriteString(SourceId);
+      }
+      if (TargetId.Length != 0) {
+        output.WriteRawTag(66);
+        output.WriteString(TargetId);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(ref output);
+      }
+    }
+    #endif
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int CalculateSize() {
+      int size = 0;
+      if (Type != global::RpgMmo.Wire.V1.GameEventType.Unspecified) {
+        size += 1 + pb::CodedOutputStream.ComputeEnumSize((int) Type);
+      }
+      if (Source != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Source);
+      }
+      if (Target != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Target);
+      }
+      if (Amount != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeSInt32Size(Amount);
+      }
+      if (AbilityId != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(AbilityId);
+      }
+      if (Flags != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Flags);
+      }
+      if (SourceId.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(SourceId);
+      }
+      if (TargetId.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(TargetId);
+      }
+      if (_unknownFields != null) {
+        size += _unknownFields.CalculateSize();
+      }
+      return size;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(GameEvent other) {
+      if (other == null) {
+        return;
+      }
+      if (other.Type != global::RpgMmo.Wire.V1.GameEventType.Unspecified) {
+        Type = other.Type;
+      }
+      if (other.Source != 0) {
+        Source = other.Source;
+      }
+      if (other.Target != 0) {
+        Target = other.Target;
+      }
+      if (other.Amount != 0) {
+        Amount = other.Amount;
+      }
+      if (other.AbilityId != 0) {
+        AbilityId = other.AbilityId;
+      }
+      if (other.Flags != 0) {
+        Flags = other.Flags;
+      }
+      if (other.SourceId.Length != 0) {
+        SourceId = other.SourceId;
+      }
+      if (other.TargetId.Length != 0) {
+        TargetId = other.TargetId;
+      }
+      _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(pb::CodedInputStream input) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      input.ReadRawMessage(this);
+    #else
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, input);
+            break;
+          case 8: {
+            Type = (global::RpgMmo.Wire.V1.GameEventType) input.ReadEnum();
+            break;
+          }
+          case 16: {
+            Source = input.ReadUInt32();
+            break;
+          }
+          case 24: {
+            Target = input.ReadUInt32();
+            break;
+          }
+          case 32: {
+            Amount = input.ReadSInt32();
+            break;
+          }
+          case 40: {
+            AbilityId = input.ReadUInt32();
+            break;
+          }
+          case 48: {
+            Flags = input.ReadUInt32();
+            break;
+          }
+          case 58: {
+            SourceId = input.ReadString();
+            break;
+          }
+          case 66: {
+            TargetId = input.ReadString();
+            break;
+          }
+        }
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalMergeFrom(ref pb::ParseContext input) {
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, ref input);
+            break;
+          case 8: {
+            Type = (global::RpgMmo.Wire.V1.GameEventType) input.ReadEnum();
+            break;
+          }
+          case 16: {
+            Source = input.ReadUInt32();
+            break;
+          }
+          case 24: {
+            Target = input.ReadUInt32();
+            break;
+          }
+          case 32: {
+            Amount = input.ReadSInt32();
+            break;
+          }
+          case 40: {
+            AbilityId = input.ReadUInt32();
+            break;
+          }
+          case 48: {
+            Flags = input.ReadUInt32();
+            break;
+          }
+          case 58: {
+            SourceId = input.ReadString();
+            break;
+          }
+          case 66: {
+            TargetId = input.ReadString();
+            break;
+          }
         }
       }
     }
@@ -3230,7 +4309,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[9]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[10]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -3255,6 +4334,7 @@ namespace RpgMmo.Wire.V1 {
       full_ = other.full_;
       entities_ = other.entities_.Clone();
       removed_ = other.removed_.Clone();
+      events_ = other.events_.Clone();
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -3326,6 +4406,30 @@ namespace RpgMmo.Wire.V1 {
       get { return removed_; }
     }
 
+    /// <summary>Field number for the "events" field.</summary>
+    public const int EventsFieldNumber = 6;
+    private static readonly pb::FieldCodec<global::RpgMmo.Wire.V1.GameEvent> _repeated_events_codec
+        = pb::FieldCodec.ForMessage(50, global::RpgMmo.Wire.V1.GameEvent.Parser);
+    private readonly pbc::RepeatedField<global::RpgMmo.Wire.V1.GameEvent> events_ = new pbc::RepeatedField<global::RpgMmo.Wire.V1.GameEvent>();
+    /// <summary>
+    /// Edge-triggered occurrences produced by the tick this snapshot reports, in
+    /// the order the simulation produced them. Empty on most snapshots.
+    ///
+    /// Sent on DELTAS AND KEYFRAMES ALIKE, and never re-sent. A keyframe restates
+    /// the world's STATE because a client may have missed a delta; it does not
+    /// restate its HISTORY, because an event that has already been shown must not
+    /// be shown twice. A client that missed the snapshot carrying an event has
+    /// missed the event — permanently, by design. Events are presentation, and a
+    /// damage number arriving late is worse than one that never arrives.
+    ///
+    /// See GameEvent for why these live here rather than in a message of their own.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pbc::RepeatedField<global::RpgMmo.Wire.V1.GameEvent> Events {
+      get { return events_; }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -3346,6 +4450,7 @@ namespace RpgMmo.Wire.V1 {
       if (Full != other.Full) return false;
       if(!entities_.Equals(other.entities_)) return false;
       if(!removed_.Equals(other.removed_)) return false;
+      if(!events_.Equals(other.events_)) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -3358,6 +4463,7 @@ namespace RpgMmo.Wire.V1 {
       if (Full != false) hash ^= Full.GetHashCode();
       hash ^= entities_.GetHashCode();
       hash ^= removed_.GetHashCode();
+      hash ^= events_.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -3390,6 +4496,7 @@ namespace RpgMmo.Wire.V1 {
       }
       entities_.WriteTo(output, _repeated_entities_codec);
       removed_.WriteTo(output, _repeated_removed_codec);
+      events_.WriteTo(output, _repeated_events_codec);
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -3414,6 +4521,7 @@ namespace RpgMmo.Wire.V1 {
       }
       entities_.WriteTo(ref output, _repeated_entities_codec);
       removed_.WriteTo(ref output, _repeated_removed_codec);
+      events_.WriteTo(ref output, _repeated_events_codec);
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -3435,6 +4543,7 @@ namespace RpgMmo.Wire.V1 {
       }
       size += entities_.CalculateSize(_repeated_entities_codec);
       size += removed_.CalculateSize(_repeated_removed_codec);
+      size += events_.CalculateSize(_repeated_events_codec);
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
       }
@@ -3458,6 +4567,7 @@ namespace RpgMmo.Wire.V1 {
       }
       entities_.Add(other.entities_);
       removed_.Add(other.removed_);
+      events_.Add(other.events_);
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
 
@@ -3495,6 +4605,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 42: {
             removed_.AddEntriesFrom(input, _repeated_removed_codec);
+            break;
+          }
+          case 50: {
+            events_.AddEntriesFrom(input, _repeated_events_codec);
             break;
           }
         }
@@ -3536,6 +4650,10 @@ namespace RpgMmo.Wire.V1 {
             removed_.AddEntriesFrom(ref input, _repeated_removed_codec);
             break;
           }
+          case 50: {
+            events_.AddEntriesFrom(ref input, _repeated_events_codec);
+            break;
+          }
         }
       }
     }
@@ -3563,7 +4681,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[10]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[11]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -3765,7 +4883,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[11]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[12]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -3932,7 +5050,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[12]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[13]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -4133,7 +5251,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[13]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[14]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -4373,7 +5491,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[14]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[15]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -4576,7 +5694,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[15]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[16]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -4816,7 +5934,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[16]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[17]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -5017,7 +6135,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[17]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[18]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -5227,7 +6345,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[18]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[19]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -5250,6 +6368,7 @@ namespace RpgMmo.Wire.V1 {
       publicKey_ = other.publicKey_;
       binding_ = other.binding_;
       error_ = other.error_;
+      serverSignature_ = other.serverSignature_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -5325,6 +6444,52 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "server_signature" field.</summary>
+    public const int ServerSignatureFieldNumber = 4;
+    private pb::ByteString serverSignature_ = pb::ByteString.Empty;
+    /// <summary>
+    /// Ed25519 signature, 64 bytes, over the server's per-pod IDENTITY key
+    /// (ADR-25). This is the replacement for `binding` above, and it exists
+    /// because `binding` is a SYMMETRIC MAC under JOIN_TOKEN_SECRET: a client able
+    /// to verify it would hold the key the gateway mints join tokens with, and
+    /// could forge a token for any player on any server. `binding_verified` is
+    /// therefore permanently false for every shipped client, and no configuration
+    /// reaches true. An asymmetric signature has no such problem -- the client
+    /// needs only the public half.
+    ///
+    /// The signed input is NOT the transcript. It is:
+    ///
+    ///   "cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00
+    ///     || identity_public (32)
+    ///
+    /// where `transcript` is EXACTLY the bytes described on `binding` above,
+    /// unchanged byte for byte. That is deliberate: key derivation
+    /// (DeriveDirectionKeys) and the HMAC binding keep their current bytes and
+    /// their current cross-implementation vectors, so this field adds a guarantee
+    /// without invalidating one. The identity key is inside the signed input
+    /// because a signature that does not name its signer authenticates a statement
+    /// ABOUT a key rather than a key, and the NUL separators are load-bearing for
+    /// the same re-splitting reason given on `binding`.
+    ///
+    /// The server ALWAYS signs. There is no negotiation and no fallback: a client
+    /// that has been told to check and cannot is refused, never downgraded. A
+    /// client that ignores this field behaves exactly as it did before, which is
+    /// what makes the server-and-gateway-first migration order safe.
+    ///
+    /// The public half needed to check this arrives out of band, in
+    /// EnterWorldResponse.server_public_key -- read the note there before
+    /// concluding that a verified signature means the server is authenticated. It
+    /// does not, while the gateway hop is plaintext.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString ServerSignature {
+      get { return serverSignature_; }
+      set {
+        serverSignature_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -5343,6 +6508,7 @@ namespace RpgMmo.Wire.V1 {
       if (PublicKey != other.PublicKey) return false;
       if (Binding != other.Binding) return false;
       if (Error != other.Error) return false;
+      if (ServerSignature != other.ServerSignature) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -5353,6 +6519,7 @@ namespace RpgMmo.Wire.V1 {
       if (PublicKey.Length != 0) hash ^= PublicKey.GetHashCode();
       if (Binding.Length != 0) hash ^= Binding.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (ServerSignature.Length != 0) hash ^= ServerSignature.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -5383,6 +6550,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(26);
         output.WriteString(Error);
       }
+      if (ServerSignature.Length != 0) {
+        output.WriteRawTag(34);
+        output.WriteBytes(ServerSignature);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -5405,6 +6576,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(26);
         output.WriteString(Error);
       }
+      if (ServerSignature.Length != 0) {
+        output.WriteRawTag(34);
+        output.WriteBytes(ServerSignature);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -5423,6 +6598,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Error.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (ServerSignature.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(ServerSignature);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -5444,6 +6622,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Error.Length != 0) {
         Error = other.Error;
+      }
+      if (other.ServerSignature.Length != 0) {
+        ServerSignature = other.ServerSignature;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -5476,6 +6657,10 @@ namespace RpgMmo.Wire.V1 {
             Error = input.ReadString();
             break;
           }
+          case 34: {
+            ServerSignature = input.ReadBytes();
+            break;
+          }
         }
       }
     #endif
@@ -5505,6 +6690,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 26: {
             Error = input.ReadString();
+            break;
+          }
+          case 34: {
+            ServerSignature = input.ReadBytes();
             break;
           }
         }

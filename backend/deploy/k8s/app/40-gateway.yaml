@@ -180,10 +180,50 @@ spec:
             # get "wrong protocol", it gets a closed socket. Turning this on
             # needs either a certificate the client already trusts, or the pin
             # shipped with the client -- a deployment decision, not a flag.
+            #
+            # ENABLEMENT IS A PER-CLUSTER SECRET, NOT A MANIFEST EDIT, and that
+            # is the whole reason these read from an OPTIONAL ConfigMap key
+            # rather than carrying a literal path.
+            #
+            # This file is applied UNCHANGED to dev and staging (cd.yml resolve
+            # step; only KUBE_CONTEXT and the published ports differ). A literal
+            # path here turns TLS on for BOTH clusters at once, and the cluster
+            # that has no `gateway-tls` Secret then fails to start -- both-or-
+            # neither is a deliberate startup error, not a fall back to
+            # plaintext. That is the same trap ADR-26 hit with GAMESERVER_SEALED,
+            # where one value sealed two environments.
+            #
+            # So: a cluster opts in by holding BOTH the Secret and these two
+            # ConfigMap keys. A cluster without them gets plaintext and a
+            # deployment that comes up. `dev-up.sh` refuses the half-configured
+            # shapes before the pod can.
+            #
+            #   kubectl -n rpg-k8s-realtime create secret generic gateway-tls \
+            #     --from-file=tls.crt=tls.crt --from-file=tls.key=tls.key
+            #   kubectl -n rpg-k8s-realtime patch configmap gateway-config --type=merge -p \
+            #     '{"data":{"tls-cert-path":"/etc/gateway/tls/tls.crt",
+            #               "tls-key-path":"/etc/gateway/tls/tls.key"}}'
+            #
+            # THE CLIENT SIDE IS NOT OPTIONAL EITHER, and a mismatch here cannot
+            # name itself: the listener is wrapped in TLS, so it has no way to
+            # answer a plaintext client in a language that client understands. A
+            # player without the pin gets a closed socket, not "wrong protocol".
+            # Every client reaching a TLS gateway needs
+            #   -cuvara-gateway-tls 1 -cuvara-gateway-tls-cert <the PEM>
+            # (or CUVARA_GATEWAY_TLS / CUVARA_GATEWAY_TLS_CERT, which is how an
+            # Android build is aimed -- see backend.env in the client repo).
             - name: GATEWAY_TLS_CERT
-              value: ""
+              valueFrom:
+                configMapKeyRef:
+                  name: gateway-config
+                  key: tls-cert-path
+                  optional: true
             - name: GATEWAY_TLS_KEY
-              value: ""
+              valueFrom:
+                configMapKeyRef:
+                  name: gateway-config
+                  key: tls-key-path
+                  optional: true
             - name: REDIS_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -212,11 +252,54 @@ spec:
               value: "rpg-k8s-realtime"
             - name: ALLOCATOR_FLEET_MAP
               value: "map-servers-dotnet-k8s"
-            # No dungeon fleet exists (ADR-14 stage 6 unstarted). Left unset
-            # so KindDungeon fails with ErrKindNotConfigured naming the knob,
-            # instead of a 404 for a fleet that was never going to be there.
+            # The dungeon fleet, deployed by 60-fleet-dungeon.yaml (ADR-26 /
+            # ADR-14 stage 6). This value read "" until 2026-09-12 because no
+            # such fleet existed; an unset value still fails legibly with
+            # ErrKindNotConfigured naming this knob, so reverting it degrades
+            # dungeon entry without touching map play.
             - name: ALLOCATOR_FLEET_DUNGEON
-              value: ""
+              value: "dungeon-servers-dotnet-k8s"
+            # NAKAMA — party membership, and ONLY party membership.
+            #
+            # The gateway verifies auth tokens locally and never calls Nakama on
+            # the login path (ADR-3). This URL exists for one question, asked
+            # once per dungeon entry and never per tick: "is this user in the
+            # party they named?" (ADR-26 decision 3). Membership is not mirrored
+            # into Redis, because a mirror of an authority is a second authority
+            # that disagrees under partition.
+            #
+            # Absent, dungeon entry is refused with a message saying dungeons
+            # are not configured, and map play is untouched. That is why this is
+            # `optional: true` while the game server's identically-named
+            # variable is not: there, an absent URL silently awards no rewards;
+            # here, an absent URL closes one door loudly.
+            - name: NAKAMA_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: gameserver-config
+                  key: nakama-url
+                  optional: true
+            - name: NAKAMA_HTTP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rpg-app-secrets
+                  key: nakama-http-key
+                  optional: true
+            # The meta hop's pin (ADR-24), from the SAME ConfigMap key the game
+            # server reads, so the two cannot disagree about which certificate
+            # Nakama presents. Empty = plaintext Nakama, which is the default.
+            #
+            # The gateway REFUSES TO START on a mismatch (https URL with no pin,
+            # or a pin against a plaintext URL). Before that refusal existed it
+            # started cleanly and failed every dungeon entry with an x509 error
+            # the client saw as a bare "internal error", while map play carried
+            # on working -- so nothing looked wrong anywhere.
+            - name: NAKAMA_TLS_PIN
+              valueFrom:
+                configMapKeyRef:
+                  name: gameserver-config
+                  key: nakama-tls-pin
+                  optional: true
             # What the FLEET listens with, not what this gateway listens with.
             # It is announced to the client BEFORE the pod's own registration
             # lands, so a mismatch tells the client to speak the wrong
@@ -273,11 +356,21 @@ spec:
             - name: gateway-tls
               mountPath: /etc/gateway/tls
               readOnly: true
+            # Same mount path the game server uses, because the same ConfigMap
+            # key names the path for both.
+            - name: nakama-tls-pin
+              mountPath: /etc/nakama-tls
+              readOnly: true
       volumes:
         - name: gateway-tls
           secret:
             secretName: gateway-tls
             optional: true
+        - name: nakama-tls-pin
+          secret:
+            secretName: nakama-tls-pin
+            optional: true
+            defaultMode: 0444
 ---
 # Client-facing Service. ClusterIP, and deliberately NOT NodePort.
 #

@@ -56,6 +56,52 @@ services:
       SIM_CRITICAL_HZ: ${SIM_CRITICAL_HZ:-60}
       SIM_WORLD_HZ: ${SIM_WORLD_HZ:-15}
       SIM_BACKGROUND_HZ: ${SIM_BACKGROUND_HZ:-5}
+      GAMESERVER_AOI_RADIUS: ${GAMESERVER_AOI_RADIUS:-50}
+      # DEV ONLY, and only the ORDERING half. balanced changes which entities are emitted
+      # first when the downlink budget bites; it defers nothing and adds no staleness, so
+      # the worst case is that a different entity is a beat late than would have been.
+      # GAMESERVER_REPLICATION_SCHEDULE stays off -- that half halves player update rate
+      # (BENCHMARK.md Part XIV 44) and is not a dev-box decision.
+      GAMESERVER_IMPORTANCE: ${GAMESERVER_IMPORTANCE:-balanced}
+      # The four per-factor overrides. docker-compose.yml gained these when the gap
+      # was first found; map_02 did not, so for as long as they have existed an
+      # operator setting GAMESERVER_IMPORTANCE_W_TYPE in .env changed map_01's
+      # replication policy and silently left map_02 on the profile's own weights --
+      # the two maps running different policies from one file, which is harder to
+      # find than the original gap because the knob demonstrably WORKS, just not
+      # everywhere. Found by ComposeEnvPassthroughTests once these names were
+      # declared as constants; they are assembled from a prefix and a suffix in
+      # ImportanceSettings, so until then no reflection or grep could see them.
+      GAMESERVER_IMPORTANCE_W_DISTANCE: ${GAMESERVER_IMPORTANCE_W_DISTANCE:-}
+      GAMESERVER_IMPORTANCE_W_CHANGE: ${GAMESERVER_IMPORTANCE_W_CHANGE:-}
+      GAMESERVER_IMPORTANCE_W_TYPE: ${GAMESERVER_IMPORTANCE_W_TYPE:-}
+      GAMESERVER_IMPORTANCE_W_COMBAT: ${GAMESERVER_IMPORTANCE_W_COMBAT:-}
+      GAMESERVER_REPLICATION_SCHEDULE: ${GAMESERVER_REPLICATION_SCHEDULE:-off}
+      # THE SEVENTH PASSTHROUGH INSTANCE, and the second of exactly this shape: added
+      # to the map_01 service in docker-compose.yml and never here, so field-level
+      # delta encoding was ON for the map anyone would test on and OFF for the other
+      # -- two maps replicating differently from one file. Found by
+      # ComposeEnvPassthroughTests the moment the name was declared as a constant in
+      # ServerEnv; as an inline literal in Program.cs it was invisible to the gate.
+      GAMESERVER_FIELD_DELTA: ${GAMESERVER_FIELD_DELTA:-on}
+      # ── Admission, pre-join and ingestion bounds ──────────────────────────
+      # Forwarded from .env rather than written as literals: every one of these is a
+      # limit an operator tunes per deployment, and every one of them ran on a
+      # compiled-in default that nothing in deploy/.env could reach until now (#404).
+      # Empty stays empty on purpose -- Env() in Program.cs maps "" back to null, so an
+      # unset variable means "not configured" and the server keeps its own default
+      # rather than parsing the empty string as a value.
+      GAMESERVER_CAPACITY: ${GAMESERVER_CAPACITY:-}
+      GAMESERVER_MAX_PENDING_HANDSHAKES: ${GAMESERVER_MAX_PENDING_HANDSHAKES:-}
+      GAMESERVER_HANDSHAKE_TIMEOUT_MS: ${GAMESERVER_HANDSHAKE_TIMEOUT_MS:-}
+      GAMESERVER_MIN_PROTOCOL_VERSION: ${GAMESERVER_MIN_PROTOCOL_VERSION:-}
+      GAMESERVER_MAX_INPUTS_PER_TICK: ${GAMESERVER_MAX_INPUTS_PER_TICK:-}
+      GAMESERVER_MAX_PENDING_INPUTS: ${GAMESERVER_MAX_PENDING_INPUTS:-}
+      GAMESERVER_GATHER_WORKERS: ${GAMESERVER_GATHER_WORKERS:-}
+      # tcp (default) or kcp. The value is advertised to clients through the registry,
+      # so it must describe what the listener actually speaks. The KCP pre-shared key
+      # is TRANSPORT_KEY, which carries no GAMESERVER_ prefix and is not gated here.
+      GAMESERVER_TRANSPORT: ${GAMESERVER_TRANSPORT:-}
       METRICS_ADDR: ":9101"
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
@@ -67,7 +113,61 @@ services:
       # Two sources of truth for one hop is exactly how that happens.
       NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
+      # The game server's end of the same decision: the certificate it PINS when
+      # NAKAMA_URL is https and Nakama's certificate is self-signed. Empty means
+      # .NET's own validation, which refuses a self-signed Nakama -- correctly.
+      # Set together with an https URL or the server refuses to start.
+      NAKAMA_TLS_PIN: ${NAKAMA_TLS_PIN:-}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
+      # Enemy AI and synthetic players. Repeated here rather than inherited: this service
+      # declares its OWN environment block, so anything absent from it is not passed to
+      # map_02 however it is set. Bots are per-server, so map_02 needs its own count.
+      # Snapshot sizing. NOT previously passed through: the server took its built-in
+      # 8192 and .env could not change it. At ~316 entities in one AOI that is ~26 bytes
+      # per entity, so KEYFRAMES WERE BEING TRUNCATED -- and SnapshotMerger clears its
+      # entity set on a full snapshot, so every truncated keyframe made the omitted
+      # entities vanish on the client and reappear on the next delta. That is the
+      # "enemies disappear and come back" the owner reported.
+      GAMESERVER_MAX_SNAPSHOT_BYTES: ${GAMESERVER_MAX_SNAPSHOT_BYTES:-}
+      GAMESERVER_KEYFRAME_INTERVAL: ${GAMESERVER_KEYFRAME_INTERVAL:-}
+      GAMESERVER_ENEMIES: ${GAMESERVER_ENEMIES:-true}
+      GAMESERVER_ENEMY_CHASE: ${GAMESERVER_ENEMY_CHASE:-}
+      GAMESERVER_ENEMY_MAX: ${GAMESERVER_ENEMY_MAX:-}
+      GAMESERVER_ENEMY_MAX_PER_PLAYER: ${GAMESERVER_ENEMY_MAX_PER_PLAYER:-}
+      GAMESERVER_ENEMY_WAVE_SIZE: ${GAMESERVER_ENEMY_WAVE_SIZE:-}
+      GAMESERVER_ENEMY_WAVE_SIZE_PER_PLAYER: ${GAMESERVER_ENEMY_WAVE_SIZE_PER_PLAYER:-}
+      GAMESERVER_ENEMY_WAVE_INTERVAL: ${GAMESERVER_ENEMY_WAVE_INTERVAL:-}
+      GAMESERVER_ENEMY_SPAWN_DISTANCE: ${GAMESERVER_ENEMY_SPAWN_DISTANCE:-}
+      GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE: ${GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE:-}
+      GAMESERVER_ENEMY_CONTACT_RANGE: ${GAMESERVER_ENEMY_CONTACT_RANGE:-}
+      GAMESERVER_ENEMY_HP: ${GAMESERVER_ENEMY_HP:-}
+      GAMESERVER_ENEMY_ATTACK: ${GAMESERVER_ENEMY_ATTACK:-}
+      GAMESERVER_ENEMY_DEFENSE: ${GAMESERVER_ENEMY_DEFENSE:-}
+      GAMESERVER_ENEMY_SPEED: ${GAMESERVER_ENEMY_SPEED:-}
+      GAMESERVER_BOTS: ${GAMESERVER_BOTS_MAP02:-${GAMESERVER_BOTS:-}}
+      GAMESERVER_BOT_SPREAD: ${GAMESERVER_BOT_SPREAD:-}
+      GAMESERVER_BOT_ENGAGE_RANGE: ${GAMESERVER_BOT_ENGAGE_RANGE:-}
+      # Per-bot stats. These four were declared, documented and strictly parsed but
+      # reached NEITHER service until the compose passthrough gate found them
+      # (ComposeEnvPassthroughTests) -- settable in .env and silently ignored, with
+      # the server running its compiled default and /status reporting that default
+      # truthfully. That gate is now what keeps this list in step; the comment is a
+      # courtesy, not the mechanism.
+      GAMESERVER_BOT_HP: ${GAMESERVER_BOT_HP:-}
+      GAMESERVER_BOT_ATTACK: ${GAMESERVER_BOT_ATTACK:-}
+      GAMESERVER_BOT_DEFENSE: ${GAMESERVER_BOT_DEFENSE:-}
+      GAMESERVER_BOT_SPEED: ${GAMESERVER_BOT_SPEED:-}
+      GAMESERVER_ENEMY_ATTACKS: ${GAMESERVER_ENEMY_ATTACKS:-}
+      GAMESERVER_ENEMY_ATTACKERS_PER_TARGET: ${GAMESERVER_ENEMY_ATTACKERS_PER_TARGET:-}
+      # NOT a knob that goes below 0.5s. An enemy attack travels the ordinary input
+      # path, so InputHandler charges it the same GameConstants.AttackCooldownMs
+      # (500ms) it charges a player: the effective interval is max(this, 0.5s) and a
+      # smaller value buys nothing. GAMESERVER_ENEMY_ATTACKERS_PER_TARGET is the lever
+      # for a deadlier fight -- worst case is
+      # `ATTACKERS_PER_TARGET x max(1, ENEMY_ATTACK - player defense) / interval`
+      # damage per second, i.e. 6/s and ~17s to die at these defaults.
+      GAMESERVER_ENEMY_ATTACK_INTERVAL: ${GAMESERVER_ENEMY_ATTACK_INTERVAL:-}
+      GAMESERVER_PLAYER_RESPAWN: ${GAMESERVER_PLAYER_RESPAWN:-}
     ports:
       - "9002:9000"
       - "9103:9101"

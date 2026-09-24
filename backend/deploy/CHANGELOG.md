@@ -6,6 +6,899 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+
+- **Backups of dev and staging backed up nothing, and a restore of the meta database did
+  not work.** Found by the first PostgreSQL restore drill ever run (`docs/DISASTER-RECOVERY.md`,
+  "Failure drill: PostgreSQL restore"):
+  - `db/backup.sh` only knew the compose containers. Dev and staging keep their databases in
+    k3d, and the k8s deploy stops the compose containers, so CD's `Back up databases` skipped
+    both, printed `done` and went green -- the checkpoint that gates migrations covered
+    nothing. Both `backup.sh` and `restore.sh` take `--kube-context`; CD passes it when
+    `vars.DEPLOY_MODE == 'k8s'`; `backup.sh` reports how many databases it dumped and raises
+    a `::warning::` when it is zero.
+  - `restore.sh` staged the archive through `kubectl exec -i`, which truncates uploads at 32
+    KiB multiples (measured 32768 / 98304 / 131072 of 133030 bytes). The meta restore failed
+    with 0 users. k8s mode now uses `kubectl cp`, and every staged copy is md5-checked.
+  - Both scripts verified with `pg_restore --list`, which reads only the table of contents
+    and **accepted an archive truncated to 131072 of 133030 bytes**. They now read every data
+    block (`pg_restore -f /dev/null`); the same archive is rejected and `restore.sh` stops
+    before creating anything.
+
+  After the fixes: meta restored with all 20 tables' exact row counts and a user+wallet
+  checksum identical to live (500 users, 25 wallet-ledger entries); gamestate identical row
+  for row.
+
+### Added
+
+- **An issue opens itself when CD on develop goes red, and closes on recovery.** CD failed on
+  every develop run from 2026-09-13 to 2026-09-24 and nobody noticed: CI stayed green beside
+  it and a red run notifies no one. The new `alert` job in `cd.yml`
+  (`.github/scripts/cd-red-alert.sh`) keeps one `cd-red` issue open while it is red,
+  comments on each further red run, and closes it on the next green one; it also posts to
+  Discord if `DISCORD_WEBHOOK_URL` is set, but needs no secret. Push to develop only.
+  A superseded (cancelled) run says nothing either way; a skipped deploy (an upstream job
+  failed) counts as red. All seven verdict branches exercised against a stubbed `gh`.
+
+### Fixed
+
+- **CD on `develop` was red on every run for eleven days, for four independent reasons.**
+  The last green `CD — Build & Deploy` on `develop` was 2026-09-13 05:52 (`14522e9`); every
+  run since failed or was cancelled. The dev cluster's `nakama-config` TLS opt-in was created
+  at 08:41 the same morning. Grouped by the job that failed rather than by the last line
+  printed, the failures split into four defects -- three of them silent, which is why a
+  green `CI` beside a red `CD` went unexamined. They also **masked a fifth**, in the game
+  server: once the deploy got past them, the smoke test found a player killed during the
+  reconnect hold (see `backend/gameserver-dotnet/CHANGELOG.md`).
+
+  1. **`data.nakama_health` probed a TLS Nakama over plain HTTP** (the dominant one). The dev
+     cluster is opted into meta-hop TLS (ADR-24) through the optional `nakama-config` keys.
+     `dev-up.sh` discovers that and exports the https URL and pin -- **inside its own
+     process**. CD runs `dev-up.sh` and `verify.sh` in separate steps, so the export never
+     arrived, `targets/k8s-dev.env` fell back to its literal `http://127.0.0.1:7001`, and
+     every deploy failed with `status 400` -- Nakama's answer to "Client sent an HTTP
+     request to an HTTPS server". Both k8s targets now resolve the scheme from the cluster
+     through `verify/lib/nakama_endpoint.sh`, the way they already read the server key.
+     Measured on the same cluster: develop's target `FAIL data.nakama_health`; this one 6/6
+     on layer 2. Staging, which did not opt in, resolves to `http://` and answers 200.
+  2. **`printf ... | grep -qx` under `pipefail` reported a match as a miss.** `grep -q` exits
+     on the first hit, `printf` takes SIGPIPE, and the pipeline status is `printf`'s. In
+     `dev-up.sh`'s "stop the compose dev stack" a running container therefore read as
+     stopped (CD logged `printf: write error: Broken pipe`). Reproduced deterministically:
+     50 of 50 misses with the match on line 1 of a long list, 0 of 50 with a here-string.
+     All five sites (`dev-up.sh` x2, `rollback-to-compose.sh` x2, `checks_registry.sh`) now
+     use `grep -qx ... <<<"$list"`.
+  3. **The image-import step died silently.** `rev=$(docker image inspect ... 2>/dev/null)`
+     under `set -e`: one Docker Desktop shim flake failed the assignment, the script exited,
+     and `2>/dev/null` had already discarded the only message. The log showed the step
+     heading, then `exit 1`. Now retried five times, stderr kept out of the revision value
+     (so shim chatter cannot trip the revision-mismatch refusal), and a persistent failure
+     names itself.
+  4. **`Back up databases` made one shim flake fatal.** `detect_docker` tried `docker info`
+     once per candidate; it failed on develop after nine consecutive successes on the same
+     runner, and the PostgreSQL dump it gates is deliberately fatal. Retried in `backup.sh`,
+     `redis-backup.sh` and `redis-restore.sh`.
+
+- **Every re-deploy briefly ran five-week-old game servers, and one split the world.**
+  `dev-up.sh` applied the raw manifests, which name the moving `:develop` image, and pinned
+  the real image afterwards. `:develop` is hand-retagged and lags the branch: in the dev node
+  it was `307f1e8`, 2026-08-17, older than dungeon-mode registration (ADR-26). The dungeon
+  manifest's `replicas: 0` exists to stop exactly this, but only works on a **first** deploy
+  -- once the fleet and its Buffer autoscaler exist, the autoscaler holds the floor and Agones
+  rolled real pods onto `:develop` before the pin. A five-week-old dungeon pod registers
+  `map_01` like a map server, and its registry entry outlives the pod until its heartbeat
+  expires. CD caught it once: the smoke test was routed to `dungeon-servers-...-7vh8n` on
+  `map_01`, its join died with EOF, and the entry expired three seconds later -- a previous
+  run had passed only by timing. The gateway manifest had the same shape.
+
+  `apply` is now image-neutral: each manifest is rendered with the image the cluster is
+  already running (the pinned one on a first deploy), and refused if the line to pin is
+  missing or a moving image survives. The existing drain-and-pin logic still owns every
+  image change. Checked on the live cluster: `kubectl diff` of the raw dungeon manifest shows
+  the image going `42e484a -> :develop`; the rendered one shows no image change at all, and a
+  server-side dry run accepts all three objects.
+
+- **`cluster.restarts` failed forever on a completed init container.** The classifier read
+  every container that is not `running` as a crash loop, "at any age". An init container is
+  *supposed* to end `terminated` with exit 0, so any pod whose init container had restarted
+  once -- a host reboot is enough -- failed every deploy until someone deleted the pod: the
+  permanent-red trap the check's own `restartCount` note exists to prevent. Surfaced on the
+  first deploy that reached verification: Nakama's `migrate` init container, restarted once
+  by a reboot, now `Completed`. A completed init container (exit 0) is now settled and aged
+  by its completion time; a failed init container, a crash-looping one, a terminated **main**
+  container and a restart inside the window all still fail. Six fixtures cover exactly those
+  cases; on the live dev cluster develop's classifier reports 1 RECENT, this one 0 RECENT and
+  10 OLD, the `migrate` container still named as a warning rather than dropped.
+
+- **`verify.sh` reported `VERIFY=PASS` for a run that verified nothing.** Found while fixing
+  the above: `--layer data` (layers are numbered) selected zero checks and printed
+  `checks: 0 ... VERIFY=PASS`, exit 0. An empty run, or one where every check skipped, now
+  fails and names which. Proved both ways: the empty selection exits 1, layer 2 still exits
+  0 with 6/6.
+
+  **Why the compose dev stack keeps going down.** `COMPOSE_DEV_CONTAINERS` names
+  `rpg-gateway rpg-nakama rpg-redis rpg-postgres rpg-postgres-game`, and every k8s-mode dev
+  deploy stops them by design -- the cluster replaces them. Anyone using the compose stack on
+  the same box will see Nakama and the gateway `Exited (0)` after a `develop` push. That is
+  intended, and recorded here because it reads as a crash.
+
+### Added
+
+- **The three Agones fleet manifests now declare 48 `GAMESERVER_*` names instead of 9, and a
+  test keeps them that way.** Closes #400.
+
+  `50-fleet-map.yaml`, `agones/fleet-map-dotnet-dev.yaml` and `60-fleet-dungeon.yaml` each
+  declared nine `GAMESERVER_*` names against compose's 41. A container receives nothing its
+  spec did not name, so **24 gameplay knobs were unreachable on a cluster** — the whole enemy
+  AI, combat and bot surface. A staging or production fleet ran the built-in defaults
+  (enemies attacking, respawn on, `30 + 45/player`, an 8192-byte snapshot budget) with no way
+  to change any of it short of editing the manifest.
+
+  Each added knob is a `configMapKeyRef` against the existing `gameserver-config` ConfigMap
+  with `optional: true`, so an absent key is not an error and a cluster that sets nothing
+  behaves exactly as it did before. That matters here specifically: this manifest set is
+  applied **unchanged to dev and staging**, so a required key would wedge every pod in the
+  cluster that had not opted in. No new ConfigMap and no new apply step — operators add only
+  the keys they actually set.
+
+  Names are written out one per entry rather than pulled in with `envFrom`. `envFrom` reads
+  as more flexible and is worse here: nothing in the repository would state which knobs a
+  fleet supports, the gate would have no list to check, a key misspelled in the ConfigMap
+  would be silently dropped instead of failing, and an explicit `env:` entry silently
+  overrides an `envFrom` value — a precedence trap in the exact area this change is
+  hardening.
+
+  `GAMESERVER_JOIN_DEADLINE_SECONDS` was added to the **dungeon** fleet only, and it had
+  never been passed to it. That is the one fleet running `GAMESERVER_MODE: dungeon` and
+  therefore the only deployment where the knob does anything: without it an allocated dungeon
+  pod that is never joined sits Allocated forever, because Agones does not reclaim an
+  Allocated pod, and the replica is lost until an operator releases it by hand (ADR-26).
+
+  **Three fleets, not the one the issue names.** Each declares its own `env:` list and
+  inherits nothing from the others, so a fix applied to one leaves the rest on different
+  configurations from the same ConfigMap — the fleet-side version of the `map02` divergence
+  that has now happened twice under compose. The gate reads all three.
+
+  Exclusions here are real, unlike the compose gate's empty dictionary, and each says what
+  would happen if the name *were* declared: `GAMESERVER_ID` is forbidden (it beats
+  `POD_NAME`, so every pod registers under one hardcoded id and every join is rejected with
+  `Token is for a different server`); `GAMESERVER_PUBLIC_ADDR` cannot carry a port assigned
+  at scheduling time under `portPolicy: Dynamic`; `GAMESERVER_TRANSPORT` is coupled to the
+  port's `protocol:`, so forwarding it alone would advertise KCP through the registry while
+  the port still speaks TCP and every client would fail against a fleet that is Ready and
+  healthy; `GAMESERVER_MIGRATE_ONLY` would make a pod exit at boot and present as a
+  CrashLoopBackOff whose logs show a successful migration.
+
+### Changed
+
+- **Eight more knobs are forwarded to both compose game-server services**
+  (`GAMESERVER_CAPACITY`, `_MAX_PENDING_HANDSHAKES`, `_HANDSHAKE_TIMEOUT_MS`,
+  `_MIN_PROTOCOL_VERSION`, `_MAX_INPUTS_PER_TICK`, `_MAX_PENDING_INPUTS`, `_GATHER_WORKERS`,
+  `_TRANSPORT`). Part 2 of #404.
+
+  Fifteen names were missing; seven were deliberately **not** added and are excluded by name
+  with a reason, because a list assembled to make a gate pass is how a gate stops gating:
+
+  | Name | Why it is not forwarded from `.env` |
+  |---|---|
+  | `GAMESERVER_ADVERTISE_HOST` | Agones only; compose declares no `AGONES_ENABLED`. Its compose counterpart `GAMESERVER_PUBLIC_ADDR` is forwarded, and exactly one of the two ever applies. |
+  | `GAMESERVER_REGISTER_ON_ALLOCATED` | Agones only, same reason. Gated on the three fleets instead. |
+  | `GAMESERVER_TICK_RATE` | Cannot take effect: the legacy scalar applies only when no `SIM_*` rate is set, and compose sets all three unconditionally. Set the `SIM_*` rates. |
+  | `GAMESERVER_JOIN_DEADLINE_SECONDS` | Dungeon mode only; compose has no dungeon service — both game-server services pin `GAMESERVER_MODE: map`. Gated on the dungeon fleet. |
+  | `GAMESERVER_MIGRATE_ONLY` | A one-shot invocation mode, not configuration. The one entry here that would be actively harmful: set once in a shared `.env`, every long-running server exits at boot instead of serving. |
+  | `GAMESERVER_MAP_WIDTH` | A property of the map. The two services are two different maps, and one shared value would resize both — and `GAMESERVER_AOI_RADIUS` is validated against it. Set as a literal in the service's own block, next to `GAMESERVER_MAP_ID`. |
+  | `GAMESERVER_MAP_HEIGHT` | As above; the two are set together, since `MapBounds.FromSize` takes both. |
+
+- **`GAMESERVER_FIELD_DELTA` now reaches `gameserver-dotnet-map02`.** The seventh passthrough
+  instance, and the second of exactly this shape: it had been added to `gameserver-dotnet`
+  and never here, so field-level delta encoding was on for the map anyone would test on and
+  off for the other, for as long as the knob had existed. Found automatically by
+  `ComposeEnvPassthroughTests` the moment #404 declared the name as a constant; as an inline
+  literal in `Program.cs` it was invisible to the gate.
+
+### Fixed
+- **Four bot-stat knobs reached neither game-server service.** `GAMESERVER_BOT_HP`,
+  `GAMESERVER_BOT_ATTACK`, `GAMESERVER_BOT_DEFENSE` and `GAMESERVER_BOT_SPEED` are declared
+  by the server, documented in `gameserver-dotnet/docs/README.md` and strictly parsed, and
+  were absent from the `environment:` block of both `gameserver-dotnet` (in
+  `docker-compose.yml`) and `gameserver-dotnet-map02` (in `docker-compose.override.yml`) —
+  so setting any of them in `.env` reached nothing and the bots ran compiled defaults while
+  the manifest said otherwise. Added to both.
+
+  This is the **fourth** instance of the same failure in this file's history, after the
+  `GAMESERVER_IMPORTANCE_W_*` weights and the `GAMESERVER_ENEMY_ATTACK*` family. It was not
+  found by review: it was found by the new
+  `gameserver-dotnet` test `ComposeEnvPassthroughTests` on its first run, which is the point
+  of that test. A comment above each block has now failed four times, so the link between
+  "add a knob" and "list it in two services" is mechanical from here.
+
+- **`gameserver-dotnet-map02` never received the four importance weights.**
+  `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}` were added to `docker-compose.yml`
+  when that gap was first found and never to `docker-compose.override.yml`, so setting one
+  in `.env` changed map_01's replication policy and silently left map_02 running the
+  profile's own weights. **Two maps running different policies from one file is worse than
+  the original gap**, because the knob demonstrably works and only works somewhere — the
+  exact reason the passthrough gate checks both services rather than one. Added to map_02.
+
+  This is the **fifth** instance, and it only became visible once the four names were
+  declared as `const string` in `ImportanceSettings`: they had been assembled from a prefix
+  and a suffix, so nothing — no reflection, no grep — could enumerate them.
+
+- **`GAMESERVER_ENEMY_ATTACK_INTERVAL` now carries its floor where an operator will read
+  it.** An enemy attack travels the ordinary input path, so `InputHandler` charges it the
+  same 500 ms `GameConstants.AttackCooldownMs` it charges a player: the effective interval
+  is `max(knob, 0.5s)` and a smaller value buys nothing. The knob reads like it would work,
+  which makes it look like a broken setting rather than a documented floor, so both compose
+  files now say so beside the variable along with the worst-case damage-per-second
+  arithmetic and a pointer to `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` as the actual lever.
+
+- **`docker-compose.yml` never passed `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}`
+  to the game server**, while the comment directly above `GAMESERVER_IMPORTANCE` documented
+  all four. Compose forwards only what the service lists, so setting one in `.env` reached
+  nothing: no error, no warning, and `/status` went on reporting the profile's own weights.
+  The knob read as "tried it, made no difference" — which is how it was found, while
+  measuring `W_TYPE=7` against a live play session. Now listed with empty defaults, and an
+  empty value is an absent variable to the server, so an operator who sets none of them gets
+  exactly the profile's weights as before.
+- **The verification suite could not verify a deployment with the meta hop's TLS on — three more
+  consumers that had not moved with the flag.** Found by running `verify.sh` against the dev
+  cluster after `dev-up.sh` finally succeeded:
+
+  | Consumer | Symptom |
+  |---|---|
+  | `lib/checks_data.sh` | `curl` without `--cacert` printed **`observed: 000`** — a code that names no cause |
+  | `verify/probe` | plaintext GET **hung** until the deadline, reporting Nakama as dead |
+  | `lib/checks_flow.sh` | never passed the pin to the smoketest, so the flow check could not run |
+
+  All three now take the pin, and `targets/k8s-dev.env` makes `VERIFY_NAKAMA_URL` and
+  `VERIFY_NAKAMA_TLS_CERT` **overridable** so `dev-up.sh`'s exports win — it already writes the
+  pin out of the cluster's own `nakama-tls` Secret.
+
+  **`--cacert`/`RootCAs`, never `-k`.** An accept-anything probe passes against anything at all,
+  which is the failure these checks exist to catch.
+
+### Measured
+- **`verify.sh --target k8s-dev` against the dev cluster, both hops on: 19 PASS, 1 FAIL, 2 SKIP,
+  2 WARN.** `flow.smoke` reports `SMOKE=PASS` with a **sealed gameplay hop
+  (chacha20-poly1305 over protobuf), TLS gateway hop, certificate PINNED**, plus persistence and
+  a 30 s hold-window reload. Before these fixes the same cluster reported 6 PASS / 9 FAIL.
+
+  The one FAIL is `refusal.alloc_wait`, which needs `docker run` and hit this box's intermittent
+  docker (`exec: docker.exe: not found`; the daemon probe fails ~8 times in 10 here). Not a code
+  result either way.
+
+## [Unreleased]
+
+### Fixed
+- **`dev-up.sh`'s own Nakama health probe still spoke plaintext, and failed the whole deploy the
+  first time the meta hop's TLS was on.** Nakama was healthy and answering TLS on that exact
+  port; the script reported `ERROR: Nakama does not answer /healthcheck on the published port
+  7001` and exited 1. A probe that has not moved with the thing it probes does not merely fail —
+  it reports the **wrong cause**, and sends the reader to look at Nakama.
+
+  The scheme now follows the flag, from the same `nakama-config` source of truth the game
+  server's half is derived from. The pin is written out of the cluster's **own** `nakama-tls`
+  Secret, like the gateway pin beside it, because a copy kept anywhere else can go stale and a
+  stale pin fails in the one way that does not name itself.
+
+  **`--cacert`, not `-k`.** Skipping verification would make the probe pass against anything at
+  all, which is the failure it exists to catch. The certificate carries `IP:127.0.0.1` as a SAN
+  for exactly this. `VERIFY_NAKAMA_TLS_CERT` is exported so the verification suite and any
+  client this deploy hands the pin to check the same bytes.
+
+  Measured: `./dev-up.sh` against `k3d-rpg-dev` with both hops on now exits **0** and prints
+  `nakama answers https on 127.0.0.1:7001`. Before the fix, the same cluster and the same
+  healthy Nakama exited 1.
+
+  This is the fourth consumer of the meta hop found not to have moved with it — after the game
+  server's ConfigMap (#358), the `killprobe` harness (#353) and the recipe's own verification
+  commands (#351). Each was invisible until something exercised it.
+
+## [Unreleased]
+
+### Fixed
+- **The meta hop's opt-in did not survive a deploy, and the way it failed hid itself.**
+  `app/20-configmaps.yaml` is repo state carrying the plaintext defaults, so every `apply`
+  resets `nakama-url` and `nakama-tls-pin` — while `nakama-config` in `rpg-k8s-data` is
+  cluster-only and survives untouched. Half the flag reverted and half did not: Nakama kept
+  terminating TLS and the game server was told to speak plaintext to it. My defect, from #354.
+
+  **It does not show up when it happens.** Environment variables are fixed at pod creation, so
+  the running game servers keep the values they started with and everything keeps working —
+  until the next pod is created, by a crash or a scale or a rollout nobody connects to this.
+  Measured today: a CD run reset the ConfigMap at 09:51, `killprobe` still reported `REWARDED`
+  minutes later off the stale pods, and the cluster was one pod replacement away from every
+  reward RPC failing.
+
+  `nakama-config` is now the **one** source of truth and the game server's half is derived
+  from it immediately after the apply, rather than maintained in parallel and checked later.
+  The scheme is swapped rather than a host hardcoded, so the host keeps coming from the
+  manifest.
+
+  Verified against the live cluster in the exact state CD left behind:
+
+  | | result |
+  |---|---|
+  | block run on the broken state | `http` + empty pin → `https` + `/etc/nakama-tls/tls.crt` |
+  | the gate that failed CD, after | passes |
+  | run a second time | idempotent, same values |
+  | staging (no `nakama-config`) | **silent no-op**, stays `http` |
+  | a freshly created pod | comes up `https` with the pin |
+
+  That last row is the one that matters: the old state passed every check that reads a running
+  pod, and only a **new** pod exposed it.
+
+### Added
+- **`dev-up.sh`'s gate proved itself on the real pipeline.** It failed the CD deploy at
+  `1ce2bb7` with `ERROR: Nakama terminates TLS but gameserver-config nakama-url is
+  'http://...'` — refusing exactly the half-disabled state described above, on a run nobody
+  staged. A gate that has only ever been fired by hand is not known to fire.
+
+## [Unreleased]
+
+### Fixed
+- **`docs/MONITORING.md` still named `gameserver_save_errors_total` twice.** #356 fixed the
+  Grafana panel that queried it and left the document that told you to query it — so the
+  dashboard was right and the instructions were still wrong. The metric **has never existed**:
+  the instrument is `gameserver.player.saves`, exported as `gameserver_player_saves_total` with
+  a `status` label, and `status="error"` was verified at the source
+  (`_saveErrorTags`, `RecordPlayerSaveError`) rather than assumed.
+
+  **Every other metric named in that file was checked against a running pod's `/metrics`**,
+  because one wrong name is a typo and a pattern is a process problem. All nine exist. The
+  save-errors name is the only casualty, so #356's finding was complete in scope as well as
+  correct.
+
+  Worth recording how nearly that check went wrong: the first sweep `exec`-ed into the gateway
+  pod, which has no `wget`, got empty output, and reported five live gateway metrics as
+  missing. Scraping the metrics **service** from a pod that does have a client returned all
+  ten. A scrape that fails silently reads exactly like a metric that does not exist — the same
+  shape as the panel this entry is about, met while fixing it.
+
+## [Unreleased]
+
+### Added
+- **`GAMESERVER_IMPORTANCE=balanced` on the DEV stack only, and only the ordering half.**
+  `docker-compose.override.yml` and the Agones **dev** fleet; the k8s manifests are
+  untouched because one manifest set serves dev and staging, so turning it on there would
+  turn it on for both.
+  - Ordering decides which entities are emitted FIRST when the per-connection downlink
+    budget bites. It defers nothing and adds no staleness — the worst case is that a
+    different entity is a beat late than would otherwise have been — and the budget does
+    bite at density: a 200-player cluster run shed hundreds of thousands of entity updates.
+  - `GAMESERVER_REPLICATION_SCHEDULE` stays **off** everywhere. That half buys its 47 % by
+    replicating player positions at 7.5 Hz (BENCHMARK.md Part XIV §44), which is not a
+    dev-box decision.
+- **`GAMESERVER_REPLICATION_SCHEDULE` wired into every game-server deployment**, set
+  explicitly to `off` — every dirty entity due every world tick — so **nothing changes
+  behaviourally**. It decides how often an entity of a given importance is re-sent; it
+  changes neither the byte cap nor the candidate set. `tiered` without
+  `GAMESERVER_IMPORTANCE` weights **exits 2 at startup** rather than degrading into a
+  uniform staleness increase. Intervals are configured in milliseconds and converted through
+  `SIM_WORLD_HZ`, so raising the world rate does not silently halve the staleness a manifest
+  asked for. Read `replication_schedule` off `/status` on the pod — a fleet update reaches
+  only NEW pods.
+- **`GAMESERVER_IMPORTANCE` wired into every game-server deployment**, set explicitly to
+  `legacy` — the pre-importance ordering — so **nothing changes behaviourally** and turning
+  it on is a one-line manifest edit. It decides which entities are emitted first when the
+  per-connection downlink budget bites; it changes neither the byte cap
+  (`GAMESERVER_MAX_SNAPSHOT_BYTES`) nor the candidate set (`GAMESERVER_AOI_RADIUS`). An
+  unknown profile, a malformed weight, or a weight on a factor the server has no data for
+  all **exit 2 at startup**. As with every other game-server env var, a fleet update reaches
+  only NEW pods — read `importance_profile` off `/status` on the pod rather than trusting
+  the manifest.
+- **`GAMESERVER_AOI_RADIUS` wired into every game-server deployment** — `.env.example`,
+  `docker-compose.yml`, `docker-compose.override.yml`, `k8s/app/50-fleet-map.yaml`,
+  `k8s/app/60-fleet-dungeon.yaml` and `agones/fleet-map-dotnet-dev.yaml` — set explicitly to
+  `50`, which is the compiled-in default, so **nothing changes behaviourally** and tuning it
+  becomes a one-line manifest edit rather than a code change. It is the largest single lever
+  on downstream bandwidth (population inside a circle grows with the square of the radius).
+  Two operational notes: an unparseable or non-positive value **exits 2 at startup** rather
+  than falling back to the default, and because a GameServer's environment is fixed at pod
+  creation, a fleet update reaches only NEW pods — read `aoi_radius` off `/status` on the pod
+  rather than trusting the manifest.
+- **The first alert rule in this repository** (`monitoring/alerts.yaml`, wired via
+  `rule_files:` in `monitoring/prometheus.yaml` and mounted in compose). Until now
+  monitoring was one scrape config and one dashboard: every number was visible to someone
+  already looking and said nothing to anyone who was not, which ADR-24 §8.1 named as the
+  reason a quietly broken reward path was only ever found by a human reading pod logs.
+
+  `NakamaRewardsNotLanding` fires when more than half of `reward_kills` answers on a map
+  have not landed for ten minutes -- a RATIO, not a rate, because an absolute threshold is
+  wrong on an idle map in both directions. `NakamaRewardPathSilent` is its info-level
+  companion for no answers at all while players are online, which is how the k8s fleet ran
+  for weeks with `NAKAMA_URL` unset and every deploy green. No Alertmanager in this stack,
+  so a firing rule surfaces on Prometheus' Alerts page and in Grafana -- stated in the file
+  rather than implied.
+
+### Fixed
+- **A Grafana panel that has always read "No data".** `rpg-gameplay.json` queried
+  `gameserver_save_errors_total`, which does not exist and never has -- the instrument is
+  `gameserver.player.saves`, exported as `gameserver_player_saves_total` with a `status`
+  label. Verified by grepping the whole module for the name (zero hits outside the
+  dashboard) and by reading the live `_total` names off a running pod. Same shape as the
+  `agones.dev/fleet` selector fixed yesterday: a query that silently returns nothing reads
+  as good news.
+
+
+### Fixed
+- **The "turning it back off" instruction still described the mechanism its own section had
+  just replaced.** #354 rewrote the meta-hop TLS recipe from "uncomment four files" to two
+  ConfigMaps, and left a line eight paragraphs down saying turning it off is "the same four
+  files in reverse". Mine, shipped in the same PR as the rewrite: I changed the section and
+  did not re-read what sat under it.
+
+  That is the exact failure this file now warns about twice — in the compose block, and in the
+  four manifest comments — arriving a third time, in the document doing the warning. A
+  paragraph is no more self-checking than a comment: nothing compiles either.
+
+  **Both directions are now measured on `k3d-rpg-dev` rather than described**, which is what
+  made the correction worth more than a one-line edit:
+
+  | | off | back on |
+  |---|---|---|
+  | `NAKAMA_TLS_CERT` in the pod | empty | `/nakama/tls/tls.crt` |
+  | `SSL mode enabled` in the log | absent | present |
+  | `:7350` plaintext via the API proxy | `{}` | **BadRequest** |
+  | `:7350` TLS via the API proxy | — | `{}` |
+  | `dev-up.sh` gate says | plaintext (ADR-24's default) | terminates TLS |
+  | `killprobe` end to end | — | `REWARDED: wallet map[] -> map[gold:20]` |
+
+  The two Secrets were left in place across the cycle on purpose, and the off column proves
+  the claim made about them: the files stay mounted and **nothing reads them** while the
+  ConfigMap keys are absent. That is what `optional: true` buys, stated as a measurement
+  instead of an assurance.
+
+## [Unreleased]
+
+### Fixed
+- **A commented-out compose block that would have broken the file the moment anyone
+  followed its own instruction.** The `gameserver-dotnet` TLS mount was written *inside*
+  the `environment:` mapping, between `NAKAMA_TLS_PIN` and `GAME_DB_URL`. Commented it
+  parses, so CI stayed green; uncommented -- which is what the comment tells the reader to
+  do -- `volumes:` at four spaces closes `environment:` and the next entry is a syntax
+  error. It is now a sibling of `environment:`, and **the check is the point**: the
+  uncommented form is parsed, not read. A commented block is only as correct as the file it
+  becomes, and nothing in CI reads comments.
+
+  The harness caught its own bug first, which is worth recording: the initial version
+  matched comment lines by exact stripped text, missed one by an indent, and reported a
+  pass with `gameserver.volumes = None`. Matching by shape found all three.
+- **`kubectl logs -l agones.dev/fleet=...` matches nothing, and says so quietly.** That
+  label is on the GameServer CR, **not on the pod** -- the pods carry only
+  `agones.dev/gameserver`, `agones.dev/role` and `agones.dev/safe-to-evict` (measured on
+  k3d-rpg-dev). The verification step therefore answered `No resources found`, which reads
+  like a quiet pass rather than a broken command. Now `-l agones.dev/role=gameserver
+  --prefix`; `--prefix` is load-bearing because it names the pod each line came from, which
+  is what separates one stale `Allocated` GameServer on the old plaintext `NAKAMA_URL` from
+  a fleet-wide failure.
+- **Comments left describing a mechanism that no longer exists.** The ConfigMap-driven
+  opt-in replaced "four coordinated edits, uncomment these volumes", but four comments
+  still told the reader to uncomment blocks that now ship uncommented and optional --
+  `k8s/data/nakama.yaml` (env plus both volume blocks), both fleet files, and
+  `20-configmaps.yaml`. Rewritten to say what the mechanism is now, and to say that they
+  used to say otherwise.
+
+### Added
+- The compose half of the recipe now provides the mount it was telling operators to add by
+  hand: `./tls:/nakama/tls:ro` on `nakama`, and the **public certificate only** on
+  `gameserver-dotnet`. The k8s half was uncomment-and-apply and the compose half was prose.
+- A pull-free alternative for the first verification step, for a cluster that cannot fetch
+  `curlimages/curl`: the API server proxies it, and the `https:` prefix on the service name
+  is what makes it speak TLS to the backend. The unprefixed form is the negative control.
+
+
+### Changed
+- **The meta hop's TLS (ADR-24) is a per-CLUSTER opt-in, not a manifest edit — and it is ON in
+  dev.** The recipe used to be "uncomment blocks in four files", which cannot work: these
+  manifests are applied **unchanged to dev and staging**, so an edit turned the flag on in both
+  or neither, and a required Secret volume would have wedged every pod in the cluster that had
+  not opted in.
+
+  The mounts now ship uncommented with `optional: true`, and the paths come from ConfigMap keys
+  that are also optional, so **an absent key is the flag off**. Turning it on is two ConfigMaps
+  and two Secrets; turning it off is deleting them. This is the shape ADR-23's gateway TLS
+  already uses, for the same reason.
+
+  **Measured on both clusters with the same manifests, 2026-09-13:**
+
+  | | dev (opted in) | staging (not opted in) |
+  |---|---|---|
+  | `NAKAMA_TLS_CERT` in the pod | `/nakama/tls/tls.crt` | empty |
+  | files in `/nakama/tls` | the pair | **0** |
+  | Nakama's log | `SSL mode enabled` | nothing |
+  | `:7350` over plaintext | **`http:400`** | `http:200` |
+  | `:7350` over TLS | `https:200` | — |
+
+  The staging column is the control: the cluster that did not opt in was applied the same
+  files and stayed plaintext and healthy.
+
+### Added
+- **A `dev-up.sh` gate for the meta hop, mirroring the gateway's.** It refuses the halfway
+  states rather than deploying them:
+
+  - exactly one of `tls-cert-path` / `tls-key-path` → error;
+  - TLS paths named but no `nakama-tls` Secret → error (the volume is optional, so the paths
+    would point at an empty directory);
+  - **Nakama on TLS with the game server still on `http://`** → error. This is the dangerous
+    one and it is not hypothetical: it happened here on 2026-09-13, and every reward RPC failed
+    with `BadRequest code=-1 Client sent an HTTP request to an HTTPS server` **while the game
+    itself kept working perfectly**. It is a `LogWarning` with no counter and no alert, so
+    nothing but a human reading pod logs would ever have noticed;
+  - `https` URL with no pin, or a pin whose Secret is absent → error (Nakama's certificate is
+    self-signed by design, so .NET's own validation correctly refuses it and every reward RPC
+    fails on the certificate);
+  - a pin set while Nakama terminates no TLS → error, because a pin on a plaintext hop protects
+    nothing while reading as though it does.
+
+  The gate was exercised against the live cluster rather than reasoned about: it passes dev
+  (opted in) and staging (not), and both dangerous states were **created on purpose** on dev
+  and refused with `exit=1` before being restored.
+
+### Fixed
+- **`k8s/data/README.md` told you to create a Secret in a namespace that does not exist.**
+  Steps 2 and the verification block said `rpg-k8s-app`; the namespace is `rpg-k8s-realtime`,
+  and `rpg-k8s-app` appears in no manifest anywhere in the repo. Anyone following the recipe
+  hit `error: failed to create secret namespaces "rpg-k8s-app" not found` at step 2 — which is
+  at least loud. The verification command would have been worse: it would have reported no
+  matching pods rather than a failure.
+- **The README now records that a fleet update does NOT recreate an `Allocated` GameServer.**
+  Environment variables are fixed at pod creation and a ConfigMap patch never reaches a running
+  pod, so the new spec reaches only new pods — which is how the reward path above came to be
+  broken on one server while the fleet looked fully rolled out.
+
+## [Unreleased]
+
+### Documentation
+- **The probe move's real cost is now a named open item, not a reassuring sentence
+  (ADR-24 §8.1, `k8s/data/README.md`).** The first write-up said the change was "not a
+  regression, because the old target checked nothing either". That is true of *dependency*
+  checking and false of one thing that matters: the old liveness probe would have
+  **restarted the pod** when the `:7350` server itself stopped answering, and the new one
+  will not. A narrow class of failure has lost its automatic recovery -- still the right
+  trade against the four measured alternatives, but a cost, and now written where it will
+  be found rather than re-derived.
+
+  **Nothing else closes it in steady state**, checked rather than assumed: the gateway is
+  not a consumer of this hop at all; the C# game server is the only in-cluster one and its
+  Nakama failures are `LogWarning` with no counter and nothing on `/metrics`; there are **no
+  alert rules anywhere** in `deploy/monitoring/`; and `dev-up.sh`, `checks_flow.sh` and the
+  smoketest exercise the hop for real but only at deploy time. First notice is a human, when
+  players cannot authenticate. The cheapest close is named and deliberately **not** built
+  here -- a counter on the game server's existing Nakama outcome cases plus an alert on the
+  failure rate, which catches the wedge and a certificate misconfiguration from the
+  consumer's side.
+
+### Fixed
+- **Nakama's k8s probes and compose healthcheck no longer break when the meta hop's TLS is
+  turned on (ADR-24 §8.1).** All three probes were `httpGet` on `:7350` with no `scheme` --
+  the one port `--socket.ssl_certificate` converts to TLS -- so with the flag on they failed
+  with `client sent an HTTP request to an HTTPS server` and the pod never became Ready
+  (measured on k3d-rpg-dev 2026-09-12, rollout timing out with a healthy container). They now
+  GET `/` on the metrics listener `:9100`, which the flag does not cover, so **one spec works
+  in both modes** and no per-environment overlay is needed.
+
+  **Compose had the same bug and nobody had recorded it.** Its healthcheck was bare
+  `/nakama/nakama healthcheck`, and Nakama v3.40.0's subcommand is
+  `http.Get("http://localhost:" + port)` -- hardcoded plaintext, no TLS branch -- so with TLS
+  on the container would be marked unhealthy and every `depends_on: service_healthy` in the
+  file would block. It is now `healthcheck 9100`, using the subcommand's port argument.
+
+  The alternatives were rejected on measurements, not preference: `scheme: HTTPS` is wrong
+  whenever TLS is off, which is the default at every deploy path; an exec probe cannot use
+  `curl` or `wget` because `heroiclabs/nakama:3.40.0` is Debian 12 and ships neither (nor
+  `nc`, `python3`, `openssl` -- measured in the running pod); and `tcpSocket` cannot tell a
+  wedged Nakama from a healthy one. **The cost is stated rather than glossed:** `:9100` is a
+  different `http.Server` in the same process, so the probes prove the process is serving
+  HTTP, not that the client-API mux answers -- narrow, because the old target was a static
+  200 that checked no dependency.
+
+### Added
+- **`NAKAMA_TLS_PIN`: the game server's end of the meta-hop trust decision (ADR-24 §8.2).**
+  An `https://` `NAKAMA_URL` against a self-signed Nakama fails .NET's certificate validation
+  and every reward RPC with it, while the game keeps working -- the quiet failure this hop
+  specialises in. The new variable names a PEM the server pins byte for byte. Wired through
+  compose (both files), `20-configmaps.yaml` as `nakama-tls-pin`, both Agones fleets, and
+  `STACK_OVERRIDABLE`. Empty everywhere, which means .NET's own validation.
+- **An enable recipe that can be followed verbatim**, in `k8s/data/README.md` §"Turning the
+  meta hop's TLS on": certificate generation with the SANs both clients need, the two Secrets
+  (private key in `rpg-k8s-data`, **public half only** in `rpg-k8s-app`), the four files that
+  must move together, per-consumer verification commands, how to hand the pin to a Unity
+  player, a docker-compose variant, and what the flag still does not cover. The manifests
+  carry commented-out volume and volumeMount blocks so the recipe is uncomment-and-apply.
+
+### Added
+- **Gateway-hop TLS is ON for dev (ADR-23), and enablement is a per-cluster Secret rather than a
+  manifest edit.** `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY` now read from **optional** `gateway-config`
+  keys. That shape is load-bearing: `40-gateway.yaml` is applied unchanged to dev and staging, so a
+  literal path turns TLS on for both at once and the cluster without a `gateway-tls` Secret then fails
+  to start -- both-or-neither is a deliberate startup error. Same trap ADR-26 hit with
+  `GAMESERVER_SEALED`, where one value sealed two environments.
+
+  `dev-up.sh` gains gates for the three half-configured shapes, and the third is the dangerous one:
+  **a Secret present with no ConfigMap paths means TLS is silently OFF while someone believes they
+  turned it on**, and nothing about a healthy gateway distinguishes that from success. It also writes
+  the pin out of the cluster's own Secret on every deploy, so clients pin what the gateway actually
+  serves instead of a copy someone remembered to update.
+
+- **`verify.sh`'s `flow.smoke` pins the gateway certificate, and reads whether TLS is on from the
+  CLUSTER.** Not from the target file, and not from whether a pin file happens to exist -- both can
+  disagree with the deployment, and each disagreement blames the wrong thing. A pin supplied against
+  a plaintext gateway now FAILS rather than being ignored, because somebody believing that hop is
+  encrypted when it is not is exactly the state nothing else here would reveal.
+
+  Without this the check would have become the thing that broke when TLS was turned on: an unpinned
+  run against a TLS gateway fails with a bare `read length: EOF`, naming nothing from either end.
+
+### Documentation
+- **`CORE-COMPLETION.md`: every C item is done, and C5 was proven with two real built players.**
+  Not a probe this time -- two Windows players, one creating a party through Nakama and one
+  joining it by id, both entered the **same** dungeon instance (`127.0.0.1:7019`), which
+  reported `players_online: 2` and `sealed_cipher: chacha20-poly1305`. Both were refused on
+  their first join for not sealing and escalated themselves, which is the shipped default.
+
+  The correction block added on 2026-09-12 -- when C1 was marked done on the strength of a Go
+  probe while the client could not ask for a dungeon at all -- is marked resolved rather than
+  deleted. The gap closed in a day; the lesson outlives it.
+
+### Documentation
+- **The join deadline and the dungeon autoscaler are now MEASURED on dev, not only
+  unit-tested.** Both shipped with an explicit "never run on a cluster" caveat. The two
+  `dungeonprobe` runs that leaked a two-replica fleet permanently on 2026-09-12 were repeated
+  against the fix and the fleet watched every 20s: both leaked instances released themselves
+  between **t+80s and t+100s** -- the 90s deadline -- and the fleet returned to its buffer.
+
+  The same observation is the first live evidence for the autoscaler: **four** GameServers at
+  t+20s is two allocated plus the two Ready spares the buffer maintains, converging back to
+  two. Recorded in ADR-26's consequence, which now says measured rather than closed.
+
+### Added
+- **A buffer `FleetAutoscaler` on the dungeon fleet -- the first one in this project**
+  (`k8s/app/70-fleetautoscaler-dungeon.yaml`, ADR-14 stage 7). Buffer policy, `bufferSize: 2`,
+  `minReplicas: 2`, `maxReplicas: 6`, 30s fixed sync, on
+  `rpg-k8s-realtime/dungeon-servers-dotnet-k8s`. ADR-18 forbids an autoscaler on a fleet that
+  pins one `GAMESERVER_MAP_ID` for every replica, because the C# server self-registers at
+  **startup** and a spare Ready pod is then a second live server for that map -- measured on
+  k3d, `1 -> 2` put two members into `servers:map:map_01` 5.38s later with no allocation
+  involved. **That argument does not reach this fleet**: its pods pin no map id and register
+  nothing into the map index (ADR-26 decision 8), so a spare Ready pod is an idle instance
+  waiting for a party, which is the exact shape ADR-18 decision 4 names as the unlock. The map
+  fleet is unchanged: `replicas: 1`, no autoscaler.
+  - `bufferSize: 2` counts **parties about to enter**, not players -- an instance holds one
+    party (ADR-26 decision 2) and a party is capped at 4. Two is the figure dev already runs
+    (`K8S_DUNGEON_REPLICAS` defaults to 2), so this codifies the standing number rather than
+    inventing one. It buys the removal of a 5.38s cold pod start from inside the client's
+    `EnterWorld` budget and claims **nothing** about capacity; no dungeon has ever run under
+    load.
+  - `maxReplicas: 6` is a **bound on ADR-26's measured instance leak**, not a capacity ceiling.
+    A pod that is Allocated and never joined never self-shuts down (`everHadPlayer` stays
+    false) and Agones never reclaims an Allocated pod; with no ceiling the autoscaler replaces
+    every leaked pod indefinitely, turning a visible outage into an unbounded one. Raise it
+    when the bounded join deadline ADR-26 asks for exists, not before.
+- **`k8s/verify/tests/autoscaler_rule_test.sh`** -- runs the `cluster.autoscaler` decision
+  offline against canned `kubectl get -o json` documents carrying the **real** shape of both
+  fleets, and asserts three verdicts: PASS with no autoscaler, **FAIL** with one on the
+  map-pinned fleet, PASS with one on the map-less fleet. It exists because the only live proof
+  of a prohibition is to create the forbidden object on a shared cluster -- which is how the
+  2026-08-18 proof had to be done -- and that manufactures the ADR-2 split-world hazard on
+  purpose. No cluster, no mutation, both answers in one run.
+
+### Changed
+- **`cluster.autoscaler` now sweeps every Fleet in `VERIFY_NAMESPACES`**, not just the single
+  fleet a target file names in `VERIFY_FLEET` (`k8s/verify/lib/checks_cluster.sh`). The old
+  form was complete when there was one fleet and covered half the fleets once the dungeon fleet
+  landed: an autoscaler placed on the fleet a target does not name was neither refused nor
+  reported. **The map-id condition itself was not loosened** -- a pod template with no
+  `GAMESERVER_MAP_ID` at all already returned empty from `fleet_wide_map_id` and already read
+  as "not pinned", so admitting the dungeon autoscaler required no exemption. What it lacked
+  was reach. `VERIFY_FLEET`, when set, is still asserted to exist.
+  - The rule moved into `classify_fleets()`, which takes two JSON documents out of the
+    environment and touches no cluster, so it can be tested offline. The separator between its
+    fields is `|` and **not** a tab: tab is IFS whitespace, so `IFS=$'\t' read` collapses two
+    adjacent tabs and a fleet with no map id would have had its autoscaler list read back as
+    its map id -- which renders as a PASS on exactly the fleet the rule is about. Caught by the
+    new test before it could be believed.
+- **`dev-up.sh` applies the autoscaler after pinning the dungeon image, and deletes it when
+  `K8S_DUNGEON_REPLICAS=0`.** A `minReplicas` floor overrides a manual scale, which collides
+  with two existing deliberate behaviours. `60-fleet-dungeon.yaml` ships `replicas: 0` so
+  `apply` cannot create a pod on the moving `:develop` tag before the pin -- on 2026-09-12 that
+  race put three live servers on map_01 -- and an autoscaler in the bulk apply defeats that
+  within one sync interval, so `70-*.yaml` is deliberately **not** in the bulk apply.
+  `K8S_DUNGEON_REPLICAS=0` is the documented way to take dungeons out of service without
+  editing a manifest, and a floor of 2 would undo it within 30s, so that path deletes the
+  autoscaler instead. In steady state the two agree on the number (`allocated + 2` == 2 with
+  nothing allocated); only the order matters.
+- **`rollback-to-compose.sh` now retires the dungeon fleet too, autoscaler first.** It drained
+  only the map fleet, leaving dungeon pods that nothing could allocate -- the compose gateway
+  sets no `ALLOCATOR_FLEET_DUNGEON`. Deleting the `FleetAutoscaler` before the drain is not
+  tidiness: with the floor still in place the scale-down reverses itself within 30s.
+
+### Documentation
+- **ADR-14 stage 8 closes as "retired and documented", not "deleted", and the report says
+  which.** Checked before deleting anything: the Go-image manifests
+  (`fleet-map.yaml`, `fleet-dungeon.yaml`, `fleet-map-dev.yaml`, `fleet-dungeon-dev.yaml`,
+  `allocation.yaml`, `autoscaler.yaml`, `autoscaler-dev.yaml`) were **already** deleted in
+  `6281c72`, and `map-servers-dev` / `dungeon-servers-dev` are gone from `k3d-rpg-dev`
+  (verified read-only). The three files left in `deploy/agones/` are **not** Go manifests:
+  `fleet-map-dotnet-dev.yaml`, `allocation-dev.yaml` and `secret-example.yaml` are the C# dev
+  fleet in `rpg-realtime`, applied by `k3s/setup-dev.sh`, verified by the `dev-agones` target,
+  named by `docker-compose.yml`/`.env.example` through `ALLOCATOR_FLEET_MAP`, and scaled
+  **back to 1** by `k8s/rollback-to-compose.sh`. Deleting them deletes the documented rollback
+  out of the k8s app tier, so they stay and the documentation that called them live was fixed
+  instead.
+- **`docs/K3S.md`'s manifest table listed the deleted Go manifests twice**, in two blocks that
+  disagreed with each other and with the directory. Rewritten to the three files that exist,
+  with a pointer to the app-tier fleets, which are a different set in a different namespace.
+  "Why there is no autoscaler" is now "Why there is no autoscaler on a MAP fleet (and why the
+  dungeon fleet has one)" and carries the stage-7 outcome plus the two ordering rules.
+- **`k8s/app/README.md` no longer claims "this does not replace anything".** That stopped being
+  true when `dev-up.sh` gained its retire step; the legacy fleet is the rollback target, not
+  the live one. Adds the `70-*.yaml` row and a table of the three ways a manual scale and the
+  autoscaler would fight, with the resolution for each.
+- **ADR-18 and ADR-26 amended rather than rewritten.** ADR-18 gains an amendment recording that
+  its decision-4 unlock arrived as a *second fleet* rather than as either named mechanism, that
+  decision 1 is untouched, and that the check was widened rather than weakened. ADR-26's
+  "cluster.autoscaler needs a second look" consequence records what the second look actually
+  found: not the feared false FAIL, but a check that inspected only one fleet.
+- **`CORE-COMPLETION.md` C4 marked done**, which closes the last C item.
+- **`60-fleet-dungeon.yaml` carried two near-identical copies of its own header comment**, both
+  still opening "TWO, and this is the fleet where a spare is meaningful" while the value below
+  had become `replicas: 0`, and both still saying "STILL NO FleetAutoscaler ... the check moves
+  first". Collapsed to one block that keeps the map_01-fallback history (which is why the rule
+  is worded "registers no map" rather than "pins no map id") and records that the check did
+  move first and the autoscaler now exists in its own file.
+- `deploy/CLAUDE.md`, `docs/README.md`, `k8s/README.md` and `k8s/verify/README.md` updated for
+  the new manifest and the check's new scope. `docs/REALTIME-FLOW.md` was left alone
+  deliberately: its header scopes it as historical analysis dated 2026-08-17, and the fleet
+  listing in it is evidence from that date rather than a claim about today.
+
+### Fixed
+- **`CORE-COMPLETION.md` said the gate was open; it is open on the backend only.** C1 and C2
+  were proven by a Go probe, and the Unity client has **none** of either: `party_id` appears
+  nowhere in `com.cuvara.netcode`, nothing in `Assets/Scripts/` mentions a party or a dungeon,
+  and the client is pinned to a netcode version predating the wire field. A real player cannot
+  ask for a dungeon — there is no field to ask with. Added as **C5**, and the correction states
+  the lesson rather than only the fact: "measured on dev" meant measured with the tool that was
+  easiest to write, and a probe speaking the protocol directly proves a backend while proving
+  nothing about whether anyone can reach it.
+
+### Documentation
+- **`CORE-COMPLETION.md`: the gate is open.** C1 (dungeon instancing) is marked done and
+  measured, not asserted -- a party created through Nakama, two members entering, both handed
+  the **same** instance address, an outsider refused by name, and map entry unaffected on the
+  same gateway. The file now states what content may be written against and, more usefully,
+  what it must not: position inside a dungeon is not durable (ADR-26 decision 5), encounters
+  are not resumable (decision 4 defers encounter checkpointing), and the per-server player
+  ceiling is still unknown (ADR-7, blocked on hardware).
+
+### Fixed
+- **The dungeon fleet ran an unpinned image and put three live servers on `map_01`.** Caught
+  by `verify.sh` on the dev deploy (`registry.one_server` FAILED) -- after the pods were live.
+
+  `dev-up.sh` pins the resolved commit over the manifests' moving `:develop` tag, but it only
+  did so for the **map** fleet; adding the dungeon fleet to the `apply` line without adding it
+  to the pin left its pods on whatever `:develop` happened to be. That image predated
+  dungeon-mode registration, so the pods self-registered into `servers:map:map_01` exactly
+  like map servers. Measured in Redis: `SMEMBERS servers:map:map_01` held both dungeon pods
+  alongside the map pod, and the dungeon pods carried `rpg-mmo/gameserver-dotnet:develop`
+  while the map pod carried the pinned commit.
+
+  Two changes, because pinning alone is not enough: `apply` creates pods the instant it runs,
+  **before** the pin. So the manifest now ships **`replicas: 0`** and `dev-up.sh` scales it to
+  `K8S_DUNGEON_REPLICAS` (default 2) only after pinning. A fleet that cannot run the wrong
+  build beats a fleet that runs it briefly, and "briefly" here means long enough to break
+  ADR-2 and fail a deploy. Applying the file by hand now yields zero pods, for the same reason
+  a hand-apply would get the unpinned image.
+
+  No drain-on-image-change for this fleet, unlike the map fleet, and that is deliberate: its
+  pods claim no map, so old and new replicas running together is not a split world -- they are
+  interchangeable instances, and a party allocated to an old one keeps it until the run ends.
+
+### Changed
+- **The dungeon fleet runs `replicas: 2` now that dungeon-mode registration has landed.** It
+  shipped at 0 for one reason, recorded here because the reason is the interesting part:
+  `Program.cs` resolves `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`, and this fleet pins no
+  map id **on purpose** -- so every pod of it fell back to `map_01` and self-registered
+  there, which with the map fleet's pod is three live servers for one map. The fallback was
+  the hazard, not a missing value.
+
+  That is closed: in dungeon mode the server writes its `servers:id:` hash and is never added
+  to `servers:map:`, whatever map id the fallback hands it, pinned by a test that names the
+  fallback. Raising the count is therefore safe **after** that change and was not safe before,
+  which is why it is a separate commit rather than the one the manifest comment asked for --
+  the property that matters is the order, and this is the order.
+
+### Fixed
+- **The dungeon fleet ships at `replicas: 0` until the game-server half lands.** As merged it
+  was `replicas: 2`, and that was one deploy away from splitting dev's world. The fleet
+  deliberately pins no `GAMESERVER_MAP_ID` -- but `Program.cs` resolves
+  `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`, so **today** every pod from it falls back to
+  `map_01` and self-registers under it. Three live servers for one map: the exact ADR-2
+  invariant ADR-26 was written to protect. `verify.sh`'s `registry.one_server` would have
+  caught it and turned the deploy red, so it would have failed loudly rather than silently --
+  it would still have split the world first. ADR-26 decision 8 (in dungeon mode the server
+  publishes its own `servers:id:` entry and registers no map) is what makes a non-zero replica
+  count correct, and the count moves back to 2 in the same change that lands it.
+
+### Added
+- **`app/60-fleet-dungeon.yaml`: the dungeon fleet (ADR-26 / ADR-14 stage 6).** Two things
+  make it not-a-second-map-fleet, and both are ADR-26 on the deployment side.
+
+  It **pins no `GAMESERVER_MAP_ID`**. A map pod claims `map_01` at boot and is found through
+  `servers:map:map_01`; a dungeon pod claims nothing and is allocated to a party, with the
+  gateway recording that mapping itself. A map id here would put every replica into the map
+  index and let `FindServer` hand a passing player someone else's dungeon.
+
+  It runs **`replicas: 2`, and spare Ready pods are correct on this fleet.** ADR-18 forbids
+  that on the map fleet because every replica self-registers under one map id, so a spare is
+  a second live server for one world. None of it applies to a fleet whose pods register no
+  map -- ADR-18 names exactly this shape as the condition that unlocks `replicas > 1`. A
+  spare is what makes dungeon entry fit inside the client's EnterWorld budget instead of
+  paying a cold pod start inside it. **Still no `FleetAutoscaler`**, although one is now
+  defensible: `verify.sh`'s `cluster.autoscaler` check fails on any autoscaler it finds and
+  stands down only for a per-pod-map-id fleet, so adding one before the check knows about
+  this fleet turns every deploy red on a healthy stack. The check moves first.
+
+  Capacity is **8**, and it is not a tuning knob: a dungeon instance holds one party, the
+  party cap is 4, and the slack covers a reconnecting member still inside the 60s hold being
+  counted alongside their replacement. Resources are bounds scaled from the map fleet's
+  measurements, **not** dungeon measurements -- no dungeon has ever run.
+
+### Changed
+- `40-gateway.yaml` sets `ALLOCATOR_FLEET_DUNGEON` (it was `""` because no such fleet
+  existed) and gains `NAKAMA_URL`/`NAKAMA_HTTP_KEY`, both **optional**, used for one
+  question asked once per dungeon entry: is this user in the party they named. Absent, the
+  gateway refuses dungeon entry with a message saying dungeons are not configured and map
+  play is untouched -- which is why these are optional here while the game server's
+  identically-named variables are not: there an absent URL silently awards no rewards, here
+  it closes one door loudly.
+- `dev-up.sh` applies the new fleet alongside the map fleet.
+
+### Documentation
+- **`CORE-COMPLETION.md` C3 (Android) is done, and was measured rather than assumed.** An
+  Android player built for `arm64,x86_64` ran on an x86_64 emulator against the dev cluster,
+  reached IN WORLD, was kicked `no_sealed_session`, reconnected with sealing, established the
+  session and stayed in world -- the full ADR-22 escalation path, on the platform the game
+  targets, for the first time. Server side: `players_online: 1`,
+  `sealed_cipher: chacha20-poly1305`. Two client gaps were found doing it (arm64-only builds
+  install on no usable emulator; an Android build could not be pointed at a backend at all)
+  and are fixed in the client repo. The gate itself is unchanged: **C1 and C2 still stand
+  between here and gameplay content.**
+
+### Documentation
+- **`docs/CORE-COMPLETION.md`: the checklist that says when the gameplay-content gate
+  opens.** "Is the core done?" was being answered from memory, and both places that record
+  state have been caught describing a state that had changed under them. Its rule is ADR-14's
+  own: a row is ✅ only when it has been *demonstrated*, not when the code exists. The audit
+  finds **two** items standing between here and gameplay content -- dungeon instancing
+  (ADR-14 stage 6; `--mode=dungeon` changes exactly one thing today, the hold TTL, and the
+  word "checkpoint" appears in no `.cs` or `.go` file in the repo) and party/social in Nakama
+  (`backend/nakama/` has `auth/` and `economy/` only), the second being a precondition of the
+  first because dungeons allocate *per party*. Android proof and ADR-14 stages 7-8 are listed
+  as real but non-gating: they do not change the shape of any flow content sits on. Five more
+  items are listed as blocked on something that is not code, so nobody plans work against them.
+- **ADR-14's status line said stages 5-8 remain open; stage 5 has shipped.** Dev and staging
+  gateways run `ALLOCATOR=agones`, a pod reaches `Allocated`, and `flow.smoke` joins a real
+  client to it -- stage 5's own definition. Same staleness the ADR itself warns about two
+  sentences earlier.
+
+
+### Added
+- **`dev-up.sh` now gates on the leaderboard the Nakama plugin refuses to boot against,
+  and says why the rollout failed when it fails anyway.** `kills_alltime` must be
+  `authoritative=true`; the Go plugin fails `InitModule` rather than accept a
+  client-writable kill leaderboard. Nothing said so where it was read: Nakama crash-looped,
+  `rollout status` timed out 300s later, and CD printed `error: timed out waiting for the
+  condition` with no mention of leaderboards -- the cause was only in the pod log. **This
+  defect lives in each environment's database, not in the image**, so a green dev deploy
+  predicted nothing: dev was fixed by hand on 2026-09-10 and staging failed identically on
+  2026-09-12 during the develop -> staging promotion. Production has never been deployed
+  and would have met it on its first run. The gate prints the record-preserving `UPDATE`
+  verbatim, and skips (rather than fails) when the table does not exist yet, which is the
+  first-ever-deploy case. The `rollout status` for Nakama is now wrapped so a failure dumps
+  the pod's last 20 log lines into the same output.
+
+
+### Fixed
 - **Nakama's k8s probes do not follow its TLS decision, and the hazard is now recorded where
   someone will hit it.** All three (`startup`, `readiness`, `liveness`) are `httpGet` with no
   `scheme`, which means HTTP. Set `NAKAMA_TLS_CERT/_KEY` and Nakama answers TLS on the same

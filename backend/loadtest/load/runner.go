@@ -20,6 +20,9 @@ type Runner struct {
 	cfg Config
 	out io.Writer
 	hc  *http.Client
+	// rates is resolved once at the top of Run, from the server's /status. See
+	// ServerRates for why the acceptance criteria cannot use a constant.
+	rates ServerRates
 }
 
 // NewRunner builds a Runner for cfg, writing progress to out.
@@ -41,6 +44,22 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 	}
 	started := time.Now()
 
+	// Asked once, before any load: the acceptance criteria are defined against
+	// the server's rates, and a harness that assumes them judges a server it
+	// never identified. A failure here is reported in the header, not fatal —
+	// an unreachable /status is a reason to label the verdict, not to refuse to
+	// measure bandwidth, which does not depend on either rate.
+	rates, ratesErr := FetchServerRates(ctx, r.hc, r.cfg.GSMetricsURL)
+	if ratesErr != nil {
+		// Said out loud, every time. A run judged against assumed rates is not
+		// wrong, but a reader who does not know it happened will read the tick
+		// column as if the harness had checked.
+		fmt.Fprintf(r.out, "loadtest: could not read server rates (%v); judging against %s\n",
+			ratesErr, rates.Source)
+	}
+	r.rates = rates
+	budgetSec := rates.TickBudget().Seconds()
+
 	res := &Result{
 		Schema:  ResultSchema,
 		Label:   r.cfg.Label,
@@ -57,8 +76,12 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 			BaselineEntities: r.cfg.BaselineEntities,
 			MapID:            r.cfg.MapID,
 			Transport:        r.cfg.Transport,
-			HoldGateway:      r.cfg.HoldGateway,
-			TickBudgetSec:    TickBudget.Seconds(),
+			HoldGateway:       r.cfg.HoldGateway,
+			TickBudgetSec:     budgetSec,
+			SnapshotPeriodSec: rates.SnapshotPeriod().Seconds(),
+			SimCriticalHz:     rates.CriticalHz,
+			SimWorldHz:        rates.WorldHz,
+			RatesSource:       rates.Source,
 		},
 	}
 
@@ -147,7 +170,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		serverWindowSec = windowSec
 	}
 	res.Client = aggregateClients(stats, windowSec)
-	res.Server = aggregateServer(beforeGS, afterGS, beforeGW, afterGW, serverWindowSec,
+	res.Server = aggregateServer(beforeGS, afterGS, beforeGW, afterGW, serverWindowSec, budgetSec,
 		firstErr(errGS, errGS2), firstErr(errGW, errGW2))
 	reconcile(&res.Client, &res.Server)
 	// Sampled after the window so it describes the run rather than whatever
@@ -224,7 +247,7 @@ func aggregateClients(stats []*PlayerStats, windowSec float64) ClientStats {
 }
 
 // aggregateServer differences the two /metrics scrapes over the window.
-func aggregateServer(beforeGS, afterGS, beforeGW, afterGW *Scrape, windowSec float64, errGS, errGW error) ServerStats {
+func aggregateServer(beforeGS, afterGS, beforeGW, afterGW *Scrape, windowSec, tickBudgetSec float64, errGS, errGW error) ServerStats {
 	out := ServerStats{}
 	if errGS != nil {
 		out.ScrapeErrGameserver = errGS.Error()
@@ -244,7 +267,7 @@ func aggregateServer(beforeGS, afterGS, beforeGW, afterGW *Scrape, windowSec flo
 		out.TickP50 = round6(HistogramQuantile(buckets, 0.50))
 		out.TickP95 = round6(HistogramQuantile(buckets, 0.95))
 		out.TickP99 = round6(HistogramQuantile(buckets, 0.99))
-		ratio, edge := TickBudgetExceededRatio(buckets, TickBudget.Seconds())
+		ratio, edge := TickBudgetExceededRatio(buckets, tickBudgetSec)
 		out.TickOverBudgetRatio = round6(ratio)
 		out.TickOverBudgetEdge = edge
 
@@ -285,7 +308,18 @@ func reconcile(c *ClientStats, s *ServerStats) {
 // readable Reason: the first criterion that fails names the run.
 func Evaluate(res *Result) Verdict {
 	v := Verdict{TickBudgetOK: true, SnapshotCadenceOK: true, NoErrors: true, NoFrameLoss: true}
-	budget := TickBudget.Seconds()
+
+	// Read off the Result, not off a package constant: the budget is a property
+	// of the server that was measured, and a run loaded from disk must evaluate
+	// to the same verdict it had when it was taken.
+	budget := res.Config.TickBudgetSec
+	if budget <= 0 {
+		budget = TickBudget.Seconds()
+	}
+	snapshotPeriod := res.Config.SnapshotPeriodSec
+	if snapshotPeriod <= 0 {
+		snapshotPeriod = TickBudget.Seconds()
+	}
 
 	if res.Server.Scraped && res.Server.TickCount > 0 {
 		// Prefer the exact over-budget ratio: it needs no bucket interpolation.
@@ -297,9 +331,13 @@ func Evaluate(res *Result) Verdict {
 			v.TickBudgetOK = false
 		}
 	}
-	// Snapshot cadence: p99 must stay inside 2x the tick period.
+	// Snapshot cadence: p99 must stay inside 2x the SNAPSHOT period, which is
+	// 1/SIM_WORLD_HZ and not the tick budget. Snapshots ship on the world group;
+	// judging their interval against the base tick period would fail every level
+	// on a 60/15 server for arriving every 66.7ms, which is exactly when they are
+	// supposed to arrive.
 	if res.Client.SnapshotInterval.Count > 0 &&
-		res.Client.SnapshotInterval.P99 > 2*budget*1000 {
+		res.Client.SnapshotInterval.P99 > 2*snapshotPeriod*1000 {
 		v.SnapshotCadenceOK = false
 	}
 	if res.Client.PlayersFailed > 0 || res.Client.PlayersJoined < res.Client.PlayersRequested {
@@ -333,8 +371,8 @@ func Evaluate(res *Result) Verdict {
 			res.Server.TickP99*1000, budget*1000,
 			res.Server.TickOverBudgetRatio*100, res.Server.TickOverBudgetEdge*1000)
 	case !v.SnapshotCadenceOK:
-		v.Reason = fmt.Sprintf("snapshot interval p99 %.1fms over 2x tick period (%.1fms)",
-			res.Client.SnapshotInterval.P99, 2*budget*1000)
+		v.Reason = fmt.Sprintf("snapshot interval p99 %.1fms over 2x snapshot period (%.1fms)",
+			res.Client.SnapshotInterval.P99, 2*snapshotPeriod*1000)
 	case !v.NoErrors:
 		v.Reason = fmt.Sprintf("%d/%d players failed",
 			res.Client.PlayersFailed, res.Client.PlayersRequested)

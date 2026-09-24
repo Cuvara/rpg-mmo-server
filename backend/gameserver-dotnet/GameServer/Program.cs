@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
+using GameServer;
 using GameServer.Agones;
 using GameServer.Content;
 using GameServer.Events;
@@ -13,33 +14,40 @@ using GameServer.Server;
 
 // ── Parse command-line args and environment variables ──
 
-string mode = GetArg(args, "--mode") ?? Env("GAMESERVER_MODE") ?? "map";
-string addr = GetArg(args, "--addr") ?? Env("GAMESERVER_ADDR") ?? ":9000";
-string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
-string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
-int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
+string mode = GetArg(args, "--mode") ?? Env(ServerEnv.Mode) ?? "map";
+string addr = GetArg(args, "--addr") ?? Env(ServerEnv.Addr) ?? ":9000";
+string? explicitMapId = GetArg(args, "--map-id") ?? Env(ServerEnv.MapId);
+// The fallback is the hazard, not a missing value: a dungeon fleet pins NO map id on
+// purpose, so every pod from it lands on "map_01" here. What stops that becoming three
+// live servers for one map (ADR-2) is the registration scope -- a dungeon server writes
+// its servers:id: hash and never joins servers:map: (ADR-26 decision 8) -- not this
+// string. The warning below says so out loud, because a dungeon pod whose registry hash
+// reads map_01 is otherwise a genuinely alarming thing to find.
+string mapId = explicitMapId ?? "map_01";
+string serverId = GetArg(args, "--server-id") ?? Env(ServerEnv.Id) ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
+int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env(ServerEnv.Capacity), out var cap) ? cap : 100;
 // Pre-join bounds (workspace audit F03). Capacity counts authenticated players only; these
 // two bound the phase before that — how many accepted sockets may sit in the handshake at
 // once, and how long each may take to deliver a complete join frame.
 int maxPendingHandshakes = int.TryParse(
-    GetArg(args, "--max-pending-handshakes") ?? Env("GAMESERVER_MAX_PENDING_HANDSHAKES"), out var mph) && mph > 0
+    GetArg(args, "--max-pending-handshakes") ?? Env(ServerEnv.MaxPendingHandshakes), out var mph) && mph > 0
     ? mph : ServerOptions.DefaultMaxPendingHandshakes;
 // Wire protocol version floor. 0 (default) also admits a client that advertises no
 // version at all -- see ServerOptions.MinProtocolVersion for why that is the shipping
 // default and what has to be true before raising it.
 uint minProtocolVersion = uint.TryParse(
-    GetArg(args, "--min-protocol-version") ?? Env("GAMESERVER_MIN_PROTOCOL_VERSION"), out var mpv)
+    GetArg(args, "--min-protocol-version") ?? Env(ServerEnv.MinProtocolVersion), out var mpv)
     ? mpv : 0u;
 int handshakeTimeoutMs = int.TryParse(
-    GetArg(args, "--handshake-timeout-ms") ?? Env("GAMESERVER_HANDSHAKE_TIMEOUT_MS"), out var hto) && hto > 0
+    GetArg(args, "--handshake-timeout-ms") ?? Env(ServerEnv.HandshakeTimeoutMs), out var hto) && hto > 0
     ? hto : (int)ServerOptions.DefaultHandshakeTimeout.TotalMilliseconds;
 // Ingestion bounds (workspace audit F04): inputs one connection may queue between two tick
 // drains, and the world-wide queue cap (0 = capacity x per-connection budget).
 int maxInputsPerTick = int.TryParse(
-    GetArg(args, "--max-inputs-per-tick") ?? Env("GAMESERVER_MAX_INPUTS_PER_TICK"), out var mipt) && mipt > 0
+    GetArg(args, "--max-inputs-per-tick") ?? Env(ServerEnv.MaxInputsPerTick), out var mipt) && mipt > 0
     ? mipt : GameServer.World.EcsWorld.DefaultMaxInputsPerConnection;
 int maxPendingInputs = int.TryParse(
-    GetArg(args, "--max-pending-inputs") ?? Env("GAMESERVER_MAX_PENDING_INPUTS"), out var mpi) && mpi > 0
+    GetArg(args, "--max-pending-inputs") ?? Env(ServerEnv.MaxPendingInputs), out var mpi) && mpi > 0
     ? mpi : 0;
 // Downlink bound: bytes of snapshot payload one connection may be sent per snapshot.
 // The counterpart to --max-inputs-per-tick, on the other direction of the wire, and the
@@ -60,10 +68,10 @@ int maxPendingInputs = int.TryParse(
 // the local compose stack and the JSON interop tests set it explicitly — never a fallback
 // this code reaches on its own. There is no value that means "seal if the client can":
 // see the refusal below.
-string sealedMode = (GetArg(args, "--sealed") ?? Env("GAMESERVER_SEALED") ?? "require").Trim().ToLowerInvariant();
+string sealedMode = (GetArg(args, "--sealed") ?? Env(ServerEnv.Sealed) ?? "require").Trim().ToLowerInvariant();
 
 int maxSnapshotBytes = int.TryParse(
-    GetArg(args, "--max-snapshot-bytes") ?? Env("GAMESERVER_MAX_SNAPSHOT_BYTES"), out var msb) && msb >= 0
+    GetArg(args, "--max-snapshot-bytes") ?? Env(ServerEnv.MaxSnapshotBytes), out var msb) && msb >= 0
     ? msb : GameServer.Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
 // Falls back to the shared constant, not to a literal. The client derives its own
 // integration step from the same constant, and it is compiled into both sides, so a
@@ -73,7 +81,7 @@ int maxSnapshotBytes = int.TryParse(
 // move the server alone, but that is no longer silent: the critical rate now rides the
 // join response (`JoinTokenResponse.tick_rate`), so a client is told what to predict at
 // instead of assuming — #93.
-int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr)
+int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env(ServerEnv.TickRate), out var tr)
     ? tr : GameConstants.DefaultTickRate;
 // Multi-rate simulation. The three groups are named for what they do, not for how fast
 // they run, because how fast they run is configuration: SIM_CRITICAL_HZ / SIM_WORLD_HZ /
@@ -90,7 +98,7 @@ int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_
 bool anySimVar = GetArg(args, "--sim-critical-hz") != null || Env("SIM_CRITICAL_HZ") != null
               || GetArg(args, "--sim-world-hz") != null || Env("SIM_WORLD_HZ") != null
               || GetArg(args, "--sim-background-hz") != null || Env("SIM_BACKGROUND_HZ") != null;
-bool tickRateSet = (GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE")) != null;
+bool tickRateSet = (GetArg(args, "--tick-rate") ?? Env(ServerEnv.TickRate)) != null;
 int criticalHz = int.TryParse(GetArg(args, "--sim-critical-hz") ?? Env("SIM_CRITICAL_HZ"), out var chz)
     ? chz
     : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultCriticalHz);
@@ -102,26 +110,40 @@ int backgroundHz = int.TryParse(GetArg(args, "--sim-background-hz") ?? Env("SIM_
     : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultBackgroundHz);
 // Delta snapshots between full keyframes. 0 or less = send a full snapshot every tick
 // (pre-delta behaviour), the escape hatch for a client that cannot merge deltas.
-int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env("GAMESERVER_KEYFRAME_INTERVAL"), out var kf)
+int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env(ServerEnv.KeyframeInterval), out var kf)
     ? kf : GameConstants.DefaultKeyframeInterval;
 // AOI-gather worker threads. 1 = serial, the default and the pre-pool behaviour.
 // Only takes effect above TickLoop.GatherParallelMinViewers viewers -- see
 // ServerOptions.GatherWorkers for why it is opt-in.
-int gatherWorkers = int.TryParse(GetArg(args, "--gather-workers") ?? Env("GAMESERVER_GATHER_WORKERS"), out var gw) && gw > 0
+int gatherWorkers = int.TryParse(GetArg(args, "--gather-workers") ?? Env(ServerEnv.GatherWorkers), out var gw) && gw > 0
     ? gw : 1;
-float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env("GAMESERVER_MAP_WIDTH"),
+float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env(ServerEnv.MapWidth),
     System.Globalization.CultureInfo.InvariantCulture, out var mw) && mw > 0f
     ? mw : GameConstants.DefaultMapWidth;
-float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER_MAP_HEIGHT"),
+float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env(ServerEnv.MapHeight),
     System.Globalization.CultureInfo.InvariantCulture, out var mh) && mh > 0f
     ? mh : GameConstants.DefaultMapHeight;
+// Captured raw and validated below, once the map size it is reported against is known.
+// Deliberately NOT parsed with the "TryParse ? value : default" idiom the cheaper knobs
+// use: the radius is the largest single lever on downstream bandwidth (population inside a
+// circle grows with its square), so a typo that silently ran a fleet at the default while
+// its manifest said something else is exactly the divergence that gets debugged from a
+// bandwidth graph weeks later.
+string? aoiRadiusRaw = GetArg(args, "--aoi-radius") ?? Env(GameServer.Server.AoiSettings.EnvVar);
+
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
-bool enableEnemySpawner = Env("GAMESERVER_ENEMIES") != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
+bool enableEnemySpawner = Env(ServerEnv.Enemies) != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
 int loadTestEntities = int.TryParse(
     GetArg(args, "--loadtest-entities") ?? Env("LOADTEST_ENTITIES"), out var lte) ? lte : 0;
 // Nakama integration: server-to-server RPC for economy + leaderboard
 string? nakamaUrl = Env("NAKAMA_URL"); // e.g. http://rpg-nakama:7350
 string nakamaHttpKey = Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey";
+// Path to a PEM certificate to PIN for the Nakama hop, when that hop runs Nakama's own
+// TLS with a certificate no CA signed (ADR-24). Unset means .NET's own validation, which
+// is right for http:// and for an https:// Nakama holding a CA-issued certificate -- and
+// which correctly refuses a self-signed one. There is no accept-anything setting, here or
+// anywhere else in this system (ADR-24 decision 4).
+string? nakamaTlsPinPath = Env("NAKAMA_TLS_PIN");
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 // Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
 // is distributed to every game-server pod, so a compromised pod must not be able to
@@ -136,7 +158,7 @@ string metricsAddr = GetArg(args, "--metrics-addr")
 string? gameDbUrl = GetArg(args, "--game-db-url") ?? Env("GAME_DB_URL");
 // Migrate-only mode: apply pending schema migrations, then exit without listening.
 // CD runs this before the deploy step so migrations happen at a deterministic point.
-bool migrateOnly = HasFlag(args, "--migrate-only") || Env("GAMESERVER_MIGRATE_ONLY") == "true";
+bool migrateOnly = HasFlag(args, "--migrate-only") || Env(ServerEnv.MigrateOnly) == "true";
 // Redis holding the server registry the gateway reads. Unset -> no self-registration
 // (single-process / test default), and the gateway will not find this server.
 string? redisAddr = GetArg(args, "--redis") ?? Env("REDIS_ADDR");
@@ -144,7 +166,7 @@ string? redisPassword = GetArg(args, "--redis-password") ?? Env("REDIS_PASSWORD"
 // Realtime transport for the gameplay hop: "tcp" (default) or "kcp". Matches Go's
 // --transport flag; the value is also what gets advertised to clients through the
 // registry, so it must describe what the listener actually speaks.
-string transport = TransportKind.Normalize(GetArg(args, "--transport") ?? Env("GAMESERVER_TRANSPORT"));
+string transport = TransportKind.Normalize(GetArg(args, "--transport") ?? Env(ServerEnv.Transport));
 // Pre-shared AES-256 key for KCP. The SAME variable and the same derivation as the
 // Go side (backend/shared/transport): 64 hex chars are used verbatim, anything else
 // is stretched with HKDF-SHA256. Empty = plaintext.
@@ -153,7 +175,7 @@ string transportKey = Env(TransportKind.KeyEnvVar) ?? "";
 // MsgEnterWorldResp.ServerAddr, so it must be dialable BY THE CLIENT — which is not
 // the listen address whenever a container maps ports (listen :9000, clients reach
 // <host>:9200). Falls back to the listen address, which is correct for host mode.
-string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR") ?? addr;
+string publicAddr = GetArg(args, "--public-addr") ?? Env(ServerEnv.PublicAddr) ?? addr;
 // HOST ONLY, and Agones only. Replaces the host part of the address read from the Agones
 // GameServer status while the PORT still comes from that status, because under
 // portPolicy: Dynamic only Agones knows the port.
@@ -169,14 +191,28 @@ string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR
 //
 // Exactly one of them applies to any given deployment. Setting this one with Agones off
 // does nothing at all — see the start-up warning below.
-string? advertiseHost = GetArg(args, "--advertise-host") ?? Env("GAMESERVER_ADVERTISE_HOST");
+string? advertiseHost = GetArg(args, "--advertise-host") ?? Env(ServerEnv.AdvertiseHost);
 // Hold the registry entry back until Agones reports this GameServer Allocated, instead of
 // publishing it right after Ready. OFF by default: a fleet that has not been migrated must
 // behave exactly as it did before this option existed. Agones only — with no sidecar there
 // is no allocation to wait for, and gating on one would mean never registering (the server
 // logs and ignores it in that case).
 bool registerOnAllocated =
-    HasFlag(args, "--register-on-allocated") || Env("GAMESERVER_REGISTER_ON_ALLOCATED") == "true";
+    HasFlag(args, "--register-on-allocated") || Env(ServerEnv.RegisterOnAllocated) == "true";
+
+// The bounded join deadline for an instanced dungeon (ADR-26). A dungeon pod that is
+// allocated and then never joined would otherwise sit Allocated forever — Agones does not
+// reclaim an Allocated pod — and the replica is lost until an operator releases it by hand.
+// Seconds; 0 disables it. Dungeon mode only; ignored on a map server. See
+// ServerOptions.DungeonJoinDeadline for why the default is 90s and not the 30s join-token TTL.
+TimeSpan joinDeadline =
+    double.TryParse(
+        GetArg(args, "--join-deadline-seconds") ?? Env(ServerEnv.JoinDeadlineSeconds),
+        System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture,
+        out var jds) && jds >= 0
+        ? TimeSpan.FromSeconds(jds)
+        : ServerOptions.DefaultDungeonJoinDeadline;
 
 // ── Logging ──
 
@@ -187,12 +223,129 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 });
 var logger = loggerFactory.CreateLogger("Program");
 
+if (!GameServer.Server.AoiSettings.TryCreate(
+        aoiRadiusRaw, mapWidth, mapHeight,
+        out GameServer.Server.AoiSettings? aoiParsed, out string? aoiError))
+{
+    // Same fail-fast rule as the simulation rates below, for the same reason.
+    // Validated here rather than beside the other parsing because it needs a logger and
+    // the startup banner needs it: a value refused after the banner has already claimed a
+    // configuration is a value the operator reads twice and believes the first time.
+    logger.LogCritical("invalid area-of-interest configuration: {Error}", aoiError);
+    return 2;
+}
+
+GameServer.Server.AoiSettings aoi = aoiParsed!;
+
+// Enemy AI. Same fail-fast rule, and for the sharpest version of the reason: these knobs
+// decide how many entities exist and where they go, so a value that silently fell back to
+// its default gives the operator the fight they were trying to change while every counter
+// on /status reports a healthy server. Parsed here, before the banner, so the banner
+// cannot claim a configuration that was refused.
+if (!GameServer.Scaffolding.EnemyAiSettings.TryCreate(
+        Env,
+        Shared.GameLogic.Components.MapBounds.FromSize(mapWidth, mapHeight),
+        out GameServer.Scaffolding.EnemyAiSettings? enemyAiParsed, out string? enemyAiError))
+{
+    logger.LogCritical("invalid enemy AI configuration: {Error}", enemyAiError);
+    return 2;
+}
+
+GameServer.Scaffolding.EnemyAiSettings enemyAi = enemyAiParsed!;
+
+// Synthetic players. Default OFF (GAMESERVER_BOTS unset or 0), so a normal deployment is
+// untouched; same strict parse as everything else here.
+if (!GameServer.Scaffolding.BotSettings.TryCreate(
+        Env,
+        Shared.GameLogic.Components.MapBounds.FromSize(mapWidth, mapHeight),
+        out GameServer.Scaffolding.BotSettings? botsParsed, out string? botsError))
+{
+    logger.LogCritical("invalid bot configuration: {Error}", botsError);
+    return 2;
+}
+
+GameServer.Scaffolding.BotSettings bots = botsParsed!;
+
+if (!GameServer.Server.ImportanceSettings.TryCreate(
+        GetArg(args, "--importance") ?? Env(GameServer.Server.ImportanceSettings.EnvVar),
+        Env,
+        out GameServer.Server.ImportanceSettings? importanceParsed, out string? importanceError))
+{
+    // Fail fast for the same reason as the rates and the AOI radius: a server whose
+    // replication policy silently differs from the manifest that deployed it is a server
+    // nobody can reason about from the outside.
+    logger.LogCritical("invalid replication-importance configuration: {Error}", importanceError);
+    return 2;
+}
+
+GameServer.Server.ImportanceSettings importance = importanceParsed!;
+
+if (!GameServer.Server.ReplicationSchedule.TryCreate(
+        GetArg(args, "--replication-schedule") ?? Env(GameServer.Server.ReplicationSchedule.EnvVar),
+        importance.Enabled,
+        // The raw configured rates: a schedule's bands only mean something next to the rate
+        // that serves them, and at some rates they collapse into one. SimulationRates has
+        // not validated these yet, so the gate skips unusable values rather than shadowing
+        // the rate validator's own message.
+        criticalHz,
+        worldHz,
+        out GameServer.Server.ReplicationSchedule? scheduleParsed, out string? scheduleError))
+{
+    logger.LogCritical("invalid replication schedule: {Error}", scheduleError);
+    return 2;
+}
+
+GameServer.Server.ReplicationSchedule replicationSchedule = scheduleParsed!;
+
+// Field-level delta kill switch. Parsed strictly rather than with the usual
+// `Env("X") != "false"` shape, because that idiom reads every typo as ON: an operator who
+// writes GAMESERVER_FIELD_DELTA=off gets the feature they were trying to disable, and the
+// measurement they took to compare against it is quietly of the same arm twice. This is a
+// toggle whose entire purpose is producing an honest control, so a value it does not
+// understand is a configuration error, not a default.
+string? fieldDeltaRaw = GetArg(args, "--field-delta") ?? Env(ServerEnv.FieldDelta);
+bool fieldDelta;
+switch (fieldDeltaRaw?.Trim().ToLowerInvariant())
+{
+    case null or "":
+    case "1" or "true" or "on" or "yes":
+        fieldDelta = true;
+        break;
+    case "0" or "false" or "off" or "no":
+        fieldDelta = false;
+        break;
+    default:
+        logger.LogCritical(
+            "invalid GAMESERVER_FIELD_DELTA {Value}: expected one of on/true/1/yes or off/false/0/no",
+            fieldDeltaRaw);
+        return 2;
+}
+
+
 // Resolved once so a bad AGONES_SDK_HTTP_PORT warns once rather than in both the
 // start-up banner and the SDK constructor. Meaningless when useAgones is false.
 int agonesPort = useAgones ? HttpAgonesSdk.ResolvePort(logger) : HttpAgonesSdk.DefaultPort;
 
 logger.LogInformation("GameServer .NET starting");
 logger.LogInformation("  Mode:      {Mode}", mode);
+if (GameServerHost.IsDungeonMode(mode) && explicitMapId == null)
+{
+    logger.LogWarning(
+        "  Dungeon mode with no map id configured, so the default '{MapId}' applies. This " +
+        "is expected on a dungeon fleet, which pins no GAMESERVER_MAP_ID: the value is " +
+        "recorded in this pod's servers:id: hash and NOWHERE ELSE. A dungeon server does " +
+        "not join servers:map:, so it cannot be found by map lookup and cannot become a " +
+        "second live server for '{MapId}' (ADR-26 decision 8).",
+        mapId, mapId);
+}
+if (GameServerHost.IsDungeonMode(mode))
+{
+    logger.LogInformation(
+        joinDeadline > TimeSpan.Zero
+            ? "  Join deadline: {Deadline}s — an instance whose party never arrives releases itself (ADR-26)"
+            : "  Join deadline: DISABLED — an instance whose party never arrives will hold its Agones allocation forever (ADR-26)",
+        joinDeadline.TotalSeconds);
+}
 logger.LogInformation("  Address:   {Addr}", addr);
 logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
     transport == TransportKind.Kcp
@@ -210,6 +363,55 @@ logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
     : "full every tick (delta disabled)");
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
+logger.LogInformation("  AOI:       {Aoi}", aoi);
+logger.LogInformation(
+    "  Enemies:   {Enemies}",
+    enableEnemySpawner ? enemyAi.ToString() : "OFF (GAMESERVER_ENEMIES=false)");
+logger.LogInformation("  Bots:      {Bots}", bots);
+if (bots.Enabled)
+{
+    // Said once, loudly, at the moment it becomes true. Bots are player-type entities, and
+    // somebody reading a player count or a snapshot without knowing they are on will
+    // conclude the server has users it does not have.
+    logger.LogWarning(
+        "{Count} SYNTHETIC PLAYERS are active (GAMESERVER_BOTS). They are real player " +
+        "entities in the world and in every snapshot — enemies chase them, clients render " +
+        "them, and they attack. They are NOT persisted, hold no connection and occupy no " +
+        "capacity, so `players_online` counts real clients only and will read lower than " +
+        "the map looks. This is a development and demo setting.",
+        bots.Count);
+
+    if (enableEnemySpawner)
+    {
+        // The compounding effect, computed rather than left to be discovered from a
+        // snapshot size: bots are players to the enemy spawner, so the cap they buy is the
+        // per-player allowance times the whole synthetic population.
+        logger.LogWarning(
+            "With those bots the enemy population cap is {Cap} before a single real player " +
+            "joins ({Base} + {PerPlayer} x {Bots}). Lower GAMESERVER_ENEMY_MAX_PER_PLAYER if " +
+            "that is more world than this box or this map should carry.",
+            enemyAi.EffectiveMaxEnemies(bots.Count), enemyAi.MaxEnemies,
+            enemyAi.MaxEnemiesPerPlayer, bots.Count);
+    }
+}
+logger.LogInformation("  Importance:{Importance}", " " + importance);
+logger.LogInformation("  Schedule:  {Schedule}", replicationSchedule.Describe(worldHz));
+logger.LogInformation(
+    "  FieldDelta: {FieldDelta}",
+    fieldDelta
+        ? "on — unchanged fields suppressed for protocol-2 protobuf clients"
+        : "OFF — every field sent on every entity (GAMESERVER_FIELD_DELTA)");
+if (aoi.CoversWholeMap)
+{
+    // Not a refusal: legitimate in a small dungeon instance, a mistake on an open map, and
+    // the server cannot tell which it is looking at. Said once, at the moment it becomes
+    // true, rather than left to be inferred from a bandwidth graph.
+    logger.LogWarning(
+        "AOI radius {Radius} reaches every corner of a {Width}x{Height} map, so interest " +
+        "management filters nothing: every entity appears in every snapshot for every " +
+        "client, and downstream bandwidth is O(entities x players).",
+        aoi.Radius, mapWidth, mapHeight);
+}
 logger.LogInformation("  Agones:    {Agones}", useAgones
     ? $"HTTP sidecar at localhost:{agonesPort}"
     : "disabled (no-op SDK)");
@@ -226,7 +428,69 @@ logger.LogInformation("  Register:  {Register}",
         : registerOnAllocated
             ? "at startup (GAMESERVER_REGISTER_ON_ALLOCATED set but Agones is disabled -- IGNORED)"
             : "at startup, right after Ready (default)");
+// ── The Nakama hop's trust decision (ADR-24) ──
+//
+// Three settings have to agree and none of them implies another: whether Nakama
+// terminates TLS, whether NAKAMA_URL says https, and whether this server has the
+// certificate. Every disagreement below is refused or named out loud rather than
+// discovered as a reward RPC that silently stopped working.
+bool nakamaIsHttps = nakamaUrl is not null &&
+    nakamaUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+HttpMessageHandler? nakamaHttpHandler = null;
+string nakamaTrust = "n/a";
+
+if (!string.IsNullOrWhiteSpace(nakamaTlsPinPath))
+{
+    if (string.IsNullOrWhiteSpace(nakamaUrl))
+    {
+        logger.LogWarning("NAKAMA_TLS_PIN is set but NAKAMA_URL is not -- there is no Nakama hop to pin. Ignored.");
+    }
+    else if (!nakamaIsHttps)
+    {
+        // Refused, not downgraded. A pin against a plaintext URL is an operator who
+        // believes this hop is protected and is wrong about it, and the whole point of
+        // ADR-24's "set together or not at all" is that half-configured fails loudly.
+        logger.LogCritical(
+            "NAKAMA_TLS_PIN is set but NAKAMA_URL is '{Url}', which is not https -- refusing to start. " +
+            "Pinning a certificate on a plaintext hop protects nothing while reading as though it does. " +
+            "Move NAKAMA_URL to https:// (Nakama must be running NAKAMA_TLS_CERT/_KEY), or unset the pin.",
+            nakamaUrl);
+        return 2;
+    }
+    else
+    {
+        try
+        {
+            byte[] pin = GameServer.Nakama.NakamaTlsPin.LoadDerFromPemFile(nakamaTlsPinPath);
+            nakamaHttpHandler = GameServer.Nakama.NakamaTlsPin.CreatePinnedHandler(pin);
+            nakamaTrust = $"pinned to {nakamaTlsPinPath} (sha256:{GameServer.Nakama.NakamaTlsPin.Fingerprint(pin)})";
+        }
+        catch (Exception ex)
+        {
+            // Fatal rather than a fall back to platform validation. Falling back would be
+            // the safe DIRECTION -- it refuses a self-signed Nakama -- but it turns "your
+            // pin file is wrong" into "every reward RPC fails with a certificate error",
+            // which is a much longer walk to the same answer.
+            logger.LogCritical(ex,
+                "NAKAMA_TLS_PIN='{Path}' could not be loaded -- refusing to start.", nakamaTlsPinPath);
+            return 2;
+        }
+    }
+}
+else if (nakamaIsHttps)
+{
+    nakamaTrust = "platform trust store (no NAKAMA_TLS_PIN) -- a self-signed Nakama WILL be refused";
+}
+else if (!string.IsNullOrWhiteSpace(nakamaUrl))
+{
+    nakamaTrust = "none -- PLAINTEXT hop, the http_key crosses it in a URL query string";
+}
+
 logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
+if (!string.IsNullOrWhiteSpace(nakamaUrl))
+{
+    logger.LogInformation("  NakamaTLS: {Trust}", nakamaTrust);
+}
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
     string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
@@ -427,6 +691,34 @@ else
         "(GAMESERVER_SEALED defaults to \"require\"); something set it to \"off\" for this process.");
 }
 
+// ── Per-pod identity (ADR-25) ──
+//
+// Generated here, once, in memory. NOT read from configuration and NOT persisted: there is
+// deliberately no flag, no environment variable and no file path that can supply one,
+// because the moment such a path exists somebody mounts a fleet-wide private key into the
+// process most exposed to player-controlled input. Rotation is pod replacement -- the Fleet
+// already does it on every scale, rollout and crash -- so there is nothing to roll here.
+//
+// Unconditional, not gated on `sealedRequirement`. The key is cheap, and publishing it even
+// when this listener is not sealing keeps the registry entry uniform, so a gateway never has
+// to explain why one entry has the field and another does not.
+var serverIdentity = GameServer.Net.Sealed.ServerIdentity.Generate();
+
+// Logged at every boot, like the transport and sealed postures, because a claim about
+// identity that is not visible in the log is a claim nobody can check against a live pod.
+// The line states the limit as well as the fact: this key reaches the client over the
+// gateway hop, and while that hop is plaintext (ADR-23's TLS is implemented and off
+// everywhere) a client that checks the signature has learned that its peer holds THIS key,
+// not that this key is ours. An attacker on the client's path substitutes it in
+// enter_world_resp and forges a signature that verifies.
+logger.LogInformation(
+    "Server identity: ed25519 {IdentityKey} -- generated for THIS POD at startup, never persisted, dies with the " +
+    "process. Published to the registry as identity_key and handed to clients in enter_world_resp. A client can " +
+    "verify the sealed handshake signature with it, but that proves the gameplay peer holds this key -- it is only " +
+    "an identity guarantee once the gateway hop that delivers the key is itself authenticated (ADR-23 TLS, off " +
+    "everywhere today). See ADR-25 decision 6.",
+    serverIdentity.PublicKeyBase64);
+
 if (string.IsNullOrEmpty(jwtSecret))
 {
     logger.LogWarning("JWT_SECRET not set -- token validation will reject all tokens in production");
@@ -505,8 +797,8 @@ try
 {
     content = ContentLoader.Load(contentDir);
     logger.LogInformation(
-        "Content loaded from {Dir}: {Items} items, hash {Hash}",
-        contentDir, content.Database.ItemCount, content.Hash);
+        "Content loaded from {Dir}: {Items} items, {Abilities} abilities, hash {Hash}",
+        contentDir, content.Database.ItemCount, content.Database.AbilityCount, content.Hash);
 }
 catch (ContentLoadException ex)
 {
@@ -568,7 +860,10 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
             PublicAddr = publicAddr,
             Transport = transport,
             Capacity = capacity,
-            Ttl = RegistryDefaults.HeartbeatTtl
+            Ttl = RegistryDefaults.HeartbeatTtl,
+            // ADR-25. Rebuilt into every registration AND every heartbeat repair, so an
+            // entry that Redis lost and the loop re-created is never missing the key.
+            IdentityKey = serverIdentity.PublicKeyBase64
         };
     }
     catch (Exception ex)
@@ -623,6 +918,13 @@ IAgonesSdk agonesSdk = useAgones
 
 // ── Build server options ──
 
+// The enemy phase, once the factory below has built it. Captured so /status can publish
+// what enemy-side combat has actually done: the counters live on the phase, and the phase
+// is created inside the server's constructor because it needs the world the server owns.
+// Null while the server is being constructed and for a build with GAMESERVER_ENEMIES=false,
+// which the status assembly reads as zero rather than as a missing field.
+GameServer.Scaffolding.EnemySpawner? enemyPhase = null;
+
 var options = new ServerOptions
 {
     ServerAddr = addr,
@@ -639,11 +941,20 @@ var options = new ServerOptions
     Capacity = capacity,
     MaxPendingHandshakes = maxPendingHandshakes,
     MinProtocolVersion = minProtocolVersion,
+    // The same database the /content endpoint serves. Abilities have to resolve against
+    // exactly the set the client downloaded, or a cast the client believes in is refused as
+    // "unknown ability" — the hash on both sides is what makes that checkable.
+    Content = content.Database,
     HandshakeTimeout = TimeSpan.FromMilliseconds(handshakeTimeoutMs),
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,
     MaxSnapshotBytes = maxSnapshotBytes,
+    Aoi = aoi,
+    Importance = importance,
+    ReplicationSchedule = replicationSchedule,
+    FieldDelta = fieldDelta,
     SealedTransport = sealedRequirement,
+    ServerIdentity = serverIdentity,
     JwtSecret = jwtSecret,
     JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
@@ -652,6 +963,7 @@ var options = new ServerOptions
     AgonesSdk = agonesSdk,
     AdvertiseHost = advertiseHost,
     RegisterOnAllocated = registerOnAllocated,
+    DungeonJoinDeadline = joinDeadline,
     // Redis Streams when REDIS_ADDR is configured (RedisEventStream XADDs into
     // `events:game`, the stream the gateway's relay consumes — ADR-5); Noop
     // otherwise, and cross-server events are generated (entity_killed) and then
@@ -663,10 +975,32 @@ var options = new ServerOptions
     Registration = registrationOptions,
     // The composition root decides what the game is. The core host only knows it has
     // a phase to tick; see ISimulationPhase.
+    // Enemies and bots compose; the load-test spawner still does not, because it tags its
+    // entities EnemyAi and would be chased and reaped by the enemy systems it replaces.
+    // Captured so /status can publish what enemy-side combat has actually done. The phase
+    // is built by the factory below, inside the server's constructor, so there is no
+    // instance to read until then — and nothing reads this before the server is running.
     SimulationPhaseFactory = loadTestEntities > 0
         ? (world, loggerFactory, onGroupRan) => new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan)
-        : enableEnemySpawner
-            ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan)
+        : (enableEnemySpawner || bots.Enabled)
+            ? (world, loggerFactory, onGroupRan) =>
+            {
+                var phases = new List<GameServer.Server.ISimulationPhase>(2);
+                if (enableEnemySpawner)
+                {
+                    enemyPhase = new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan, enemyAi);
+                    phases.Add(enemyPhase);
+                }
+                if (bots.Enabled)
+                {
+                    // After the enemies, so the brain aims at this tick's world — see
+                    // CompositeSimulationPhase.
+                    phases.Add(new GameServer.Scaffolding.BotPlayerSpawner(world, simulationRates, bots, loggerFactory.CreateLogger<GameServer.Scaffolding.BotPlayerSpawner>(), onGroupRan));
+                }
+                return phases.Count == 1
+                    ? phases[0]
+                    : new GameServer.Scaffolding.CompositeSimulationPhase(phases.ToArray());
+            }
             : null,
     // The composition root is the one place allowed to know what the game is, so it is
     // where the status endpoint's entity count comes from. The JSON field stays
@@ -674,8 +1008,18 @@ var options = new ServerOptions
     StatusEntityCount = (loadTestEntities > 0 || enableEnemySpawner)
         ? static world => world.CountWith<GameServer.World.Components.EnemyAi>()
         : null,
+    StatusBotCount = bots.Enabled
+        ? static world => world.CountWith<GameServer.Scaffolding.BotTag>()
+        : null,
+    // From the WORLD's player entities, never from the connection count: bots are player
+    // entities the cap scales on and connections they are not, so the two differ by the
+    // whole synthetic population.
+    StatusEnemyCap = enableEnemySpawner
+        ? world => enemyAi.EffectiveMaxEnemies(world.CountWith<GameServer.World.Components.PlayerTag>())
+        : null,
     NakamaUrl = nakamaUrl,
-    NakamaHttpKey = nakamaHttpKey
+    NakamaHttpKey = nakamaHttpKey,
+    NakamaHttpHandler = nakamaHttpHandler
 };
 
 // ── Graceful shutdown on SIGINT / SIGTERM ──
@@ -760,17 +1104,35 @@ metricsEndpoint?.SetStatusProvider(() =>
         AchievedTickHz = server.AchievedTickHz,
         CurrentTick = server.CurrentTick,
         PlayersOnline = metrics.PlayersOnline,
+        // From the ConnectionManager, NOT from PlayersOnline: publishing a derived copy
+        // would make the two agree by construction and destroy the only signal that says
+        // one of them is wrong (#401).
+        Connections = server.Connections,
         Capacity = capacity,
         Entities = server.EntityCount,
         EnemiesAlive = server.EnemiesAlive,
+        PlayerSavesOk = metrics.PlayerSavesOk,
+        PlayerSavesError = metrics.PlayerSavesError,
+        PlayerSaveErrorRatio = metrics.PlayerSaveErrorRatio,
         AttacksReceived = server.AttackStats.Received,
         AttacksUnresolved = server.AttackStats.Unresolved,
         AttacksRejected = server.AttackStats.Rejected,
         AttacksAccepted = server.AttackStats.Accepted,
+        AttackRateViolations = server.AttackRates.Violations,
         AttackKills = server.AttackStats.Kills,
         LastAttackRejection = server.AttackStats.LastRejection,
+        // CONFIGURED, not reachable -- see the note on EventStream below and #407.
         Redis = serverRegistry != null ? "connected" : "disconnected",
+        // CONFIGURED, not healthy. These two are null checks on objects built at startup:
+        // once the handle exists they answer the same thing for the life of the process,
+        // whatever happens to the dependency. Read `event_stream_health` for health (#407).
         EventStream = redisEventStream != null ? "redis" : "noop",
+        EventStreamHealth =
+            redisEventStream == null ? "disabled"
+            : redisEventStream.ConsecutiveFailures > 0 ? "failing"
+            : redisEventStream.Published > 0 ? "ok"
+            : "idle",
+        EventStreamConsecutiveFailures = redisEventStream?.ConsecutiveFailures ?? 0,
         EventsDropped = redisEventStream?.Dropped ?? 0,
         EventPublishFailures = redisEventStream?.PublishFailures ?? 0,
         KickConsumer = kickConsumer != null ? "redis" : "disabled",
@@ -817,8 +1179,26 @@ metricsEndpoint?.SetStatusProvider(() =>
             })
             .ToList(),
         MaxSnapshotBytes = maxSnapshotBytes,
+        AoiRadius = aoi.Radius,
+        AoiCoversWholeMap = aoi.CoversWholeMap,
+        ImportanceProfile = importance.Profile,
+        ImportanceWeights = importance.ToString(),
+        ReplicationSchedule = replicationSchedule.Describe(worldHz),
+        EnemyAi = enableEnemySpawner ? enemyAi.ToString() : "off",
+        EnemyAiMaxNow = server.EnemyCapNow,
+        EnemyAttacksDecided = enemyPhase?.Attacks.Decided ?? 0,
+        EnemyAttacksThrottled = enemyPhase?.Attacks.Throttled ?? 0,
+        PlayerRespawns = enemyPhase?.Attacks.Respawns ?? 0,
+        Bots = bots.ToString(),
+        BotsAlive = server.BotsAlive,
+        FieldDelta = fieldDelta,
+        SnapshotDeferredByInterval = metrics.SnapshotDeferredByInterval,
+        SnapshotMaxStateAge = metrics.MaxStateAge,
         SnapshotBytes = metrics.SnapshotBytes,
         SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
+        SnapshotAnchorMissing = metrics.SnapshotAnchorMissing,
+        SnapshotEntitiesGathered = metrics.SnapshotEntitiesGathered,
+        SnapshotMaxGather = metrics.MaxGather,
         SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,
         SnapshotMaxShedAge = metrics.MaxShedAge,
         TransfersRejected = metrics.TransfersRejected,

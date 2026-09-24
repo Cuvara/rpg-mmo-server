@@ -24,6 +24,16 @@
 > was withdrawn on re-run. **The mobile bandwidth ceiling is still only ~93
 > players, and that, not the tick ceiling, is what should size a fleet.**
 
+> **⚠️ SUPERSEDED, 2026-09-24 — the two boxes above tell you to size a fleet on
+> bandwidth at ~93 players. Do not.** Both were written during Part II, before id
+> interning. ADR-7's `⛔ CURRENT STATE (2026-08-07, final)` block is the authority
+> and says the opposite: downstream bandwidth is **solved**, its **ceiling is above
+> 200 and no longer bracketed**, and **tick time is what binds now** — at a ceiling
+> that is UNKNOWN and unknowable on this machine. This file's own ADR-7 threshold
+> table already marks the bandwidth figure *"SUPERSEDED — now passes above 200"*;
+> the summary boxes were never updated to match. Quote ADR-7's block, not them.
+> See `CORE-BASELINE-V1.md` §2 and issue #205.
+
 > **⚠️ The ~150-player figure in Part I is STALE.** It predates Protobuf, the
 > entity-type enum and id interning — three changes that removed 81% of the wire
 > and with it the constraint that produced 150. **The current tick ceiling is
@@ -2474,3 +2484,700 @@ returns on `ackTick <= 0`, so the latency estimate is not poisoned by the gap ei
 > covered by the measurement above, but it is a local invariant, not a third-party one,
 > which is precisely why conditions 1 and 2 are not optional.
 
+---
+
+## Part XIII — the pre-importance baseline, and a harness that had been grading against the wrong number (2026-09-18)
+
+Taken on `develop@3378bc9` as the control for importance-driven replication work.
+Raw results: [`loadtest/results/2026-09-18-develop-3378bc9/`](../loadtest/results/2026-09-18-develop-3378bc9/).
+
+Dedicated bench server, Release build run directly rather than through a container:
+`GAMESERVER_ENEMIES=false`, capacity 2000, no registry, TCP, sealed off, `SIM 60/15/5`.
+`-join direct`, `-encoding proto`, 4 levels x 3 repeats per movement mode, 35 s measure
+after 8 s settle, ramp 20/s, `-cooldown 40s` between levels (it has to exceed the 30 s
+entity hold, or the next level starts against a world still holding the previous level's
+disconnected players and the validity gate trips).
+
+### 30. The harness was grading against a budget four times too generous
+
+Before any number below can be read, the instrument had to be fixed. One package constant,
+`TickBudget = 1/15s = 66.67ms`, served two independent rates:
+
+- `gameserver_tick_duration_seconds` times a **base** tick, which runs at
+  `SIM_CRITICAL_HZ`. At the 60 Hz default the budget is **16.67 ms**. A server spending
+  40 ms per base tick — 2.4x over — was reported as comfortably passing, and the header
+  printed `tick budget 66.67ms @ 15Hz` for a server that had not run at 15 Hz since the
+  default changed. Part VI recorded this on 2026-08-15 and nothing acted on it.
+- Narrowing that constant to 1/60 would have introduced a louder defect, because the same
+  number also bounded **snapshot cadence**, which is governed by `SIM_WORLD_HZ` —
+  replication is gated to the world group (ADR-13 decision 7). Every level in every sweep
+  would then have failed for delivering snapshots every 66.7 ms, which is exactly when they
+  are supposed to arrive. **The fix is two numbers, not a corrected one.**
+
+Both are now read off the game server's own `/status` at the start of each run and recorded
+in the result (`tick_budget_sec`, `snapshot_period_sec`, `sim_critical_hz`, `sim_world_hz`,
+`rates_source`). `Evaluate` reads them off the Result rather than a constant, so a sweep
+loaded from disk evaluates to the verdict it had when it was taken, and the 12 archived
+result files that predate the fields still evaluate exactly as they always did. A run that
+could not reach `/status` says `rates from ASSUMED (...)` in its header.
+
+**Every tick verdict in Parts I–XII was taken against the old constant.** Their bandwidth
+figures stand; their tick verdicts at any configuration other than single-rate do not.
+
+### 31. Measured — `cluster` (worst case: every entity in every other entity's AOI)
+
+| players | pass | tick p99 median | tick p99 min..max | **KB/s/client** | B/entity/snapshot |
+|---|---|---|---|---|---|
+| 50 | 3/3 | 0.5 ms | 0.5..0.5 | **18.7** | 24.92 |
+| 100 | 3/3 | 0.9 ms | 0.9..1.7 | **37.1** | 24.77 |
+| 150 | 3/3 | 2.4 ms | 2.4..2.5 | **56.0** | 24.87 |
+| 200 | 3/3 | 4.5 ms | 3.3..5.8 | **75.0** | 25.00 |
+
+### 32. Measured — `spread` (players dispersed over the map)
+
+| players | pass | tick p99 median | tick p99 min..max | **KB/s/client** |
+|---|---|---|---|---|
+| 50 | 3/3 | 0.5 ms | 0.5..0.5 | **10.7** |
+| 100 | 3/3 | 0.7 ms | 0.6..1.5 | **20.2** |
+| 150 | 3/3 | 2.1 ms | 2.0..2.5 | **28.6** |
+| 200 | 3/3 | 4.0 ms | 2.5..4.7 | **36.3** |
+
+24 of 24 runs valid, 24 of 24 passing. Ceiling: **at least 200** in both modes, unchanged
+from Part IX — but now measured against the real 16.67 ms base-tick budget, at which
+200 players in the worst case consumes **27 %** of it rather than the 5 % the old constant
+implied.
+
+### 33. Bytes per entity are flat, so downlink is exactly linear in AOI population
+
+24.77–25.00 B/entity/snapshot across a 4x population range in `cluster`, where every entity
+is in every AOI so the world population *is* the AOI population. That gives a model with no
+fitted terms:
+
+```
+KB/s per client  =  AOI population  x  24.9 B  x  SIM_WORLD_HZ / 1000
+```
+
+At 200 players: `200 x 24.9 x 15 = 74.7`, measured **75.0** — 0.4 % out.
+
+Three factors, and every possible saving has to come out of one of them. Nothing else on the
+server moves this number.
+
+The `spread` column is **half** the `cluster` column at 200 players (36.3 against 75.0),
+which is the same model with a smaller first term rather than a different effect.
+
+### 34. Bandwidth is up 19 % since Part IX, and the wire schema explains it
+
+| | Part IV (2026-08-07) | Part IX (2026-09-07) | this run |
+|---|---|---|---|
+| B/entity/snapshot | 15.7 | 21.0 | **24.9** |
+
+`29aa8d9 feat(wire): per-entity facing and action state` is reachable from `3378bc9` and not
+from Part IX's `c05f715`, and `SnapshotByteIdentityTests` records its digests being
+rebaselined for `facing_brad` and `action` on 2026-09-09 — two days after Part IX was
+measured. A `facing_brad` varint (tag + 1–3 bytes) plus an `action` varint (tag + 1) is the
+whole +3.9 B gap.
+
+**This is a correlation from the commit log with a mechanism that fits, not an isolated
+measurement** — the same standing Part IX gave its own +34 %. The honest test is a two-arm
+run of `c05f715` against `3378bc9` from one generator, and it has not been done.
+
+What is measured is the consequence. ADR-7's `< 50 KB/s` mobile threshold now sits at
+roughly **134 players** on a worst-case cluster (`50000 / (24.9 x 15)`), against the ~160
+Part IX reported. On `spread` it sits above 270 and the server is inside budget at 200.
+
+### 35. What importance-driven replication intervals would save, measured before building them
+
+`GameServer.Tests/Bench/ImportanceIntervalBench.cs` runs the **real** `SnapshotDeltaState`
+twice over one synthetic population — once as today, once with the candidate set filtered by
+a distance- and type-tiered interval policy. No production code changes; the policy lives in
+the bench. A deferred entity is **substituted with its last-sent values, never removed** from
+the gathered span: removing it would make the encoder conclude it left the AOI and emit a
+despawn, which is both wrong and more expensive than the update it was skipping.
+
+| shape | population | B/ent/snap today | tiered | **saving** | staleness max | tier mix 1/2/4 |
+|---|---|---|---|---|---|---|
+| cluster | 200 | 31.32 | 31.32 | **0.0 %** | 0 | 100/0/0 |
+| spread | 200 | 31.23 | 21.77 | **30.3 %** | 1 tick | 36/64/0 |
+| realistic | 360 | 14.56 | 8.10 | **44.4 %** | 3 ticks | 13/30/57 |
+| realistic | 720 | 14.65 | 7.86 | **46.3 %** | 3 ticks | 12/32/56 |
+
+Only within-bench ratios are quotable: the bench divides message bytes by AOI observations
+and §31 divides client receive bytes by world entities, so the absolute columns are not the
+same statistic.
+
+**`cluster` is 0.0 %, and that is the headline.** 200 players standing on each other are all
+near players, all tier 1; no weighting demotes any of them. **The shape that defines the
+published ceiling is the one shape an interval policy cannot improve.**
+
+**`realistic` is 44–46 %** at a bounded cost of 3 world ticks (200 ms) of staleness. Note its
+arm-A column is 14.6 B/entity against cluster's 31.3: two mobs in three stand still, and an
+idle entity is **already free** because the delta encoder omits anything unchanged. Roughly
+half of what looks like an importance win is delta suppression that already ships; the
+tiering halves what is left.
+
+`realistic` is a guess. This server's enemy AI is `Scaffolding/` — 30 mobs walking to the
+origin — so no measurement of this game's real population exists or can exist yet. The
+tier thresholds are one proposal.
+
+### 36. The conclusion the numbers force
+
+- **Where bandwidth binds, tiering does nothing.** Worst-case density is 75.0 KB/s and 0.0 %.
+- **Where tiering works, bandwidth does not bind.** `spread` is 36.3 KB/s at 200 players,
+  already inside ADR-7's budget before any change.
+- **The competing lever is bigger, already shipped, and free of staleness.**
+  `GAMESERVER_AOI_RADIUS` (Part XII's companion change) is a square law: 50 to 35 cuts the
+  population term by 51 %, with no scheduler, no per-connection state and no deferral.
+- **The untested lever is bigger still.** Of 24.9 B/entity, `hp`, `max_hp`, `speed` and
+  `type` are re-sent on every emission and change on none of them — roughly 11 B, or **44 %**,
+  on every entity in every population shape. That is an estimate from the schema, not a
+  measurement, and it is cheap to measure: count the bytes of unchanged fields in the
+  encoder without touching the wire.
+
+None of this says importance-driven replication is wrong. It says the case for it cannot be
+made from the bandwidth figure this document publishes, and that the work it justifies
+should be sequenced behind the two cheaper levers.
+
+---
+
+## Part XIV — what importance-driven replication actually costs and saves (2026-09-18)
+
+The A/B the previous part was taken as a control for. Same bench server, same generator,
+same protocol: 200 players, 3 repeats per arm, `-join direct -encoding proto`, TCP, 35 s
+measure after 8 s settle, `cooldown 40s`. Raw results:
+[`loadtest/results/2026-09-18-importance/`](../loadtest/results/2026-09-18-importance/).
+
+Two arms, one binary, one env var pair apart:
+
+```
+control:  GAMESERVER_IMPORTANCE=legacy    GAMESERVER_REPLICATION_SCHEDULE=off
+tiered:   GAMESERVER_IMPORTANCE=balanced  GAMESERVER_REPLICATION_SCHEDULE=tiered
+```
+
+### 37. The instrument was inert on the first attempt, and every test said it was fine
+
+The first run of this sweep reported `snapshot_deferred_by_interval = 0` on the tiered arm,
+with the banner and `/status` both printing the right bands. The schedule was converting
+configured milliseconds into **world** ticks and comparing them against
+`TickLoop.CurrentTick`, which advances at the **critical** rate — four times faster at
+60/15. `tick - lastSent >= 2` was true every time, so every entity was due on every
+snapshot and the feature did nothing.
+
+**All fourteen unit tests passed**, because every one of them fed the encoder a counter that
+advanced by 1 per snapshot: the exact assumption the production path breaks. So did an
+in-process probe, which deferred nearly twenty thousand entities from the same population
+shape. Two probes of one mechanism disagreeing is what exposed it; the number that was
+right was the one read off a running server.
+
+This is recorded here rather than only in the changelog because the failure shape is the
+point: **a rate conversion is only checkable against the clock the consumer actually
+reads**, and no amount of unit testing a converter finds a consumer reading a different
+clock.
+
+### 38. Measured
+
+| arm | KB/s/client | tick p99 | snapshot interval p99 | ack p99 | snapshots received |
+|---|---|---|---|---|---|
+| control · cluster | **80.9** | 7.38 ms | 79.1 ms | 73.2 ms | 100.1 % |
+| tiered · cluster | **42.6** | 4.56 ms | 76.1 ms | 71.0 ms | 100.0 % |
+| control · spread | **39.4** | 5.27 ms | 74.0 ms | 69.8 ms | 100.1 % |
+| tiered · spread | **20.8** | 3.96 ms | 73.7 ms | 68.8 ms | 100.0 % |
+
+```
+cluster   80.9 -> 42.6 KB/s   -47.3 %
+spread    39.4 -> 20.8 KB/s   -47.2 %
+```
+
+12 of 12 runs valid and passing in both arms.
+
+### 39. The cost is per-entity staleness, and it is NOT snapshot cadence
+
+Snapshot interval p99 is **unchanged** — 76.1 ms against 79.1 on cluster, 73.7 against 74.0
+on spread, all within run-to-run noise and all a clean 15 Hz. Ack latency likewise. The
+schedule does not skip snapshots; it omits entities from snapshots that ship anyway, so a
+client's clock, its interpolation buffer and its reconciliation anchor see exactly what they
+saw before.
+
+What does change is how stale one entity may be, and the server reports it:
+`snapshot_max_state_age` read **4 base ticks** — one snapshot period, 66.7 ms — on both
+tiered arms. Not four snapshot periods: an entity in the 133 ms band is deferred once, at
+age 4, and is due at 8.
+
+### 40. Read this before quoting the 47 %
+
+**The shipped `balanced` profile puts a merely-moving player in the 133 ms band.** Its score
+is distance 2 + type 3 = 5, under the 8 threshold that buys every-tick treatment, so
+**player positions replicate at 7.5 Hz rather than 15 Hz** unless the player's health or
+action changed — and those are edges, which are never deferred.
+
+That is where most of the 47 % comes from, and it is a **visual-quality decision**, not a
+technical detail. The client's interpolation buffer is 100 ms with 50 ms of extrapolation,
+so a 133 ms gap sits at its edge; the netcode `ImportanceIntervalProbe` shows the result is
+stair-stepping rather than freezing, but it shows it for distant mobs, not for the player
+two metres away.
+
+Putting players back on every tick costs **the entire saving** on both measured shapes —
+see §44, which sweeps it. The correct value is `GAMESERVER_IMPORTANCE_W_TYPE=7`, not the 6
+this section first named: at 6 a player still scores under 8 at every distance and nothing
+changes.
+
+### 41. Bandwidth is 8 % higher than Part XIII measured, and `action_seq` is why
+
+Part XIII's control read 75.0 KB/s on cluster and 36.3 on spread, against 80.9 and 39.4
+here. It was taken on `develop@3378bc9`, before `action_seq` (#365) merged; a `uint32`
+varint plus its tag on every entity of every snapshot is the whole gap. Consistent with
+Part XIII §34's own finding that `facing_brad` and `action` cost ~3.9 B/entity: this is the
+third such field and costs about 2.
+
+### 42. The in-process bench agrees, and did not until it was made to run the shipped policy
+
+`ImportanceIntervalBench` carried a **hand-written** interval policy, which gave a near
+player interval 1 — so on `cluster`, where every entity is a near player, it demoted nothing
+and reported **0.0 %**. The live sweep measured **−47.3 %** on the same server.
+
+Two measurements of one mechanism disagreeing by 47 points means at least one is measuring
+something else, and it was the bench: a policy nobody runs answers a question nobody asked.
+It now calls `ReplicationImportance.Score` and `ReplicationSchedule.Tiered` — the same two
+production types the encoder calls — and the two agree:
+
+| shape | bench | live sweep |
+|---|---|---|
+| cluster | 47.9 % | 47.3 % |
+| spread | 45.3 % | 47.2 % |
+| realistic (360) | 55.6 % | not measurable — this game has no such population |
+| realistic (720) | 57.8 % | — |
+
+The bench's tier histogram is the honest summary of what the profile does on a crowd:
+`cluster` is **0 / 100 / 0**. Every entity is in the middle band. Nothing is top tier,
+because nothing is changing health or swinging.
+
+### 43. Both still ship OFF
+
+Nothing here changes that. A 47 % bandwidth saving is worth having and the cost is bounded
+and measured — but the cost is player smoothness on a client whose interpolation this
+project has not re-measured since, and the two cheaper levers from Part XIII are untouched:
+the AOI radius is a square law that costs no staleness at all, and roughly 11 of every 24.9
+bytes is still `hp`, `max_hp`, `speed` and `type` re-sent unchanged on every emission.
+
+Turning it on is a one-line manifest edit, and it should follow a look at the game, not a
+table.
+
+### 44. Who actually pays for the 47 %
+
+§40 said player demotion was "where most of the saving comes from". Swept, it is where
+**all** of it comes from on both shapes this project can measure.
+
+Two ways to protect players, both measured on the probe that reproduces the encoder:
+
+| | cluster | spread | realistic (360) | cluster tier 1/2/4 |
+|---|---|---|---|---|
+| shipped (`W_TYPE=3`, top band ≥ 8) | **47.8 %** | 45.4 % | 55.9 % | 0/100/0 |
+| `W_TYPE=7` — players always top band | **0.0 %** | **0.0 %** | 40.0 % | 100/0/0 |
+| top band ≥ 4.5 | 0.0 % | 29.1 % | 49.4 % | 100/0/0 |
+
+- **`W_TYPE=6` does nothing.** A merely-moving player scores `type + distance`, and the
+  distance term is at most 2 and strictly under it at any real separation — so at 6 the
+  score stays under 8 everywhere. 7 is the first value that clears the band at every
+  distance. An earlier revision of §40 named 6; it was never swept.
+- **On `cluster` and `spread`, protecting players zeroes the saving.** Not reduces —
+  zeroes. Every entity in both populations is a player, so once players are top-band there
+  is nothing left to demote.
+- **Only `realistic` keeps anything: 40 of its 55.9 points survive.** That is the
+  mob-driven saving the original proposal was actually about, and it is the one number here
+  that describes a population this game does not have.
+
+So the honest statement of the result is narrower than §38's headline:
+
+> **Importance tiering halves the wire by replicating players at 7.5 Hz.** The part that
+> comes from demoting distant, idle mobs is worth about 40 % — and is unmeasurable on this
+> server until there are distant, idle mobs.
+
+That reframes the decision. It is not "47 % for 66.7 ms of staleness"; it is "**47 % for
+halving every player's position update rate**", with the mob half of the idea still
+untested because the content for it does not exist.
+
+---
+
+## Part XV — 43 % of every entity on the wire is fields that did not change (2026-09-18)
+
+Measured, not estimated: `GameServer.Tests/Bench/UnchangedFieldBytesBench.cs`, 120 players
+walking a random walk for 300 snapshots through the real encoder.
+
+### 45. What each field costs
+
+Per entity, on a handle-only mention, at the values this game produces:
+
+| group | fields | bytes |
+|---|---|---|
+| identity | `handle` | 3 |
+| **moves** | `x` 5, `y` 5, `facing_brad` 4 | **14** |
+| **event** | `hp` 2, `action` 2, `action_seq` 2 | **6** |
+| **constant** | `max_hp` 2, `speed` **5**, `type` 2 | **9** |
+
+### 46. Measured over a real stream
+
+```
+35,462 entity emissions, 895,298 bytes of snapshot payload
+  bytes per emission                     25.25
+  unchanged since this client was last told:
+    hp       99.7 % of emissions x 2 B
+    max_hp   99.7 %              x 2 B
+    speed    99.7 %              x 5 B
+    type     99.7 %              x 2 B
+  recoverable per emission               10.96   (43.4 % of the payload)
+```
+
+25.25 B/emission independently reproduces Part XIII's 24.9 B/entity/snapshot from a
+different instrument, which is the cross-check that makes the rest of the number worth
+reading.
+
+**The delta encoder is entity-granular.** It suppresses an entity only when *every* visible
+field matches what this connection was last told, so a player who merely moved re-sends its
+health, its maximum health, its speed and its type — none of which have changed since it
+spawned. `speed` alone is **5 bytes, 20 % of the payload**, a float that is written once and
+never again.
+
+### 47. Against the lever that shipped
+
+| | saving | cost | applies to |
+|---|---|---|---|
+| field-level delta | **43.4 %** | **none** — nothing is deferred | every population |
+| importance tiering (Part XIV) | 47.3 % | players at **7.5 Hz** | populations made of players |
+
+The two are **independent and compose**: one sends each entity less often, the other sends
+fewer bytes each time. Nothing here argues against the feature Part XIV measured; it argues
+that the cheaper lever was never priced, and now it is.
+
+### 48. What it would cost to build, honestly
+
+It is **not free**, and it needs a wire change, which is why this part stops at the number.
+
+- **proto3 cannot express "unchanged".** An omitted field and a zero-valued one are the same
+  bytes, which is the rule `speed` and `facing_brad` already document their way around. So
+  field-level delta needs explicit presence — proto3 `optional` on the constant fields, or a
+  per-entity presence mask — and a receiver rule that absent means *keep what you have*
+  rather than *this is zero*.
+- **It moves state into the receiver.** Today a resolved handle carries complete state and a
+  client that has lost track asks for a keyframe. Under field-level delta a client's view of
+  `speed` is only as good as the last snapshot that carried it, so the keyframe contract has
+  to say which fields a keyframe guarantees — and it already does say "complete", so the
+  work is in the deltas, not in the keyframes.
+- **It interacts with the budget, not with the schedule.** Shedding an entity already defers
+  all of its fields; making entities cheaper makes the budget bite later, which is strictly
+  good and needs no coordination with Part XIV's work.
+
+### 49. Where this leaves the three levers
+
+| lever | measured | staleness | population it needs | status |
+|---|---|---|---|---|
+| AOI radius | square law; 50 → 35 is −51 % | none | any | **shipped**, config |
+| field-level delta | **−43.4 %** | none | any | measured, not built |
+| importance tiering | −47.3 % (all of it player demotion, §44) | players at 7.5 Hz | players | shipped, off |
+
+Two of the three cost nothing in smoothness. The one that ships costs the most and needs a
+population this game does not have to earn the part of its case that was originally made
+for it.
+
+
+---
+
+## Part XVI — three real clients, and the one entity the schedule must not defer (2026-09-18)
+
+Everything above is synthetic: a bench that drives the encoder, or a load generator that
+speaks the wire without rendering anything. This is the first time the feature was **played**
+— three Windows players built from the netcode DOTS sample, on one map, against the compose
+stack at `develop@0008cc7`. It took under a minute to find something no bench had.
+
+### §46 — tiering on, and the game visibly stutters
+
+| arm | KB/s total | KB/s per client | client `lastCorrection` |
+|---|---|---|---|
+| `legacy` / `off` (control) | 11.14 | 3.71 | 0.000–0.004 |
+| `balanced` / `tiered` | **4.76** | **1.59** | **0.333** |
+| `tiered` + `W_TYPE=7` | 6.93 | 2.31 | 0.000–0.012 |
+| `balanced` / `tiered`, **with the decision-9 fix** | **5.54** | **1.85** | **0.000–0.008** |
+
+Three players, five mobs, 60s per arm, bytes read as a delta of `snapshot_bytes` off
+`/status` and normalised by the tick delta from the same document.
+
+`lastCorrection` is the client's own reported reconciliation step. An **80× jump** in it, at
+fps 170–280 with `clamped=0`, `discarded=0` and `resyncs=0`, is not framerate and not loss:
+the server was telling each client where it was at 7.5Hz while the client predicted at 60Hz.
+Self scores 5 under `balanced` — distance 2 plus type 3, with no HP or action edge to add —
+and 5 lands in the 133ms band. **The observer's own entity was being deferred.** ADR-27
+decision 9 now exempts it; see the gameserver changelog for why the rule existed in prose in
+two places before the code had it.
+
+### §47 — why `W_TYPE=7` is a worse answer than it looks
+
+§44 found `W_TYPE=7` is the first value that lifts a player clear of the top band, and it
+does stop the stutter — third row above. It is still the wrong fix, for a reason the
+synthetic sweep could not show: it protects **every** player, so the one being predicted and
+one at 49 units get identical treatment, and 38% is all that is left of the 57%.
+
+The fourth row is the same three clients against the fixed server, `balanced`/`tiered` with
+no weight override at all: `lastCorrection` back at control levels (0.000–0.008 against the
+control's 0.000–0.004) and **50% cheaper** than the control, with `deferred=13135` in the
+window proving the schedule is still doing its work. Exempting one entity per connection
+costs 3 points of the 57; exempting every player costs 19.
+
+### §48 — the mobs stuttered too, and that one was arithmetic
+
+With self exempt the players were smooth and the **mobs** were not. A mob scores under 3
+(distance at most 2, no type bonus, and `change` only fires on an HP or action edge), so it
+landed in the slowest band — which was **266ms**, against a client that holds
+`TargetDelay` 100ms + `MaxExtrapolation` 50ms = **150ms**. Past that the client is not
+looking at old state, it has none: the entity holds and then jumps.
+
+The ceiling above that band was `MaxIntervalMs = 500`, and the remark justifying it read
+*"500ms is also the point past which the client's 100ms interpolation buffer plus 50ms
+extrapolation stops covering the gap at all"* — 100 + 50 is 150. **The constant was 3.3x the
+number its own sentence derived**, and 266 sat between the two. The ceiling is now
+`ClientInterpolationBudgetMs = 150` and the 266ms band is gone: at a 15Hz world rate and a
+150ms budget, the only intervals that fit are one tick and two.
+
+| arm | KB/s total | KB/s per client | max deferral | clients |
+|---|---|---|---|---|
+| `off` (control) | 11.14 | 3.71 | 0 | smooth |
+
+> **These rows are the OLD wire.** They predate protocol 2 and field-level delta, and the
+> client that produced them announced protocol 1 — which the current server refuses
+> outright. Do not compare them against Part XVIII's 3.188 baseline as if the difference
+> were one feature: two builds separated them. Part XVIII is the controlled measurement.
+| three bands, self exempt | 5.54 | 1.85 | 12 base ticks = **200ms** | players smooth, **mobs step** |
+| two bands, ≤ budget | **7.03** | **2.34** | 4 base ticks = **66ms** | smooth |
+
+**`snapshot_max_state_age` counts BASE ticks, not world ticks** — the encoder is handed
+`TickLoop`'s tick, which advances at 60Hz. Reading it as world ticks overstates every
+staleness figure by 4x, which is how the three-band arm first got written up as 800ms of
+deferral rather than 200ms. The argument was unchanged; the number was wrong by the ratio
+between two rates that ADR-13 exists to keep apart.
+
+Dropping the band costs **13 points**: 50% saving becomes 37%. That is the honest price of
+the slowest band having been outside what the shipped client can absorb.
+
+### §49 — do not read these as capacity numbers
+
+Three players and five mobs is not a population. The absolute KB/s here are an order of
+magnitude below Part XIII's, and nothing in this Part revises a ceiling, a per-client budget
+or a saving percentage — Part XIV's −47.3% is still the measurement of record. What this
+Part is for is the class of defect it caught: a policy that every unit test, both benches and
+a 200-client load run had agreed was correct, and that one person moving a character noticed
+in seconds. The instrument that found it was a human eye; the instrument that *confirmed* it
+was a counter the client had been printing all along and nobody had read.
+
+---
+
+## Part XVII — the enemy frozen-frame baseline is spawn churn, not the instrument (2026-09-19)
+
+Part XVI §48–49 left an enemy figure unexplained, and #372's ship/no-ship decision waited on
+it. `RenderMotionProbe` (Cuvara/Netcode#154) rendered ~360–390k frames per arm across three
+clients against `develop@0cc3b16` and counted **frozen frames** — a frame where an entity
+that moved during the window rendered zero displacement:
+
+| class | schedule `off` | schedule `tiered` |
+|---|---|---|
+| local player | 0.0–0.2 % | 0.0–0.1 % |
+| remote player | **0.0 %** (p90 0.0 %) | 0.0 % (p90 2.1 %) |
+| enemy | **3.9 %** (p90 6.3 %, worst/median 4.64) | 5.9 % (p90 11.1 %, worst/median 7.74) |
+
+The `tiered` column is expected: mobs demote to the 133ms band and a coarser send renders
+coarser. The puzzle was the `off` column. With the schedule off, every dirty entity is sent
+every world tick, so an enemy and a remote player are replicated **identically** — yet
+enemies froze 3.9 % against remote players' 0.0 %.
+
+### 50. It is churn — the population arithmetic closes, the frozen-frame arithmetic does not
+
+The gap is the enemy respawn rate, not the send rate. Verified against `EnemyAiTuning.cs`:
+
+- Enemy lifetime = `(SpawnRadius 13 − DespawnRadius 2.5) / EnemySpeed 2.5` = **4.2 s**.
+- Spawn rate = `EnemiesPerWave 2 / WaveIntervalSec 1.5` = **1.33/s** → steady-state alive
+  ≈ `1.33 × 4.2` ≈ **5.6**, matching the `/status` 4↔6 oscillation (`MaxEnemies 30` never
+  binds, `attack_kills = 0`).
+
+Every fresh entity id starts with **one** interpolation sample, and one sample cannot be
+interpolated — the view holds it still until the buffer has something to interpolate
+between. A persistent remote player pays that hold **once** and amortises it to ~0 over a
+6-min window; an enemy pays it every ~4.2 s. "Replicated identically per tick" is true; the
+churn rate is not, and that asymmetry is the mechanism the `off` column was missing.
+
+**How much of the 3.9 % it accounts for depends on the hold length, and this measurement
+does not pin the hold length down.** The frozen share a per-spawn hold predicts is
+`hold / lifetime` = `hold / 4.2 s`. At schedule `off` one send interval is 66.7ms (15Hz
+world tick), so:
+
+| assumed hold | predicted frozen share | vs measured 3.9 % |
+|---|---|---|
+| 1 send interval (66.7ms) | 1.6 % | accounts for ~40 % of it |
+| 2 intervals (133ms) | 3.2 % | close |
+| 3 intervals (200ms) | 4.8 % | overshoots |
+
+Inverting it, 3.9 % of a 4.2 s life is a **~164ms** hold — about 2.5 send intervals, which
+is what a 2–3 sample interpolation buffer would cost, and *not* what the
+one-sample-to-two-samples reading alone would cost. So churn is the mechanism and is
+consistent with the magnitude **on the buffer-fill reading**; it is not consistent on the
+single-interval reading. Which of the two the client actually does was not measured here.
+Read this Part as: churn is established as the driver, the residual is not partitioned.
+
+The instrument-artefact hypothesis (a decelerating enemy miscounted as frozen while it parks)
+is **dead code under this tuning, not a live risk**. `EnemyReapSystem` despawns at radius 2.5
+while `EnemyMoveSystem` stops at radius 0.1 (`distSq <= 0.01f`), and reap runs the same tick
+after move. `EnemyMoveSystem` also applies a constant `EnemySpeed` with no deceleration term,
+so an enemy is destroyed at full speed and never reaches the stop branch — the "decelerating
+into the centre" premise the hypothesis rests on does not exist in this code. There are no
+legitimately-still enemy frames to miscount. `EnemyMoveSystem.cs:174` is unreachable
+under `EnemyAiTuning` as shipped. Speed (enemy median frame step 0.0063 vs a player's 0.0112)
+is a minor amplifier — a hold is a larger share of a smaller step — not the driver.
+
+### 51. Consequence for #372
+
+The 3.9 % baseline is **real frozen frames** — churn-induced interpolation holds — not a
+measurement artefact. That much is settled, and settled by the code rather than by a
+preference between hypotheses. So tiering's 3.9 % → 5.9 % is genuine coarser-render cost
+stacked on genuine churn cost, and neither is discountable. This does not move #372's recommendation
+(`tiered` stays `off` by default; the two cheaper, staleness-free levers still dominate), but
+it removes the "cost is untrustworthy" caveat that decision was carrying: the cost is
+trustworthy, and it is a cost. A quantitative confirmation splitting each class's frozen
+frames by entity lifetime — `fresh` (first 0.25 s) vs `steady` — is Cuvara/Netcode#157;
+the prediction is that enemy chop concentrates in `fresh` and `steady` sits near the remote
+player's ~0 %.
+
+---
+
+## Part XVIII — field-level delta, measured against a control at last (2026-09-20)
+
+Part XVI measured with the client on protocol 1 and Part XVII's numbers were taken the same
+way. Both predate `GAMESERVER_FIELD_DELTA`, and neither could isolate the feature: it
+activates on protocol version match alone, and the server refuses a peer whose version is
+not an exact match, so the control arm required a client that cannot connect.
+
+The switch exists now (#382). This Part is the first measurement of the feature against
+itself.
+
+### §52 — the three-arm sweep
+
+`develop@4866a89`, three clients, 9 entities (3 players, 6 mobs), ~116s per arm, only the
+named setting moved:
+
+| arm | KB/s total | KB/s per client | vs baseline |
+|---|---|---|---|
+| field-delta **off**, schedule off | 3.188 | 1.063 | baseline |
+| field-delta **on**, schedule off | **2.160** | **0.720** | **−32.2%** |
+| field-delta on + **tiered** | **1.889** | **0.630** | **−40.7%** |
+
+Two figures fall out, and the second is the one that decides anything:
+
+- **Field-level delta saves 32.2%.** Under the 43.4% ceiling `UnchangedFieldBytesBench`
+  establishes in Part XV, which is what a believable number looks like.
+- **Tiering's marginal contribution is 12.5%** — `1 − 1.889/2.160`, 0.271 KB/s across three
+  clients — against a cost of every mob replicating at 7.5Hz.
+
+### §53 — the −73% that never reached this document was an artefact
+
+A figure of 11.14 → 3.02 KB/s, reported as −73%, circulated in #372 and #381 on 2026-09-20.
+It was **never written into this file**, and that was deliberate: it is thirty points above
+the ceiling the feature's own bench establishes in Part XV, and a number nobody can explain
+does not belong in the record of what this project has measured. It was flagged in the
+issues rather than resolved, because there was no way to resolve it without a control.
+
+With a control the figure is 32.2%. So roughly 40 of those 73 points came from something
+else that moved between the 2026-09-18 and 2026-09-20 builds. **This Part does not identify
+what.** It establishes only that it was not field-level delta — which was the actual risk,
+since the number was about to be quoted as the feature's.
+
+Every tiering figure published before this one was measured against a baseline that
+field-delta has since moved: 37% on the old wire, then 23% against the cross-build 3.02.
+Both are superseded by the 12.5% above. A saving quoted against a baseline that is itself
+moving is not a saving, and three of them were published here before anyone could tell.
+
+### §54 — the first use of the switch produced a silent false control
+
+The first attempt at the off-arm reported bytes **identical** to the on-arm — a control that
+was a second copy of the treatment. `/status` said `field_delta = True` while `.env` said
+`off`.
+
+Cause: the deploy directory in use was an older worktree whose `docker-compose.yml`
+predated the variable, and **compose passes only what it lists**. Exactly the shape of the
+`GAMESERVER_IMPORTANCE_W_*` gap recorded in Part XVI.
+
+It was caught by reading `field_delta` back off `/status` instead of trusting the `.env`
+that was edited. For a measurement whose entire value is the difference between two arms,
+reading the flag back off the running server is not a nicety — it is the only thing standing
+between a real control and two copies of one number.
+
+---
+
+## Part XIX — the enemy frozen-frame baseline, partitioned (2026-09-21)
+
+Part XVII established spawn churn as the mechanism behind the 3.9% enemy frozen-frame
+figure and said plainly that the magnitude did not close: a one-interval hold predicted
+1.6%, and the measurement implied ~164ms. §51 deferred the quantitative test.
+
+This is that test. It also required fixing the measurement protocol first, for a reason
+Part XVII could not have known.
+
+### §55 — the protocol, and why the old runs could not have answered this
+
+Enemies spawn on a ring of radius 13 about the **world origin** and despawn at 2.5, while
+the area of interest is radius 50 about the **player**. An observer beyond ~63 units
+therefore sees **zero enemies, permanently and correctly**, with every counter on both
+sides clean — and the probe prints no enemy rows at all, which reads as an instrument
+fault rather than an empty AOI.
+
+Player position is persisted, so a device id replayed across sessions drifts out of the only
+populated region of the map and never returns. Three long-running test clients measured
+**215 units** out. A fresh device id measured **5.9** and saw all six mobs on the first
+frame.
+
+So every enemy figure published before this Part was conditional on a variable nobody was
+recording. The protocol now is: **a fresh device id per run**, and the observer's distance
+from origin logged on every line (Cuvara/Netcode#162).
+
+### §56 — fresh versus steady
+
+Fresh device ids, observer median distance **10.8**, field-delta on, schedule `off`. 119
+enemy report windows across three clients, **333,587 enemy frames**.
+
+| class | frozen, FRESH (first 0.25s) | frozen, STEADY | n steady |
+|---|---|---|---|
+| local player | 0.00% (n=9) | **0.02%** | 97,925 |
+| remote player | 16.67% (n=18) | **0.56%** | 132,346 |
+| **enemy** | **38.16%** (n=21,624) | **0.42%** | 311,963 |
+
+**Enemy steady-state is 0.42% against the remote player's 0.56%** — indistinguishable, and
+if anything lower. All of the enemy chop lives in the first quarter-second of each mob's
+life.
+
+The outcome that would have been interesting did not happen. Had `steady` come out near
+2.3% there would have been a second, steady-state source that none of the hypotheses in
+#371 covered. There is not one. Established entities are as smooth as any other remote
+entity.
+
+### §57 — the magnitude closes, three ways
+
+| check | predicted | observed |
+|---|---|---|
+| fresh share of a 4.2s life | `0.25 / 4.2` = 5.95% | `21,624 / 333,587` = **6.48%** |
+| overall frozen share | `0.0648 × 38.16% + 0.9352 × 0.42%` = 2.86% | median **2.40%** |
+| implied hold | — | `0.3816 × 0.25s` = **95ms**, or `0.0286 × 4.2s` = **120ms** |
+
+**The hold is 1.4–1.8 send intervals** (66.7ms at 15Hz), not the ~164ms Part XVII inferred.
+That inference attributed the whole 3.9% to one hold spread across the lifetime, with no
+fresh/steady split to constrain it, and landed in the 2–3 sample buffer range by coincidence
+of that assumption. Measured directly, the hold is one interval plus part of a second —
+which is what "wait for a second sample before you can interpolate" predicts without a full
+buffer fill.
+
+Part XVII's 3.9% is superseded rather than contradicted: it came from a build and a
+population whose observer position was not recorded. The controlled figure is **2.40%
+median**.
+
+### §58 — what is not claimed
+
+That 38% fresh-frame chop is acceptable. It is **not a defect** — a freshly spawned entity
+has exactly one sample and cannot be interpolated — but with mobs churning every 4.2s it is
+visible, and reducing it is a design question (introduce entities carrying two samples, or
+hold them unrendered for one interval) rather than a bug fix.
+
+Nor does this Part say anything about a population where mobs outnumber players. Three
+players and six mobs is the shape available; the churn rate that drives the whole result is
+`EnemiesPerWave 2 / WaveIntervalSec 1.5` on a scaffolding spawner.

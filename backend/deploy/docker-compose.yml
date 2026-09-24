@@ -167,8 +167,30 @@ services:
     volumes:
       # Compiled Go plugin (nakama.so) is dropped here by `make plugin`.
       - ./modules:/nakama/data/modules
+      # Meta-hop TLS (ADR-24). Uncomment together with NAKAMA_TLS_CERT/_KEY above
+      # and the matching mount on gameserver-dotnet; the paths those variables name
+      # are the ones this mount creates. `./tls` and NOT a /tmp path -- a bind mount
+      # from a /tmp WSL path silently creates an empty DIRECTORY at the mount point
+      # and Nakama exits with "is a directory".
+      # - ./tls:/nakama/tls:ro
     healthcheck:
-      test: ["CMD", "/nakama/nakama", "healthcheck"]
+      # THE PORT ARGUMENT IS LOAD-BEARING, AND IT IS 9100 ON PURPOSE.
+      #
+      # Nakama v3.40.0's healthcheck subcommand is
+      # `http.Get("http://localhost:" + port)` -- hardcoded http, no TLS branch,
+      # no config lookup (main.go). Bare `healthcheck` therefore defaults to 7350
+      # and, the moment NAKAMA_TLS_CERT/_KEY are set above, GETs plaintext HTTP
+      # against a listener that now speaks only TLS. It fails, the container is
+      # marked unhealthy, and every `depends_on: service_healthy` in this file
+      # blocks -- so the whole stack refuses to come up over a perfectly healthy Nakama.
+      # That breakage was NOT recorded when the flag landed; the k8s probes were.
+      #
+      # 9100 is the Prometheus listener, which `--socket.ssl_certificate` does
+      # not cover (ADR-24 §4). Its root path answers 200 in both modes, so this
+      # is one spec for both. Same trade as the k8s probes: it proves the process
+      # is serving HTTP, not that the client-API mux answers. The image ships no
+      # curl and no wget (Debian 12, measured), so there is no third option.
+      test: ["CMD", "/nakama/nakama", "healthcheck", "9100"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -396,6 +418,150 @@ services:
       SIM_CRITICAL_HZ: ${SIM_CRITICAL_HZ:-60}
       SIM_WORLD_HZ: ${SIM_WORLD_HZ:-15}
       SIM_BACKGROUND_HZ: ${SIM_BACKGROUND_HZ:-5}
+      # Area-of-interest radius in world units. The largest single lever on
+      # downstream bandwidth: population inside a circle grows with the SQUARE
+      # of it, so halving this quarters the expected entity count per snapshot,
+      # which no budget downstream of it can match. 50 is the compiled-in
+      # default, set explicitly here so it is visible and so changing it is a
+      # one-line edit rather than a code change.
+      # An unparseable or non-positive value exits 2 at startup; it is NOT
+      # silently replaced by the default. A radius that reaches the map's
+      # diagonal logs a warning and disables interest filtering entirely.
+      GAMESERVER_AOI_RADIUS: ${GAMESERVER_AOI_RADIUS:-50}
+      # Replication importance: which entities are emitted FIRST when the
+      # per-connection downlink budget bites. It never changes how many bytes
+      # go out (GAMESERVER_MAX_SNAPSHOT_BYTES) nor which entities are
+      # candidates at all (GAMESERVER_AOI_RADIUS).
+      # 
+      # "legacy" (default) is every factor zero, i.e. the ordering that shipped
+      # before importance existed: self, then longest-deferred, then nearest.
+      # "balanced" additionally ranks on visible-state change, combat, entity
+      # type and distance. Deferral age stays DOMINANT in both, because the
+      # starvation bound depends on it.
+      # 
+      # Per-factor overrides: GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,
+      # COMBAT}. Weighting a factor this server has no data for (PARTY, PVP,
+      # BOSS, QUEST, VISIBILITY, ZONE, INTERACTION) exits 2 rather than being
+      # ignored. Read importance_profile off /status to see what a pod runs.
+      GAMESERVER_IMPORTANCE: ${GAMESERVER_IMPORTANCE:-legacy}
+      # The four overrides the comment above names. Compose passes only what it
+      # lists, so without these lines GAMESERVER_IMPORTANCE_W_TYPE=7 in .env never
+      # reached the container: no error, no warning, and /status went on reporting
+      # the unmodified profile -- the knob read as "tried it, made no difference".
+      # An empty value is an absent variable to the server, so an operator who sets
+      # none of them gets exactly the profile's own weights.
+      GAMESERVER_IMPORTANCE_W_DISTANCE: ${GAMESERVER_IMPORTANCE_W_DISTANCE:-}
+      GAMESERVER_IMPORTANCE_W_CHANGE: ${GAMESERVER_IMPORTANCE_W_CHANGE:-}
+      GAMESERVER_IMPORTANCE_W_TYPE: ${GAMESERVER_IMPORTANCE_W_TYPE:-}
+      GAMESERVER_IMPORTANCE_W_COMBAT: ${GAMESERVER_IMPORTANCE_W_COMBAT:-}
+      # Per-importance send intervals: how often an entity of a given
+      # importance is RE-SENT. "off" (default) means every dirty entity is due
+      # every world tick. "tiered" withholds lower-importance entities for a
+      # configured interval (score>=8 every tick, >=3 for 133ms, else 266ms).
+      # 
+      # Intervals are configured in MILLISECONDS and converted through
+      # SIM_WORLD_HZ, so the same setting holds the same wall time at any world
+      # rate. "tiered" without GAMESERVER_IMPORTANCE weights exits 2.
+      # 
+      # Read replication_schedule, snapshot_deferred_by_interval and
+      # snapshot_max_state_age off /status. The last is NOT
+      # snapshot_max_shed_age: that counts byte-budget deferrals, this counts
+      # schedule ones, and a schedule deferral never touches the budget's
+      # bookkeeping. See ADR-27.
+      GAMESERVER_REPLICATION_SCHEDULE: ${GAMESERVER_REPLICATION_SCHEDULE:-off}
+      # Kill switch for field-level delta encoding (protocol 2). On by default.
+      #
+      # Only reason to set it: field-delta is otherwise gated by protocol version alone, so
+      # the control arm for any bandwidth measurement needs a client the server refuses.
+      # Setting this off emits valid v2 frames -- changed_fields=0 means "every field
+      # present" -- so the SAME client measures both arms. See #381.
+      #
+      # Strict: on/true/1/yes or off/false/0/no. Anything else exits 2 rather than
+      # defaulting, because a typo silently reading as ON would make the control arm a
+      # second copy of the treatment arm. Read `field_delta` off /status to see what a pod
+      # actually runs.
+      GAMESERVER_FIELD_DELTA: ${GAMESERVER_FIELD_DELTA:-on}
+      # Enemy AI and synthetic players (#391, #394). Listed here because a variable
+      # absent from this block is NOT passed to the container however carefully it is set
+      # in .env or the shell -- it silently takes the server's built-in default, and
+      # /status then reports a configuration nobody chose. That has already happened once
+      # on this project with GAMESERVER_IMPORTANCE_W_*, where an entire measurement arm was
+      # run against defaults while the operator believed the weights were applied.
+      #
+      # Every one of these is strictly parsed: an unrecognised value exits non-zero rather
+      # than falling back, so a typo fails loudly at boot instead of quietly at runtime.
+      # Read `enemy_ai`, `enemy_ai_max_now` and `bots_alive` off /status to see what a pod
+      # is actually running.
+      #
+      # BOTS ARE PLAYERS TO THE ENEMY SPAWNER, so they multiply the enemy population:
+      #   cap = ENEMY_MAX + ENEMY_MAX_PER_PLAYER x (real players + bots)
+      # GAMESERVER_BOTS=24 at the default allowance is a 1110-enemy world before a single
+      # client connects. The server computes that number and logs it at startup rather
+      # than leaving it to be discovered in a snapshot size.
+      # Snapshot sizing. NOT previously passed through: the server took its built-in
+      # 8192 and .env could not change it. At ~316 entities in one AOI that is ~26 bytes
+      # per entity, so KEYFRAMES WERE BEING TRUNCATED -- and SnapshotMerger clears its
+      # entity set on a full snapshot, so every truncated keyframe made the omitted
+      # entities vanish on the client and reappear on the next delta. That is the
+      # "enemies disappear and come back" the owner reported.
+      GAMESERVER_MAX_SNAPSHOT_BYTES: ${GAMESERVER_MAX_SNAPSHOT_BYTES:-}
+      GAMESERVER_KEYFRAME_INTERVAL: ${GAMESERVER_KEYFRAME_INTERVAL:-}
+      # ── Admission, pre-join and ingestion bounds ──────────────────────────
+      # Forwarded from .env rather than written as literals: every one of these is a
+      # limit an operator tunes per deployment, and every one of them ran on a
+      # compiled-in default that nothing in deploy/.env could reach until now (#404).
+      # Empty stays empty on purpose -- Env() in Program.cs maps "" back to null, so an
+      # unset variable means "not configured" and the server keeps its own default
+      # rather than parsing the empty string as a value.
+      GAMESERVER_CAPACITY: ${GAMESERVER_CAPACITY:-}
+      GAMESERVER_MAX_PENDING_HANDSHAKES: ${GAMESERVER_MAX_PENDING_HANDSHAKES:-}
+      GAMESERVER_HANDSHAKE_TIMEOUT_MS: ${GAMESERVER_HANDSHAKE_TIMEOUT_MS:-}
+      GAMESERVER_MIN_PROTOCOL_VERSION: ${GAMESERVER_MIN_PROTOCOL_VERSION:-}
+      GAMESERVER_MAX_INPUTS_PER_TICK: ${GAMESERVER_MAX_INPUTS_PER_TICK:-}
+      GAMESERVER_MAX_PENDING_INPUTS: ${GAMESERVER_MAX_PENDING_INPUTS:-}
+      GAMESERVER_GATHER_WORKERS: ${GAMESERVER_GATHER_WORKERS:-}
+      # tcp (default) or kcp. The value is advertised to clients through the registry,
+      # so it must describe what the listener actually speaks. The KCP pre-shared key
+      # is TRANSPORT_KEY, which carries no GAMESERVER_ prefix and is not gated here.
+      GAMESERVER_TRANSPORT: ${GAMESERVER_TRANSPORT:-}
+      GAMESERVER_ENEMIES: ${GAMESERVER_ENEMIES:-true}
+      GAMESERVER_ENEMY_CHASE: ${GAMESERVER_ENEMY_CHASE:-}
+      GAMESERVER_ENEMY_MAX: ${GAMESERVER_ENEMY_MAX:-}
+      GAMESERVER_ENEMY_MAX_PER_PLAYER: ${GAMESERVER_ENEMY_MAX_PER_PLAYER:-}
+      GAMESERVER_ENEMY_WAVE_SIZE: ${GAMESERVER_ENEMY_WAVE_SIZE:-}
+      GAMESERVER_ENEMY_WAVE_SIZE_PER_PLAYER: ${GAMESERVER_ENEMY_WAVE_SIZE_PER_PLAYER:-}
+      GAMESERVER_ENEMY_WAVE_INTERVAL: ${GAMESERVER_ENEMY_WAVE_INTERVAL:-}
+      GAMESERVER_ENEMY_SPAWN_DISTANCE: ${GAMESERVER_ENEMY_SPAWN_DISTANCE:-}
+      GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE: ${GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE:-}
+      GAMESERVER_ENEMY_CONTACT_RANGE: ${GAMESERVER_ENEMY_CONTACT_RANGE:-}
+      GAMESERVER_ENEMY_HP: ${GAMESERVER_ENEMY_HP:-}
+      GAMESERVER_ENEMY_ATTACK: ${GAMESERVER_ENEMY_ATTACK:-}
+      GAMESERVER_ENEMY_DEFENSE: ${GAMESERVER_ENEMY_DEFENSE:-}
+      GAMESERVER_ENEMY_SPEED: ${GAMESERVER_ENEMY_SPEED:-}
+      GAMESERVER_BOTS: ${GAMESERVER_BOTS:-}
+      GAMESERVER_BOT_SPREAD: ${GAMESERVER_BOT_SPREAD:-}
+      GAMESERVER_BOT_ENGAGE_RANGE: ${GAMESERVER_BOT_ENGAGE_RANGE:-}
+      # Per-bot stats. These four were declared, documented and strictly parsed but
+      # reached NEITHER service until the compose passthrough gate found them
+      # (ComposeEnvPassthroughTests) -- settable in .env and silently ignored, with
+      # the server running its compiled default and /status reporting that default
+      # truthfully. That gate is now what keeps this list in step; the comment is a
+      # courtesy, not the mechanism.
+      GAMESERVER_BOT_HP: ${GAMESERVER_BOT_HP:-}
+      GAMESERVER_BOT_ATTACK: ${GAMESERVER_BOT_ATTACK:-}
+      GAMESERVER_BOT_DEFENSE: ${GAMESERVER_BOT_DEFENSE:-}
+      GAMESERVER_BOT_SPEED: ${GAMESERVER_BOT_SPEED:-}
+      GAMESERVER_ENEMY_ATTACKS: ${GAMESERVER_ENEMY_ATTACKS:-}
+      GAMESERVER_ENEMY_ATTACKERS_PER_TARGET: ${GAMESERVER_ENEMY_ATTACKERS_PER_TARGET:-}
+      # NOT a knob that goes below 0.5s. An enemy attack travels the ordinary input
+      # path, so InputHandler charges it the same GameConstants.AttackCooldownMs
+      # (500ms) it charges a player: the effective interval is max(this, 0.5s) and a
+      # smaller value buys nothing. GAMESERVER_ENEMY_ATTACKERS_PER_TARGET is the lever
+      # for a deadlier fight -- worst case is
+      # `ATTACKERS_PER_TARGET x max(1, ENEMY_ATTACK - player defense) / interval`
+      # damage per second, i.e. 6/s and ~17s to die at these defaults.
+      GAMESERVER_ENEMY_ATTACK_INTERVAL: ${GAMESERVER_ENEMY_ATTACK_INTERVAL:-}
+      GAMESERVER_PLAYER_RESPAWN: ${GAMESERVER_PLAYER_RESPAWN:-}
       # /metrics + /healthz. Binds the wildcard, so it answers on any Host —
       # scraped in-network as gameserver-dotnet:9101 and from the host as
       # 127.0.0.1:9101, with no `Host:` header trickery on either path.
@@ -431,7 +597,24 @@ services:
       # Two sources of truth for one hop is exactly how that happens.
       NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
+      # The game server's end of the same decision: the certificate it PINS when
+      # NAKAMA_URL is https and Nakama's certificate is self-signed. Empty means
+      # .NET's own validation, which refuses a self-signed Nakama -- correctly.
+      # Set together with an https URL or the server refuses to start.
+      NAKAMA_TLS_PIN: ${NAKAMA_TLS_PIN:-}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
+    # Meta-hop TLS (ADR-24): the file NAKAMA_TLS_PIN names. Uncomment with that
+    # variable. The certificate is PUBLIC and the key is not needed here -- do not
+    # mount the pair into a service that terminates no TLS.
+    #
+    # This block is a sibling of `environment:` and not a line inside it, which is
+    # not a formatting preference: `volumes:` indented into the mapping above
+    # closes it, and the next environment entry then fails to parse. A commented
+    # block is only as correct as the file it becomes when uncommented, and
+    # nothing in CI reads comments -- so this one was verified by uncommenting it
+    # and parsing the result, not by reading it.
+    # volumes:
+    #   - ./tls/tls.crt:/nakama/tls/tls.crt:ro
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"
       - "${GAMESERVER_METRICS_PORT:-9101}:9101"
@@ -482,6 +665,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./monitoring/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      # Alert rules, referenced by rule_files: in the file above. Mounted as a
+      # separate file rather than inlined so `promtool check rules` can read it.
+      - ./monitoring/alerts.yaml:/otel-lgtm/alerts.yaml:ro
       - ./monitoring/grafana-dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/rpg-dashboards.yaml:ro
       - ./monitoring/dashboards:/otel-lgtm/dashboards-rpg:ro
       # All bundled components write under /data — one volume keeps dashboards,

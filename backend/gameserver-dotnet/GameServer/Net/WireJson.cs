@@ -89,6 +89,16 @@ internal static class JsonWriter
                 if (e.FacingBrad > 0) w.WriteNumber("facing_brad"u8, e.FacingBrad);
                 if (e.Action != RpgMmo.Wire.V1.EntityAction.Unspecified)
                     w.WriteNumber("action"u8, (int)e.Action);
+                // Same omit-when-zero rule, for the same reason: zero is this field's
+                // reserved "not sent". Writing an explicit 0 would assert "there is a
+                // retrigger counter and it holds the reserved value".
+                //
+                // It is NOT optional in the sense of "JSON clients do not need it". A JSON
+                // client drives the same animator from the same level-triggered action
+                // field and hits the same repeated-attack problem; omitting the counter
+                // here would leave one encoding able to retrigger and the other not, which
+                // is a difference discovered by a player on the wrong client.
+                if (e.ActionSeq != 0) w.WriteNumber("action_seq"u8, e.ActionSeq);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -97,6 +107,29 @@ internal static class JsonWriter
             {
                 w.WriteStartArray("removed"u8);
                 for (int i = 0; i < m.Removed.Count; i++) w.WriteStringValue(m.Removed[i]);
+                w.WriteEndArray();
+            }
+
+            // Events ride the snapshot in both encodings. A JSON connection never interns,
+            // so the encoder filled source_id/target_id and left the handles at zero — see
+            // SnapshotDeltaState.AppendEvents.
+            if (m.Events.Count > 0)
+            {
+                w.WriteStartArray("events"u8);
+                for (int i = 0; i < m.Events.Count; i++)
+                {
+                    var ev = m.Events[i];
+                    w.WriteStartObject();
+                    w.WriteNumber("type"u8, (int)ev.Type);
+                    if (ev.SourceId.Length > 0) w.WriteString("source_id"u8, ev.SourceId);
+                    if (ev.TargetId.Length > 0) w.WriteString("target_id"u8, ev.TargetId);
+                    if (ev.Source != 0) w.WriteNumber("source"u8, ev.Source);
+                    if (ev.Target != 0) w.WriteNumber("target"u8, ev.Target);
+                    if (ev.Amount != 0) w.WriteNumber("amount"u8, ev.Amount);
+                    if (ev.AbilityId != 0) w.WriteNumber("ability_id"u8, ev.AbilityId);
+                    if (ev.Flags != 0) w.WriteNumber("flags"u8, ev.Flags);
+                    w.WriteEndObject();
+                }
                 w.WriteEndArray();
             }
 
@@ -115,6 +148,15 @@ internal static class JsonWriter
             w.WriteNumber("move_x"u8, m.MoveX);
             w.WriteNumber("move_y"u8, m.MoveY);
             if (m.AttackTargetId.Length > 0) w.WriteString("attack_target_id"u8, m.AttackTargetId);
+            // Written only when set, matching how proto3 elides a zero and an empty string.
+            // The JSON encoding is legacy, and a peer reading it must reach the same
+            // InputData as a peer reading the protobuf; emitting an explicit 0 here would
+            // still decode the same, but it would put bytes on the wire that the encoding
+            // this mirrors does not.
+            if (m.AbilityId != 0) w.WriteNumber("ability_id"u8, m.AbilityId);
+            if (m.AbilityTargetId.Length > 0) w.WriteString("ability_target_id"u8, m.AbilityTargetId);
+            if (m.AimX != 0f) w.WriteNumber("aim_x"u8, m.AimX);
+            if (m.AimY != 0f) w.WriteNumber("aim_y"u8, m.AimY);
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -272,11 +314,19 @@ internal static class JsonReader
             bool moveX = r.ValueTextEquals("move_x"u8);
             bool moveY = r.ValueTextEquals("move_y"u8);
             bool target = r.ValueTextEquals("attack_target_id"u8);
+            bool abilityId = r.ValueTextEquals("ability_id"u8);
+            bool abilityTarget = r.ValueTextEquals("ability_target_id"u8);
+            bool aimX = r.ValueTextEquals("aim_x"u8);
+            bool aimY = r.ValueTextEquals("aim_y"u8);
             if (!r.Read()) break;
             if (tick) m.Tick = r.GetUInt64();
             else if (moveX) m.MoveX = r.GetSingle();
             else if (moveY) m.MoveY = r.GetSingle();
             else if (target) m.AttackTargetId = r.TokenType == JsonTokenType.Null ? "" : r.GetString() ?? "";
+            else if (abilityId) m.AbilityId = r.GetUInt32();
+            else if (abilityTarget) m.AbilityTargetId = r.TokenType == JsonTokenType.Null ? "" : r.GetString() ?? "";
+            else if (aimX) m.AimX = r.GetSingle();
+            else if (aimY) m.AimY = r.GetSingle();
             else r.Skip();
         }
         return m;
@@ -294,6 +344,7 @@ internal static class JsonReader
             bool full = r.ValueTextEquals("full"u8);
             bool entities = r.ValueTextEquals("entities"u8);
             bool removed = r.ValueTextEquals("removed"u8);
+            bool events = r.ValueTextEquals("events"u8);
             if (!r.Read()) break;
 
             if (tick) m.Tick = r.GetUInt64();
@@ -301,9 +352,49 @@ internal static class JsonReader
             else if (full) m.Full = r.TokenType == JsonTokenType.True;
             else if (entities) ReadEntities(ref r, m);
             else if (removed) ReadRemoved(ref r, m);
+            else if (events) ReadEvents(ref r, m);
             else r.Skip();
         }
         return m;
+    }
+
+    private static void ReadEvents(ref Utf8JsonReader r, SnapshotMessage m)
+    {
+        if (r.TokenType != JsonTokenType.StartArray) return;
+
+        while (r.Read() && r.TokenType != JsonTokenType.EndArray)
+        {
+            if (r.TokenType != JsonTokenType.StartObject) continue;
+
+            var ev = new RpgMmo.Wire.V1.GameEvent();
+            while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+            {
+                bool type = r.ValueTextEquals("type"u8);
+                bool sourceId = r.ValueTextEquals("source_id"u8);
+                bool targetId = r.ValueTextEquals("target_id"u8);
+                bool source = r.ValueTextEquals("source"u8);
+                bool target = r.ValueTextEquals("target"u8);
+                bool amount = r.ValueTextEquals("amount"u8);
+                bool abilityId = r.ValueTextEquals("ability_id"u8);
+                bool flags = r.ValueTextEquals("flags"u8);
+                if (!r.Read()) break;
+
+                // Absent leaves the protobuf default, which every one of these fields
+                // defines as "not sent" — so the two encodings agree without a second rule,
+                // exactly as the entity fields do.
+                if (type) ev.Type = (RpgMmo.Wire.V1.GameEventType)r.GetInt32();
+                else if (sourceId) ev.SourceId = r.GetString() ?? "";
+                else if (targetId) ev.TargetId = r.GetString() ?? "";
+                else if (source) ev.Source = r.GetUInt32();
+                else if (target) ev.Target = r.GetUInt32();
+                else if (amount) ev.Amount = r.GetInt32();
+                else if (abilityId) ev.AbilityId = r.GetUInt32();
+                else if (flags) ev.Flags = r.GetUInt32();
+                else r.Skip();
+            }
+
+            m.Events.Add(ev);
+        }
     }
 
     private static void ReadEntities(ref Utf8JsonReader r, SnapshotMessage m)
@@ -323,6 +414,7 @@ internal static class JsonReader
                 bool speed = r.ValueTextEquals("speed"u8);
                 bool facingBrad = r.ValueTextEquals("facing_brad"u8);
                 bool action = r.ValueTextEquals("action"u8);
+                bool actionSeq = r.ValueTextEquals("action_seq"u8);
                 if (!r.Read()) break;
                 if (id) e.Id = r.GetString() ?? "";
                 else if (type) EntityTypes.SetType(e, r.GetString());
@@ -335,6 +427,7 @@ internal static class JsonReader
                 // "not sent" - so the two encodings agree without a second rule.
                 else if (facingBrad) e.FacingBrad = r.GetUInt32();
                 else if (action) e.Action = (RpgMmo.Wire.V1.EntityAction)r.GetInt32();
+                else if (actionSeq) e.ActionSeq = r.GetUInt32();
                 else r.Skip();
             }
             m.Entities.Add(e);

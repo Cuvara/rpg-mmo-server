@@ -17,6 +17,12 @@ import (
 //	servers:id:{server_id}   HASH  server fields, TTL = ServerHeartbeatTTL
 //	servers:map:{map_id}     SET   server ids on that map (index, no TTL)
 //
+// Hash fields: server_id, map_id, addr, transport, capacity, player_count,
+// identity_key. The names and their value encodings are a CROSS-LANGUAGE
+// CONTRACT — the C# game server writes these entries and this Go code reads
+// them with no translation layer — so a change here is a change in
+// GameServer/Registry/RedisServerRegistry.cs in the same commit.
+//
 // The hash is the source of truth. A server disappears automatically when it
 // stops heartbeating; the map index is pruned lazily on lookup.
 const (
@@ -76,6 +82,10 @@ func (r *ServerRegistry) Register(ctx context.Context, info storage.ServerInfo) 
 		"transport", info.Transport,
 		"capacity", info.Capacity,
 		"player_count", info.PlayerCount,
+		// ADR-25. The C# game server writes the same field name with the same
+		// base64 encoding (GameServer.Registry.RedisServerRegistry); the gateway
+		// reads this hash directly, so the two must not drift.
+		"identity_key", info.IdentityKey,
 	)
 	pipe.Expire(ctx, key, r.ttl)
 	pipe.SAdd(ctx, mapKey(info.MapID), info.ServerID)
@@ -195,6 +205,10 @@ func infoFromFields(f map[string]string) storage.ServerInfo {
 		Transport:   f["transport"],
 		Capacity:    capacity,
 		PlayerCount: count,
+		// Absent for a pre-ADR-25 server, and absent is not an error: a missing
+		// key means a client cannot require identity against that server, which
+		// the client decides, not the registry reader.
+		IdentityKey: f["identity_key"],
 	}
 }
 

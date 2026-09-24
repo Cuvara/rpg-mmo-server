@@ -2,6 +2,7 @@ package sealed
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/hex"
 	"testing"
 )
@@ -38,7 +39,80 @@ const (
 	interopBinding      = "f0788e11400bd7a65954cef957c685f3ff1afebb052964e8b0dc9ad7f3bef2bc"
 	interopFrame        = "c1010000000000000007f599297035b016c0f6ecef9fe5c4d1879637da13c7c3" +
 		"9676f6f435aed71bd0"
+
+	// ADR-25 identity vector. The seed is arbitrary but FIXED; everything below
+	// follows from it and from the transcript above, which is unchanged — that
+	// the transcript is the same array the binding and the direction keys are
+	// computed over is itself the thing decision 3 promises, and this vector
+	// would not reproduce if a future edit "improved" it.
+	interopIdentitySeed = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+
+	interopIdentityPublic = "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
+	interopIdentityInput  = "6375766172612f7365616c65642d6964656e746974792f763100" +
+		"6375766172612f7365616c65642d68616e647368616b652f763100" +
+		"696e7465726f702d6a74692d3030303100" +
+		"8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a" +
+		"de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f" +
+		"00" +
+		"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
+	interopIdentitySignature = "73b55ddc68679d0694bb1602c7422a6a98941354a82a37c84fa8fe3181c7467d" +
+		"abb9590f380ce33dfe298daa33ea5c9421cead03a6764bb34b37c85c67d37a0e"
 )
+
+// The identity signature, pinned between the implementations (ADR-25 decision
+// 3). Ed25519 is deterministic, so one key and one input give one signature
+// everywhere — which is what makes this a vector rather than a round-trip.
+//
+// GameServer.Tests/Net/ServerIdentityInteropTests.cs asserts the SAME three
+// constants. Producing them independently is the point: two sides that each
+// round-trip against themselves agree with themselves, not with each other, and
+// a divergence here would show in production as a client that refuses every
+// session with no log anywhere naming encryption.
+func TestInteropIdentityVector(t *testing.T) {
+	client := interopKeyPair(t, interopClientPrivate)
+	server := interopKeyPair(t, interopServerPrivate)
+
+	transcript, err := Transcript(interopJTI, client.Public, server.Public)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed, err := hex.DecodeString(interopIdentitySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	if got := hex.EncodeToString(pub); got != interopIdentityPublic {
+		t.Errorf("identity public\n got: %s\nwant: %s", got, interopIdentityPublic)
+	}
+
+	input, err := IdentityInput(transcript, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(input); got != interopIdentityInput {
+		t.Errorf("identity signed input\n got: %s\nwant: %s", got, interopIdentityInput)
+	}
+	// The transcript must appear inside the signed input BYTE FOR BYTE. If it
+	// did not, ADR-22's binding and key vectors above would no longer describe
+	// the same handshake this signature covers.
+	if !bytes.Contains(input, transcript) {
+		t.Error("the signed input does not contain the transcript verbatim")
+	}
+
+	sig, err := SignIdentity(priv, transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(sig); got != interopIdentitySignature {
+		t.Errorf("identity signature\n got: %s\nwant: %s", got, interopIdentitySignature)
+	}
+	if err := VerifyIdentity(pub, transcript, sig); err != nil {
+		t.Errorf("the vector signature does not verify: %v", err)
+	}
+}
 
 func interopKeyPair(t *testing.T, privateHex string) *KeyPair {
 	t.Helper()

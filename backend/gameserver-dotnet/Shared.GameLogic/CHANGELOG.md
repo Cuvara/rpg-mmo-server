@@ -6,6 +6,76 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **BREAKING (0.6.0): the ten-argument `EntitySnapshotData` constructor taking
+  `changedFields` positionally.** Pass `changedFields:` by name, or use the eleven-argument
+  constructor with `actionSeq:` as well.
+
+  Its doc comment claimed source compatibility "with callers that predated `ActionSeq`" —
+  but those callers passed **nine** arguments, and that overload still exists. The
+  ten-argument form was new API introduced in the *same release* as the field it served, so
+  it had no caller to be compatible with. What it actually did was capture every
+  pre-existing ten-argument call, whose tenth argument was `ActionSeq`.
+
+  `WorldState.Apply` in the Unity client was one such call. It compiled clean, and the
+  counter landed in `changedFields` — where **a counter of 12 is a mask asserting
+  `Hp|MaxHp` are the only fields present**, so the next merge reconstructed the entity from
+  stale X, Y, Speed, Facing and Action while believing it was correct. Nothing validates a
+  mask for plausibility, and nothing should: a mask comes from an encoder, not from a
+  mis-bound argument. Only an action-repeat test objected (Cuvara/Netcode#159; the call
+  site was fixed in Netcode#156).
+
+  Removing it turns that mistake into a compile error. Verified: the removal broke exactly
+  one call site in this repo — the snapshot-merger golden test — which now names its
+  arguments. The Unity client's single call site already names them.
+
+  **Known gap this surfaced**: the golden-vector corpus does not exercise `ActionSeq` at
+  all, which is why the field could be lost at the merge without the conformance gate
+  noticing. Worth a vector, tracked separately rather than folded in here — changing the
+  shared corpus changes what both sides must agree on.
+
+### Added
+- **`GameEventData` / `GameEventType` / `GameEventFlags`** — edge-triggered occurrences in
+  SIMULATION terms, naming entities by id rather than by wire handle. Interning is a property
+  of a connection, not of the world: the simulation produces one event and the encoder turns
+  it into as many wire events as there are connections entitled to see it.
+- **`AbilityDefinition` / `AbilityTargeting` / `AbilityEffect`** — the shared content schema
+  for abilities. Ids are numeric, unlike an item's, because they travel on every cast event
+  and every ability input where a string would cost ~10 bytes on the hottest gameplay path.
+  Cooldowns are in SIMULATION TICKS, never milliseconds, so replaying an input sequence
+  resolves the same way on server and client.
+- **`AbilityLogic`** — cast validation, damage and heal resolution. Shared even though
+  abilities are not predicted: a client that greys out an out-of-range target or draws a
+  cooldown sweep is applying these rules, and its own copy would drift from the server's.
+  A local answer is a hint for presentation, never a substitute for the server's.
+- **`ActionStateLogic`** — the single rule for advancing `EntityAction` and its retrigger
+  counter together. One function rather than an assignment per call site, because the counter
+  is only useful if every writer agrees on when it moves.
+- **`EntityState.ActionSeq`** and **`EntityState.AbilityCooldownUntilTick`**.
+- **`InputData.AbilityId` / `AbilityTargetId` / `Aim`**, with the four-argument constructor
+  kept so existing call sites compile unchanged.
+- **`SnapshotFieldBits` — bit assignments for `EntitySnapshot.changed_fields` (wire field 13,
+  protocol version 2+).** Defines `X = 0x0001`, `Y = 0x0002`, `Hp = 0x0004`, `MaxHp = 0x0008`,
+  `Type = 0x0010`, `Speed = 0x0020`, `FacingBrad = 0x0040`, `Action = 0x0080`,
+  `ActionSeq = 0x0100`. One definition shared by the server encoder and the client merger; a
+  disagreement between the two is now a compile error rather than a silent wrong world.
+- **`EntitySnapshotData.ActionSeq` and `EntitySnapshotData.ChangedFields` (both uint, default 0).**
+  `ActionSeq` is the retrigger counter carried through the merge so the client can distinguish
+  repeated identical actions. `ChangedFields` carries the field-level delta mask from the wire
+  into the merger. Both are zero in the pre-v0.5.0 sense. The full 11-arg constructor accepts
+  `actionSeq` and `changedFields` as the last two arguments; all existing overloads chain
+  through it with both zeroed. A 10-arg compatibility overload accepts `changedFields` only
+  (with `actionSeq` defaulting to 0) for callers that decoded partial updates before `ActionSeq`
+  was defined.
+- **`SnapshotMerger.Apply` now handles partial entity updates.** When a delta entity's
+  `ChangedFields != 0` and the entity is already in the merger's set, `MergeFieldDelta()`
+  combines changed fields from the wire with kept fields from the last-known state, including
+  `ActionSeq`. The old full-replace path runs when `ChangedFields == 0` (old protocol) or when
+  the entity is being introduced for the first time (no prior state to merge against). Six new
+  golden vectors in `snapshot_merger.json` drive both paths, including the trap case:
+  `changedFields != 0` on a brand-new entity falls through to the full-replace path rather than
+  merging against nothing.
+
 ## [0.4.1] — 2026-09-09
 
 Released as `sgl-v0.4.1`. Patch, but it changes a golden vector, so it changes what a

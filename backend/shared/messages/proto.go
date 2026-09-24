@@ -42,9 +42,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		m = authRespPB(*t)
 
 	case EnterWorldRequest:
-		m = &wirepb.EnterWorldRequest{MapId: t.MapID}
+		m = &wirepb.EnterWorldRequest{MapId: t.MapID, PartyId: t.PartyID}
 	case *EnterWorldRequest:
-		m = &wirepb.EnterWorldRequest{MapId: t.MapID}
+		m = &wirepb.EnterWorldRequest{MapId: t.MapID, PartyId: t.PartyID}
 
 	case EnterWorldResponse:
 		m = enterWorldRespPB(t)
@@ -101,9 +101,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		m = &wirepb.SealedClientHello{PublicKey: t.PublicKey}
 
 	case SealedServerHello:
-		m = &wirepb.SealedServerHello{PublicKey: t.PublicKey, Binding: t.Binding, Error: t.Error}
+		m = sealedServerHelloPB(t)
 	case *SealedServerHello:
-		m = &wirepb.SealedServerHello{PublicKey: t.PublicKey, Binding: t.Binding, Error: t.Error}
+		m = sealedServerHelloPB(*t)
 
 	case KickMessage:
 		m = &wirepb.KickMessage{Reason: t.Reason}
@@ -150,7 +150,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		if err := proto.Unmarshal(data, &pb); err != nil {
 			return wrapUnmarshal(v, err)
 		}
-		t.MapID = pb.MapId
+		t.MapID, t.PartyID = pb.MapId, pb.PartyId
 
 	case *EnterWorldResponse:
 		var pb wirepb.EnterWorldResponse
@@ -159,6 +159,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.ServerAddr, t.JoinToken = pb.ServerAddr, pb.JoinToken
 		t.Transport, t.Error = pb.Transport, pb.Error
+		t.ServerPublicKey = pb.ServerPublicKey
 
 	case *SealedClientHello:
 		var pb wirepb.SealedClientHello
@@ -173,6 +174,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.PublicKey, t.Binding, t.Error = pb.PublicKey, pb.Binding, pb.Error
+		t.ServerSignature = pb.ServerSignature
 
 	case *JoinTokenRequest:
 		var pb wirepb.JoinTokenRequest
@@ -198,6 +200,8 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.Tick, t.MoveX, t.MoveY = pb.Tick, pb.MoveX, pb.MoveY
 		t.AttackTargetID = pb.AttackTargetId
+		t.AbilityID, t.AbilityTargetID = pb.AbilityId, pb.AbilityTargetId
+		t.AimX, t.AimY = pb.AimX, pb.AimY
 
 	case *SnapshotMessage:
 		var pb wirepb.SnapshotMessage
@@ -209,6 +213,28 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		// A keyframe with no entities and a delta with no entities are both
 		// legal; keep the slice non-nil only when the wire carried one, so
 		// round-tripping a JSON-shaped message does not gain an empty slice.
+		if len(pb.Events) > 0 {
+			evs := make([]GameEvent, len(pb.Events))
+			for i, e := range pb.Events {
+				evs[i] = GameEvent{
+					// Carried through even when this build does not recognise the
+					// type: an unknown value belongs to a newer peer, and the
+					// decision to ignore it is the consumer's, not the codec's.
+					Type:      GameEventType(e.Type),
+					Source:    e.Source,
+					Target:    e.Target,
+					SourceID:  e.SourceId,
+					TargetID:  e.TargetId,
+					Amount:    e.Amount,
+					AbilityID: e.AbilityId,
+					Flags:     e.Flags,
+				}
+			}
+			t.Events = evs
+		} else {
+			t.Events = nil
+		}
+
 		if len(pb.Entities) > 0 {
 			ents := make([]EntitySnapshot, len(pb.Entities))
 			for i, e := range pb.Entities {
@@ -231,6 +257,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					// would turn "I do not know" into a confident wrong answer.
 					FacingBrad: e.FacingBrad,
 					Action:     EntityAction(e.Action),
+					ActionSeq:  e.ActionSeq,
 				}
 			}
 			t.Entities = ents
@@ -304,10 +331,20 @@ func authRespPB(t AuthResponse) *wirepb.AuthResponse {
 
 func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 	return &wirepb.EnterWorldResponse{
-		ServerAddr: t.ServerAddr,
-		JoinToken:  t.JoinToken,
-		Transport:  t.Transport,
-		Error:      t.Error,
+		ServerAddr:      t.ServerAddr,
+		JoinToken:       t.JoinToken,
+		Transport:       t.Transport,
+		Error:           t.Error,
+		ServerPublicKey: t.ServerPublicKey,
+	}
+}
+
+func sealedServerHelloPB(t SealedServerHello) *wirepb.SealedServerHello {
+	return &wirepb.SealedServerHello{
+		PublicKey:       t.PublicKey,
+		Binding:         t.Binding,
+		Error:           t.Error,
+		ServerSignature: t.ServerSignature,
 	}
 }
 
@@ -335,6 +372,15 @@ func inputPB(t InputMessage) *wirepb.InputMessage {
 		MoveX:          t.MoveX,
 		MoveY:          t.MoveY,
 		AttackTargetId: t.AttackTargetID,
+
+		AbilityId:       t.AbilityID,
+		AbilityTargetId: t.AbilityTargetID,
+		// Written unconditionally rather than only when AbilityID is set. The aim is
+		// meaningless without an ability and the server says so; gating it here would
+		// be a second place that has to agree about which field gates which, and
+		// proto3 elides a zero float anyway.
+		AimX: t.AimX,
+		AimY: t.AimY,
 	}
 }
 
@@ -379,6 +425,21 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 		Full:    t.Full,
 		Removed: t.Removed,
 	}
+	if len(t.Events) > 0 {
+		pb.Events = make([]*wirepb.GameEvent, len(t.Events))
+		for i, e := range t.Events {
+			pb.Events[i] = &wirepb.GameEvent{
+				Type:      wirepb.GameEventType(e.Type),
+				Source:    e.Source,
+				Target:    e.Target,
+				SourceId:  e.SourceID,
+				TargetId:  e.TargetID,
+				Amount:    e.Amount,
+				AbilityId: e.AbilityID,
+				Flags:     e.Flags,
+			}
+		}
+	}
 	if len(t.Entities) > 0 {
 		pb.Entities = make([]*wirepb.EntitySnapshot, len(t.Entities))
 		for i, e := range t.Entities {
@@ -396,6 +457,7 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 				// exactly why those encodings were chosen.
 				FacingBrad: e.FacingBrad,
 				Action:     wirepb.EntityAction(e.Action),
+				ActionSeq:  e.ActionSeq,
 			}
 			// Enum when we can (2 bytes), name when we cannot (2 + len). Never
 			// both: the reader prefers the enum, so setting both would make the

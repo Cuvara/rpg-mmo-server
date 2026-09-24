@@ -5,6 +5,133 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`dungeonprobe` takes both pins too (`-gateway-tls-cert`, `-nakama-tls-cert`).** It is the
+  tool that proves C1 (dungeon instancing), and it could not run at all against a dev cluster
+  with either flag on. Its negative control — an outsider's refusal must **name the party** —
+  is what caught the gateway failing every dungeon entry with a bare "internal error".
+
+  `smoke.PinnedTLSConfig` is exported for it rather than copied; the gateway pin is a
+  package-level value because `enterWorld` is called from five places and threading it through
+  each invites one being missed, which is exactly the failure this class of bug keeps taking.
+
+- **`-nakama-tls-cert` / `NAKAMA_TLS_CERT`: the smoketest can reach a Nakama that terminates
+  its own TLS (ADR-24).** Without it the suite reported `context deadline exceeded` against a
+  perfectly healthy Nakama — **a plaintext GET to a TLS listener is not refused, it hangs**, and
+  the timeout then names Nakama rather than the scheme. That is worse than a clean failure: it
+  sends the reader to look at the wrong component.
+
+  The pin is the leaf, compared byte for byte, and `InsecureSkipVerify` disables only the
+  DEFAULT verifier so `VerifyPeerCertificate` is the sole decider — how Go spells "replace
+  verification", not "remove it". Pinning is **stricter** than the public trust store.
+
+  Two startup refusals rather than warnings, matching the game server's own rule: a pin against
+  a non-https URL is refused (a pin on a plaintext hop protects nothing while reading as though
+  it does), and an https URL with no pin is refused up front rather than failing deep inside an
+  x509 message.
+
+  `NewRunner` now returns an error instead of a bare `*Runner`, because these are configuration
+  faults that must stop the run rather than surface as a mid-flight failure.
+
+## [Unreleased]
+
+### Added
+- **`killprobe` can pin both TLS hops: `-gateway-tls-cert` (ADR-23) and `-nakama-tls-cert`
+  (ADR-24).** Without them the probe could not run at all against a dev cluster with either
+  flag on, so the one tool that proves the reward path end to end stopped working exactly when
+  the security work it was meant to validate landed.
+
+  **Both are pins, not CA trust, and pinning is stricter than the trust store** — a certificate
+  signed by any CA on earth is refused unless it is this exact one, compared leaf-only and byte
+  for byte. A pin that matched anywhere in the chain would accept a certificate *issued by* the
+  pinned one, which is a different guarantee. `InsecureSkipVerify` is set and that is not what
+  it sounds like: it disables the default verifier so `VerifyPeerCertificate` is the only thing
+  deciding, which is how Go spells "replace verification", not "remove it".
+
+  **Two startup refusals rather than warnings**, matching the game server's own rule: a pin
+  against a non-https `-nakama` is refused, because a pin on a plaintext hop protects nothing
+  while reading as though it does; and an https `-nakama` with no pin is refused up front
+  rather than failing several steps later inside an x509 message, because Nakama's meta-hop
+  certificate is self-signed by design and is never trusted through a CA.
+
+  There is no downgrade on the gateway hop either: a pin that fails to match ends the probe
+  instead of retrying in the clear, because a probe that quietly falls back measures the wrong
+  stack and reports success.
+
+  `smoke.WrapGatewayTLS` and `smoke.LoadPinnedCertificate` are exported for this (they were
+  unexported and reachable only from the smoke tests); no behaviour changed with the rename.
+
+## [Unreleased]
+
+### Added
+- **The smoke test verifies the game server's identity signature (ADR-25).** It passes the
+  `server_public_key` the real gateway handed it into the sealed handshake, so a forged or
+  missing signature now ends the run instead of being reported. This is the closest peer in
+  the repo to a shipped client -- it receives its join token rather than minting one -- so it
+  is the one that proves a REAL player can reach an authenticated state, which
+  `binding_verified` never could.
+
+  The game-server step reports **three** facts rather than one:
+  `identity_checked`, `key_hop_authenticated` and `server_identity_verified`. While the
+  gateway hop is plaintext a passing run prints `checked=true authenticated=false
+  verified=false`, and that is the honest result, not a degraded one: the key was delivered
+  over a hop an attacker could have owned. `KeyHopAuthenticated` is hard-coded false and is
+  the single line to change when ADR-23's gateway TLS is on AND this client validates the
+  certificate -- not before. A backend with no identity key still passes with
+  `identity_key=false`, so the suite stays green against a pre-ADR-25 deployment.
+- **`-gateway-tls-cert` / `SMOKE_GATEWAY_TLS_CERT`: the gateway hop's TLS, with the certificate
+  PINNED byte-for-byte (ADR-23).** Covers the gateway hop only; the gameplay hop is `-sealed`, and
+  setting one says nothing about the other.
+
+  A pin, not a trust store, and that is stricter rather than weaker: the dev and staging gateways are
+  self-signed so chain validation cannot succeed, leaving pinning or skipping -- and skipping is what
+  makes a misconfigured hop look exactly like a working one. A certificate signed by any CA on earth
+  is refused unless it is this exact one. `InsecureSkipVerify` is set and does not mean what it looks
+  like: it removes the DEFAULT verifier so the pin can be the only one that decides, which is how Go
+  expresses "replace verification". The C# client's `PinValidator` does the same and likewise ignores
+  the platform's chain result.
+
+  Measured against `k3d-rpg-dev` on 2026-09-13: correct pin -> `SMOKE=PASS` with `sealed=true`; a
+  different valid self-signed certificate -> refused by name; no pin at all -> `read length: EOF`,
+  which is the closed socket a TLS listener has no way to explain to a plaintext client.
+
+  Unit tests cover both directions, including that the refusal NAMES the pin -- a refusal nobody can
+  attribute costs as much as no refusal. Mutation-checked: deleting the comparison fails them. One
+  honest gap: the "peer presented no certificate" guard is unreachable from a real handshake, so no
+  test exercises it.
+
+### Added
+- **`cmd/dungeonprobe`: proves ADR-26 end to end against a running deployment.** A real party
+  created through Nakama's RPCs, entering a dungeon through the real gateway.
+
+  It exists because the unit tests on both sides can only prove their own halves: the
+  gateway's drive a fake party authority and a fake allocator, the Nakama module's drive an
+  in-process storage double. Neither can answer the question that matters -- do two players
+  who joined the same party through Nakama land on the **same pod**?
+
+  **The verdict is the address.** Not "both calls succeeded": two successful calls returning
+  two different pods is precisely the failure ADR-26 decision 2 exists to prevent, and it
+  looks like success from every angle except that one.
+
+  The negative control runs **first**, before the members enter. It is the security assertion,
+  and an assertion placed after everything else is the one that gets skipped on the day it
+  would have fired; it also needs no allocated pod, so it still runs and still means something
+  against a fleet scaled to zero. It asserts not just that the outsider is refused but that the
+  refusal **names the party** -- "all servers busy" there would be a pass-looking result from a
+  gateway that never checked at all.
+
+  **Measured on dev, 2026-09-12**, with the dungeon fleet at `replicas: 0`:
+  ```
+  party created: 0615e1c3faf6fb9bff4574a91b2518de (leader)
+  member joined the same party
+  outsider refused, and the reason names the party: "not a member of that party"
+  FAILED: enter world rejected: all servers busy, retry shortly
+  ```
+  The first three lines are the live proof that the party RPCs and the gateway's
+  membership check work against a real Nakama -- the Nakama module's own author could not
+  verify that, having never loaded the plugin. The fourth is the expected answer from an
+  empty fleet and is what the game-server half of ADR-26 unblocks.
+
 ### Fixed
 - **`killprobe` spoke JSON, so turning sealing on broke it.** The day `GAMESERVER_SEALED`
   flipped to `require` on dev, the reward acceptance harness stopped working:

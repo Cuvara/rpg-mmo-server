@@ -372,11 +372,269 @@ Carried across from the compose healthchecks, with the intent preserved:
 |---|---|---|
 | both PostgreSQL | `pg_isready -U $POSTGRES_USER -d $POSTGRES_DB -h 127.0.0.1` | A listening socket during recovery is not a database that accepts queries. `-h 127.0.0.1` forces the TCP path, which is the one clients use — the unix socket answers earlier. |
 | Redis | `redis-cli ping` | Exits non-zero on anything but `PONG`, so the exit code carries what compose's `grep -q PONG` carried. |
-| Nakama | `httpGet /healthcheck :7350` | Identical to what `/nakama/nakama healthcheck` does internally, without forking a 200MB binary every 10s. A `startupProbe` (24 x 5s) covers migrate + plugin load so the liveness timer never runs during a cold start. |
+| Nakama | `httpGet / :9100` | **The metrics port, not the client port, and that is the whole point.** :7350 changes protocol when meta-hop TLS is on (ADR-24); :9100 never does, so one spec works in both modes. A `startupProbe` (24 x 5s) covers migrate + plugin load so the liveness timer never runs during a cold start. See below. |
 
 Liveness is deliberately slacker than readiness everywhere: readiness takes a
 pod out of a Service, liveness kills it, and killing a database mid-recovery
 turns a slow start into a crash loop.
+
+### Why Nakama's probe left `/healthcheck`
+
+It used to be `httpGet /healthcheck` on `:7350`, which is the port
+`--socket.ssl_certificate` converts to TLS. Measured on k3d-rpg-dev 2026-09-12:
+with the meta-hop flag on, all three probes failed with
+`client sent an HTTP request to an HTTPS server` and the pod never became Ready
+while the container itself was perfectly healthy.
+
+Every other candidate was tried and rejected on a measurement, not a preference:
+
+| Candidate | Why not |
+|---|---|
+| `scheme: HTTPS` on `:7350` | Right with TLS on, wrong with it off — and off is the default everywhere. Trades a broken opt-in for a broken default, and there is no per-environment overlay to vary it in. |
+| exec `/nakama/nakama healthcheck` | Nakama v3.40.0's subcommand is `http.Get("http://localhost:" + port)` — hardcoded plaintext, no TLS branch — so it breaks under TLS in the same way. It also forks a 200MB binary every 10s. |
+| exec `curl` / `wget` | The image has neither. `heroiclabs/nakama:3.40.0` is Debian 12 with no `curl`, no `wget`, no `nc`, no `python3` and no `openssl` (measured in the running pod, 2026-09-13). |
+| `tcpSocket :7350` | Mode-independent, and answers the wrong question: "is something accepting connections", not "is Nakama serving". A probe that cannot tell a wedged Nakama from a healthy one is worse than the bug it replaces. |
+
+**What the new probe gives up, stated plainly.** `:9100` is a different
+`http.Server` in the same process than the client API, so it proves the process
+is alive and serving HTTP — not that the client-API mux still answers. The gap
+is narrow because the old target was narrow too: Nakama's `/healthcheck` is a
+static 200 (`{}` on the wire) that checks no dependency. A certificate the
+operator got wrong is *not* in that gap — Nakama cannot read it and exits, and
+the pod crash-loops visibly.
+
+**Open item: the wedged API mux, and the automatic restart this cost.** The
+paragraph above was first written as "not a regression, because the old target
+checked nothing either". True of *dependency* checking, and false of one thing
+that matters:
+
+> The old liveness probe would have **restarted the pod** when the `:7350`
+> server itself stopped answering — a dead accept loop, a wedged listener —
+> because that is exactly what it hit. **The new one will not.** A narrow class
+> of failure has lost its automatic recovery.
+
+That is the real cost of this fix. It is the right trade against the four
+alternatives in the table, and it is written here so nobody has to re-derive it.
+
+**Nothing else closes it in steady state**, checked rather than assumed:
+
+| Where you might expect to notice | What is actually there |
+|---|---|
+| the gateway | **not a consumer** — it makes no Nakama call at all, so its health says nothing |
+| the C# game server | the only in-cluster consumer of `:7350`; its Nakama failures are `LogWarning` with **no counter and nothing on `/metrics`** |
+| monitoring | **no alert rules anywhere** in `deploy/monitoring/` — one scrape config, one dashboard. Nakama's own API counters on `:9100` would flatline visibly, but only to someone already looking |
+| `dev-up.sh`, `verify/lib/checks_flow.sh`, smoketest | exercise the hop for real, **only at deploy time** |
+
+So the first notice is **a human, when players cannot authenticate**.
+
+**Closed 2026-09-13** — and the failure it describes happened first, on the day
+the flag went on: one stale `Allocated` GameServer kept the old plaintext
+`NAKAMA_URL` and failed every reward RPC while the game played perfectly.
+`gameserver_nakama_reward_outcomes_total{map_id,outcome}` now counts every answer
+to `reward_kills`, and `deploy/monitoring/alerts.yaml` — this repository's first
+alert rule — fires when more than half of them have not landed for ten minutes.
+It watches from the consumer's side, which is the only side that can see `:7350`
+be unreachable, untrusted **or** wedged; the probes on `:9100` cannot see any of
+the three. `backend/gameserver-dotnet/docs/METRICS.md` has the label meanings.
+
+**Still not closed:** the lost automatic restart. Nothing kills a pod whose API
+mux has wedged — the alert says a human should look.
+
+Compose has the same trap and it was not recorded when the flag landed: its
+healthcheck was bare `/nakama/nakama healthcheck`, which defaults to 7350. It is
+now `/nakama/nakama healthcheck 9100`, for the same reason and with the same
+trade.
+
+## Turning the meta hop's TLS on
+
+ADR-24's flag, off at every deploy path. **Four things move together**; three of
+four is a deploy that looks fine and breaks the reward path, or a client that
+cannot log in. Everything below is `k3d-rpg-dev`; swap the context for staging.
+
+The certificate is self-signed, and that is fine *because both clients of this
+hop pin it* — pinning is stricter than the public trust store, not looser. There
+is no accept-anything setting anywhere in this system (ADR-24 decision 4).
+
+**Step 0 — generate the pair.** SANs matter: the game server dials the Service
+DNS name, the Unity player dials the host address.
+
+```bash
+mkdir -p /tmp/nakama-tls && cd /tmp/nakama-tls
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout tls.key -out tls.crt \
+  -subj "/CN=nakama.rpg-k8s-data.svc.cluster.local" \
+  -addext "subjectAltName=DNS:nakama,DNS:nakama.rpg-k8s-data.svc.cluster.local,DNS:localhost,IP:127.0.0.1"
+openssl x509 -in tls.crt -noout -subject -ext subjectAltName -enddate
+```
+
+**Step 1 — the Secret Nakama reads (private key included).**
+
+```bash
+kubectl --context k3d-rpg-dev -n rpg-k8s-data create secret tls nakama-tls \
+  --cert=tls.crt --key=tls.key
+```
+
+**Step 2 — the Secret the game-server pods read (PUBLIC HALF ONLY).** Different
+namespace, so it is a second Secret — a Secret cannot cross one, the same reason
+`NAKAMA_HTTP_KEY` exists twice. **Do not copy the key into it.**
+
+```bash
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime create secret generic nakama-tls-pin \
+  --from-file=tls.crt=tls.crt
+```
+
+**Step 3 — set two ConfigMaps. No manifest edit.**
+
+This used to be four file edits and it no longer is. The manifests are applied
+**unchanged to dev and staging**, so an edit here turned the flag on in both
+clusters or neither — and a required Secret volume wedged every pod in the cluster
+that had not opted in. The mounts now ship uncommented with `optional: true`, and
+the paths come from ConfigMap keys that are also optional, so **an absent key is
+the flag off**. That is the same shape ADR-23's gateway TLS uses, for the same
+reason.
+
+```bash
+# Nakama's end: where it reads its certificate and key from.
+kubectl --context k3d-rpg-dev -n rpg-k8s-data create configmap nakama-config \
+  --from-literal=tls-cert-path=/nakama/tls/tls.crt \
+  --from-literal=tls-key-path=/nakama/tls/tls.key \
+  --dry-run=client -o yaml | kubectl --context k3d-rpg-dev apply -f -
+
+# The game server's end: the URL it dials and the pin it checks the leaf against.
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime patch configmap gameserver-config \
+  --type=merge -p '{"data":{
+    "nakama-url":"https://nakama.rpg-k8s-data.svc.cluster.local:7350",
+    "nakama-tls-pin":"/etc/nakama-tls/tls.crt"}}'
+```
+
+The probes need no edit — that is what moving them to `:9100` bought.
+
+> **A fleet update does NOT recreate an Allocated GameServer.** Measured
+> 2026-09-12/13: after applying the fleets and patching the ConfigMap, the one
+> `Allocated` map server kept running with the old plaintext `NAKAMA_URL` and no
+> pin mounted, and **every reward RPC it made failed** with
+> `BadRequest code=-1 Client sent an HTTP request to an HTTPS server` while the
+> game itself carried on working perfectly. Environment variables are fixed at pod
+> creation, so a ConfigMap patch never reaches a running pod either. Delete the
+> allocated GameServer (`kubectl delete gs <name>`) and let the fleet replace it,
+> or accept that the rollout is not complete until that player leaves.
+>
+> Nothing alerts on this. It is the steady-state gap ADR-24 §8.1 records, seen
+> live.
+
+**Step 4 — apply, and watch the thing that used to fail.**
+
+```bash
+KUBE_CONTEXT=k3d-rpg-dev ./apply.sh          # from k8s/data/ -- NOT plain `apply -k`, see the top of apply.sh
+kubectl --context k3d-rpg-dev -n rpg-k8s-data rollout status deploy/nakama --timeout=180s
+kubectl --context k3d-rpg-dev -n rpg-k8s-data logs deploy/nakama | grep -i "ssl mode"
+kubectl --context k3d-rpg-dev apply -f k8s/app/20-configmaps.yaml \
+  -f k8s/app/50-fleet-map.yaml -f k8s/app/60-fleet-dungeon.yaml
+```
+
+Expect `INFO SSL mode enabled` plus Nakama's own
+`WARNING: enabling direct SSL termination is not recommended` — that warning is
+expected and is argued with in ADR-24 §4, not ignored.
+
+**Verify each of the three consumers separately**, because none of them implies
+another:
+
+```bash
+# 1. Nakama itself: https answers, http is refused.
+kubectl --context k3d-rpg-dev -n rpg-k8s-data run tlscheck --rm -i --restart=Never \
+  --image=curlimages/curl -- \
+  sh -c 'curl -sk -o /dev/null -w "https:%{http_code}\n" https://nakama:7350/healthcheck; \
+         curl -s  -o /dev/null -w "http:%{http_code}\n"  http://nakama:7350/healthcheck'
+# expect https:200 and http:400
+#
+# No image pull available? The API server will proxy it, and the `https:` prefix on
+# the service name is what makes it speak TLS to the backend rather than plaintext:
+#   kubectl --context k3d-rpg-dev get --raw \
+#     "/api/v1/namespaces/rpg-k8s-data/services/https:nakama:7350/proxy/healthcheck"
+# It prints {} on success. The unprefixed form is the negative control and must now
+# fail -- it is the plaintext request Nakama refuses.
+
+# 2. The game server: no certificate error on the reward path.
+#
+# NOT `-l agones.dev/fleet=...`. That label is on the GameServer CR and NOT on the
+# pod, so a fleet selector matches zero pods and `kubectl logs` answers "No
+# resources found" -- which reads like a quiet pass rather than a broken command
+# (measured on k3d-rpg-dev 2026-09-13; the pods carry only agones.dev/gameserver,
+# agones.dev/role and agones.dev/safe-to-evict).
+#
+# --prefix is not decoration either: it names the pod each line came from, which is
+# what distinguishes one stale Allocated GameServer still on the old plaintext
+# NAKAMA_URL from a fleet-wide failure. See the warning above about exactly that.
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime logs -l agones.dev/role=gameserver \
+  --prefix --tail=200 | grep -E "NakamaTLS|reward|certificate"
+# expect "NakamaTLS: pinned to /etc/nakama-tls/tls.crt (sha256:...)" from EVERY pod
+
+# 3. The Unity player: hand it the same PEM.
+#   Tools/verify-multiclient.sh --exe … --nakama-port 7001 … \
+#     -- -cuvara-nakama-scheme https -cuvara-nakama-tls-cert /tmp/nakama-tls/tls.crt
+```
+
+**Handing the pin to a client** is the whole client-side story: copy `tls.crt`
+to the machine running the player and pass `-cuvara-nakama-tls-cert <path>`
+alongside `-cuvara-nakama-scheme https` (or `CUVARA_NAKAMA_TLS_CERT` /
+`CUVARA_NAKAMA_SCHEME`, or the `backend.env` file on Android). The client
+compares the certificate Nakama presents against that file byte for byte and
+refuses anything else. Without the flag the player fails every request with
+`Curl error 60: Cert verify failed … UnityTls error code: 7`, which is the
+correct refusal, not a bug.
+
+### The same thing under docker compose
+
+```bash
+cd backend/deploy
+mkdir -p tls && cd tls        # a Windows-visible path, NOT /tmp -- see the note in .env.example
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout tls.key -out tls.crt \
+  -subj "/CN=nakama" -addext "subjectAltName=DNS:nakama,DNS:localhost,IP:127.0.0.1"
+cd ..
+```
+
+Mount the pair into the `nakama` service (a `./tls:/nakama/tls:ro` volume) and
+into the gameserver service, then:
+
+```bash
+NAKAMA_TLS_CERT=/nakama/tls/tls.crt \
+NAKAMA_TLS_KEY=/nakama/tls/tls.key \
+NAKAMA_URL=https://nakama:7350 \
+NAKAMA_TLS_PIN=/nakama/tls/tls.crt \
+  ./stack.sh up
+```
+
+All four names are in `STACK_OVERRIDABLE`, so a `.env` on disk does not clobber
+them. The compose healthcheck already probes `:9100` and needs no change.
+
+**What this does NOT cover**, and must not be described as covered: the Nakama
+console `:7351` and metrics `:9100` stay plaintext (ADR-24 §4), the
+Nakama→Postgres DSN still specifies no `sslmode`, and the session token still
+travels in the `/ws` query string where TLS protects the wire but not Nakama's
+own access log.
+
+**Turning it back off** is deleting the two ConfigMap keys and rolling; no file
+is edited, because none was edited to turn it on. An earlier draft of this line
+said "the same four files in reverse", which was true of the mechanism replaced
+above and survived the rewrite of the section it sits under -- the exact failure
+this file now warns about twice.
+
+```bash
+kubectl --context k3d-rpg-dev -n rpg-k8s-data delete configmap nakama-config
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime patch configmap gameserver-config \
+  --type=merge -p '{"data":{
+    "nakama-url":"http://nakama.rpg-k8s-data.svc.cluster.local:7350",
+    "nakama-tls-pin":""}}'
+kubectl --context k3d-rpg-dev -n rpg-k8s-data rollout restart deploy/nakama
+```
+
+Both moves together, as on the way in: a game server left pinning while Nakama
+stops terminating TLS **refuses to start**, and `dev-up.sh` refuses that state
+before it reaches a cluster. The two Secrets can stay -- they are inert while the
+ConfigMap keys are absent, which is what `optional: true` buys.
+
+Delete the `Allocated` GameServers afterwards or the rollout is not complete; see
+the warning in step 4.
 
 ## Verification
 

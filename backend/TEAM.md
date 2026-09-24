@@ -56,6 +56,7 @@ deploy (depends on all above — build artifacts)
   does not happen and the reward path is silently inert
 - **Gateway (Go) <-> GameServer (C# .NET 10)**: no runtime connection. The gateway never talks to a game server; it issues a join token and the *client* dials the server directly (ADR-3). Both speak the same wire protocol (4-byte BE length prefix + Protobuf, legacy JSON still accepted — ADR-9), joined by an HS256 join token whose `sid` names the target server
 - **Gateway <-> Redis**: Session store (TTL), server registry, event-stream consumer
+- **The `servers:id:{server_id}` hash is a CROSS-LANGUAGE CONTRACT with no translation layer.** The C# game server writes it (`GameServer/Registry/RedisServerRegistry.cs`) and the Go gateway parses it directly (`shared/storage/redisstore/registry.go`, `infoFromFields`). Fields: `server_id`, `map_id`, `addr`, `transport`, `capacity`, `player_count`, `identity_key`. A rename or an encoding change on one side **must** land in the same commit as the other; there is nothing in between to catch a drift, and the symptom is not an error — the gateway reads an empty value and behaves as if the server had not published it. `identity_key` is ADR-25's per-pod Ed25519 public key as standard padded base64 of 32 raw bytes; use `sealed.EncodeIdentityKey`/`DecodeIdentityKey` and `ServerIdentity.PublicKeyBase64` rather than calling base64 by hand
 - **GameServer <-> Redis**: ✅ **implemented** — `GameServer/Registry/RedisServerRegistry.cs` (self-registration + 5s heartbeat against 15s TTL), `GameServer/Events/RedisEventStream.cs` (event publishing via StackExchange.Redis), `GameServer/Events/RedisKickConsumer.cs` (duplicate-login kick consumer). Enabled when `REDIS_ADDR` is set; noop fallback otherwise
 - **GameServer <-> PostgreSQL**: Async batch save every 30s + save on entity removal. No checkpoint-on-transfer yet (ADR-6)
 
@@ -89,6 +90,31 @@ Constraints: no Unity refs, **no ECS refs (`Arch.Core` included)**, no server-sp
 - `package.json`'s `version` is bumped in the same commit that gets tagged.
   Otherwise the client installs `sgl-v0.2.0` and gets a package reporting `0.1.0`,
   which UPM will not warn about.
+
+  This is enforced by `.github/workflows/verify-sgl-tag.yml`, which fails on any
+  pushed `sgl-v*` tag whose `package.json` disagrees with it. It **detects**
+  rather than prevents: the push has already happened by the time a workflow
+  runs, and there is no pre-receive hook here. `publish-shared-gamelogic.yml`
+  cannot produce a mismatch at all — it derives the tag from `package.json` — so
+  the automated path was never the risk. Every mismatch below came from a tag
+  pushed by hand.
+
+  **Five published tags are wrong and will stay wrong.** A tag that somebody has
+  already pinned cannot be moved without breaking them, so these are recorded
+  rather than repaired:
+
+  | tag | `package.json` actually reports |
+  |---|---|
+  | `sgl-v0.1.1` | `0.1.0` |
+  | `sgl-v0.1.2` | `0.1.0` |
+  | `sgl-v0.1.3` | `0.1.0` |
+  | `sgl-v0.1.4` | `0.1.0` |
+  | `sgl-v0.1.5` | `0.1.0` |
+
+  Anything pinned to one of those five resolves a package reporting `0.1.0`.
+  `sgl-v0.1.6` onward agree. Found by reading each tag's `package.json` while
+  backfilling the GitHub releases that these tags never had — not by any check,
+  because until now there was none.
 - **Tagging is a release action and belongs to the lead.** Do not create one.
 - No `.tgz`, no NuGet, no registry. UPM does not consume tarball URLs, and the
   client must compile *source* (Unity 6 is C# 9).
@@ -171,6 +197,31 @@ Rules:
 - All exported functions: GoDoc comment
 - Complex logic: inline comments explaining WHY (not what)
 - Package-level doc.go for each package
+
+## Mandatory: verify a result before reporting it
+
+Every expensive defect this project has shipped produced **a plausible number instead of an
+error** — a believable result about the wrong thing, or about nothing at all. Not a crash,
+not a red test.
+
+Before reporting any measurement, benchmark, CI verdict, counter reading or "it works now":
+
+- **Count passes, never the absence of failures.** `gh pr checks` prints nothing at all for a
+  CONFLICTING pull request, and a loop asking "are there zero failures" reads that as green.
+- **Get a non-empty result out of an instrument before trusting it.** A gate that matches
+  nothing must fail, not pass. A counter reading zero must be shown capable of being non-zero.
+- **Mutation-test anything that matters** — revert the logic, watch that specific test go
+  red, restore. Force a rebuild between mutations: MSBuild resolves timestamps to one second
+  and will silently test the previous binary.
+- **A control must differ in exactly one thing**, and must actually exercise the code.
+- **Verify remote and live state, not exit codes.** After a push, `git ls-remote`. After a
+  config change, read it back off `/status`.
+
+The full incident list, with what each one cost, is **`backend/docs/MEASUREMENT.md`**. The
+working checklist is the `verify-a-result` skill in `.claude/skills/`.
+
+Ask of every green result: *what would this look like if the thing I am measuring were
+broken?* If the answer is "the same", it is not evidence yet.
 
 ## Development Standards
 

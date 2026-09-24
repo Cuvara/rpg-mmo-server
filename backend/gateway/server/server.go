@@ -31,6 +31,10 @@ import (
 type Gateway struct {
 	sessions  *session.SessionManager
 	registry  *registry.RegistryService
+	// dungeonIndex and partyMembers are nil on a deployment without dungeons.
+	// Nil is a supported state, not an oversight: see assignDungeon.
+	dungeonIndex storage.DungeonIndex
+	partyMembers transfer.PartyMembership
 	jwtSecret string
 	logger    *slog.Logger
 
@@ -113,6 +117,24 @@ type Option func(*Gateway)
 // default (TCP).
 func WithTransport(kind string) Option {
 	return func(g *Gateway) { g.transportKind = kind }
+}
+
+// WithDungeons enables dungeon entry: the party -> instance index and the
+// authority that answers "is this user in that party".
+//
+// Both or neither. A gateway with an index but no membership check would
+// allocate a pod for anyone who names a party id, which is the one thing
+// ADR-26 decision 3 exists to prevent; a gateway with a membership check and
+// no index has nowhere to record the answer, so four members would get four
+// instances. Passing one without the other is therefore a programming error
+// and is treated as "dungeons off" rather than half-on.
+func WithDungeons(index storage.DungeonIndex, party transfer.PartyMembership) Option {
+	return func(g *Gateway) {
+		if index == nil || party == nil {
+			return
+		}
+		g.dungeonIndex, g.partyMembers = index, party
+	}
 }
 
 // WithMetrics attaches the Prometheus metric set. Without it the gateway is
@@ -1107,11 +1129,23 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	// (registry.allocateOnce), so a later retry finds the server ready.
 	ctx, cancel := context.WithTimeout(context.Background(), g.enterWorldBudget)
 	defer cancel()
-	result, err := transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
+
+	// One message, two things it can ask for (ADR-26 decision 1). A non-empty
+	// party id means "an instance of this content for this party"; empty means
+	// the map flow that has always existed. The branch is here rather than in a
+	// second handler so both share this budget, this auth check and these error
+	// paths -- two copies of them would drift.
+	var result transfer.AssignResult
+	var err error
+	if req.PartyID != "" {
+		result, err = g.assignDungeon(ctx, userID, req.PartyID, req.MapID)
+	} else {
+		result, err = transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
+	}
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
 		g.logger.Error("enter world failed",
-			"conn", cc.ID(), "user", userID, "map", req.MapID,
+			"conn", cc.ID(), "user", userID, "map", req.MapID, "party", req.PartyID,
 			"reason", "no_assignment", "err", err,
 			"dur_ms", time.Since(start).Milliseconds())
 		g.sendEnterWorldError(cc, clientSafeAssignError(err))
@@ -1126,9 +1160,14 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	// also the only record anywhere of which server a client was sent to, so
 	// it carries the server id and address the client is about to dial.
 	g.logger.Info("enter world assigned",
-		"conn", cc.ID(), "user", userID, "map", req.MapID,
+		"conn", cc.ID(), "user", userID, "map", req.MapID, "party", req.PartyID,
 		"server", result.ServerID, "server_addr", result.ServerAddr,
 		"transport", result.Transport,
+		// Whether this assignment carried a server identity key (ADR-25), not
+		// the key itself: a public key in every enter-world line is noise, but
+		// its ABSENCE is the whole explanation for a client that refuses to
+		// seal, and that must be findable in the gateway's own log.
+		"server_key", len(result.ServerPublicKey) > 0,
 		"dur_ms", time.Since(start).Milliseconds())
 
 	// Update session with server and map association (task 2c). On its own
@@ -1152,6 +1191,12 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		ServerAddr: result.ServerAddr,
 		JoinToken:  result.JoinToken,
 		Transport:  result.Transport,
+		// ADR-25. Forwarded verbatim from the registry entry; the gateway never
+		// generates, stores or validates this key, it only relays the one the pod
+		// published. Empty when that pod predates ADR-25 — logged above as
+		// server_key=false so an operator can see WHY a client that requires
+		// identity refused, without having to read the registry by hand.
+		ServerPublicKey: result.ServerPublicKey,
 	})
 	if err != nil {
 		g.logger.Error("marshal enter world response", "err", err)
@@ -1190,6 +1235,17 @@ const (
 	// read like msgNoServerAvailable either, which means "this map exists but is
 	// full". It names no fleet, namespace or server id.
 	msgUnknownMap = "map is not available"
+	// msgNotInParty is terminal and is the client's own fault: they asked for an
+	// instance of a party they are not in. It must not read like
+	// msgServerStarting, because retrying cannot change the answer, and it must
+	// not read like msgInternalError, because that is what an operator will
+	// search the logs for when something is actually broken here.
+	msgNotInParty = "not a member of that party"
+	// msgUnknownParty is the other client-fault case and is kept separate from
+	// the one above on purpose: "the party is gone" and "you are not in it" send
+	// a player to different places in a UI, and collapsing them would make a
+	// disbanded party look like a permissions bug.
+	msgUnknownParty = "party does not exist"
 	// msgFleetBusy is the second retryable EnterWorld failure: the map has no
 	// live server and the allocation API answered `UnAllocated` — every
 	// GameServer in the fleet is taken and none is Ready at this instant
@@ -1234,11 +1290,41 @@ func clientSafeAssignError(err error) string {
 		return msgFleetBusy
 	case errors.Is(err, registry.ErrNoServerAvailable):
 		return msgNoServerAvailable
+	// The two party failures are the client's own fault and terminal. They are
+	// checked before the generic cases so a membership refusal is never reported
+	// as an internal error -- which would send an operator hunting a fault that
+	// is not there, and a player retrying something that cannot succeed.
+	case errors.Is(err, transfer.ErrNotAPartyMember):
+		return msgNotInParty
+	case errors.Is(err, transfer.ErrPartyUnknown):
+		return msgUnknownParty
 	case gameerrors.Is(err, gameerrors.ErrNotImplemented):
 		return msgNotImplemented
 	default:
 		return msgInternalError
 	}
+}
+
+// assignDungeon resolves a dungeon entry, or explains why it cannot.
+//
+// The dependencies are assembled here rather than held on Gateway because two
+// of them are optional in a way the map path's are not: a deployment with no
+// dungeon fleet and no Nakama URL is a valid deployment today, and it must fail
+// a dungeon request legibly rather than panic on a nil field. That is the same
+// posture the allocator already takes for an unconfigured dungeon fleet.
+func (g *Gateway) assignDungeon(ctx context.Context, userID, partyID, contentID string) (transfer.AssignResult, error) {
+	if g.dungeonIndex == nil || g.partyMembers == nil {
+		return transfer.AssignResult{}, fmt.Errorf("assign dungeon: %w",
+			gameerrors.New(gameerrors.ErrNotImplemented,
+				"dungeons are not configured on this deployment (NAKAMA_URL and a dungeon fleet are required)"))
+	}
+
+	return transfer.AssignDungeon(ctx, userID, partyID, contentID, transfer.DungeonDeps{
+		Registry: g.registry,
+		Index:    g.dungeonIndex,
+		Party:    g.partyMembers,
+		JoinKeys: g.joinKeys,
+	})
 }
 
 func (g *Gateway) handlePing(cc *ClientConn, env messages.Envelope) {

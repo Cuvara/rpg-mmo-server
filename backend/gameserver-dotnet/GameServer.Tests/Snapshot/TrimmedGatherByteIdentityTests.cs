@@ -72,6 +72,7 @@ public class TrimmedGatherByteIdentityTests
         bool intern = encoding == WireEncoding.Proto;
 
         bool sawFull = false, sawDelta = false, sawRemoved = false;
+        bool sawActionSeq = false;
 
         for (int t = 1; t <= Ticks; t++)
         {
@@ -101,6 +102,11 @@ public class TrimmedGatherByteIdentityTests
                     $"t{t} {ids[i]}: match counts diverged (old {oldCount}, new {newCount})");
                 Assert.True(oldCount <= stateBuffer.Length, "scenario buffer undersized");
 
+                // Verify the scenario produces non-zero ActionSeq values so we know the
+                // retrigger counter is actually exercised.
+                for (int e = 0; e < newCount; e++)
+                    sawActionSeq |= viewBuffer[e].ActionSeq != 0;
+
                 SnapshotMessage oldMsg = oldStates[i].Encode(
                     loop.CurrentTick, ackTick, stateBuffer.AsSpan(0, oldCount),
                     GameConstants.DefaultKeyframeInterval, intern);
@@ -128,6 +134,12 @@ public class TrimmedGatherByteIdentityTests
         Assert.True(sawFull, "scenario produced no keyframe");
         Assert.True(sawDelta, "scenario produced no delta");
         Assert.True(sawRemoved, "scenario produced no despawn — AOI transitions missing");
+
+        // Guards the normalisation above. If the scenario stops producing a non-zero
+        // retrigger counter, zeroing it hides nothing today and would hide everything the
+        // day the gather drops it — the failure mode this whole file exists to catch.
+        Assert.True(sawActionSeq,
+            "scenario produced no non-zero action_seq, so normalising it out proves nothing");
     }
 
     /// <summary>Protobuf with interning: the order-sensitive handle allocation is the

@@ -116,19 +116,19 @@ func (c *sealedTestClient) handshake(joinToken, joinTokenSecret string) (sealed.
 			}
 			return c.send(env)
 		},
-		func() ([]byte, []byte, string, error) {
+		func() ([]byte, []byte, []byte, string, error) {
 			env, _, rerr := c.recv(5 * time.Second)
 			if rerr != nil {
-				return nil, nil, "", rerr
+				return nil, nil, nil, "", rerr
 			}
 			if env.Type != messages.MsgSealedServerHello {
-				return nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
+				return nil, nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
 			}
 			var hello messages.SealedServerHello
 			if uerr := env.UnmarshalPayload(&hello); uerr != nil {
-				return nil, nil, "", uerr
+				return nil, nil, nil, "", uerr
 			}
-			return hello.PublicKey, hello.Binding, hello.Error, nil
+			return hello.PublicKey, hello.Binding, hello.ServerSignature, hello.Error, nil
 		},
 	)
 	if err != nil {

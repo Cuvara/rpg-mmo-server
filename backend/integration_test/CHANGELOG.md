@@ -6,6 +6,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`gameplay_v2_e2e_test.go`** — the event channel, ability input and `action_seq` over a
+  real socket against the real C# game server, in both encodings.
+
+  It found the defect it was written to rule out: events were being discarded on three ticks
+  in four (see the gameserver changelog). Unit tests on both sides had passed throughout,
+  because each half was correct on its own.
+
+  Two things in the harness are load-bearing and were each got wrong first:
+  the handle table lives per CONNECTION, not per read — an observer rebuilt between reads
+  resolves nothing and reports every participant as absent, which looks exactly like a
+  product bug; and the wait between two attacks reads THROUGH the socket rather than
+  sleeping, because the server's send queue is bounded and drops the oldest frame, so a
+  client that stops reading discards the frames it is about to assert on.
+
+- **`testdata/gameplayv2/items.json`** — content with two abilities, passed via
+  `--content-dir`. Deliberately not added to `backend/content`: the game ships no abilities
+  yet, and a test that needs one must not decide what the game ships.
+
+### Added
+
+- **ADR-25: updated for the new `readHello` signature.** The sealed client callback now
+  returns the server's Ed25519 `server_signature` as a third `[]byte`. The suite still
+  passes no `ServerPublicKey`, so it exercises the pre-ADR-25 path deliberately: it holds
+  `JOIN_TOKEN_SECRET` and its value here is proving the *binding* end to end, which remains
+  the only thing that path covers. Identity verification is proven by the smoke test, which
+  receives its token from the real gateway like a player does.
 
 - **`hop_confidentiality_tap_test.go` — a two-hop byte tap, committed as an instrument.**
   ADR-23. A transparent TCP relay sits in the path of the gateway hop *and* the gameplay hop of

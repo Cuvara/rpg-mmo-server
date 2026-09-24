@@ -1,0 +1,84 @@
+# Prometheus alerting rules.
+#
+# THIS IS THE FIRST ALERT RULE IN THIS REPOSITORY, and that is the point of the
+# file. Until now monitoring was one scrape config and one dashboard: every
+# number was visible to someone already looking at it, and nothing said anything
+# to anyone who was not. ADR-24 §8.1 named that as the reason the meta hop's
+# quiet failures were only ever found by a human reading pod logs.
+#
+# Loaded by the bundled Prometheus inside grafana/otel-lgtm via `rule_files:` in
+# prometheus.yaml, and mounted next to it in docker-compose.yml. There is no
+# Alertmanager in this stack, so a firing rule surfaces in Prometheus' own Alerts
+# page and in Grafana rather than paging anyone -- which is honest about what it
+# is: a signal for whoever is looking at the stack, not an on-call rotation.
+
+groups:
+  - name: nakama-reward-path
+    rules:
+      # ADR-24 §8.1. The failure this catches has happened, on dev, on the day
+      # the meta hop's TLS went on: ONE Allocated GameServer was left on the old
+      # plaintext NAKAMA_URL (Agones does not recreate an allocated GameServer on
+      # a fleet update, and env is fixed at pod creation), so every reward RPC it
+      # made returned `400 Client sent an HTTP request to an HTTPS server`
+      # -- while the game itself played perfectly. It was found by reading pod
+      # logs. This rule is what finds it next time.
+      #
+      # Expressed as a RATIO, not a rate of failures. An absolute threshold has
+      # to be tuned per map population and is wrong on an idle map in both
+      # directions: a quiet map produces few failures while being completely
+      # broken, and a busy map produces some at any threshold. The ratio asks the
+      # question that actually matters -- of the reward calls that were made, how
+      # many landed.
+      #
+      # `too_large` is deliberately absent from the numerator: it is the batcher
+      # splitting an oversized batch as designed, and folding it in would give
+      # this rule a routine background rate to hide in.
+      - alert: NakamaRewardsNotLanding
+        expr: |
+          sum by (map_id) (
+            rate(gameserver_nakama_reward_outcomes_total{outcome=~"partial|not_granted|unknown"}[5m])
+          )
+          /
+          clamp_min(
+            sum by (map_id) (rate(gameserver_nakama_reward_outcomes_total[5m])),
+            0.001
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            More than half of reward_kills answers on {{ $labels.map_id }} did not land
+            for 10 minutes.
+          description: >-
+            Players are killing things and not being paid, while the game itself looks
+            healthy -- this hop fails quietly by design of the code around it (ADR-24
+            §8.1). Check, in order: whether NAKAMA_URL on the pod matches the scheme
+            Nakama is actually serving (a stale Allocated GameServer keeps the env it
+            was created with), whether NAKAMA_TLS_PIN is set for a self-signed
+            certificate, and whether Nakama's client API on :7350 answers at all -- the
+            k8s probes watch :9100 and cannot see :7350 wedge.
+            Per-pod attribution:
+            kubectl -n rpg-k8s-realtime logs -l agones.dev/role=gameserver --prefix
+            --tail=200 | grep -E 'NakamaTLS|reward|certificate'
+
+      # The other half of the same question, and the reason the denominator is
+      # counted at all: a hop that answers nothing produces no failures either.
+      # Firing together with the rule above means "broken"; this one alone means
+      # "nobody is playing", which is not an incident.
+      - alert: NakamaRewardPathSilent
+        expr: |
+          sum by (map_id) (rate(gameserver_nakama_reward_outcomes_total[15m])) == 0
+          and on (map_id) sum by (map_id) (gameserver_players_online) > 0
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: >-
+            No reward_kills answers on {{ $labels.map_id }} in 15 minutes with players online.
+          description: >-
+            Either nothing is dying, or the reward path is not being reached at all
+            (NAKAMA_URL unset logs `Nakama: disabled` at boot and issues no RPC -- which
+            is exactly how the k8s fleet ran for weeks with every deploy green). Info,
+            not warning: an empty map is a normal state and this rule cannot tell the
+            two apart on its own.

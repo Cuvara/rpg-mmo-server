@@ -46,6 +46,63 @@ public class PostgresPlayerStoreTests
         Assert.Equal("map_07", loaded.MapId);
     }
 
+    /// <summary>
+    /// The stats-only save is what a dungeon instance writes (ADR-26 decision 5). It must
+    /// move <c>hp</c>/<c>max_hp</c> and leave <c>map_id</c>, <c>x</c> and <c>y</c> exactly
+    /// as the origin map wrote them — in ONE statement, so no concurrent full save can be
+    /// lost in a read-modify-write window.
+    /// </summary>
+    [SkippableFact]
+    public async Task SaveStats_LeavesMapIdAndPositionAsTheOriginWroteThem()
+    {
+        _pg.SkipUnlessAvailable(nameof(SaveStats_LeavesMapIdAndPositionAsTheOriginWroteThem));
+
+        await using var store = await MigratedStoreAsync();
+        string userId = $"user-{Guid.NewGuid():N}";
+
+        await store.SavePlayerAsync(new PlayerState(userId, 33.5f, -8.25f, 100, 100, "map_origin"), default);
+        long rowsAfterOrigin = await CountRowsAsync(userId);
+
+        await store.SavePlayerStatsAsync(userId, hp: 41, maxHp: 120, default);
+
+        var loaded = await store.LoadPlayerAsync(userId, default);
+        Assert.NotNull(loaded);
+        Assert.Equal("map_origin", loaded!.MapId);
+        Assert.Equal(33.5f, loaded.X);
+        Assert.Equal(-8.25f, loaded.Y);
+        Assert.Equal(41, loaded.Hp);
+        Assert.Equal(120, loaded.MaxHp);
+
+        // One row per player, still. A second row would be the other way of getting this
+        // wrong, and ADR-26 rules it out explicitly.
+        Assert.Equal(1, rowsAfterOrigin);
+        Assert.Equal(1, await CountRowsAsync(userId));
+    }
+
+    /// <summary>
+    /// A stats-only save for a player with no row yet creates one that claims NO map: the
+    /// empty id is what <c>PlayerSpawn.SameMap</c> treats as unattributable, so the next
+    /// join spawns them at the spawn point with their HP intact.
+    /// </summary>
+    [SkippableFact]
+    public async Task SaveStats_ForAnUnknownPlayer_InsertsARowWithNoMapClaim()
+    {
+        _pg.SkipUnlessAvailable(nameof(SaveStats_ForAnUnknownPlayer_InsertsARowWithNoMapClaim));
+
+        await using var store = await MigratedStoreAsync();
+        string userId = $"user-{Guid.NewGuid():N}";
+
+        await store.SavePlayerStatsAsync(userId, hp: 17, maxHp: 90, default);
+
+        var loaded = await store.LoadPlayerAsync(userId, default);
+        Assert.NotNull(loaded);
+        Assert.Equal(string.Empty, loaded!.MapId);
+        Assert.Equal(0, loaded.X);
+        Assert.Equal(0, loaded.Y);
+        Assert.Equal(17, loaded.Hp);
+        Assert.Equal(90, loaded.MaxHp);
+    }
+
     [SkippableFact]
     public async Task Save_Twice_UpsertsInPlaceAndBumpsUpdatedAt()
     {

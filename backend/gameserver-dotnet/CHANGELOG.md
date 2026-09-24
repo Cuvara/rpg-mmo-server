@@ -7,6 +7,1834 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- **`backend/docs/CORE-BASELINE-V1.md` — what gameplay may build on.**
+
+  `CORE-COMPLETION.md` answers *is the core done*. This answers the question after it: which
+  parts are stable enough to write gameplay against, and which are not. It pins the baseline
+  to two commits and two tags (`rpg-mmo-server develop c2c034e`, `IndieRPGMMOAdventure develop
+  0553af8`, netcode `v0.44.0`, `sgl-v0.6.0`, wire protocol 2, 60/15), lists the flows
+  demonstrated by **built players rather than probes**, the defaults content inherits and why
+  each matters, and what is explicitly not settled.
+
+### Fixed
+
+- **`BENCHMARK.md`'s summary boxes told readers to size a fleet on a superseded figure.**
+
+  Two boxes at the top say bandwidth is the binding constraint and name **~93 players** as the
+  mobile ceiling. Both were written during Part II, **before id interning**. ADR-7's
+  `⛔ CURRENT STATE (2026-08-07, final)` block says the opposite: downstream bandwidth is
+  solved, its ceiling is **above 200 and no longer bracketed**, and **tick time binds now** at
+  a ceiling that is unknown and unknowable on this host.
+
+  The file already contradicted itself — its own ADR-7 threshold table marks the bandwidth
+  figure *"SUPERSEDED — now passes above 200"* — but the summary boxes are what a reader sees
+  first, and they are the ones that say what to do. Marked superseded in place rather than
+  deleted, with a pointer to ADR-7's block and #205, because the old figures are quoted
+  elsewhere.
+
+  Found while writing the baseline doc: the first draft repeated "size a fleet on ~93
+  players" straight out of the summary box, which would have put a stale ceiling into the one
+  document gameplay is meant to rely on.
+
+- **`KcpTransportTests.SealAndOpen_RoundTrip(1)` failed one run in 256, by construction.** It
+  asserted a sealed payload differs from its plaintext. `Seal` draws a fresh nonce per packet,
+  so a ciphertext equals its plaintext whenever every keystream byte over it is zero -- for a
+  one-byte payload, probability 1/256. It failed CI exactly that way (`expected not [0],
+  actual [0]`) on a PR that touched no crypto. The single comparison now applies from 8 bytes
+  (coincidence 2^-64); below that the test seals the same payload 64 times and requires at
+  least one to differ (false failure 256^-64 at one byte), so short payloads stay covered
+  rather than exempted. An identity-cipher mutation (both `Seal` and `Open` skipping crypto,
+  so the round trip still passes) is killed at lengths 1, 15, 16, 17 and 1329.
+
+- **A player whose connection dropped could be killed during the reconnect grace, and was
+  then saved at the spawn point.** A disconnected entity stays in the world for
+  `ServerOptions.HoldTtl` (30s on a map, 60s in a dungeon) so a reconnect finds it where it
+  was. The hold was tracked only in `GameServerHost._holds`, invisible to the ECS, so a held
+  player was still a target: enemies chased and hit it, `PlayerRespawnSystem` revived it at
+  the spawn point at full health, and the eviction save persisted that.
+
+  Found by the CD smoke test once the deploy stopped failing earlier (see
+  `backend/deploy/CHANGELOG.md`): it walked to x=4.83, disconnected, and its row came back
+  `x=0 y=0 hp=79/100` — killed, revived at 100, hit for 21 more, saved. Every earlier smoke
+  row on the same cluster, from before enemies could attack, sits at x≈5.9 hp=100. The
+  failure had been **masked for eleven days** by the unrelated CD failure in front of it.
+
+  `PlayerTag`'s unused byte becomes `Linkdead`: set when the hold starts, cleared on
+  reattach. `PlayerTargetBuffer` — shared by the enemy attack, move, spawn and reap systems —
+  skips a held player. A field on an existing component rather than a new tag, so toggling
+  it is a write rather than an archetype move on every disconnect, and nothing new needs an
+  AOT hint.
+
+  Three tests, each proved by a mutation killed by name after a forced clean rebuild:
+  `APlayerHeldForReconnect_IsNotAttacked_AndIsAgainOnceItIsBack` and
+  `AHeldPlayer_IsNotKilledAndMovedToTheSpawnPoint` (both killed by removing the filter), and
+  `HeldPlayerOutOfReachTests` through a real server (killed by never setting the flag, and by
+  never clearing it). The second mutation is why the third test exists: with the flag never
+  set, **both enemy tests still pass** — a filter on a flag nobody raises protects no one.
+
+### Changed
+
+- **ADR-27 decision 11 — the client's interpolation budget is shared with the network, and
+  at the shipped world rate that leaves `tiered` nothing to buy.**
+
+  Records the decision behind the `MaxIntervalMs = 105` / `LinkSpreadAllowanceMs = 45` change
+  that closed #413. Decision 10 had set the scheduler's ceiling to the client's *entire*
+  cover (150ms), which is only correct on a link that costs nothing; measurement put `tiered`
+  at 148-150ms per-entity p99 **on loopback**, with the link adding 33-41ms at +/-25ms of
+  jitter and 83-87ms at +/-60ms.
+
+  The consequence needed a decision rather than a constant: emission is on world ticks, so at
+  60/15 the only intervals that exist are 66.7ms and 133.3ms, and a 105ms ceiling sits between
+  them - every band clamps to one tick and `tiered` collapses into `off`. The ADR records that
+  `tiered` stays in the tree, gated, because the constraint is a property of `SIM_WORLD_HZ`
+  (which is deployment configuration and may move) rather than of the feature, and that it was
+  already OFF by default everywhere, so nothing shipped regresses.
+
+  Records the startup refusal shipped in #416 as part of the same decision: a test asserting
+  the collapse does not stop a deployment from configuring it, so `tiered` now fails at boot
+  when the rates leave it no usable band. The ADR names the two load-bearing properties of
+  that refusal, both established by a surviving mutation rather than by review - the collapse
+  is computed with the arithmetic the live path uses rather than from declared ms values, and
+  the recommended world rate is checked to be one `SimulationRates` accepts. 20Hz, not 30, is
+  the slowest rate that separates the bands.
+
+  Decision 10 is marked superseded in part rather than rewritten, because its reasoning - a
+  band slower than the client can interpolate through is a stutter, and the constant belongs
+  to the netcode package - is unchanged; only the arithmetic moved.
+
+  Also recorded: the base-tick/world-tick quantisation defect found while applying the first
+  fix, where `MaxIntervalMs = 105` changed the constant and not the behaviour and only the
+  live arm disagreed; that this was measured on arrival gaps rather than the client's
+  staleness estimator, which is in its known-bad regime on the development box; and that a
+  real Unity client held `snapshotsApplied` at 14.8/s unchanged with zero resyncs on a 40ms
+  +/-60ms link, so the bound is the scheduler's arithmetic and not client robustness.
+
+### Added
+
+- **`MEASUREMENT.md` §1 now leads with the shape the entries share:** a reviewer reads each
+  line and each line is correct; only an instrument that can disagree with both sees it. It
+  ties the §2 reflection guard — whose mutation was drawn from the same wrong assumption the
+  guard was testing — to the two recurrences in #413, including the refusal whose
+  recommendation of a 16Hz world rate passed two assertions that were both vacuous, and would
+  have sent an operator to a rate the server rejects.
+
+- **`MEASUREMENT.md` §1: an exit code cannot tell a pass from a skip.** `dotnet test` exits 0
+  when everything passed, when it selected nothing, and when everything it selected was
+  skipped — three readings an exit code cannot separate.
+
+  Written from a near-miss during #413. Two Redis-backed failures were re-run in isolation to
+  decide whether they were the known flakes, and the re-run returned `exit=0` having reported
+  `Skipped! - Failed: 0, Passed: 0, Skipped: 9`: the container had gone away between runs.
+  "Re-ran them alone and they passed" was one line from being reported. The summary counters
+  are what caught it. The entry pairs that with the counter-check that did clear a different
+  flaky test in the same session — `Passed: 10, Skipped: 0` — because the contrast is what
+  makes it a procedure rather than a warning.
+
+- **CI now fails when a test run selected or executed nothing.** The entry above originally
+  asserted that the CI step already read the `.trx` counters and failed on `total == 0`. It
+  did not: `ci-dotnet.yml` ran `dotnet test`, wrote the `.trx` and uploaded it with
+  `if-no-files-found: warn`, so a run that selected nothing would have gone green and a run
+  that produced no results file at all would have warned. The false sentence was worse than
+  no sentence, because it told a reader the automated side was covered.
+
+  A `Verify test counters` step now parses the `Counters` element of every `.trx`
+  (`.github/scripts/verify-test-counters.py`) and fails on a missing results file, on
+  `total == 0`, and on `executed == 0`; `if-no-files-found` is now `error`. Verified against
+  four fixtures before wiring it in — a healthy run (exit 0, `total=10 executed=10`), an
+  empty selection, an all-skipped run, and a missing file — so the gate is known to produce a
+  non-empty pass as well as the three failures it exists for.
+
+- **The replication ceiling now reserves budget for the network (#413).**
+
+  `ReplicationSchedule.MaxIntervalMs` was `ClientInterpolationBudgetMs` — the scheduler was
+  permitted to spend the client's **entire** 150ms of cover on deferral, on the implicit
+  assumption that the wire contributes zero. It does not. `MaxIntervalMs` is now
+  `ClientInterpolationBudgetMs - LinkSpreadAllowanceMs` = **105ms**.
+
+  Measured by `EntityIntervalUnderAdversityTests` — a real client through `AdversityProxy`,
+  timing the gap between consecutive snapshots **carrying a given entity**, arrival-timed
+  with no rate fit in it. Two runs, per-entity p99 in ms:
+
+  | profile | clean | ±25ms | ±60ms | ±100ms |
+  |---|---|---|---|---|
+  | off (shipped) | 74–79 | 111–115 | 161–162 | 215 |
+  | tiered | **148–150** | 176–178 | 218–223 | — |
+
+  The `tiered` row is the finding: it reached **148–150ms on loopback**, against 150ms of
+  cover, before a single millisecond of network. The 17ms of headroom its 133ms band was
+  meant to leave did not survive tick quantisation. Snapshot **cadence** over the same runs
+  stayed at 66–78ms p99 — perfectly healthy, and blind to all of it, which is why no cadence
+  number this project has could ever have found this.
+
+  This is the same defect that already shipped once. The ceiling was 500ms while the remark
+  justifying it derived 150, and three people play-testing saw mobs stepping. That fix
+  corrected the constant and kept the assumption underneath it. The superseded reasoning is
+  quoted in place in `ReplicationSchedule.cs` rather than deleted.
+
+- **The server refuses to start with a schedule whose bands all collapse into one.**
+  `ReplicationSchedule.TryCreate` now takes the configured rates and rejects `tiered` when
+  every band resolves to the same wait, alongside the existing refusal of `tiered` without
+  importance weights. At 60/15:
+
+  ```
+  GAMESERVER_REPLICATION_SCHEDULE=tiered has no usable band at 60/15. Configured intervals
+  0ms, 105ms all resolve to the same 66ms wait, because snapshots are emitted every 66.7ms
+  and the ceiling is 105ms (150ms of client cover minus 45ms reserved for the link). The
+  policy would print two bands and behave as one, which is the failure this refusal exists
+  to prevent. Raise SIM_WORLD_HZ to 20 to separate them, or set
+  GAMESERVER_REPLICATION_SCHEDULE=off.
+  ```
+
+  The collapse is computed with the **same arithmetic the live path uses**, not from the
+  declared millisecond values — reading the declared values is how this stayed invisible,
+  since `0ms` and `105ms` look distinct while both are served on every world tick at 60/15.
+  The recommended rate is asserted to be actionable rather than merely present: the test
+  parses it out of the message and re-runs the gate at it.
+
+  This failure has already happened twice in this file's history — a tier flooring to "every
+  tick" while still appearing in the banner and in `/status`, and a 266ms band whose only
+  effect was arriving after the client could use it. Both were found by reading a running
+  server, and a comment did not prevent the second.
+
+- **`ReplicationSchedule.IntervalTicksFor(score, baseHz, worldEvery)`** — the ceiling is in
+  base ticks and emission is on world ticks, so an interval of N base ticks is served on the
+  next world tick at or after N. A ceiling landing between two world periods therefore
+  rounded **up** and bought nothing.
+
+  Invisible while the ceiling was 150ms, because the band under it was 133ms — exactly 2
+  periods at 60/15, so the rounding had nothing to do. Tightening the ceiling to 105ms (6
+  base ticks, still served at 8) changed the constant and **not the behaviour**: the live
+  measurement went on reading 133ms while the unit test read 105. Caught only because the
+  two disagreed; a ceiling change validated by unit tests alone would have shipped as a
+  no-op. `SnapshotDeltaState.WorldEvery` carries the emission cadence, defaulted to the
+  shipped rates rather than to 1 so a caller that forgets it cannot silently get the
+  unquantised behaviour.
+
+  **Behaviour-neutral at the old ceiling**, which is what makes this reviewable as a separate
+  change from the ceiling itself: at `MaxIntervalMs = 150` the slow band was 133ms = 8 base
+  ticks = exactly 2 world periods at 60/15, so the quantisation has nothing to round and
+  `IntervalTicksFor(score, baseHz, worldEvery)` returns what `IntervalTicksFor(score, baseHz)`
+  returned. It changes behaviour only for a ceiling that lands between two world periods,
+  which is the case this commit introduces.
+
+### Changed
+
+- **`tiered` buys nothing at the shipped 60/15 rate, and that is now asserted.** At 60/15 the
+  only waits that exist are 66.7ms and 133.3ms; 105ms sits between them, so every band
+  collapses to "every tick". `ScheduleFitsTheClientBudgetTests.TieringBuysNothingAtTheShippedWorldRate_AndNeedsAFasterOne`
+  asserts the collapse at 15Hz **and** that the bands separate again at 30Hz — because the
+  alternative is ADR-27 decision 4 all over again, a tier that silently stopped existing
+  while `replication_schedule` went on printing it. Keeping tiering alive at 60/15 would need
+  the link allowance at or under 17ms, i.e. a link with under ~10ms one-way jitter. **This
+  bears on ADR-27 and the ADR is not edited here.**
+
+- **Six deferral tests re-homed from 60/15 to 60/30** (`ReplicationScheduleTests`,
+  `SelfIsNeverDeferredTests`, `ScheduleOnTheLivePathTests`). They cover the schedule's
+  mechanics — aging, self-exemption, edges, keyframe coverage, convergence after a deferral —
+  which are rate-independent, and at 60/15 there is no longer any deferral to exercise. Their
+  own guards caught this rather than passing vacuously: *"nothing was deferred, so this
+  proves nothing"*, *"the tiered arm deferred nothing"*, *"the schedule deferred nothing on
+  the real input path"*.
+
+### Fixed
+
+- **`ScheduleFitsTheClientBudgetTests.AtTheShippedWorldRate_EveryBandIsStillDistinct` measured
+  the wrong rate.** It computed `worldHz * 4` from a constant named `worldHz` set to 15, so a
+  test named for the shipped world rate asserted at 60Hz, four times it. Renamed
+  `AtAWorldRateFastEnoughForThem_…` with the rate spelled out; the shipped rate now has its
+  own case, where the bands do **not** stay distinct — the thing the old name claimed to
+  cover.
+
+- **`NetworkAdversityTests` and `AdversityProxy` — the server measured under a bad network.**
+
+  Every latency and loss number this project had was taken on loopback on one box, where
+  there is no loss and the physical RTT floor is zero. The behaviours written to survive a
+  bad mobile network — held movement's 250ms silence budget, the outbound send channel, the
+  reconnect hold — had therefore never met one. They were green under conditions that cannot
+  test them.
+
+  **Where the adversity is injected.** `GameServer.Tests/Infrastructure/AdversityProxy.cs` is
+  a seeded TCP relay that sits between a real client socket and the real game server
+  listener and adds one-way latency, jitter, a directional blackout and an RST. The server
+  runs its own listener and tick loop; the client is a real `TcpClient` speaking the real
+  `WireProtocol` framing. Nothing is stubbed, so shipping code is on **both** sides of the
+  injection point — a hand-written transport returning canned frames would have measured the
+  fixture instead.
+
+  Four cases, each against a control arm over the same proxy with a clean link, and each
+  with an **absolute** bound as well as the ratio. The ratio alone is not enough: deleting
+  held movement shortens both arms equally and leaves the ratio at 1.0, which the mutation
+  pass confirmed — the control arm travelled 25.0% of what it was owed and only the absolute
+  assertion caught it.
+
+  Measured, at 60/15/5 with a player speed of 5 u/s:
+
+  | Case | Clean | Adverse |
+  |---|---|---|
+  | Travel over 6s, 80±60ms both ways | 29.750 | 29.833 |
+  | Travel with a 1200ms upstream blackout | 29.667 | 24.667 (−5.000; 250ms budget predicts −4.750) |
+  | Snapshot p99 inter-arrival | 72.8ms | 164.2ms, gaps all 4, rate 14.977/s |
+  | Travel with a 4000ms downstream blackout | 44.500 | 44.583; 23.000 units gained across the 4.6s dark window, 4056ms arrival gap |
+
+### Findings
+
+- **What a downstream stall costs is load-dependent, and is therefore reported rather than
+  asserted.** Idle, a 4s blackout drops nothing at all: loopback send buffers absorb the
+  backlog and `Connection._sendChannel`'s 64-frame drop-the-oldest path is never reached — a
+  mutation shrinking that channel to **4** frames still dropped nothing. The same binary
+  under a full-suite run dropped **18 frames and opened a 12-tick gap**. An earlier draft of
+  this entry claimed the drop path was unreachable at one player, on the strength of the idle
+  runs; the loaded run disproved it. `DownstreamBlackoutDoesNotStopTheSimulation` now asserts
+  the load-independent thing — the player advanced by the blackout's worth of movement across
+  the blackout itself, and by no more — and prints the frame counts.
+
+- **Ambient load moves whole runs, so a cross-run ratio is not always a control.** The stall
+  case first compared total distance between a stalled run and a clean one: 0.2% apart in
+  isolation, 5.4% apart under the full suite, on the same binary. It now samples the player's
+  position on each side of the blackout within the one arm. The class is also pinned to a
+  `DisableParallelization` collection, because every assertion in it is about wall-clock
+  behaviour.
+
+- **±60ms of one-way jitter puts snapshot arrivals past what the client can render through.**
+  Measured p99 spacing was 164.2ms against the client's 150ms of cover (100ms target delay +
+  50ms max extrapolation, `Packages/com.cuvara.netcode`). The send period itself is 66.7ms,
+  so the budget tolerates roughly **±42ms** one way before a remote entity freezes rather
+  than interpolating through the gap. This is a property of the link a deployment runs over,
+  not a defect in the server, and it is asserted as "the server adds no spread of its own on
+  top of the link's" rather than as a p99 ceiling — the first version asserted the ceiling
+  and failed at 165.3ms having found nothing but the jitter constant it was given.
+
+- **A reconnecting player's position cannot distinguish a held entity from a rebuilt one.**
+  The player store persists position on disconnect and restores it on rejoin, so a re-created
+  entity lands exactly where a held one would. The first version of
+  `BlackoutThenResetThenReconnect` asserted a return to spawn past the hold window and failed
+  at 8.500 — the reading was right and the assertion was wrong. The discriminator is
+  `EntityCount` polled **across** the gap: never zero inside the window, zero outside it.
+
+- **`event_stream_health` and `event_stream_consecutive_failures` on `/status`** — a
+  dependency signal that can say **failing** (#407).
+
+  `redis`, `event_stream` and `kick_consumer` are null checks on objects built at startup:
+  once the handle exists they answer the same thing for the life of the process, whatever
+  happens to the dependency. The endpoint was observed reporting `"redis": "connected"` while
+  the Redis container was `Exited (0)`, with `events_dropped` past 22,000 and climbing — the
+  endpoint contradicting itself, because the two numbers that measure the thing disagreed
+  with the field that names it.
+
+  The knowledge already existed and had no route out: `RedisEventStream` maintained a
+  consecutive-failure count for its recovery log line, resetting it on success. That is now
+  public and published. **No I/O is performed per status request** — a health endpoint that
+  probes its dependencies on every scrape becomes a way to hammer them.
+
+  `redis` and `event_stream` are kept, with their documentation rewritten to say they report
+  the **configured** backend rather than its health. A field answering "which backend is
+  wired" is legitimate; it was only dangerous while it was the one an operator would read as
+  health.
+
+  The test asserts the **failing** direction and then recovery, because asserting the signal
+  reads healthy on a working stream passes today with the defect live — equally true of a
+  correct implementation and of a constant. Mutation-verified: replacing the signal with a
+  literal `0`, the constant a null check amounts to, fails that test and leaves the other
+  four green.
+
+### Changed
+
+- **`backend/docs/MEASUREMENT.md` gains section 2b: a stopped instrument and a quiet one read
+  the same.** "The counter stopped moving" is the shape of a fix working *and* of the process
+  that writes it having died.
+
+  Written because it was published as a verification before it was noticed: #401's fix was
+  confirmed by two samples 120s apart at `connections: 0` showing byte-identical totals —
+  which a server with a dead tick loop would have produced identically. The complete shape
+  asserts a liveness signal in the same window (`current_tick` advancing at 60.1 Hz) alongside
+  the flat counters and the zero connection count.
+
+  Also records the two adjacent traps: **flat is not zero** (an accumulated total stays large
+  after the last client leaves, so asserting zero fails on a correct server), and the
+  mirror-image bug — making the *recording* calls conditional instead of the resets — produces
+  the same flat counter at rest while hiding a stopped tick loop under load.
+
+### Added
+
+- **The player-save failure ratio is now visible on `/status` and in the log.** `/metrics`
+  read `gameserver_player_saves_total{status="ok"} 27` against `{status="error"} 239` — a
+  90% failure rate — for 7.8 hours, and nothing said so anywhere a person looks (#402).
+
+  **The cause was benign and is worth stating plainly: the dev stack's own
+  `rpg-postgres-game` container was stopped and never brought back.** Every failure reads
+  `pgstore save player <id>: Name does not resolve` — Docker's embedded DNS returning
+  NXDOMAIN for a container that no longer exists — bracketed by a single
+  `57P01: terminating connection due to administrator command` at the moment of shutdown.
+  Not bot rows, not a constraint, not the schema. `PersistablePlayerStates()` was already
+  correct and already guarded in both directions by `BotPlayerTests`.
+
+  What the incident actually exposed is that **nothing surfaced the ratio**, and that the
+  shape of the counter misleads: it is cumulative over process lifetime, so an outage that
+  starts and never ends freezes `ok` and grows `error` without bound. The 9:1 ratio was
+  therefore not a steady-state failure rate at all — it was one outage, still running,
+  averaged against the healthy period before it. Anyone reasoning "a restart would give a
+  burst, not a steady ratio" is led to the wrong candidate by the metric itself.
+
+  - `/status` gains `player_saves_ok`, `player_saves_error` and `player_save_error_ratio`.
+    `GameMetrics` mirrors both outcomes into `Interlocked` counters, because a
+    `Counter<T>` is write-only and that is the mechanical reason the ratio had nowhere to
+    appear — the same dual-surface pattern as `RecordPlayerKicked`.
+  - `AsyncSaver` raises one `Error` line, `Player save sweep DEGRADED`, when a sweep's
+    failure ratio crosses 50%, and one `Information` line when it recovers. Edge
+    triggered, so a healthy server stays silent, with a restatement every 20 degraded
+    sweeps so a long outage does not look like recovery once the first line scrolls away.
+    The pre-existing per-player `LogWarning` is not this signal: it fires once per player
+    per sweep, states no ratio, and sits at warning level among routine noise.
+  - `SaveAllAsync` no longer returns early on an empty sweep. "Nobody was online" and
+    "everybody failed" are different facts, and letting a zero-player sweep reach
+    `EvaluateSweepHealth` keeps one place deciding what a sweep meant — a second zero-check
+    upstream would shadow that guard, and a shadowed guard is one no test can hold.
+- **Every `GAMESERVER_*` name `Program.cs` reads is now declared as a constant
+  (`GameServer/ServerEnv.cs`), and a second gate reads the Agones fleet manifests**
+  (`GameServer.Tests/Deploy/FleetEnvPassthroughTests.cs`). Closes #400 and part 2 of #404.
+
+  The compose gate added in #398 enumerates knobs by reflecting over the assembly's
+  `const string` fields. Twenty-five names were read from **inline string literals** inside
+  `Program.cs` expressions, so they existed nowhere reflection could reach and were invisible
+  to it — which is exactly where the sixth passthrough instance lived
+  (`GAMESERVER_MAX_SNAPSHOT_BYTES`, the first of the seven to produce a defect a player could
+  see). Declaring them in `ServerEnv` widened the gate's input from 31 names to 56.
+
+  **That immediately exposed a seventh instance**, which is the second time this mechanism
+  has found one on the day it was applied: `GAMESERVER_FIELD_DELTA` had been added to
+  `gameserver-dotnet` and never to `gameserver-dotnet-map02`, so field-level delta encoding
+  was on for the map anyone would test on and off for the other. Two maps replicating
+  differently from one `.env`, for as long as the knob had existed.
+
+  Not every widened name was swept into the manifests. Fifteen were missing from compose and
+  **eight** were added; the other seven are excluded **by name, with a reason**, because
+  forwarding them would be inert or actively wrong — see `Excluded` in
+  `ComposeEnvPassthroughTests`. The seven divide into Agones-only knobs (compose runs no
+  sidecar), values compose's own pinned settings make unreachable (`GAMESERVER_TICK_RATE`
+  cannot take effect while the `SIM_*` rates are always set), per-map dimensions, and
+  `GAMESERVER_MIGRATE_ONLY` — a one-shot invocation mode that would stop every server in the
+  stack from serving if a shared `.env` set it.
+
+  The fleet gate covers **three** manifests, not the one #400 names: `50-fleet-map.yaml`, its
+  dev sibling `agones/fleet-map-dotnet-dev.yaml`, and `60-fleet-dungeon.yaml`. Each declares
+  its own `env:` list and inherits nothing, which is the same property that produced both
+  map02 divergences. Its exclusions are keyed **per fleet**, because
+  `GAMESERVER_JOIN_DEADLINE_SECONDS` is meaningless on a map fleet and required on the
+  dungeon one — the only fleet that runs `GAMESERVER_MODE: dungeon`, and the one it had never
+  been passed to — while `GAMESERVER_MAP_ID` is the reverse. A single global exclusion would
+  have excused the one deployment where each knob does something.
+
+  Both gates now take their knob list from one `DeclaredKnobs` helper. Two gates with two
+  definitions of "covered" drift invisibly: the one that still knows about a knob keeps
+  passing while the one that forgot it stops checking, and nothing compares them.
+
+  The fleet reader is scoped to the container's `env:` list rather than scanning for
+  `- name:`. These manifests put `- name:` entries under `ports:`, `imagePullSecrets:`,
+  `containers:`, `volumeMounts:` and `volumes:`, several at the **same indentation** as an env
+  entry, so a naive scan reports names nobody declared and goes green on a fleet whose env
+  list is empty as long as it has ports. A test asserts the decoys are not counted, and
+  another asserts a **prefix fragment** does not satisfy the gate for the names it names —
+  `GAMESERVER_IMPORTANCE_W_` appeared in `50-fleet-map.yaml` as exactly that, which is the
+  concealment that hid that family through three incidents.
+
+
+### Fixed
+
+- **`snapshot_bytes` climbed at ~16.4 KB/s on a server with `players_online: 0`** (#401), twenty
+  minutes after the last client was killed and far outside the 30 s reconnect hold.
+
+  Not a leaked connection. **Nothing was being sent at all** — the counters were replaying one
+  old tick. Every per-tick snapshot delta (`_snapshotBytesDelta`,
+  `_snapshotEntitiesGatheredDelta`, `_snapshotAnchorMissingDelta`, the coalesced, frames-written,
+  shed, removals-deferred and schedule deltas) was reset **inside** `if (_viewerCount > 0)` in
+  `TickLoop`, while the `RecordSnapshot*` calls at the bottom of the tick ran unconditionally. On a
+  world tick with no viewers each delta therefore kept the value the last tick *with* a viewer had
+  left in it, and was recorded again, 15 times a second, forever.
+
+  This is the same range of lines as the earlier gather-counter defect, failing at the other end:
+  that fix moved the resets *into* the guard to get them ahead of the gather. They are now
+  unconditional, before the gather and outside the guard — a world tick with no viewers records a
+  zero, because zero is what happened.
+
+  Observed on the live stack, `map_01`: `players_online: 0`, **no established socket on the game
+  port** (`/proc/net/tcp` showed only the listener), and the climb bit-exact at **+1140
+  `snapshot_bytes` and +279 `snapshot_entities_gathered` per world tick** across three samples —
+  real traffic varies per tick, a constant increment is a replayed value. `snapshots_sent` stayed
+  frozen at 150008 throughout, because `_snapshotsThisTick` is the one delta reset at the top of the
+  tick rather than inside the guard; that disagreement between two counters recorded three lines
+  apart is what located it. Control arm: `map_02`, same build, same 9 bots and ~250 enemies, which
+  had never carried a client, read **0** for both.
+
+### Added
+
+- **`connections` on `/status` and `gameserver_connections` on `/metrics`** — the number of
+  connections registered on this server, which is the set the snapshot broadcast iterates and
+  therefore what snapshot bandwidth is paid per.
+
+  Deliberately **not** derived from `players_online`: that is an independently balanced counter, so
+  the two disagreeing is the only local evidence that one of them is wrong. `connections >
+  players_online` means connections are outliving their players and the server is gathering,
+  encoding and writing for sockets nobody owns; `connections < players_online` means the join/leave
+  balance has drifted, and `players_online` is what capacity and allocation decisions read.
+
+  Added because its absence cost the whole of #401: with `players_online` alone, distinguishing "a
+  connection is leaking" from "the counters are lying" needed three 30 s samples, a read of the
+  broadcast source and a socket table pulled out of the container. `docs/METRICS.md` documents how
+  to read the pair.
+
+- **Enemies visibly disappeared and reappeared while the player moved.** `GAMESERVER_MAX_SNAPSHOT_BYTES`
+  was not in either compose service's `environment:` block, so the server always took its
+  built-in **8192** and `.env` could not change it.
+
+  That default is no longer compatible with the enemy population this server now ships.
+  A single observer's area of interest carries up to **316 entities** at the default
+  `30 + 25/player`, which is **~26 bytes per entity** inside 8192 — right at the edge, so
+  keyframes were being truncated continuously.
+
+  A truncated keyframe is not a partial update. `SnapshotMerger` **clears its entity set on
+  a full snapshot**, so every entity the budget dropped vanished from the client's world and
+  was re-introduced by a following delta. `SnapshotDeltaState` documents this as the
+  accepted cost of a hard byte cap — the client is never told anything false — but at this
+  population it fires on every keyframe, roughly every two seconds, which reads as the whole
+  crowd blinking out and back.
+
+  Measured on the live stack, 2 clients and 9 bots at ~300 entities:
+  `snapshot_entities_shed` **11,827 → 0** with the budget at 32768, at an unchanged
+  `snapshot_max_gather` of 316.
+
+  `GAMESERVER_KEYFRAME_INTERVAL` is passed through in the same change, because it is the
+  other half of the same lever and was missing for the same reason.
+
+  **The two defaults are still inconsistent** and that is not fixed here: the shipped
+  snapshot budget cannot carry a keyframe at the shipped enemy population. Raising one or
+  lowering the other is a product decision with a bandwidth cost either way, so it is filed
+  rather than decided in a passthrough fix.
+
+### Added
+
+- **`backend/docs/MEASUREMENT.md`** and the **`verify-a-result` skill** — the measurement and
+  verification discipline this project has paid for, written down.
+
+  Every expensive defect here had one shape: it produced **a plausible number instead of an
+  error**. The document is not general advice; every entry is an incident that happened, with
+  its cost, and most happened more than once — an empty CI result read as green and a broken
+  build declared ready to merge; three gather counters reading zero for two days while 15MB of
+  snapshots went out; a reflection guard that queried public constructors while the bug was a
+  private one, validated by a mutation drawn from the same wrong assumption; a `-73%`
+  improvement that was a cross-build artefact; environment variables set in `.env` that never
+  reached a container, three times.
+
+  `backend/TEAM.md` now carries the short form as a mandatory standard and links both.
+- **A test that fails when a `GAMESERVER_*` knob is not plumbed into both compose
+  services** — `GameServer.Tests/Deploy/ComposeEnvPassthroughTests.cs`.
+
+  A knob is two things: the constant the server parses, and a line in each service's
+  `environment:` block. Docker forwards nothing a service did not declare, so a knob with
+  only the first half is documented, strictly parsed, settable in `deploy/.env` and
+  **silently ignored** — the server runs its compiled default and `/status` reports that
+  default truthfully. The strict parser cannot help, because it never sees a value to
+  refuse, and there is no log line, counter or wire field that differs.
+
+  That had happened three times, each caught by hand after the fact, and each file carries
+  a comment telling the next person to keep the list in step. **On its first run the gate
+  found a fourth nobody had noticed**: `GAMESERVER_BOT_HP`, `_ATTACK`, `_DEFENSE` and
+  `_SPEED` reached *neither* service and had not since they were added. Fixed in the same
+  change.
+
+  Both services, because `gameserver-dotnet-map02` declares its own block and inherits
+  nothing — a one-service fix leaves the two maps reading the same `.env` differently,
+  which is harder to find than the original gap.
+
+  **It is a test rather than a CI job**, deliberately: it runs on every `dotnet test` and
+  fails for the person who just added the knob, who is the one who can fix it in one line.
+  A CI job reports the same thing after a push, to a pipeline that is per-module and might
+  not even run for a gameserver change. The cost is that the test project reads two files
+  outside its own directory; it resolves them by walking up from the test assembly, the
+  same way `GoldenVectors` already does, and **throws naming the path** if they are not
+  there. It never skips: those files are committed to this repository, so their absence is
+  this test being broken, not an environment that cannot run it.
+
+  **It cannot pass vacuously.** The declared set comes from reflection over the assembly,
+  and `DeclaredEnvNames_IsNotEmpty_AndStillFindsEveryKnownSettingsType` fails if that set
+  is empty or has lost any of three sentinels from three different settings types. This is
+  the load-bearing assertion: mutation-verified, a build where the reflection matches
+  nothing leaves both gate arms **passing** and only that test red. The compose reader
+  likewise throws rather than returning an empty or partial answer — missing service,
+  missing `environment:` block, block parsed as empty, and list form each raise a distinct
+  message, and the test asserts the *distinguishing* phrase for each. A looser expectation
+  let a mutation survive by reporting the wrong cause.
+
+  **Scope, stated because a partial gate that reads as a total one is worse than none.** It
+  covers the 27 names declared as `const string`. It does not cover the 25 read from inline
+  literals, nor names built by concatenation — `GAMESERVER_IMPORTANCE_W_*` is assembled
+  from a prefix and four suffixes and exists nowhere as a whole string, so **this gate would
+  not have caught the first of the three incidents**. It does not read the k8s manifests,
+  which have the same shape of gap. Declaring a knob's name as a constant is what brings it
+  under the gate.
+
+  Exclusions are an explicit `name -> reason` dictionary, empty today, validated so a stale
+  entry for a renamed knob fails instead of quietly widening the hole. Not a name pattern:
+  a pattern excludes knobs nobody considered.
+
+- **`GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}` are now `const string`** in
+  `ImportanceSettings`, which brings them under the gate above.
+
+  They were assembled from a prefix and a suffix at each call site, so they existed nowhere
+  as a whole string and neither reflection nor a grep could enumerate them — which is why
+  that family, the **first** of the passthrough incidents, was the one the gate admitted it
+  could not see. `EnvVar + "_W_DISTANCE"` is a compile-time constant expression, so each is
+  a real literal in the assembly and the concatenation is now a readability device rather
+  than a runtime one.
+
+  **It found a fifth instance immediately, and it is the half-fix case:** all four had been
+  added to `gameserver-dotnet` when the gap was first fixed and **never** to
+  `gameserver-dotnet-map02`. So for as long as they have existed, setting
+  `GAMESERVER_IMPORTANCE_W_TYPE` in `.env` changed map_01's replication policy and silently
+  left map_02 on the profile's own weights — two maps running different policies from one
+  file, which is harder to find than the original gap because the knob demonstrably works,
+  just not everywhere.
+
+  The seven **refused** `_W_` factors (`PARTY`, `PVP`, `BOSS`, …) stay assembled from
+  suffixes on purpose and are commented as such: the server exits 2 when one is set, so a
+  constant would have the gate demand them in compose — exactly backwards.
+
+  Guarded by a fourth sentinel in the gate. Mutation-verified: rewriting
+  `EnvWeightDistance` as a *runtime* concatenation leaves both gate arms **passing** — the
+  whole family silently dropped — and only the sentinel assertion red. That is the precise
+  shape that hid this family for three incidents.
+
+### Changed
+
+- `backend/docs/MEASUREMENT.md` section 2 gains **"assert what the failure message says,
+  not just that the test went red"**. A diagnostic can survive a mutation by naming the
+  *wrong* reason, which is worse than one that fails: the compose reader's parser test
+  asserted the substring `"environment"`, and deleting the missing-block throw left it green
+  while the empty-block throw reported "has an `environment:` block this reader parsed as
+  empty" for a service that had no such block at all. The substring matched; the sentence
+  was false. Found only because the mutation pass read the message rather than the
+  red/green.
+
+
+### Fixed
+
+- **The four combat variables from #396 were not passed to the containers either.** Added to
+  both `gameserver-dotnet` and `gameserver-dotnet-map02`: `GAMESERVER_ENEMY_ATTACKS`,
+  `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET`, `GAMESERVER_ENEMY_ATTACK_INTERVAL`,
+  `GAMESERVER_PLAYER_RESPAWN`.
+
+  This is the same omission #395 fixed one change earlier, and it recurred immediately —
+  which says the comment added there is not enough on its own. Adding a strictly-parsed knob
+  is two edits, not one, and nothing links them: the server compiles and runs perfectly with
+  a variable the operator can never set, and `/status` reports a default nobody chose.
+
+  The defaults meant the feature still worked (`AttacksByDefault = true`), so nothing looked
+  broken — the knobs were simply inert. That is the whole difficulty: a passthrough gap is
+  invisible until someone sets a value and reads it back.
+
+### Fixed
+
+- **The enemy-AI and bot environment variables were not passed to the container.** Compose's
+  `environment:` block is the whole list — a variable absent from it is not forwarded however
+  carefully it is set in `.env` or the shell. The server then silently takes its built-in
+  default and `/status` reports a configuration nobody chose.
+
+  Found by setting `GAMESERVER_ENEMY_MAX_PER_PLAYER=25` in `.env`, restarting, and reading
+  `/status` back: it still said `max=30+45/player`. Both `gameserver-dotnet` and
+  `gameserver-dotnet-map02` are fixed; **map_02 declares its own `environment:` block and
+  inherits nothing**, so omitting it there would have recreated the same trap on one service.
+
+  This has happened on this project before, with `GAMESERVER_IMPORTANCE_W_*` — an entire
+  measurement arm ran against defaults while the operator believed the weights applied. The
+  comment now says so next to the list, because the failure is invisible from the compose
+  file alone.
+
+### Fixed
+
+- **`snapshot_entities_gathered`, `snapshot_max_gather` and `snapshot_anchor_missing` could
+  only ever report 0.** All three were accumulated during the gather and then zeroed a few
+  lines later by a per-tick reset block that sat *between* the code writing them and the call
+  recording them.
+
+  The other deltas in that block are filled by the viewer loop that runs **after** it, so
+  their position was correct; these three are filled by the gather, which runs **before** it.
+  Grouping them together for tidiness is what broke them. They now reset immediately ahead of
+  the gather, and the comment there says why they are not with the others.
+
+  **Found by reading `/status` on a live server** carrying 165 enemies and 3 players: 15MB of
+  snapshots sent, `snapshot_bytes` climbing, and every gather counter reading zero.
+
+  **No test caught it, and the tests were not wrong.** They assert at the `Connection`
+  boundary — `LastGatherCount`, and the bool `GatherSnapshotView` returns — and that boundary
+  was correct throughout. Nothing asserted what reached `GameMetrics`, which is the only place
+  an operator can see any of it. The new test drives a real `TickLoop` and asserts on the
+  metrics, with a no-viewer control arm so that "the counter moved" cannot be satisfied by a
+  counter that moved for an unrelated reason. Mutation-verified: restoring the original
+  ordering fails it and leaves the control green.
+
+  The irony is the point. A counter whose failure mode is a healthy-looking zero is precisely
+  what `snapshot_anchor_missing` was added to expose, and it had that failure itself.
+
+### Added
+
+- **Enemies fight back, and a player can survive being surrounded by three hundred of
+  them.** Enemy-side combat existed nowhere in the codebase: enemies chased the nearest
+  live player, stopped at `ContactRange` and stood there while players hit them. They now
+  attack, on a server-authoritative schedule, with a cap that decides whether a crowd is a
+  fight or a death screen.
+
+  **No combat is implemented in the AI.** `EnemyAttackSystem` decides *which* enemies swing
+  and *at whom*; the decision becomes an ordinary `InputData` carrying an attack target,
+  pushed through `EcsWorld.PushInput` and resolved by `InputHandler` on the next tick —
+  the same route `BotBrainSystem` takes and for the same stated reason. So the damage, the
+  range and cooldown validation, the `Damage` and `Death` game events, the `Attacking`
+  action, the `/status` attack counters, the death callback and the Nakama kill reward are
+  all the one combat path this server has, and `CombatLogic.CalculateDamage` is reached by
+  exactly the route a player's attack reaches it. A second damage formula here would be a
+  server that disagreed with the client compiling the first (ADR-10).
+
+  **The constraint, and why it is not a smaller number.** 327 enemies attacking is an
+  instant delete, and lowering `GAMESERVER_ENEMY_ATTACK` does not bound it:
+  `CombatLogic.CalculateDamage` floors at `GameConstants.MinDamage`, so three hundred
+  enemies deal at least three hundred damage per round however weak each one is. A
+  per-enemy cooldown does not bound it either — three hundred enemies each respecting the
+  same 500ms cooldown still deliver three hundred hits every 500ms. The bound is therefore
+  expressed on the **target**: at most `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` (3) attacks
+  land on one player per `GAMESERVER_ENEMY_ATTACK_INTERVAL` (0.5s), whatever the
+  population.
+
+  **The arithmetic, at the defaults and against a default player** (HP 100, defense 5,
+  enemy attack 5): damage per hit is `max(1, 5 - 5) = 1`, so the worst case is 3 damage per
+  0.5s window = **6 damage/second**, and a player surrounded on every side survives
+  **16.7 seconds** — the same 16.7 seconds whether three enemies are on them or three
+  hundred. Rounded to whole world ticks the window is really 8/15 = 0.533s, so the measured
+  worst case is 5.63/second and 17.8 seconds. `EnemyAiSettings.WorstCaseDamagePerSecond`
+  computes it, and a table test pins it for five settings including
+  `GAMESERVER_ENEMY_ATTACK=20` (90/second, 1.1s to die).
+
+  **The window is counted in WORLD ticks**, derived the way `SimulationRates.RunsOn`
+  derives its own schedule (`(baseTick - 1) / worldEvery`). Counting base ticks would make
+  a 60Hz server four times deadlier than a 15Hz one on identical settings; getting the
+  `- 1` wrong puts the uniform and multi-rate timelines a whole window out of phase, which
+  is invisible on either one alone. Both are asserted.
+
+  **A fourth and fifth phase in `EnemyAiPhase`.** A previous change considered a fourth and
+  declined — but that was about a "centre-zone damage" step the old comments claimed and no
+  code implemented: deleting a phantom, not refusing a real one. The enum's ordering
+  argument does not forbid an attack step, it *places* it: range is measured against a
+  position, so the decision runs after `Move`, and it runs before `Reap` for the reason
+  `Reap` already gives — reaping never runs before the thing that kills. Order is now
+  Spawn, Move, Attack, Respawn, Reap.
+
+  **New configuration** (strict-parse, unrecognised values exit 2, same rule as
+  `GAMESERVER_FIELD_DELTA`): `GAMESERVER_ENEMY_ATTACKS`,
+  `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET`, `GAMESERVER_ENEMY_ATTACK_INTERVAL`,
+  `GAMESERVER_PLAYER_RESPAWN`. `/status` gains `enemy_attacks_decided`,
+  `enemy_attacks_throttled` and `player_respawns`, and `enemy_ai` renders the combat
+  tuning. `enemy_attacks_throttled` is the load-bearing one: "enemies are attacking and the
+  cap is holding" and "enemies are not attacking" are indistinguishable from an HP bar and
+  from every other field, and differ in exactly that counter.
+
+  **Known residue, stated rather than hidden.** An enemy that decides to attack a player
+  another enemy kills in the same batch has its input refused on arrival, which is counted
+  as an input rejection against an id of the form `enemy-N` and feeds the anomaly tracker —
+  bots already do this, it is bounded by the cap, and the gap between
+  `enemy_attacks_decided` and `attacks_accepted` is where it is visible. Which `N` enemies
+  of a crowd spend the budget is archetype order, so it is the same ones each window;
+  damage is identical either way.
+
+- **Player death has a defined end** (`GAMESERVER_PLAYER_RESPAWN`, on by default). Enemy
+  attacks make a player's HP reaching 0 reachable in normal play for the first time, and
+  what this codebase did at that point was not a design, it was an absence: nothing reaps a
+  dead player (`EnemyReapSystem` queries the enemy archetype only), `InputHandler` refuses
+  every input from it for the life of the process, the enemy AI stops counting it as
+  somebody to fight, and `AsyncSaver` persists `hp = 0` — which `PlayerSpawn.Resolve`
+  restores verbatim on the next join, on any server, because `player_states` has no `dead`
+  column. `docs/DESIGN.md` has carried that as a known gap since 2026-08. Shipping enemy
+  attacks without addressing it would have made a permanently dead character reachable from
+  a demo.
+
+  **The smallest correct behaviour, not a death system.** `PlayerRespawnSystem` returns a
+  dead player to the map's spawn point with its own `MaxHp` on the next world tick — so the
+  player is dead for at most one world tick, long enough for the `Death` event and the
+  `Dead` action to be sampled by a snapshot, which is what keeps the death observable. No
+  death screen, no timed respawn, no corpse, no penalty, no schema change. A timed respawn
+  needs a per-entity tick to count down to, which is a component field and a wire
+  consideration, and is deliberately left out. It restores the entity's own maximum rather
+  than `ServerDefaults.DefaultPlayerHp`, so a character whose maximum is not the default is
+  not silently re-statted by dying.
+
+  It covers **every** cause of death, not only enemies — it asks the world who is dead
+  rather than being told by whatever killed them. That includes synthetic players, which
+  matters more than it sounds: a dead bot never acts again for the life of the process, so
+  a demo would otherwise drain its own crowd while `bots_alive` still reported the full
+  count. `BotPlayerTests.BotsUnderAttackAreRespawnedRatherThanDrainingAway` asserts both
+  arms of that.
+
+- **Enemies chase players, and the fight scales with the crowd** — the enemy AI is now a
+  fight rather than a conveyor belt, and every number in it is set by environment variable.
+
+  **What was wrong.** `EnemySpawner` spawned on a ring of radius 13 about the world origin,
+  walked every enemy to the centre, and despawned it on arrival. There was **no player
+  targeting anywhere in it** — players were incidental to a stream of mobs crossing the
+  middle of the map — and the cap of 30 was the whole world's budget however many players
+  shared it, so every player who joined made the fight thinner. The owner's report after
+  playing the DOTS sample ("a player hitting a few enemies that trickle into the middle")
+  is a precise description of those four facts.
+
+  **What it does now.** `EnemyMoveSystem` steps each enemy toward the **nearest live
+  player**; `EnemySpawnSystem` anchors each spawn on a **randomly chosen live player** at
+  `GAMESERVER_ENEMY_SPAWN_DISTANCE`, rejecting a placement that lands within
+  `GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE` of any player (6 samples, then the last candidate
+  anyway — a wave that silently thins as the crowd tightens is the old problem wearing a
+  safety check as a costume); and the population and wave size are
+  `base + perPlayer × livePlayers`. `EnemyReapSystem` despawns on **death**, and at the
+  centre only when there is nothing to chase.
+
+  **The defaults are today's behaviour at zero players and an improvement at one or more.**
+  This is the shape of the whole change: `30 + 45/player` and `2 + 6/player` are exactly
+  the pre-change `30` and `2` on an empty server, an enemy with no player to chase falls
+  back to the pre-change walk-to-origin step bit for bit, and the centre despawn is
+  unchanged on that path. So `EnemyAiCharacterizationTests` — 16 assertions written before
+  the system split and never edited since — **still passes unmodified**, and the new
+  behaviour is confined to the worlds where the old AI and the new one genuinely differ:
+  the ones with players in them. A solo player now fights in a 75-enemy world and a
+  four-player group in a 210-enemy one.
+
+  **Tuning (`GAMESERVER_ENEMY_*`, 13 knobs), strictly parsed.** Max, per-player max, wave
+  size, per-player wave size, wave interval, spawn distance, minimum separation, contact
+  range, HP, attack, defense, speed, and `GAMESERVER_ENEMY_CHASE` to restore the old AI in
+  full as a control arm. Every one follows the `GAMESERVER_FIELD_DELTA` rule rather than
+  the cheap `TryParse ? value : default` idiom: an unparseable, out-of-range or
+  unrecognised value **exits 2 with a named reason**. These knobs decide how many entities
+  exist and where they go, so a typo that silently ran a fleet at the default is a fight
+  nobody configured, and no counter, log line or wire field would report it.
+  `GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE >= GAMESERVER_ENEMY_SPAWN_DISTANCE` is refused as a
+  pair, because at or above it every candidate placement — including the one it was
+  measured from — is rejected, and the knob set to keep enemies off players would instead
+  have disabled the check that does.
+
+  **No allocation in the tick loop.** `PlayerTargetBuffer` holds the handle and position
+  arrays for the life of the process and is refilled, never reallocated, in steady state;
+  the nearest-player search is a linear scan rather than a spatial-grid query, because a
+  query object is an allocation per enemy per tick and the scan is `enemies × players` of
+  float comparisons already in cache. Each system owns its buffer as a
+  `[SimulationScratch]` field and refills it per run rather than caching across ticks — a
+  cross-tick cache would be simulation state in a class (ADR-12), and it would save one
+  archetype query per world tick. Guarded by
+  `EnemyBattleRoyaleTests.SteadyStateChaseDoesNotAllocatePerTick`, measured at a saturated
+  population with 8 players online.
+
+  `EnemyAiSchedule` ordering (Spawn=0, Move=1, Reap=2) is unchanged, and still correct for
+  the reason the enum documents: "arrived" is a fact produced by Move earlier in the same
+  tick, so Reap must not run before it.
+
+- **Synthetic players (`GAMESERVER_BOTS`, default OFF)** — bots that move and fight, so a
+  map with three real clients still reads as a crowd.
+
+  A battle royale is a crowd of *players* as much as of enemies, and this project can put
+  three real clients on a map. `BotPlayerSpawner` creates N player-type entities scattered
+  over a configurable disc; each one seeks the nearest enemy inside
+  `GAMESERVER_BOT_ENGAGE_RANGE`, closes, and attacks, or wanders when there is nothing to
+  fight. Enemies chase them, clients render them with no client change, and a real player
+  can attack them.
+
+  **Bots drive the real input path.** The brain emits an `InputData` and pushes it through
+  `EcsWorld.PushInput` with a null ingress — the door that method already documents for
+  "callers that have no connection (tests, benches, scaffolding)". The ordinary
+  `InputHandler` then validates and applies it: real movement integration, real map
+  clamping, real `CombatLogic` validation, cooldowns, damage, death and kill events.
+  **No combat logic is duplicated**, which is deliberate — a second damage path that
+  drifted from the first would surface as bots doing things players cannot. The decision
+  is made inside the world write scope and the input is pushed after it closes, because
+  `PushInput` takes the read lock and the world's lock is not recursive; the resulting
+  one-tick delay is exactly the delay a real client has.
+
+  **`EntityTags.Bot` and `PersistablePlayerStates()`.** A bot is a player in the archetype
+  on purpose, so every default treats it as one — right for AOI, snapshots, rendering and
+  the enemy AI, and **catastrophic for the save sweep**, which writes a row per player
+  entity keyed by id and reports success. `AsyncSaver.SaveAllAsync` now reads
+  `PersistablePlayerStates()`, which excludes bots **by archetype tag, never by id
+  prefix**: a prefix convention is enforced by nothing and fails silently, in the
+  database, the first time a bot is named differently or a real user id collides with it.
+
+  **Why not `LoadTestSpawner`.** It was read first and is unsuitable for three structural
+  reasons. It spawns `Type = "mob"` entities tagged `EnemyAi`, so they would be chased and
+  reaped by the enemy systems and counted in `enemies_alive`; it is **mutually exclusive**
+  with the enemy spawner in the composition root, so turning it on turns the fight off;
+  and its motion is a rigid rotation about the world origin at fixed radius, which is
+  precisely the everything-at-(0,0) shape this work removes. It is a bandwidth load
+  generator and a good one — worst-case delta pressure, every entity dirty every tick —
+  and bending it into a player simulator would have cost more than the new file and left
+  the load-test tool worse.
+
+  `CompositeSimulationPhase` lets the enemy and bot phases run together;
+  `ServerOptions.SimulationPhaseFactory` produces one phase, and widening that contract
+  was rejected in favour of composing on the content side, where `ISimulationPhase` says
+  knowledge of the game belongs. Order is load-bearing: enemies first, so the bot brain
+  aims at this tick's world.
+
+  **Operational note, logged as a startup warning.** Bots are players to the enemy
+  spawner, so they buy population: `GAMESERVER_BOTS=24` at the default allowance is a
+  1110-enemy world before a real client connects. The server computes that number at
+  startup rather than leaving it to be found in a snapshot size.
+
+- **`bots` and `bots_alive` on `/status`** — the synthetic-player configuration in force
+  and the live count.
+
+  Published because a bot is indistinguishable from a player in every other field on the
+  endpoint and on the wire. That is what makes them useful and it is also the trap: a
+  reader seeing a busy map and `players_online: 3` concludes the counter is broken. These
+  two fields are the line that says it is not, and the only signal that a server holds
+  entities which will never be persisted.
+
+### Fixed
+
+- **`enemy_ai_max_now` counted connections, not player entities** — found by running a
+  probe server rather than by a test.
+
+  The field was derived from `players_online`. The enemy cap scales on player *entities*,
+  and bots are entities without connections, so a server with 24 bots and nobody logged in
+  published a cap of **30 while actually running 1110** — wrong by a factor of 37, on the
+  endpoint that exists so an operator can ask a pod what it is doing. It is now
+  `ServerOptions.StatusEnemyCap`, a function of the world. The residual is stated rather
+  than papered over: it still counts a dead player awaiting respawn, which the spawner does
+  not, so it can read one allowance high during a wipe.
+
+- **`enemy_ai` and `enemy_ai_max_now` on `/status`** — the tuning in force, rendered as one
+  line, and the population cap that applies right now.
+
+  Published for the reason `aoi_radius` and `importance_profile` are: deployment-set, not
+  on the wire, and two servers running different enemy tuning are indistinguishable from
+  any client and from every other field on the endpoint — `enemies_alive` answers "how many
+  are there now", which reads the same on a server capped at 30 that has filled and one
+  capped at 300 that has not. It also answers a question a manifest cannot: an
+  already-allocated Agones GameServer keeps the environment it was created with, so a fleet
+  update changes the manifest and not the pod. `enemy_ai_max_now` is derived from
+  `players_online` (connections) while the spawner counts live player entities, so it reads
+  slightly high during a wipe; that is documented on the field rather than smoothed over.
+
+- **`snapshot_entities_gathered` and `snapshot_max_gather`** — what the server considered
+  in-interest per viewer, on `/status` and as `gameserver.snapshots.entities_gathered`
+  (Cuvara/Netcode#161).
+
+  The server half of a pair. The client now reports the entities it merged; this reports the
+  entities the gather found, **before** the byte budget or the replication schedule withheld
+  anything. Server gathered 8 and client merged 1 localises a loss to encode/decode; both
+  reading 1 means the area of interest genuinely contained one. Neither number alone
+  supports either conclusion, which is why "the wire is delivering nine" was an inference on
+  both sides at once and cost a day on Cuvara/IndieRPGMMOAdventure#126.
+
+  The maximum is kept alongside the total because an **average hides the case that matters**:
+  one client with an empty view among many full ones is exactly the shape an anchor or
+  interest defect makes, and it averages away to nothing.
+
+  A skipped gather (#385) leaves the count at zero rather than holding the last good value —
+  a count that keeps reporting the previous number reads as a healthy view during precisely
+  the failure it exists to reveal.
+### Changed
+
+- **ADR-27 decision 8 re-decided (#372): `GAMESERVER_REPLICATION_SCHEDULE` stays OFF by
+  default — but on different grounds, because the original ones are now false.**
+
+  The decision text claimed the features "buy nothing on the only population this project has
+  ever measured" and that field-level delta was "an estimated 44%, unmeasured". Both have
+  been overtaken:
+
+  - "They buy nothing" was measured on a build where the schedule deferred the observer's own
+    reconciliation anchor and the client manufactured an interpolation sample for every
+    omitted entity (#370, Cuvara/Netcode#153). With those fixed, `tiered` saves something
+    real.
+  - Field-level delta is built and measured at a controlled **32.2%**, not 44% — and tiering's
+    **marginal** contribution on top of it is **12.5%**, not the 37% it showed against a
+    baseline without field delta.
+
+  The decision survives because the cost side moved further than the saving side. #371
+  resolved the unexplained 3.9% enemy frozen-frame baseline this was waiting on: it is
+  **spawn churn, not replication** (38.16% of frames in an entity's first 0.25s against 0.42%
+  once established). 12.5% does not justify a default that withholds state when a deployment
+  that wants it sets one environment variable, and three players and five mobs remains a
+  shape rather than a population — a realistic measurement is still blocked on ADR-7.
+
+  The superseded rationale is quoted in place rather than deleted, because it is cited
+  elsewhere and a silently rewritten reason is unfalsifiable.
+
+### Fixed
+
+- **A connection whose own entity cannot be resolved is now skipped and counted, instead of
+  being sent a snapshot centred on the world origin** (#385).
+
+  `Connection.GatherSnapshotView` discarded the result of `WorldReader.TryGetSnapshotAnchor`.
+  On failure that leaves `anchor` at `default(Vec2)` — `(0, 0)` — and the connection's entire
+  area of interest was then centred there.
+
+  The origin is the worst possible place for that to happen: enemies spawn on a ring of
+  radius 13 about it and walk inward, so it is the single most populated point on a
+  1000x1000 map. The affected connection therefore received a **busy, plausible** world —
+  six mobs animating correctly, snapshots at full rate, `snapshot_entities_shed` at zero —
+  in which the only thing wrong was that none of it was near the player. Nothing on either
+  side reported anything.
+
+  The gather now returns `false` and stages nothing, before the buffer swap, so the write
+  task is undisturbed and the next tick retries. The condition is logged once per connection
+  (the gather runs at tick rate) and counted in **`snapshot_anchor_missing`**, new on
+  `/status` and as `gameserver.snapshots.anchor_missing`.
+
+  **The other `Try*` call sites in this path were audited and are correct**: in
+  `InputHandler`, `AsyncSaver`, `ConnectionManager` and `SnapshotDeltaState` a null or zero
+  default genuinely means "not found", and each caller handles it. This one was the only
+  site where the default was both meaningful and wrong.
+
+
+### Measured
+
+- **The enemy frozen-frame baseline is fully partitioned: churn is all of it** —
+  `backend/docs/BENCHMARK.md` Part XIX (§55–58), closing #371.
+
+  119 enemy report windows, **333,587 enemy frames**, fresh device ids with the observer
+  inside the enemy disc (median distance 10.8):
+
+  | class | frozen FRESH (first 0.25s) | frozen STEADY |
+  |---|---|---|
+  | local player | 0.00% | **0.02%** |
+  | remote player | 16.67% | **0.56%** |
+  | enemy | **38.16%** | **0.42%** |
+
+  - **Enemy steady-state (0.42%) is indistinguishable from a remote player's (0.56%).** The
+    second steady-state source that would have been the interesting outcome does not exist;
+    established mobs are as smooth as any other remote entity.
+  - The magnitude closes three ways: fresh share predicted 5.95% vs observed 6.48%; overall
+    predicted 2.86% vs observed median 2.40%; implied hold **95–120ms**, i.e. 1.4–1.8 send
+    intervals — **not** the ~164ms Part XVII inferred without a fresh/steady split.
+  - Part XVII's 3.9% is superseded, not contradicted: it was measured without recording
+    observer position, which turned out to be the variable that mattered most.
+  - **Protocol change, and it was a prerequisite.** Enemies are origin-anchored (ring of
+    radius 13 about (0,0)) while AOI is 50 about the player, so an observer beyond ~63 units
+    correctly sees none and the probe prints no enemy rows at all — indistinguishable from
+    an instrument fault. Player position is persisted, so replayed device ids drift out and
+    never return; three test clients measured 215 units out. Every enemy-related measurement
+    now uses a fresh device id per run with observer distance logged (Cuvara/Netcode#162).
+
+
+### Measured
+
+- **Field-level delta saves 32.2%, not the 73% that was circulating** —
+  `backend/docs/BENCHMARK.md` Part XVIII (§52–54), the first measurement of the feature
+  against a control rather than against a different build.
+
+  Three arms, `develop@4866a89`, three clients, ~116s each, only the named setting moved:
+  field-delta off 3.188 KB/s → on **2.160** (−32.2%) → on + tiered **1.889** (−40.7%).
+
+  - 32.2% sits under the 43.4% ceiling Part XV establishes, which is what a believable
+    number looks like. Roughly 40 of the earlier 73 points came from something else that
+    moved between two builds; Part XVIII establishes only that it was not this feature.
+  - **Tiering's marginal contribution is 12.5%**, not the 37% measured on the old wire nor
+    the 23% measured against the cross-build baseline. Both were taken against a baseline
+    field-delta has since moved. A saving quoted against a moving baseline is not a saving.
+  - The first attempt at the control arm produced bytes **identical** to the treatment arm:
+    `/status` reported `field_delta = True` while `.env` said `off`, because the deploy
+    directory in use had a `docker-compose.yml` predating the variable and compose passes
+    only what it lists. Caught by reading the flag back off the running server. Same shape
+    as the `GAMESERVER_IMPORTANCE_W_*` gap in Part XVI.
+  - Part XVI's `11.14 KB/s` control rows are now marked as old-wire, so they are not read as
+    the baseline Part XVIII measures against.
+
+
+### Added
+
+- **`GAMESERVER_FIELD_DELTA` (`--field-delta`), a kill switch for field-level delta
+  encoding.** Defaults to on; nothing changes for anyone who does not set it.
+
+  Field-delta is otherwise enabled per connection purely by protocol version match, and the
+  server refuses a peer whose version is not an exact match — so **the control arm required
+  a client the server will not admit**, and every bandwidth figure for the feature was a
+  before/after across two builds. A measured 11.14 → 3.02 KB/s (−73%) sat 30 points above
+  the 43.4% ceiling `UnchangedFieldBytesBench` establishes for it, with no way to find out
+  why. That is what this switch is for (#381).
+
+  Turning it off emits valid protocol-2 frames: `changed_fields == 0` is specified to mean
+  "every field present", which is exactly what a sender without the feature produces. So a
+  v2 client needs no knowledge of the setting and **one client measures both arms minutes
+  apart**, in one build.
+
+  - Parsed strictly (`on/true/1/yes` | `off/false/0/no`), and an unrecognised value **exits
+    2** rather than defaulting. The repo's usual `Env("X") != "false"` idiom reads every
+    typo as ON: an operator writing `GAMESERVER_FIELD_DELTA=off` would get the feature they
+    were disabling, and the control they then measured would be the same arm twice. For a
+    toggle whose only purpose is an honest control, that failure mode is the whole risk.
+  - Reported in the boot banner and as `field_delta` on `/status`, because it says what the
+    **server** permits, not what a given connection got — a client on protocol 1 sees whole
+    entities regardless.
+  - `FieldDeltaToggleTests` runs two arms over the same world: OFF must never emit a
+    non-zero mask, ON must emit some, ON must cost fewer bytes, and — the property that
+    matters more than the saving — every field ON's mask claims is present must equal what
+    OFF sent for the same entity on the same tick. If those can disagree the switch is not a
+    control but a second encoder. Verified against a deliberately broken toggle
+    (`_fieldDelta = intern`), which fails the OFF arm on 30 of 30 entities.
+
+
+### Documented
+
+- **The 3.9% enemy frozen-frame baseline (schedule `off`) is spawn/despawn churn, not a
+  measurement artefact** — `backend/docs/BENCHMARK.md` Part XVII (§50–51), the gate #371 held
+  on #372's ship decision. The instrument-artefact hypothesis (#371 hyp 3) is ruled out from
+  the code, not by preference: `EnemyReapSystem` despawns at radius 2.5 while
+  `EnemyMoveSystem` stops at radius 0.1 (`distSq <= 0.01f`), enemies move at constant
+  `EnemySpeed` with no deceleration, and the tick order is Spawn → Move → Reap — so an enemy
+  is destroyed at full speed and the stop branch is unreachable under `EnemyAiTuning` as
+  shipped. There are no legitimately-still enemy frames to miscount.
+- Churn is established as the driver — enemy lifetime `(SpawnRadius 13 − DespawnRadius 2.5) /
+  EnemySpeed 2.5` = 4.2s, spawn rate `2 / 1.5` = 1.33/s → steady alive ≈ 5.6, matching the
+  `/status` 4↔6 oscillation — but **the 3.9% is not fully partitioned**. A per-spawn hold of
+  one 66.7ms send interval predicts only 1.6%; the measured 3.9% implies a ~164ms hold
+  (~2.5 intervals), consistent with a 2–3 sample interpolation buffer but not with the
+  single-interval reading. The quantitative `fresh` vs `steady` split is Cuvara/Netcode#157.
+- Consequence for #372: the cost side is real rather than artefact, which removes the "cost
+  is untrustworthy" caveat, and does not move the recommendation (`tiered` stays `off`; the
+  cheaper staleness-free levers still dominate).
+
+### Added
+
+- **Field-level delta encoding (protocol version 2, issue #373): 43.4% of entity bytes were
+  unchanged fields re-sent on every dirty entity.** The delta encoder was entity-granular: if
+  a player moved, all of `hp`, `max_hp`, `speed`, `type`, `facing_brad`, `action`, and
+  `action_seq` were re-sent even though they are static 99.7% of the time. `speed` alone was
+  5 bytes — a fifth of the mean 25 B/entity payload, written once at spawn and never again.
+  - `EntitySnapshot.changed_fields` (proto field 13, `uint32`) carries a per-entity bitmask on
+    delta frames: one bit per field (x 0x0001, y 0x0002, hp 0x0004, max_hp 0x0008, type 0x0010,
+    speed 0x0020, facing_brad 0x0040, action 0x0080, action_seq 0x0100). Zero means "all fields
+    present" — the old protocol rule, so an old receiver reading a zero mask behaves unchanged.
+    Non-zero means partial update: the receiver keeps its last value for every unset bit.
+  - `SnapshotDeltaState` grows a `FieldDelta` property (set per-connection after the version
+    handshake). `Fill()` now takes `fieldDelta`/`hasPrev`/`prev` parameters and, when active,
+    writes only the fields that changed. The sizing pass (`EncodeBudgeted`) and
+    `MeasureEntity()` use the same parameters so the byte-budget measurement never diverges
+    from the emission.
+  - `SnapshotMerger` (`Shared.GameLogic`) grows `MergeFieldDelta()`: when a delta entity
+    carries a non-zero mask, the merger combines changed fields from the wire with kept fields
+    from its last-known state. Zero-mask entities are applied unchanged (old rule preserved).
+  - `SnapshotFieldBits` (`Shared.GameLogic.Systems`) defines the bit assignments once; both the
+    encoder and the merger read from it so a disagreement is a compile error rather than a
+    silent desync.
+  - **Protocol version bumped 1 → 2.** A client that advertises version 1 (or unversioned) is
+    admitted by the existing version-check rules but does not receive field-level deltas (its
+    `FieldDelta = false`). A pre-v2 receiver ignoring `changed_fields` via proto3 unknown-field
+    skip would zero every unset field, producing entities at the origin with 0 HP — which is
+    exactly the silent failure the version bump exists to prevent.
+  - Six new golden vectors in `snapshot_merger.json` prove the merge rule: partial position
+    update keeps static fields, partial HP update keeps position, zero mask applies the full
+    old rule, and a new entity arriving with a non-zero mask is treated as a full update.
+
+### Fixed
+- **`Shared.GameLogic/Systems/SnapshotFieldBits.cs` had no `.cs.meta`, and the generated
+  `Wire.cs` was stale.** The package is consumed by the Unity client as an immutable UPM
+  dependency, so a source file with no committed `.meta` is not imported at all: every
+  server-side build stays green while the client fails to compile against a type that
+  plainly exists here — the same failure mode as the 0.2.0 `Content/` regression. Added the
+  meta with a fresh, collision-checked GUID (the file is new in `b3b0ca7` and never had one,
+  so no existing GUID was available to preserve). Separately, `GameServer/Net/Generated`
+  was regenerated from `wire.proto` alongside the Go bindings.
+- **Game events were discarded on three ticks in four, and nothing said so.** Input runs on
+  the CRITICAL group — every base tick, 60 Hz by default. Snapshots ship on the WORLD group —
+  every fourth one, 15 Hz. `TickEventBuffer` was cleared at the top of each base tick, so any
+  event produced on a tick that was not also a broadcast tick was thrown away before a
+  connection could be handed it. An attack landed, the victim's HP fell, and no damage event
+  reached anyone.
+
+  **Every unit test on both sides passed throughout.** The server's suite proved it produced
+  the event, the encoder's suite proved it would write one, and the client package's suite
+  proved it would decode one. Each half was correct in isolation and the halves were never
+  joined; it took the first end-to-end run over a real socket to see it.
+
+  The buffer is now cleared after the gather has staged events on every connection — one
+  broadcast interval rather than one tick — including on the path where there are no viewers,
+  so a server with nobody connected does not accumulate. `TickEventBroadcastTests` sweeps all
+  four phases of the broadcast cycle and fails on three of them if the clear moves back;
+  written that way because the first version of it pushed its input before the first tick,
+  landed on a broadcast tick by luck, and passed against the bug.
+
+### Added
+- **`TickEventBroadcastTests`** — the seam between producing an event and broadcasting one,
+  at split rates. A uniform-rate fixture broadcasts every tick and cannot see this class of
+  bug at all.
+
+### Added
+- **Gameplay v2: an edge-triggered event channel, ability input, and an animation retrigger
+  counter.** Three additions to `wire.proto`, all purely additive optional fields with a
+  documented "zero means not sent" rule — so `WireProtocol.ProtocolVersion` is deliberately
+  **NOT** bumped, which is what that constant's own contract prescribes for this shape of
+  change. A peer of the previous version reads every one of them as absent and behaves
+  exactly as it did.
+
+  **`SnapshotMessage.events` (field 6) + `GameEvent` + `GameEventType`.** Everything the
+  server sent a client until now was level-triggered state, which is the right shape for
+  state and the wrong shape for occurrences. "This entity took 12 damage" is not recoverable
+  from two HP values a tick apart: a heal and a hit in the same tick net out, a delta may
+  omit the entity entirely, and an entity leaving the AOI simply stops reporting. A client
+  inferring damage numbers from HP deltas is wrong in exactly the cases a player notices,
+  and it is wrong silently. Events ride the snapshot rather than taking a `MsgType` of their
+  own, because entity ids are interned per connection and the table resets at every keyframe
+  — a separate message would either pay ~17 bytes per participant on the hottest path in
+  combat, or resolve handles against a table whose lifetime it does not share, which is a
+  race that misattributes damage to the wrong entity. Visibility reuses the AOI decision the
+  entity pass already made (`_lastSent`), rather than re-deriving it from positions and
+  disagreeing at the edge of the circle; `XpGain`/`LevelUp` are private to their subject.
+  Keyframes do **not** replay events: a keyframe restates state because a client may have
+  missed a delta, not history.
+
+  **`InputMessage.ability_id` / `ability_target_id` / `aim_x` / `aim_y` (fields 5-8).**
+  Abilities are validated in `Shared.GameLogic.Systems.AbilityLogic` and resolved
+  server-side. They are NOT predicted — prediction covers movement only, because movement is
+  a pure function of input the client already has while an ability outcome depends on
+  cooldowns, content and other entities' state. A mispredicted ability presents as a cast
+  that plays and then un-happens, which is worse than one that starts a round trip late.
+
+  **`EntitySnapshot.action_seq` (field 12).** `action` is level-triggered and says so at
+  length, so two attacks in a row are identical bytes and a renderer driving an animator
+  from it plays the swing once. No client-side edge detection fixes that, because the edge
+  is genuinely not in the data: only the server knows an action was re-entered. One shared
+  rule (`ActionStateLogic.Advance`) is what every writer goes through, so a continuous state
+  cannot retrigger a walk cycle per tick and an instantaneous one cannot fail to retrigger.
+  The counter wraps skipping zero, and consumers compare by **inequality**, never by
+  greater-than.
+
+- **`AbilityDefinition` in the content set.** `ContentDatabase` carries abilities beside
+  items; `ContentValidation` refuses id 0 (reserved for "no ability" on the wire), a non-self
+  ability with no range, and a ground ability with no radius. The `abilities` key is
+  OPTIONAL where `items` is required — every content document written before abilities
+  existed has no such key, and requiring it would make this a migration of every content set
+  in every environment.
+
+- **Telemetry:** `InputHandler.Abilities` counters on `/status`, seven new
+  `InputRejectionReason` values with metric labels and suspicion weights, and
+  `Connection.SnapshotEventsDropped` / `TickEventBuffer.Dropped` for the two places events
+  can be shed under load.
+
+### Changed
+- **Events survive snapshot coalescing.** Coalescing is documented as lossless and for state
+  it is — a newer gather already describes everything an unclaimed older one would have.
+  Events are the opposite, so they ACCUMULATE on the connection and are drained only when a
+  snapshot is actually claimed for encoding. Staging them like state would have dropped a
+  damage number every time a connection fell a tick behind, which is exactly the load under
+  which a player is most likely to be in combat. Bounded at
+  `Connection.MaxStagedEvents`, dropping the oldest.
+- **Both byte-identity fixtures rebaselined** for `action_seq`
+  (`SnapshotByteIdentityTests`). The evidence is recorded beside the constants: with the one
+  line writing the field commented out, the Protobuf digest came back as the previous value
+  EXACTLY, so the only bytes this change adds are that field. The JSON fixture moving is the
+  point of pinning it separately — when `action_seq` reached the Protobuf writer alone, the
+  Protobuf fixture failed and the JSON one PASSED, which looked like good news and was the
+  bug.
+
+### Known limitations
+- **Ability cooldowns are global, not per-ability.** One slot on `Combat`; a kit needing two
+  abilities usable in the same second cannot be expressed. Lifting it is a simulation-state
+  change, not a wire change.
+- **Ground abilities apply no effect.** They are validated, animated, charged and reported,
+  and no area query runs: the only index that answers "everything within radius" is the AOI
+  grid, which is not valid during input processing, and an O(all entities) scan per cast
+  would be the most expensive thing in the tick. Counted as
+  `InputHandler.Abilities.GroundCastsWithoutArea` rather than left to be rediscovered as
+  "ground abilities are broken".
+- **The replication schedule deferred the observer's own entity, which is the one entity it
+  must never defer.** With `GAMESERVER_REPLICATION_SCHEDULE=tiered` and the `balanced`
+  profile, self scores 5 (distance 2 + type 3, no HP or action edge to add) and lands in the
+  133ms band — so a client predicting at 60Hz reconciled against an anchor arriving at
+  7.5Hz. Three clients in a live session reported `lastCorrection` going **0.0041 → 0.3333**
+  the moment the schedule was switched on, at fps 170–280 with `clamped=0`, `discarded=0`,
+  `resyncs=0`: not framerate, not loss.
+  - The rule already existed twice in prose — the priority sort's first comparison ("a stale
+    one reads as rubber-banding, the single most-noticed netcode artefact") and ADR-27
+    decision 2 ("`Self` stays above both") — and the schedule shipped without it. The two
+    halves of one policy disagreed; the byte budget guaranteed self a slot every tick while
+    the schedule withheld it.
+  - The exemption goes in `DueNow`, not at its two call sites, and both it and the priority
+    sort now read one `IsSelf` helper. A third call site cannot miss it, which was the
+    failure mode the file's own comment at the budget path warned about.
+  - `SelfIsNeverDeferredTests` drives the real input handler and the real AOI gather and
+    runs **two arms**, because "self was sent on every world tick" is equally true of a
+    schedule that defers nothing: `Off` shows every entity at 200/200, `Tiered` shows self
+    at 200/200 and the median other at 100/200. With the exemption removed the same test
+    reports self at 100/200 — indistinguishable from any other entity — and fails.
+- **The slowest replication band was scheduled past the point the client can interpolate
+  through, and the constant that was supposed to prevent it was 3.3x too large.** With self
+  fixed the players were smooth and the **mobs** stepped. A mob scores under 3 — distance at
+  most 2, no `type` bonus, and `change` only fires on an HP or action edge — so it landed in
+  the 266ms band, against a client holding `TargetDelay` 100ms plus `MaxExtrapolation` 50ms.
+  Past 150ms the client is not showing slightly old state, it has none.
+  - `MaxIntervalMs` was `500`, and the remark justifying it read *"500ms is also the point
+    past which the client's 100ms interpolation buffer plus 50ms extrapolation stops
+    covering the gap at all"*. 100 + 50 is 150. The ceiling is now
+    `ClientInterpolationBudgetMs = 150`, named and derived where it can be grepped, because
+    the number it mirrors lives in the other repository and neither build fails when one of
+    them moves.
+  - `ReplicationSchedule.Tiered` drops to **two** bands (every tick, else 133ms). At a 15Hz
+    world rate and a 150ms budget those are the only intervals that fit; a third band needs
+    a faster world rate or a client that holds more.
+  - Measured live, same three clients: 7.03 KB/s against the control's 11.14 — **37%**,
+    where the three-band version bought 50% by exceeding what the client could absorb.
+    `snapshot_max_state_age` fell from 12 base ticks (200ms) to 4 (66ms).
+  - `ScheduleFitsTheClientBudgetTests` asserts no band exceeds the budget and that no two
+    bands round to the same tick count — the latter being ADR-27 decision 4's failure, where
+    a band that had silently ceased to exist went on printing in the banner.
+  - **`snapshot_max_state_age` counts BASE ticks, not world ticks.** Reading it as world
+    ticks overstates staleness 4x; it was first written up here as 800ms when it was 200ms.
+  - The three `TicksFor` rows covering 266ms and 500ms were **rewritten, not deleted**: what
+    changed is what those inputs mean, and a deleted row is a rule nobody can see was tested.
+
+### Added
+- **`UnchangedFieldBytesBench` — 43.4 % of every entity on the wire is fields that did not
+  change.** Measured over 35,462 real emissions: 25.25 B per emission, of which **10.96 B**
+  is `hp`, `max_hp`, `speed` and `type` re-sent identical to what that connection was last
+  told, 99.7 % of the time. `speed` alone is 5 bytes, a fifth of the payload, a float
+  written once at spawn and never again.
+  - The delta encoder is **entity-granular**: it suppresses an entity only when every
+    visible field matches, so a player who merely moved re-sends all four.
+  - 25.25 B/emission independently reproduces Part XIII's 24.9 B/entity/snapshot from a
+    different instrument, which is what makes the rest of the figure worth reading.
+  - **Measures; proposes nothing and changes nothing.** proto3 cannot express "unchanged" —
+    an omitted field and a zero one are the same bytes — so field-level delta needs a wire
+    change, and that is a decision to take with a number in hand. See BENCHMARK.md Part XV.
+- **`ImportanceIntervalBench` now runs the SHIPPED policy, and until it did it disagreed
+  with a live sweep by 47 percentage points.** It carried a hand-written interval policy
+  that gave a near player interval 1, so on a `cluster` population -- where every entity is
+  a near player -- it demoted nothing and reported **0.0%**, while the same server measured
+  **-47.3%** end to end. A bench that models a policy nobody runs answers a question nobody
+  asked. It now calls `ReplicationImportance.Score` and `ReplicationSchedule.Tiered`, the
+  same two types the encoder calls, and the two agree to within 2 points. See BENCHMARK.md
+  Part XIV §42.
+- **The replication schedule compared milliseconds-converted-to-WORLD-ticks against a
+  BASE-tick counter, so it deferred nothing at all.** Snapshots are built on the world
+  group, so "every 2 snapshots" is the natural way to think about an interval — but the
+  `tick` the encoder is handed is `TickLoop.CurrentTick`, the authoritative simulation tick,
+  which advances at the **critical** rate and therefore jumps by 4 between consecutive
+  snapshots at the 60/15 default. `tick - lastSent >= 2` was true every time, so every
+  entity was due on every snapshot.
+  - **Every unit test passed**, because they all fed the encoder a counter that advanced by
+    1 per snapshot — the very assumption the production path breaks. The only thing that
+    caught it was reading `snapshot_deferred_by_interval` off a running server and finding a
+    flat zero with the feature switched on.
+  - Fixed by converting into the unit the encoder is actually handed:
+    `SnapshotDeltaState.TickHz` is now the **base** rate, and the same configured
+    milliseconds come out right — 133ms is 8 base ticks, which is exactly 2 snapshots at
+    60/15, and 266ms is 16, which is 4.
+  - The tests now drive base ticks through a `Base(snapshot)` helper, and
+    `ScheduleOnTheLivePathTests` drives the real `InputHandler` and the real AOI gather so
+    the encoder sees exactly what `TickLoop` gives it.
+  - Measured on a running server before and after, same 40-player 12 s cluster run:
+    `snapshot_deferred_by_interval` 0 → **181,531**, `snapshot_max_state_age` 0 → **4** base
+    ticks (one snapshot period), snapshot bytes **10,046,697 → 5,445,866**.
+- **`GAMESERVER_REPLICATION_SCHEDULE` — per-importance send intervals (ADR-27).** `off`
+  (the default) is every dirty entity due every world tick; `tiered` withholds
+  lower-importance entities for a configured interval.
+  - **Intervals are milliseconds, never ticks**, converted through `SIM_WORLD_HZ`. The
+    conversion **rounds to nearest, and flooring was tried first and was wrong**: 133ms at
+    15Hz is 1.995 ticks, so the middle band floored to 1, became "every tick", and still
+    appeared in the banner and on `/status`. A policy whose middle band silently does not
+    exist is worse than one that is 0.3ms late — and it was caught by reading a running
+    server's `replication_schedule` line, not by any test. The ceiling is applied to the
+    interval an entity ACTUALLY waits rather than to the number someone typed.
+  - **An edge is never deferred.** Health and the action retrigger counter are occurrences,
+    not states; withholding one is a dropped event, because the next snapshot carries only
+    the state afterwards.
+  - **A keyframe never applies intervals.** The client discards anything a keyframe does not
+    list, so deferring there would make an entity vanish rather than arrive late.
+  - **The schedule applies on BOTH encoder paths.** Gating it on the byte budget was the
+    first implementation, and it meant `GAMESERVER_MAX_SNAPSHOT_BYTES=0` — documented as
+    disabling only the budget — silently disabled the schedule too.
+  - **`tiered` without importance weights exits 2**: every score would be zero, every entity
+    would land in the slowest band, and the result would be a uniform staleness increase
+    wearing the name of a policy.
+  - New `gameserver_snapshots_deferred_by_interval_total` and
+    `gameserver_snapshots_max_state_age`. The gauge is deliberately **not**
+    `max_shed_age`: a not-due entity is not a shed entity, so the budget's bookkeeping is
+    blind to schedule deferrals and reading one for the other reports a healthy zero while
+    entities go stale.
+  - Per-entity send-tick bookkeeping is pruned everywhere `_lastSent` is — despawn commit,
+    keyframe, and the deferral prune — so it cannot grow for the life of a connection.
+  - Tests: `ReplicationScheduleTests` (14), covering newly-visible bypass, keyframe
+    exemption, edge exemption, convergence after a deferral, the bounded staleness the
+    existing starvation test cannot see, and the bookkeeping leak.
+  - Verified against a running server: `tiered` without weights exits 2; at `SIM_WORLD_HZ=15`
+    the bands render `133ms = 2 ticks, 266ms = 4 ticks`, and at 30 they render `4` and `8` —
+    the same wall time at both rates.
+- **`GAMESERVER_IMPORTANCE` — the importance weights are now configurable, and the four
+  factors with a data source have a tuned profile.** `legacy` (the default) is every factor
+  zero and therefore the pre-importance ordering; `balanced` ranks on visible-state change
+  (10), combat (6), entity type (3) and distance (2).
+  - **The default stays off, deliberately.** Reordering which entity is shed first when the
+    downlink budget bites is a real behavioural change, and BENCHMARK.md Part XIII measured
+    the budget as a tail cap that does not engage at a load this server is known to handle —
+    so switching it on by default would change behaviour in a case nobody has measured, for
+    no measured benefit. Same rule the AOI radius and the downlink budget both shipped under.
+  - **Weighting a factor with no data source exits 2.** `GAMESERVER_IMPORTANCE_W_PARTY` and
+    its six siblings are refused rather than accepted and silently contributing zero:
+    accepting one would let a manifest describe a policy the server cannot run and leave
+    whoever wrote it reading their own configuration as if it had taken effect.
+  - `/status` publishes `importance_profile` and `importance_weights`, and the profile reads
+    **`custom`** whenever any weight was overridden — a server reporting `balanced` with a
+    replaced weight invites a reader to look up what balanced means.
+  - Weight ordering is an argument, not a tuning: change dominates because HP and action are
+    the only two fields a client can neither interpolate nor dead-reckon; distance is the
+    *smallest* because it is already the tie-break BELOW the score, so weighting it heavily
+    would duplicate a key that is already there.
+  - Overrides parse with `InvariantCulture`, so `2,5` is refused rather than read as 25.
+  - Tests: `ImportanceSettingsTests` (26). Verified against a running server: `legacy` and
+    `balanced` both reported correctly on `/status`, and `GAMESERVER_IMPORTANCE_W_PARTY=5`
+    exits 2 with a named reason.
+- **`ReplicationImportance` — per-connection entity importance, wired into the snapshot
+  scheduler and shipped switched off.** One scalar, computed where the scheduler already has
+  every input in hand, inserted as the **third** sort key in `CandidateComparer`.
+  - **Every weight defaults to zero, and that is the acceptance criterion.** With
+    `Weights.Legacy` the term is always 0, every comparison on that key ties, and the
+    ordering is the pre-importance one — proved by `SnapshotByteIdentityTests` and
+    `TrimmedGatherByteIdentityTests` passing with **no test file touched and no digest
+    rebaselined**. Wiring a new sort key into a shipped encoder is exactly the change that
+    looks correct and silently reorders the wire; this makes the migration provable instead
+    of argued.
+  - **`Self` and deferral `Age` are deliberately NOT in the score.** They stay as
+    lexicographic keys *ahead* of it, because the starvation bound — max deferral is the
+    size of the dirty set, independent of session length — is a consequence of the
+    comparison being strictly oldest-first. Folding age into a weighted sum makes fairness a
+    function of the weights, so a weight change would silently retune it.
+    `ImportanceOrderingTests.DeferralAge_OutranksEveryGameplayScore` pins this: the
+    lowest-scoring entity in the world, against a crowd of maximally important ones, is
+    still carried within a bounded gap.
+  - **Four factors have a data source; seven are named, reserved and zero.** Distance
+    (normalised by `GAMESERVER_AOI_RADIUS`, so weights do not silently retune when a
+    deployment changes its radius), visible-state change, entity type, and combat via
+    `EntityAction`. Party, PvP, boss/elite, quest, visibility, zone and interaction read
+    gameplay systems that **do not exist on this server** — there is no party here (parties
+    live in Nakama and the gateway consumes them), no PvP, no boss tier, no quests, no line
+    of sight, no intra-map zones. They are present so adding one later is a weight change
+    rather than a redesign, and `ReservedFactors_ContributeNothingBecauseNothingFeedsThem`
+    makes "someone weighted party and nothing happened" a red test rather than a silent
+    non-event.
+  - "Changed" is measured against `_lastSent` — what THIS connection was told — not against
+    a world-level dirty flag. Two connections seeing one entity legitimately disagree about
+    whether it is fresh, because one of them may have been shed last snapshot.
+  - `EntityTypes.IsPlayer` is an ordinal compare rather than a dictionary `Parse`: this runs
+    per AOI candidate per connection per snapshot, and the question is binary.
+  - Tests: `ReplicationImportanceTests` (20) and `ImportanceOrderingTests` (4). Both
+    ordering tests assert `EntitiesShed > 0` first — if the budget never bit, the sort never
+    ran and the assertion about its order proves nothing.
+- **Attacks now reach the wire, and two in a row are distinguishable.** Two defects, one
+  cause, both invisible to every existing test.
+  - **The sampling gap.** Actions are written on the CRITICAL group (60 Hz) and sampled by
+    the snapshot gather on the WORLD group (15 Hz), so only one write in four is ever
+    observable. `InputHandler` set `Action = Attacking` on one base tick and the next tick
+    with movement input overwrote it, so an attack reached a client only when it happened
+    to land on a world tick — a one-in-four coin flip that reads as "the animation
+    sometimes does not play". `Locomotion.ActionHoldUntilTick` now LATCHES a one-shot
+    action for one world interval (`SimulationRates.WorldEvery`, passed by the host), so
+    at least one snapshot can always sample it. `EntityAction.Dead` is terminal and
+    overrides the latch: a corpse must not keep swinging.
+  - **The missing edge.** Even latched, a second attack was byte-identical to the first,
+    so the delta encoder classified it as unchanged and omitted it.
+    `Locomotion.ActionSeq` carries the retrigger edge, rides the `Locomotion` span the AOI
+    gather already fetches (no extra `GetSpan`, so the issue #237 trim is preserved), and
+    is part of `SentView`'s equality — which is what makes the encoder send it.
+  - **One writer, and the counter rule is the SHARED one.** `ActionTransitions.Enter` is
+    now the only place `Locomotion.Action` is written; the five direct assignments in
+    `InputHandler` are gone. A counter that some call sites remembered to bump would be
+    worse than none: a missed bump is a silently dropped animation, a spurious one a swing
+    that plays twice, and neither shows up in a compile or a tick timing.
+    - The advance rule itself is **`Shared.GameLogic.Systems.ActionStateLogic.Advance`**,
+      adopted verbatim rather than reimplemented. It already existed in the client's copy
+      of `Shared.GameLogic` (`com.rpgmmo.shared-gamelogic` 0.5.0) and was written against
+      this wire contract; a server-side copy would be two implementations of one contract
+      with no test able to see them diverge, because the client decides whether to
+      retrigger by comparing counters the server produced — a server advancing them under
+      different rules fails nothing, it just plays the wrong animations. This is the
+      defect class ADR-10's shared-logic boundary exists to remove.
+    - Re-asserting a CONTINUOUS action (Moving, Idle, Dead) does not advance the counter —
+      if it did, a walking entity would differ on the wire every snapshot and the delta
+      encoder's "omit unchanged entities" property would collapse for anything in motion.
+      `ActionStateLogic.IsRetriggerable` owns that distinction.
+    - `ActionTransitions` keeps only the **latch**, which is genuinely server-only: it is a
+      fact about this server's two-rate schedule, not about the simulation, and a client
+      has no schedule to apply it to. Putting it in `Shared.GameLogic` would export a
+      server implementation detail to every client and make changing a server tick rate an
+      `sgl` release.
+  - `InputHandler`'s new `oneShotHoldTicks` parameter defaults to **1, meaning no latch**,
+    so the sixteen fixtures that construct the handler directly observe exactly what they
+    observed before. The host passes `rates.WorldEvery`.
+  - Tests: `GameServer.Tests/Input/ActionSeqTests.cs` (11), including a **control arm**
+    that runs the identical scenario with the latch off and asserts the attack IS lost —
+    without it the test would pass against a build where the latch does nothing.
+  - `TrimmedGatherByteIdentityTests` now normalises `ActionSeq` out before comparing, and
+    asserts the scenario produced a non-zero one. The legacy arm composes `EntityState`,
+    which cannot carry the field (it is a `Shared.GameLogic` type compiled into the Unity
+    client as a UPM package), so the two arms are no longer expected to agree on it; issue
+    #237's claim — that the trimmed compose emits the same bytes as the full one — stays
+    provable rather than being retired.
+  - `SnapshotPipelineTests.ProductionBytesEqualTheReferenceEncoder` now feeds the reference
+    arm `EntityView`, which is the type production feeds it. Taking `EntityState` made the
+    reference a reference for a pipeline nobody runs.
+- **`GameServer.Tests/Bench/ImportanceIntervalBench.cs` — what importance-driven
+  replication intervals would save, measured through the real encoder before any of it is
+  built.** Two `SnapshotDeltaState` instances over one synthetic population: one as today,
+  one with the candidate set filtered by a distance- and type-tiered interval policy. No
+  production code changes — the policy lives in the bench.
+  - A deferred entity is **substituted with its last-sent values, never removed** from the
+    gathered span. Removing it would make the encoder conclude it left the AOI and emit a
+    despawn, which is both wrong and more expensive than the update being skipped; the
+    substitution makes `SentView.Equals` report it unchanged, which is the same wire
+    outcome the real implementation would produce by not adding it to `_candidates`.
+  - **`cluster` saves 0.0 %**, and that is the point of running it: 200 players standing on
+    each other are all near players, all tier 1, and that is the shape BENCHMARK.md's
+    published ceiling was measured on. `realistic` saves 44–46 % at a bounded 3 world ticks
+    (200 ms) of staleness — but this server's enemy AI is `Scaffolding/`, so that shape is a
+    guess and the bench says so.
+  - The saving is reported **next to its cost**: max and p99 staleness in world ticks. A
+    policy that halves bytes by letting an entity go a second stale has not bought anything.
+  - Skipped unless `BENCH_TICK=1`, like the other benches; the output is the deliverable and
+    nothing asserts on the numbers. See BENCHMARK.md Part XIII §35.
+- **`GAMESERVER_AOI_RADIUS` / `--aoi-radius` — the AOI radius is a deployment setting, not
+  a compiled-in constant.** It was `GameConstants.DefaultAoiRadius` reached from exactly two
+  places in the server and from no flag at all, which made the **largest single lever on
+  downstream bandwidth** a code change. Population inside a circle grows with the SQUARE of
+  its radius, so halving it quarters the expected entity count per snapshot — a bigger
+  effect than anything downstream of it, including `GAMESERVER_MAX_SNAPSHOT_BYTES`, which is
+  a tail cap on what the radius has already selected. `BENCHMARK.md` Part IX puts bandwidth,
+  not tick time, as the binding constraint (61.7 KB/s per client at 200 players against a
+  tick p99 at 5% of budget), so this is the knob that acts on the thing that actually binds.
+  - **Refused at startup, never defaulted.** `GameServer/Server/AoiSettings.cs` validates and
+    exits 2 with a named reason for an unparseable, zero, negative, non-finite or
+    above-ceiling value. Deliberately NOT the `TryParse ? value : default` idiom the cheaper
+    knobs use: `GAMESERVER_AOI_RADIUS=5o` would then run a fleet at 50 while its manifest
+    said 5, and nothing would report it — the divergence would be discovered from a
+    bandwidth graph weeks later, if at all. Parsed with **InvariantCulture**, because a
+    container inherits whatever locale its base image carries and `12,5` must be refused
+    rather than reinterpreted as 125.
+  - **It is also the spatial index's cell size** (`EcsWorld`), so the two cannot be
+    configured apart. This is the half with no symptom: `SpatialGrid.Query` derives its cell
+    span from the radius it is handed rather than assuming a 3x3 neighbourhood, so a stale
+    cell size leaves every snapshot byte-correct and every differential test green while the
+    index quietly stops narrowing. `EcsWorld.AoiIndexCellSize` and
+    `AoiRadiusWiringTests.ConfiguredRadius_ReachesBothTheGatherAndTheIndex` exist only
+    because there is otherwise nothing to assert on.
+  - **A radius that reaches the map's diagonal logs a warning** at startup: interest
+    management then filters nothing and every entity is in every snapshot for every client.
+    Reported rather than refused — legitimate in a small dungeon instance, a mistake on an
+    open map, and the server cannot tell which it is looking at. Measured against the
+    diagonal and not the width: against the width it would call a radius "covering" while it
+    still excluded the far corners, which is where AOI does its most useful work.
+  - **`/status` publishes `aoi_radius` and `aoi_covers_whole_map`.** The radius is not on
+    the wire, so before this the only way to learn a pod's radius was to read the manifest
+    that was supposed to have produced it — which an **already-allocated** GameServer does
+    not necessarily reflect, since its environment is fixed at pod creation and a fleet
+    update reaches only new pods.
+  - Tests: `AoiSettingsTests` (21) and `AoiRadiusWiringTests` (11). The index/scan
+    differential is re-proved at cell sizes 15, 50 and 130 with the occupancy gate forced
+    open and an assertion that more than one cell is occupied — at 130 the production gate
+    would have sent both arms down the scan and the comparison would have compared the scan
+    against itself and passed.
+- **`gameserver_nakama_reward_outcomes_total` — the reward path now counts its own answers,
+  and ADR-24 §8.1's open item is closed.** The failure came first: turning the meta hop's
+  TLS on in dev left one `Allocated` GameServer on the old plaintext `NAKAMA_URL`, so every
+  reward RPC it made failed with `400 Client sent an HTTP request to an HTTPS server`
+  **while the game itself played perfectly** -- a `LogWarning` with nothing counting it,
+  found by a human reading pod logs.
+
+  One counter, labelled `granted` / `partial` / `not_granted` / `too_large` / `unknown`,
+  recorded in `KillRewardBatcher` because that is the one place that sees every answer
+  exactly once including retries. Three choices with reasons: it is on the CONSUMER's side,
+  because Nakama's probes answer for `:9100` and structurally cannot see `:7350` be
+  unreachable, untrusted or wedged; `granted` is counted too, because the alert is a ratio
+  and a failure counter with no denominator cannot tell "broken" from "nobody killed
+  anything"; and `too_large` is excluded from the failure side, because the batcher
+  splitting an oversized batch is not a failure and a routine background rate is somewhere
+  for a real signal to hide.
+- Eight tests. Six cover the counter, two cover the WIRING -- and the second pair exists
+  because a mutation proved the first six did not. Deleting
+  `_metrics?.RecordNakamaRewardOutcome(outcome)` from the flush loop killed **zero** tests:
+  a counter that never increments in production, invisible to the whole suite. With the
+  batcher tests, the same mutation kills exactly those two. Testing the instrument is not
+  testing the wiring.
+
+
+### Documentation
+- **ADR-25 decision 8 is answered: Ed25519 survives Unity IL2CPP at `High` stripping.**
+  Measured 2026-09-13 in a built Windows Standalone player from the Sealed Session Probe
+  sample (`Cuvara/Netcode` v0.38.2): all eight self-checks passed, including the negative case
+  this decision insists on — one byte of a genuine signature flipped, and the verifier refused
+  it. A verifier that accepts everything is indistinguishable from one that works, which is
+  why the refusal is the line that matters rather than the verification.
+
+  **Nothing on this module depended on that answer, and the entry is here anyway** because
+  this is where ADR-25's implementation is recorded and a reader who arrives at that entry is
+  the one asking whether the client can actually check what this server signs.
+
+  The scope is written down at ADR-25 decision 8 rather than summarised optimistically:
+  `Minimal` was not run separately, **Android is unmeasured** (and the BouncyCastle
+  CIL-Linker failure `link.xml` guards against was reported *on Android*), and whether those
+  `link.xml` entries are load-bearing is untested — a control run without them means editing
+  the resolved package under `Library/PackageCache`, which the package rules forbid. So the
+  claim is "Ed25519 survives `High` with those entries present", not "the entries are
+  unnecessary".
+
+  `ROADMAP-SECURITY.md` step 5 carried "**ADR-25 decision 8's IL2CPP go/no-go probe has NOT
+  been run**" and now carries the result instead.
+
+### Added
+- **ADR-25 implemented: the game server proves its identity with an Ed25519 key it generates
+  per pod.** `Net/Sealed/ServerIdentity.cs` makes the keypair once at startup from a
+  cryptographic RNG. It is **never persisted, never configured and never mounted** -- there
+  is deliberately no flag, no environment variable and no file path that can supply one,
+  because the moment such a path exists somebody mounts a fleet-wide private key into the
+  process most exposed to player-controlled input. Rotation is pod replacement; the Fleet
+  already does it on every scale, rollout and crash, so there is no key to roll, no overlap
+  window and no keyring.
+
+  `SealedHandshakeServer` signs the existing transcript -- wrapped, not modified -- and puts
+  the 64-byte signature in `SealedServerHello.server_signature` (new field 4). The HMAC
+  `binding` is unchanged and still sent: it serves the harnesses that hold
+  `JOIN_TOKEN_SECRET`, and reusing its field number is how two versions come to disagree
+  silently about a byte. **The server always signs and never negotiates.**
+
+  The public half is published as `identity_key` in this pod's Redis registry entry
+  (`RegistrationOptions.IdentityKey`, rebuilt by `BuildInfo` so every heartbeat REPAIR
+  republishes it -- a repaired entry missing the key would leave a server every
+  identity-requiring client refuses, with the registry reporting perfect health). The
+  gateway forwards it to the client in `enter_world_resp`.
+
+  **What it does not buy, said at every boot rather than only here.** The key reaches the
+  client over the gateway hop, plaintext in every environment today. An attacker able to
+  man-in-the-middle the gameplay hop is on that same path: he substitutes the key and forges
+  a signature that verifies. So a verified signature proves the gameplay peer holds THAT
+  key -- an identity guarantee only once the delivering hop is itself authenticated (ADR-23
+  TLS). The startup log states this in full, and the client half reports the distinction
+  rather than collapsing it (ADR-25 decision 6).
+
+  **NativeAOT**: BouncyCastle's Ed25519 is managed arithmetic with no reflection and no
+  dynamic loading, so nothing here needs a trimming root. No new dependency -- BouncyCastle
+  2.7.0 was already a `PackageReference`.
+
+  Tests assert the **negative** case, per ADR-25 decision 8: a tampered transcript, a
+  signature replayed into another session, a signature by another identity, a genuine
+  signature naming a different key, bit flips at both ends, an all-zero signature and a
+  short one are each rejected individually. `ServerIdentityInteropTests` pins the signed
+  input and the signature byte for byte against `shared/sealed/interop_test.go` -- two sides
+  that each round-trip against themselves agree with themselves, not with each other, and a
+  divergence would show in production as a client refusing every session with nothing in any
+  log naming encryption.
+- **`NAKAMA_TLS_PIN`: this server can now reach a Nakama that terminates its own TLS with a
+  self-signed certificate (ADR-24 §8.2).** `NakamaClient` POSTs `reward_kills` over
+  `NAKAMA_URL`; when that moves to `https://` -- which ADR-24 requires the moment Nakama's
+  flag goes on -- .NET's validation correctly refuses a certificate no CA signed, and every
+  reward RPC fails on it while the game itself keeps working. `NakamaTlsPin` pins the leaf
+  instead: `HttpClientHandler.ServerCertificateCustomValidationCallback` comparing
+  `cert.RawData` to the pinned DER with `CryptographicOperations.FixedTimeEquals`.
+
+  **There is no accept-anything mode, and the type refuses to be turned into one:**
+  `CreatePinnedHandler` throws on an empty pin, `Matches` returns false for a null or empty
+  pin, and an unparseable PEM throws rather than silently pinning nothing. Setting the pin
+  against a non-`https` `NAKAMA_URL` is a **startup refusal** (exit 2), not a warning -- a pin
+  on a plaintext hop protects nothing while reading as though it does, which is the same
+  "set together or not at all" rule the certificate pair itself follows. Startup now logs a
+  `NakamaTLS:` line naming the trust in force, including the fingerprint of the pin.
+
+  New `GameServerOptions.NakamaHttpHandler` carries it, reusing the seam the batcher tests
+  already used for a fake `HttpMessageHandler` -- one property, not two.
+- 11 tests in `GameServer.Tests/Nakama/NakamaTlsPinTests.cs`, weighted towards **refusal**,
+  because a pin that accepts is visible in any working deploy and a pin that accepts too much
+  is visible in none: a second self-signed certificate with the *same subject* is rejected, a
+  single flipped byte is rejected, an empty pin matches nothing, and `CreatePinnedHandler`
+  refuses to build an accept-anything handler.
+
+
+### Documentation
+- **ADR-26's status line said "NOT implemented" for a day after it stopped being true.**
+  Decisions 1, 2, 3, 5, 6, 7 and 8 all shipped on 2026-09-12/13 and were proven on dev; the
+  header still described the ADR as a target model. That is the exact staleness this document
+  warns about in three other places, and it was flagged by the agent that implemented the join
+  deadline rather than found by anyone reading the header. It now states what shipped, what was
+  measured, and that **decision 4 is the one exception** -- encounter checkpointing is deferred
+  by choice, not pending. "Implemented" over an ADR with a deliberately-unbuilt decision would
+  be its own kind of wrong.
+
+### Added
+- **ADR-26 allocation leak closed: a dungeon instance whose party never arrives releases
+  itself.** Measured on dev, not predicted: decision 6's shutdown rule requires
+  `everHadPlayer`, so a pod that was **allocated and then never joined** satisfied it forever
+  -- it sat `Allocated`, Agones does not reclaim an Allocated pod (ADR-16), and two runs of
+  `smoketest/cmd/dungeonprobe` consumed both replicas of a two-replica fleet permanently.
+  In production the same shape is any client that receives `{ServerAddr, JoinToken}` and dies
+  before dialling.
+
+  The fix is a **second rule**, not another term in decision 6's -- the pod cannot tell "my
+  party has not arrived yet" from "my party is never arriving" without a clock.
+  `GameServerHost.ShouldShutdownUnjoinedInstance` is
+  `isDungeon && !everHadPlayer && pendingHandshakes == 0 && deadline > 0 && waited >= deadline`,
+  the **exact complement of decision 6 on `everHadPlayer`**. The two therefore partition the
+  space on that one term and can never both fire, so a pod mid-run and a pod that emptied
+  after a real run stay decision 6's business exactly as before --
+  `TheTwoShutdownRules_AreMutuallyExclusive` pins that over the cross product of their shared
+  inputs rather than leaving it to care. `pendingHandshakes` is in the rule because a socket
+  still inside the join handshake has not set `everHadPlayer` yet, and killing the pod on the
+  deadline instant would kill the party it exists to wait for with the arrival already on the
+  wire.
+
+  **The clock starts at `Allocated`, and the pod really can observe that** -- ADR-26 left the
+  question open. The sidecar's `GET /gameserver` carries `status.state`, already surfaced as
+  `IAgonesSdk.GetStateAsync()` and already polled by `AgonesAllocationGate`; the deadline
+  reuses that gate rather than re-implementing it. Not boot: a dungeon fleet pins no map id
+  and is the one fleet shape ADR-18 says should carry spare `Ready` replicas, and a pod parked
+  in that buffer is not leaking. With Agones disabled -- compose, a local run, every test --
+  there is no allocation to observe and no allocator to leak a replica to, so the clock starts
+  at start-up.
+
+  **The deadline is 90s, not the 30s `constants.JoinTokenTTL` ADR-26 proposed.** That
+  reasoning -- the allocation is unusable once the token expires -- is true of the token and
+  false of the deadline, because the two clocks do not start together: the gateway mints the
+  token *after* allocating, having waited up to `registry.DefaultAllocationWaitTimeout` (15s)
+  for the pod to register, so the last legitimate arrival is ~45s past `Allocated` and a 30s
+  deadline would kill pods out from under parties still holding a valid token. New
+  `ServerOptions.DungeonJoinDeadline`, set by `--join-deadline-seconds` /
+  `GAMESERVER_JOIN_DEADLINE_SECONDS`; `0` disables the mechanism and the start-up banner says
+  which of the two a dungeon pod is running. Dungeon mode only -- a map server is allocated
+  for nobody in particular, so "nobody joined" is not a fault there.
+
+  Timed with `Stopwatch`, never `DateTime.UtcNow` (#153): this host's `CLOCK_REALTIME` runs
+  10-17% fast and has been observed stepping backwards, so a wall-clock budget would silently
+  shrink under exactly the load the deadline exists to tolerate.
+
+### Documentation
+- **ADR-26: dungeon instancing is keyed by the party, and a "checkpoint" is the player at the
+  boundary.** Design only -- **no runtime code changed**. It implements ADR-14 stage 6, the
+  first of the two items `CORE-COMPLETION.md` names as the gate before gameplay content, and
+  records six decisions with their rejections. The two most load-bearing: the instance is keyed
+  by **party**, not content id, and **ADR-2's one-live-server-per-`map_id`
+  rule must not be extended to cover it** -- two servers on one map split a shared world,
+  whereas each dungeon instance is a distinct logical world by design, so keying by content
+  would give the entire game one shared dungeon. And a **dungeon server must not persist
+  `map_id` or position**: `player_states` holds one row per player (`AsyncSaver.cs:10`) and
+  `PlayerSpawn.Resolve` discards another map's coordinates, so a normal save would stamp the
+  dungeon over the origin map and silently teleport the player to a spawn point as the price of
+  a dungeon run. The stated cost of that choice is that position inside a dungeon is not
+  durable. The ADR also narrows the word "checkpoint" deliberately: this one makes a crash cost
+  the run and nothing of the character, and does **not** make a boss fight resumable -- the
+  `dungeon_checkpoints` table named in `shared/CLAUDE.md` stays deferred.
+
+### Added
+- **ADR-26 decisions 5, 6 and 8: `--mode=dungeon` is now an instanced server, not a map
+  server with a longer hold.** Until this change the mode reached exactly one line -- the
+  reconnect hold TTL. Three behaviours now hang off it, each gated in one place.
+
+  **It does not appear in the map index.** `IServerRegistry.RegisterAsync` takes a
+  `RegistrationScope` (`MapIndexed` / `HashOnly`). A dungeon pod still writes
+  `servers:id:{server_id}` in full, with its heartbeat TTL untouched -- the gateway
+  allocates the pod, learns its name and then waits for exactly that hash to read the
+  dialable address out of, so skipping it would make a dungeon **unallocatable** rather
+  than merely unindexed -- and it no longer joins `servers:map:{map_id}`, the set
+  `FindServer` searches. An indexed instance would be handed to an unrelated player as if
+  it were a map, and a dungeon fleet pins no `GAMESERVER_MAP_ID`, so the key it wrote
+  would be the empty one. `GameServerHost` narrows the scope **from the mode**, not from
+  the composition root, so a caller that builds `RegistrationOptions` without thinking
+  about dungeons cannot get it wrong.
+
+  **It does not persist `map_id` or position.** `player_states` holds one row per player
+  with a single `map_id` (`Persistence/AsyncSaver.cs`), and `PlayerSpawn.Resolve` discards
+  coordinates belonging to another map -- so a dungeon server saving normally would stamp
+  the dungeon's id over the player's origin map and return them to that map's **spawn
+  point** instead of where they left, a silent permanent teleport as the price of entering
+  a dungeon. `AsyncSaver` now takes a `PlayerSaveScope`; in dungeon mode it is
+  `StatsOnly` and routes through the new `IPlayerStore.SavePlayerStatsAsync`, which writes
+  HP and max HP and leaves `map_id`/`x`/`y` exactly as the origin wrote them.
+  `PostgresPlayerStore` overrides it with a single upsert whose `DO UPDATE` names only
+  `hp` and `max_hp`, so the merge is atomic rather than a read-modify-write; the interface
+  default (load, merge, save) covers any other store. A player with no row yet gets one
+  with an **empty** map id, which `PlayerSpawn.SameMap` reads as unattributable -- the
+  same spawn-point outcome as no row, with the HP kept. **No second row per player.**
+  The stated cost, from the ADR: position inside a dungeon is not durable.
+
+  **It shuts itself down when it empties.** After the last member leaves and their hold
+  expires with no reconnect, the pod reports `Shutdown` to the Agones sidecar and ends its
+  own run -- the pod is the only party that knows both facts, and one that outlives its
+  party can never be allocated again. The rule is the pure
+  `GameServerHost.ShouldShutdownEmptyInstance(isDungeon, everHadPlayer, connections,
+  pendingHolds)`; each term stops a specific wrong shutdown (a map server ending when
+  empty, a fresh pod ending at boot before its party dials in, an ending while somebody is
+  still connected, and an ending while a second member is still inside their own hold
+  window). Evaluated after a hold expires and after a duplicate-login kick, which removes
+  an entity outright and schedules no hold of its own.
+
+  **The map-id fallback is the hazard, and it is closed by the mode.** A dungeon fleet
+  pins no `GAMESERVER_MAP_ID` on purpose, and `Program.cs` resolves
+  `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"` -- so a dungeon pod still *carries* the map
+  fleet's own id. Nothing about the registration scope reads the map id: it comes from
+  the mode, so a pod carrying `map_01` still registers no map, and two dungeon replicas
+  beside the map pod are one live server for that map rather than three. The server now
+  also logs that fallback at **Warning** on boot, naming where the value does and does not
+  go, because a dungeon pod whose registry hash reads `map_01` is otherwise an alarming
+  thing to find. This is what makes a non-zero replica count on the dungeon fleet correct
+  again. The manifest itself does **not** carry `replicas: 2`, though #337 briefly set it
+  there: it ships `replicas: 0` and `dev-up.sh` scales it up after pinning the image (#339),
+  because `apply` creates pods before the pin runs and the tag in the manifest is the moving
+  `:develop`. That is a separate hazard from this one and was found the same day, on the same
+  fleet, by the same deploy.
+
+  Depends on ADR-26, which is still in review (#331).
+
+- **Roadmap A4: the accepted-attack rate is audited per account** --
+  `GameServer/Input/AttackRateAudit.cs`, wired at the one site in `InputHandler` where an
+  attack passes validation, surfaced as `gameserver.combat.attack_rate.violations` and
+  `/status attack_rate_violations`. **Record-only: it never acts on a player**, for the same
+  reason `InputAnomalyTracker` does not -- no threshold here has a measured false-positive
+  rate against real players yet.
+
+  **What it is for, stated without overselling it.** `CombatLogic.ValidateAttack` compares
+  the simulation tick against `CooldownUntilTick`, which lives on the attacker's *entity*.
+  That is exact for one entity and structurally blind to anything that hands an account a
+  different one, and `PlayerState` persists `UserId, X, Y, Hp, MaxHp, MapId` -- not the
+  cooldown. **No live exploit is claimed:** a reconnect inside the hold window reattaches
+  the same entity with its cooldown intact (`Server/GameServer.cs`, "Acquire or reattach
+  entity"), and the two routes that do yield a fresh entity -- a map transfer, which removes
+  the entity with no hold, and an absence past the hold TTL -- both cost far more time than
+  the 500 ms cooldown they reset. The value is the blind spot itself: an account exceeding
+  the rate through any such route is **never refused**, so A1's per-reason counters and A2's
+  anomaly score stay silent throughout, and this is the only counter that would move.
+
+  Measured in **simulation ticks, never wall-clock** -- the cooldown it audits is
+  tick-based, and this host's `CLOCK_REALTIME` runs 10-17% fast and has been observed
+  stepping backwards (#153). The window is a true sliding one: a tumbling window lets a
+  client land twice the permitted rate across a boundary and calls it compliant, which is
+  the exact rate an entity reset produces. Keyed on the **account**, so two honest players
+  are not added together and one account on two connections is not split apart.
+
+  `AttackRateAuditSeamTests` proves the blindness rather than asserting it: running a real
+  `EcsWorld` and a real `InputHandler`, with the entity replaced between swings, the
+  validator **accepts every attack and rejects none** at eight times the permitted rate,
+  and only the audit flags it. Its negative control -- identical input, one entity -- is
+  refused by the cooldown and flags nothing. Both the "never flags" and "wrong window"
+  mutations of the audit fail the unit tests, with different failure counts.
+
+### Changed
+- **The dungeon reconnect hold window comes from `ServerOptions.HoldTtl` alone.** It was
+  computed in two places: `Program.cs` set 60s for `--mode=dungeon`, and
+  `Server/GameServer.cs` then hardcoded 60s again, ignoring whatever it had been given.
+  Behaviour for the shipped composition root is unchanged (it still sets 60s), but a host
+  constructed directly with a dungeon mode and a short TTL now gets the short TTL -- which
+  is what makes the empty-instance shutdown testable without a real 60s wait.
+- `GameServerHost.ShutdownStarted` and `GameServerHost.EverHadPlayer` are published for
+  diagnostics and tests. `ShutdownStarted` flips when a teardown is *decided*, not when it
+  finishes, so an observer asserting that a server has not decided to stop does not have to
+  outwait the 2s client drain.
+
+### Documentation
+- **`ROADMAP-SECURITY.md` §1.2 said A1, A2 and A3 were missing; all three had shipped.**
+  The table was written when all six anti-cheat gaps were open and was never struck off as
+  work landed between 2026-09-09 and 2026-09-11, so a reader planning from it would have
+  re-specified `Input/InputRejection.cs`, `Input/InputAnomalyTracker.cs` and ADR-22's
+  replay counter -- all of which exist in the tree with tests. The three rows are rewritten
+  with their state and the file that implements them rather than deleted, because the
+  reasoning in them is what those implementations were built against. A2's row now records
+  the part that is easy to misread as done: the tracker **flags and records, it never acts
+  on a player**, because no threshold here has a measured false-positive rate yet. The
+  recommendation line, which still said "A1 and A2 first", now names **A4** as next.
+
+### Added
 - **ADR-25: the game server will prove its identity with an Ed25519 key it generates per
   pod.** Design only -- **no runtime code changed**, and nothing described below is
   implemented. It decides the residual ADR-22 left open and that `ROADMAP-SECURITY.md`

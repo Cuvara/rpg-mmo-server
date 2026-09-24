@@ -17,6 +17,8 @@ LEGACY_FLEET_NS="${LEGACY_FLEET_NS:-rpg-realtime}"
 LEGACY_FLEET="${LEGACY_FLEET:-map-servers-dotnet-dev}"
 K8S_FLEET_NS="${K8S_FLEET_NS:-rpg-k8s-realtime}"
 K8S_FLEET="${K8S_FLEET:-map-servers-dotnet-k8s}"
+K8S_FLEET_DUNGEON="${K8S_FLEET_DUNGEON:-dungeon-servers-dotnet-k8s}"
+K8S_FLEET_DUNGEON_AUTOSCALER="${K8S_FLEET_DUNGEON_AUTOSCALER:-dungeon-servers-dotnet-k8s-buffer}"
 
 say() { printf '\n== %s\n' "$*"; }
 
@@ -62,6 +64,26 @@ if $K get fleet "$K8S_FLEET" -n "$K8S_FLEET_NS" >/dev/null 2>&1; then
   drain_fleet "$K8S_FLEET_NS" "$K8S_FLEET" || \
     echo "WARNING: k8s fleet did not fully drain -- map_01 may still have a live registrant"
 fi
+
+# 2b. The dungeon fleet, and its autoscaler FIRST.
+#
+# Deleting the FleetAutoscaler before the drain is not tidiness: a Buffer policy
+# with minReplicas: 2 puts the replica count straight back within one sync
+# interval (30s), so a drain with the autoscaler still in place is a scale-down
+# that silently reverses itself. Order is delete-then-drain, always.
+#
+# This fleet is drained for a different reason from the map fleet above -- it
+# holds no map_01 registration to conflict with the compose stack (ADR-26
+# decision 8) -- but a rollback that leaves dungeon pods running leaves pods
+# nothing can allocate: the compose gateway has no ALLOCATOR_FLEET_DUNGEON, and
+# their instances are keyed to parties that no longer have a gateway.
+say "retire the k8s dungeon fleet $K8S_FLEET_NS/$K8S_FLEET_DUNGEON"
+$K delete fleetautoscaler "$K8S_FLEET_DUNGEON_AUTOSCALER" -n "$K8S_FLEET_NS" \
+  --ignore-not-found >/dev/null 2>&1 || true
+if $K get fleet "$K8S_FLEET_DUNGEON" -n "$K8S_FLEET_NS" >/dev/null 2>&1; then
+  drain_fleet "$K8S_FLEET_NS" "$K8S_FLEET_DUNGEON" || \
+    echo "WARNING: dungeon fleet did not fully drain -- instances may still be running"
+fi
 if $K get pod redis-0 -n rpg-k8s-data >/dev/null 2>&1; then
   # --raw: one member per line, and nothing at all for an empty set. The
   # --no-raw form turned "(empty array)" into a member named `array)`.
@@ -92,7 +114,7 @@ say "start the compose dev stack"
 existing="$(docker ps -a --format '{{.Names}}' 2>/dev/null || true)"
 to_start=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  if printf '%s\n' "$existing" | grep -qx "$c"; then
+  if grep -qx "$c" <<<"$existing"; then
     to_start="$to_start $c"
   else
     echo "WARNING: container $c does not exist -- bring it up with docker compose instead" >&2
@@ -106,7 +128,7 @@ fi
 running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 missing=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  printf '%s\n' "$running" | grep -qx "$c" || missing="$missing $c"
+  grep -qx "$c" <<<"$running" || missing="$missing $c"
 done
 if [ -n "$missing" ]; then
   echo "ERROR: compose dev containers did not start:$missing" >&2

@@ -83,15 +83,24 @@ die() {
 # --------------------------------------------------------- toolchain: docker
 # WSL: the Linux `docker` CLI may be absent while Docker Desktop exposes
 # `docker.exe` on PATH. Try both.
+# Retried. One `docker info` per candidate made a single Docker Desktop shim flake
+# fatal: CD's "Back up databases" failed on develop with "docker not available (tried
+# docker, docker.exe)" after nine consecutive successes on the same runner, and the
+# PostgreSQL dump this gates is deliberately fatal. The daemon was up; one CLI call
+# was not. A few attempts cost seconds and only on the failure path.
 detect_docker() {
-	if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-		echo docker
-		return 0
-	fi
-	if command -v docker.exe >/dev/null 2>&1 && docker.exe info >/dev/null 2>&1; then
-		echo docker.exe
-		return 0
-	fi
+	local attempt
+	for attempt in 1 2 3 4 5; do
+		if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+			echo docker
+			return 0
+		fi
+		if command -v docker.exe >/dev/null 2>&1 && docker.exe info >/dev/null 2>&1; then
+			echo docker.exe
+			return 0
+		fi
+		[ "$attempt" -lt 5 ] && sleep 3
+	done
 	return 1
 }
 

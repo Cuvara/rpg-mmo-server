@@ -24,10 +24,25 @@ namespace Shared.GameLogic.Content
     public sealed class ContentDatabase
     {
         private readonly Dictionary<string, ItemDefinition> _items;
+        private readonly Dictionary<uint, AbilityDefinition> _abilities;
 
+        /// <summary>
+        /// Builds a database with items only. Kept because most call sites and every
+        /// pre-ability content file have no abilities to pass, and an overload is cheaper
+        /// than making each of them write <c>Array.Empty&lt;AbilityDefinition&gt;()</c>.
+        /// </summary>
         public ContentDatabase(IEnumerable<ItemDefinition> items, string hash)
+            : this(items, Array.Empty<AbilityDefinition>(), hash)
+        {
+        }
+
+        public ContentDatabase(
+            IEnumerable<ItemDefinition> items,
+            IEnumerable<AbilityDefinition> abilities,
+            string hash)
         {
             if (items == null) throw new ArgumentNullException(nameof(items));
+            if (abilities == null) throw new ArgumentNullException(nameof(abilities));
             Hash = hash ?? throw new ArgumentNullException(nameof(hash));
 
             _items = new Dictionary<string, ItemDefinition>(StringComparer.Ordinal);
@@ -50,11 +65,32 @@ namespace Shared.GameLogic.Content
 
                 _items.Add(item.Id, item);
             }
+
+            _abilities = new Dictionary<uint, AbilityDefinition>();
+            foreach (var ability in abilities)
+            {
+                if (ability == null) throw new ArgumentException("Null ability definition.", nameof(abilities));
+
+                // Rejected here for the same reason a duplicate item id is: a dictionary
+                // cannot represent the conflict, so the second write would silently win and
+                // the validator would be handed a database that had already lost one of the
+                // two definitions it was meant to complain about.
+                if (_abilities.ContainsKey(ability.Id))
+                {
+                    throw new ArgumentException(
+                        $"Duplicate ability id {ability.Id}. Ids must be unique across all content files — " +
+                        "a hotbar slot is only a reference, so two abilities answering to one id " +
+                        "means every stored copy is ambiguous.",
+                        nameof(abilities));
+                }
+
+                _abilities.Add(ability.Id, ability);
+            }
         }
 
         /// <summary>An empty database. Valid, and useful as a default before the first load.</summary>
         public static ContentDatabase Empty { get; } =
-            new ContentDatabase(Array.Empty<ItemDefinition>(), "empty");
+            new ContentDatabase(Array.Empty<ItemDefinition>(), Array.Empty<AbilityDefinition>(), "empty");
 
         /// <summary>Hash of the canonical bytes this was built from.</summary>
         public string Hash { get; }
@@ -92,6 +128,45 @@ namespace Shared.GameLogic.Content
             }
 
             return item;
+        }
+
+        public int AbilityCount => _abilities.Count;
+
+        /// <summary>Every ability, in no guaranteed order.</summary>
+        public IEnumerable<AbilityDefinition> Abilities => _abilities.Values;
+
+        /// <summary>
+        /// Looks up an ability by id. Returns false rather than throwing: an input naming
+        /// an ability this content set does not have is an ordinary thing for a client to
+        /// send — a stale hotbar, a downgraded server — and the server refuses the input
+        /// rather than faulting the tick.
+        /// </summary>
+        public bool TryGetAbility(uint id, out AbilityDefinition? ability)
+        {
+            if (id == 0)
+            {
+                // Zero is "no ability" on the wire, never a real id. Answering false here
+                // rather than missing the dictionary keeps that meaning in one place.
+                ability = null;
+                return false;
+            }
+
+            return _abilities.TryGetValue(id, out ability);
+        }
+
+        /// <summary>
+        /// Looks up an ability by id, throwing when it is absent. For call sites that have
+        /// already validated the reference and would only be able to rethrow.
+        /// </summary>
+        public AbilityDefinition GetAbility(uint id)
+        {
+            if (!TryGetAbility(id, out var ability) || ability == null)
+            {
+                throw new KeyNotFoundException(
+                    $"No ability with id {id} in content set {Hash}.");
+            }
+
+            return ability;
         }
     }
 }

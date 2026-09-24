@@ -20,7 +20,12 @@ func main() {
 		fmt.Println(smoke.FinalLine(false))
 		os.Exit(1)
 	}
-	if !smoke.NewRunner(cfg, os.Stdout).Run() {
+	runner, err := smoke.NewRunner(cfg, os.Stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "smoketest: %v\n", err)
+		os.Exit(2)
+	}
+	if !runner.Run() {
 		os.Exit(1)
 	}
 }

@@ -21,6 +21,8 @@ namespace GameServer.Observability;
 /// gameserver.snapshots.entities_shed  -> gameserver_snapshots_entities_shed_total
 /// gameserver.snapshots.removals_deferred -> gameserver_snapshots_removals_deferred_total
 /// gameserver.snapshots.max_shed_age   -> gameserver_snapshots_max_shed_age
+/// gameserver.snapshots.deferred_by_interval -> gameserver_snapshots_deferred_by_interval_total
+/// gameserver.snapshots.max_state_age  -> gameserver_snapshots_max_state_age
 /// gameserver.transport.encrypted      -> gameserver_transport_encrypted{transport,cipher}
 /// gameserver.transport.authenticated  -> gameserver_transport_authenticated{transport,cipher}
 /// gameserver.player.saves             -> gameserver_player_saves_total
@@ -67,6 +69,12 @@ public sealed class GameMetrics : IDisposable
     private readonly string _mapId;
     private readonly Counter<long> _snapshotBytes;
     private readonly Counter<long> _snapshotEntitiesShed;
+    private readonly Counter<long> _snapshotAnchorMissing;
+    private readonly Counter<long> _snapshotEntitiesGathered;
+    private readonly Counter<long> _snapshotDeferredByInterval;
+#pragma warning disable CS0414 // held so the gauge stays registered for the meter's lifetime
+    private readonly ObservableGauge<int> _snapshotMaxStateAge;
+#pragma warning restore CS0414
     private readonly Counter<long> _snapshotRemovalsDeferred;
     private readonly Counter<long> _playerSaves;
     private readonly Counter<long> _eventsPublished;
@@ -77,8 +85,10 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _playersKicked;
     private readonly Counter<long> _handshakesRejected;
     private readonly Counter<long> _unversionedHandshakes;
+    private readonly Counter<long> _nakamaRewardOutcomes;
     private readonly Counter<long> _inputsRejected;
     private readonly Counter<long> _anomalyAlerts;
+    private readonly Counter<long> _attackRateViolations;
     private readonly TagList[] _inputRejectionTags;
     private readonly Counter<long> _inputsDropped;
     private readonly Counter<long> _inputsCoalesced;
@@ -90,6 +100,11 @@ public sealed class GameMetrics : IDisposable
     private readonly TagList _handshakeTimeoutTags;
     private readonly TagList _handshakeMalformedTags;
     private readonly TagList _handshakeProtocolVersionTags;
+    private readonly TagList _rewardGrantedTags;
+    private readonly TagList _rewardPartialTags;
+    private readonly TagList _rewardNotGrantedTags;
+    private readonly TagList _rewardTooLargeTags;
+    private readonly TagList _rewardUnknownTags;
     private readonly TagList _inputBudgetTags;
     private readonly TagList _inputQueueFullTags;
     private readonly TagList _saveOkTags;
@@ -135,6 +150,12 @@ public sealed class GameMetrics : IDisposable
         _handshakeTimeoutTags = new TagList { { "map_id", mapId }, { "reason", "timeout" } };
         _handshakeMalformedTags = new TagList { { "map_id", mapId }, { "reason", "malformed" } };
         _handshakeProtocolVersionTags = new TagList { { "map_id", mapId }, { "reason", "protocol_version" } };
+        _rewardGrantedTags = new TagList { { "map_id", mapId }, { "outcome", "granted" } };
+        _rewardPartialTags = new TagList { { "map_id", mapId }, { "outcome", "partial" } };
+        _rewardNotGrantedTags = new TagList { { "map_id", mapId }, { "outcome", "not_granted" } };
+        _rewardTooLargeTags = new TagList { { "map_id", mapId }, { "outcome", "too_large" } };
+        _rewardUnknownTags = new TagList { { "map_id", mapId }, { "outcome", "unknown" } };
+
         _inputBudgetTags = new TagList { { "map_id", mapId }, { "reason", "connection_budget" } };
         _inputQueueFullTags = new TagList { { "map_id", mapId }, { "reason", "queue_full" } };
 
@@ -160,6 +181,47 @@ public sealed class GameMetrics : IDisposable
                          "length prefix included. Divide by players_online and by the scrape " +
                          "interval for per-client downlink KB/s, the figure ADR-7's < 50 KB/s " +
                          "mobile threshold is about.");
+
+        _snapshotDeferredByInterval = _meter.CreateCounter<long>(
+            "gameserver.snapshots.deferred_by_interval",
+            description: "Entity updates WITHHELD because the entity's importance tier was " +
+                         "not due this world tick (GAMESERVER_REPLICATION_SCHEDULE). " +
+                         "Distinct from entities_shed, which is the byte budget biting: this " +
+                         "is policy, that is pressure, and a deployment with the schedule off " +
+                         "reports zero here for ever. Read it with max_state_age -- a high " +
+                         "rate with a low age is the schedule doing exactly what it was " +
+                         "configured to do.");
+
+        _snapshotMaxStateAge = _meter.CreateObservableGauge(
+            "gameserver.snapshots.max_state_age",
+            ObserveMaxStateAge,
+            description: "Longest gap, in WORLD TICKS, between an entity's state going stale " +
+                         "for some client and being re-sent. The cost side of the replication " +
+                         "schedule. NOT the same number as max_shed_age: that counts budget " +
+                         "deferrals and this counts schedule deferrals, and a schedule " +
+                         "deferral never touches the budget's bookkeeping -- so reading one " +
+                         "for the other reports a healthy zero while entities go seconds " +
+                         "without an update.");
+
+        _snapshotEntitiesGathered = _meter.CreateCounter<long>(
+            "gameserver.snapshots.entities_gathered",
+            description: "Entities found in viewers' areas of interest, summed across every " +
+                         "viewer every world tick -- what the server CONSIDERED in-interest, " +
+                         "before the byte budget or the replication schedule withheld " +
+                         "anything. Its pair is what a client reports merging: the two " +
+                         "differing localises a loss to encode/decode, and the two agreeing " +
+                         "means the area of interest genuinely held that many. Without it, " +
+                         "'the wire is delivering N' is an inference on both sides at once.");
+
+        _snapshotAnchorMissing = _meter.CreateCounter<long>(
+            "gameserver.snapshots.anchor_missing",
+            description: "Viewer gathers SKIPPED because the viewer's own entity could not " +
+                         "be resolved, so there was no position to centre its area of " +
+                         "interest on. Brief non-zero around join and despawn is normal; " +
+                         "sustained growth means a connection has outlived its entity. " +
+                         "Before #385 this case was silent and centred the AOI on (0,0) -- " +
+                         "the most populated point on the map -- so the client was sent a " +
+                         "busy, plausible view of somewhere it was not.");
 
         _snapshotEntitiesShed = _meter.CreateCounter<long>(
             "gameserver.snapshots.entities_shed",
@@ -240,6 +302,34 @@ public sealed class GameMetrics : IDisposable
                          "non-conforming one. This going flat at zero is the evidence that raising " +
                          "GAMESERVER_MIN_PROTOCOL_VERSION will not lock out real players.");
 
+        // THE COUNTER THAT CLOSES ADR-24 §8.1's OPEN ITEM, and it is on the CONSUMER
+        // side on purpose. Nakama's own probes cannot see this: they answer for the
+        // metrics listener, and the failure this catches is the client API being
+        // unreachable or untrusted FROM HERE. Every mode that has actually happened
+        // lands on a label below --
+        //
+        //   * a stale Allocated GameServer left on a plaintext NAKAMA_URL after the
+        //     hop moved to TLS -> HTTP 400 "Client sent an HTTP request to an HTTPS
+        //     server" -> not_granted. Measured on k3d-rpg-dev 2026-09-13, one pod,
+        //     every reward RPC failing while the game itself played perfectly.
+        //   * a self-signed Nakama with no NAKAMA_TLS_PIN -> .NET refuses the
+        //     certificate -> HttpRequestException -> unknown.
+        //   * a wedged client-API mux while :9100 still answers -> timeout ->
+        //     unknown.
+        //
+        // Before this, all three were a LogWarning with nothing counting them, and
+        // the first notice was a human reading pod logs.
+        _nakamaRewardOutcomes = _meter.CreateCounter<long>(
+            "gameserver.nakama.reward_outcomes",
+            description: "Answers to reward_kills, labelled by outcome: granted (gold and " +
+                         "leaderboard committed), partial (gold committed, leaderboard write " +
+                         "failed), not_granted (Nakama answered an error; nothing granted), " +
+                         "too_large (batch over Nakama's cap, split and resent), unknown (no " +
+                         "answer -- transport failure, certificate refusal or timeout). " +
+                         "Anything but granted means a player's reward did not land on this " +
+                         "attempt. Sustained non-granted is the signal ADR-24 §8.1 says nothing " +
+                         "else in the deployment produces.");
+
         _inputsDropped = _meter.CreateCounter<long>(
             "gameserver.inputs.dropped",
             description: "Client inputs discarded at ingest, labelled by reason: " +
@@ -269,6 +359,18 @@ public sealed class GameMetrics : IDisposable
             };
             _inputRejectionTags[(int)reason] = tags;
         }
+
+        _attackRateViolations = _meter.CreateCounter<long>(
+            "gameserver.combat.attack_rate.violations",
+            description: "Times an ACCOUNT landed more ACCEPTED attacks inside the audit " +
+                         "window than one entity's cooldown permits. Every attack counted " +
+                         "here PASSED validation, so this is the one signal the rejection " +
+                         "counters cannot produce: the cooldown check is exact for one " +
+                         "entity and blind to anything handing an account a different one. " +
+                         "No live exploit is claimed -- a reconnect reattaches the same " +
+                         "entity, cooldown intact. Read a rise as a path that should not " +
+                         "exist now doing so, cheat or bug. OBSERVATION ONLY: nothing is " +
+                         "done to the player.");
 
         _anomalyAlerts = _meter.CreateCounter<long>(
             "gameserver.input.anomaly.alerts",
@@ -357,6 +459,15 @@ public sealed class GameMetrics : IDisposable
             "gameserver.players.online",
             ObservePlayersOnline,
             description: "Players currently connected to this server.");
+
+        _meter.CreateObservableGauge(
+            "gameserver.connections",
+            ObserveConnectionCount,
+            description: "Connections registered on this server — the set the snapshot " +
+                         "broadcast iterates, and therefore what snapshot bandwidth is " +
+                         "paid per. Deliberately distinct from players_online, which is an " +
+                         "independently balanced counter and not derived from this set: the " +
+                         "two disagreeing is the signal that one of them is lying (#401).");
 
         _meter.CreateObservableGauge(
             "gameserver.entities",
@@ -470,6 +581,41 @@ public sealed class GameMetrics : IDisposable
     /// nobody reads is not a check -- so these also surface on <c>/status</c>, not only in
     /// a Prometheus scrape.
     /// </remarks>
+    /// <summary>
+    /// Records this tick's gather sizes: the total across viewers, and the largest single
+    /// viewer's.
+    /// </summary>
+    /// <remarks>
+    /// The maximum is kept as well as the total because an average hides the case that
+    /// matters — one client with an empty view among many full ones, which is exactly the
+    /// shape an anchor or interest bug makes.
+    /// </remarks>
+    public void RecordSnapshotGather(long entitiesGathered, int maxGather)
+    {
+        if (entitiesGathered > 0)
+        {
+            _snapshotEntitiesGathered.Add(entitiesGathered, _mapTags);
+            Interlocked.Add(ref _snapshotEntitiesGatheredTotal, entitiesGathered);
+        }
+        if (maxGather > Volatile.Read(ref _maxGather)) Volatile.Write(ref _maxGather, maxGather);
+    }
+
+    /// <summary>Entities gathered into viewers' areas of interest since process start.</summary>
+    public long SnapshotEntitiesGathered => Interlocked.Read(ref _snapshotEntitiesGatheredTotal);
+
+    /// <summary>Largest single-viewer gather observed on this server.</summary>
+    public int MaxGather => Volatile.Read(ref _maxGather);
+
+    /// <summary>
+    /// Records viewer gathers skipped this tick for want of a resolvable anchor (#385).
+    /// </summary>
+    public void RecordSnapshotAnchorMissing(long count)
+    {
+        if (count <= 0) return;
+        _snapshotAnchorMissing.Add(count, _mapTags);
+        Interlocked.Add(ref _snapshotAnchorMissingTotal, count);
+    }
+
     public void RecordSnapshotBudget(long bytes, long entitiesShed, long removalsDeferred, int maxShedAge)
     {
         if (bytes > 0)
@@ -491,8 +637,13 @@ public sealed class GameMetrics : IDisposable
     }
 
     private int _maxShedAge;
+    private int _maxStateAge;
+    private long _snapshotDeferredByIntervalTotal;
     private long _snapshotBytesTotal;
     private long _snapshotEntitiesShedTotal;
+    private long _snapshotAnchorMissingTotal;
+    private long _snapshotEntitiesGatheredTotal;
+    private int _maxGather;
     private long _snapshotRemovalsDeferredTotal;
 
     /// <summary>Snapshot bytes written to sockets since start. Mirrors the counter for <c>/status</c>.</summary>
@@ -501,6 +652,17 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Entity updates deferred by the downlink budget since start.</summary>
     public long SnapshotEntitiesShed => Interlocked.Read(ref _snapshotEntitiesShedTotal);
 
+    /// <summary>
+    /// Viewer gathers skipped because the viewer's own entity could not be resolved.
+    /// </summary>
+    /// <remarks>
+    /// Non-zero briefly around join and despawn is normal. Sustained growth means a
+    /// connection has outlived its entity and is being sent nothing — which before #385
+    /// instead centred its area of interest on the world origin and sent it a plausible
+    /// view of somewhere else entirely.
+    /// </remarks>
+    public long SnapshotAnchorMissing => Interlocked.Read(ref _snapshotAnchorMissingTotal);
+
     /// <summary>Despawn notifications deferred by the downlink budget since start.</summary>
     public long SnapshotRemovalsDeferred => Interlocked.Read(ref _snapshotRemovalsDeferredTotal);
 
@@ -508,6 +670,25 @@ public sealed class GameMetrics : IDisposable
     public int MaxShedAge => Volatile.Read(ref _maxShedAge);
 
     private Measurement<int> ObserveMaxShedAge() => new(Volatile.Read(ref _maxShedAge), _mapTags);
+
+    /// <summary>Entity updates withheld by the replication schedule since process start.</summary>
+    public long SnapshotDeferredByInterval => Interlocked.Read(ref _snapshotDeferredByIntervalTotal);
+
+    /// <summary>Longest schedule deferral, in world ticks, observed on this server.</summary>
+    public int MaxStateAge => Volatile.Read(ref _maxStateAge);
+
+    private Measurement<int> ObserveMaxStateAge() => new(Volatile.Read(ref _maxStateAge), _mapTags);
+
+    /// <summary>Record one tick's worth of replication-schedule deferrals.</summary>
+    public void RecordSnapshotSchedule(long deferredByInterval, int maxStateAge)
+    {
+        if (deferredByInterval > 0)
+        {
+            _snapshotDeferredByInterval.Add(deferredByInterval, _mapTags);
+            Interlocked.Add(ref _snapshotDeferredByIntervalTotal, deferredByInterval);
+        }
+        if (maxStateAge > Volatile.Read(ref _maxStateAge)) Volatile.Write(ref _maxStateAge, maxStateAge);
+    }
 
     private TagList _transportTags;
     private volatile bool _transportEncrypted;
@@ -580,11 +761,57 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Duplicate-login kicks executed since start (see <see cref="RecordPlayerKicked"/>).</summary>
     public long PlayersKicked => Interlocked.Read(ref _playersKickedCount);
 
-    /// <summary>Record a successful player save.</summary>
-    public void RecordPlayerSaveOk() => _playerSaves.Add(1, _saveOkTags);
+    /// <summary>
+    /// Record a successful player save. Mirrored into <see cref="PlayerSavesOk"/> for the
+    /// same reason as <see cref="RecordPlayerKicked"/>: a <see cref="Counter{T}"/> is
+    /// write-only, so without the mirror the save outcome is readable only by scraping
+    /// <c>/metrics</c>. That is precisely how a 90% failure rate stayed invisible on a dev
+    /// box for 7.8 hours (#402) — nothing scrapes it there, and <c>/status</c>, which
+    /// people do open, did not carry it.
+    /// </summary>
+    public void RecordPlayerSaveOk()
+    {
+        Interlocked.Increment(ref _playerSavesOkCount);
+        _playerSaves.Add(1, _saveOkTags);
+    }
 
-    /// <summary>Record a failed player save.</summary>
-    public void RecordPlayerSaveError() => _playerSaves.Add(1, _saveErrorTags);
+    /// <summary>Record a failed player save. Mirrored into <see cref="PlayerSavesError"/>.</summary>
+    public void RecordPlayerSaveError()
+    {
+        Interlocked.Increment(ref _playerSavesErrorCount);
+        _playerSaves.Add(1, _saveErrorTags);
+    }
+
+    private long _playerSavesOkCount;
+    private long _playerSavesErrorCount;
+
+    /// <summary>Player save attempts that succeeded since process start.</summary>
+    public long PlayerSavesOk => Interlocked.Read(ref _playerSavesOkCount);
+
+    /// <summary>Player save attempts that threw since process start.</summary>
+    public long PlayerSavesError => Interlocked.Read(ref _playerSavesErrorCount);
+
+    /// <summary>
+    /// Failed share of all player save attempts since start, in <c>[0,1]</c>; <c>0</c>
+    /// when nothing has been attempted yet.
+    ///
+    /// <para>Read the pair, not just this ratio, before concluding anything: the counters
+    /// are cumulative over process lifetime, so a store that is down <em>right now</em>
+    /// drives this towards 1 without bound while <see cref="PlayerSavesOk"/> stays frozen
+    /// at whatever it reached before the outage. A high lifetime ratio therefore does not
+    /// distinguish "failing steadily" from "was fine, then the database went away and
+    /// never came back" — which was the actual answer in #402.</para>
+    /// </summary>
+    public double PlayerSaveErrorRatio
+    {
+        get
+        {
+            long ok = PlayerSavesOk;
+            long err = PlayerSavesError;
+            long total = ok + err;
+            return total == 0 ? 0d : (double)err / total;
+        }
+    }
 
     /// <summary>Record a published game event of the given type.</summary>
     public void RecordEventPublished(string type)
@@ -615,6 +842,26 @@ public sealed class GameMetrics : IDisposable
 
     private Measurement<int> ObservePendingHandshakes()
         => new(_pendingHandshakesProvider?.Invoke() ?? 0, _mapTags);
+
+    private Func<int>? _connectionCountProvider;
+
+    /// <summary>
+    /// Register the callback used by the <c>gameserver_connections</c> gauge: connections
+    /// registered in the ConnectionManager, which is the set the snapshot broadcast
+    /// iterates. Separate from <c>players_online</c> on purpose — see the gauge's
+    /// description and <see cref="ConnectionCount"/>.
+    /// </summary>
+    public void SetConnectionCountProvider(Func<int> provider) => _connectionCountProvider = provider;
+
+    /// <summary>
+    /// Connections registered on this server, or 0 when no provider has been registered.
+    /// Read by <c>/status</c> so the number there and the number in a scrape come from the
+    /// same place.
+    /// </summary>
+    public int ConnectionCount => _connectionCountProvider?.Invoke() ?? 0;
+
+    private Measurement<int> ObserveConnectionCount()
+        => new(_connectionCountProvider?.Invoke() ?? 0, _mapTags);
 
     /// <summary>
     /// Record a handshake refused before authentication. Mirrored into the
@@ -659,6 +906,63 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Clients admitted without advertising a wire protocol version.</summary>
     public long UnversionedHandshakes => Interlocked.Read(ref _unversionedHandshakeCount);
 
+    // ── The Nakama reward path (ADR-24 §8.1) ─────────────────────────────────
+
+    private long _rewardsGranted;
+    private long _rewardsNotGranted;
+
+    /// <summary>
+    /// Record Nakama's answer to one <c>reward_kills</c> batch.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Recorded on <b>every</b> answer including the successful one, because a failure
+    /// counter with no denominator cannot distinguish "the hop is broken" from "nobody
+    /// killed anything". A rate of non-granted answers is only meaningful against the
+    /// rate of granted ones.
+    /// </para>
+    /// <para>
+    /// <c>Partial</c>, <c>NotGranted</c> and <c>Unknown</c> are all counted as not
+    /// granted for the summary property, and <c>TooLarge</c> is <b>not</b> — that one
+    /// is the batcher's own splitting working as designed, and folding it in would give
+    /// the alert a routine background rate to hide in.
+    /// </para>
+    /// </remarks>
+    public void RecordNakamaRewardOutcome(Nakama.KillRewardOutcome outcome)
+    {
+        switch (outcome)
+        {
+            case Nakama.KillRewardOutcome.Granted:
+                Interlocked.Increment(ref _rewardsGranted);
+                _nakamaRewardOutcomes.Add(1, _rewardGrantedTags);
+                break;
+            case Nakama.KillRewardOutcome.Partial:
+                Interlocked.Increment(ref _rewardsNotGranted);
+                _nakamaRewardOutcomes.Add(1, _rewardPartialTags);
+                break;
+            case Nakama.KillRewardOutcome.TooLarge:
+                _nakamaRewardOutcomes.Add(1, _rewardTooLargeTags);
+                break;
+            case Nakama.KillRewardOutcome.Unknown:
+                Interlocked.Increment(ref _rewardsNotGranted);
+                _nakamaRewardOutcomes.Add(1, _rewardUnknownTags);
+                break;
+            default:
+                Interlocked.Increment(ref _rewardsNotGranted);
+                _nakamaRewardOutcomes.Add(1, _rewardNotGrantedTags);
+                break;
+        }
+    }
+
+    /// <summary>reward_kills batches Nakama confirmed. The denominator.</summary>
+    public long NakamaRewardsGranted => Interlocked.Read(ref _rewardsGranted);
+
+    /// <summary>
+    /// reward_kills batches that did not land on this attempt — partial, not_granted or
+    /// unknown. Excludes too_large, which is the batcher splitting as designed.
+    /// </summary>
+    public long NakamaRewardsNotGranted => Interlocked.Read(ref _rewardsNotGranted);
+
     /// <summary>
     /// Record one client admitted without advertising a wire protocol version.
     /// </summary>
@@ -679,6 +983,7 @@ public sealed class GameMetrics : IDisposable
     private long _inputsDroppedQueueFull;
     private long _inputsCoalescedCount;
     private long _anomalyAlertCount;
+    private long _attackRateViolationCount;
     private readonly long[] _inputsRejectedByReason =
         new long[GameServer.Input.InputRejection.All.Length];
     private long _transfersRejectedCount;
@@ -743,6 +1048,7 @@ public sealed class GameMetrics : IDisposable
             _inputsRejected.Add(0, _inputRejectionTags[(int)reason]);
 
         _anomalyAlerts.Add(0, _mapTags);
+        _attackRateViolations.Add(0, _mapTags);
     }
 
     /// <summary>
@@ -775,6 +1081,19 @@ public sealed class GameMetrics : IDisposable
 
     /// <summary>Accounts that have crossed the anomaly alert threshold since start.</summary>
     public long AnomalyAlerts => Interlocked.Read(ref _anomalyAlertCount);
+
+    /// <summary>
+    /// Record one account exceeding the accepted-attack rate its cooldown permits.
+    /// Observation only -- see <c>Input/AttackRateAudit.cs</c>.
+    /// </summary>
+    public void RecordAttackRateViolation()
+    {
+        Interlocked.Increment(ref _attackRateViolationCount);
+        _attackRateViolations.Add(1, _mapTags);
+    }
+
+    /// <summary>Accounts flagged for exceeding the permitted attack rate since start.</summary>
+    public long AttackRateViolations => Interlocked.Read(ref _attackRateViolationCount);
 
     /// <summary>Inputs refused by validation for one reason.</summary>
     public long InputsRejected(GameServer.Input.InputRejectionReason reason)

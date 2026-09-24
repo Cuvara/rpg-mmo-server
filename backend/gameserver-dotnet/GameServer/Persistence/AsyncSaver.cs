@@ -9,11 +9,67 @@ namespace GameServer.Persistence;
 /// <summary>Persistent player state record.</summary>
 public record PlayerState(string UserId, float X, float Y, int Hp, int MaxHp, string MapId);
 
+/// <summary>
+/// What a saving server writes out of a player.
+///
+/// <para><c>player_states</c> holds exactly ONE row per player, with a single
+/// <c>map_id</c>, and <see cref="PlayerSpawn.Resolve"/> discards saved coordinates whose
+/// row belongs to another map. So "which fields may I write" is a property of the server
+/// doing the writing, not of the row: a dungeon instance that wrote the row in full would
+/// stamp its own id over the player's origin map and send them back to that map's spawn
+/// point instead of where they left (ADR-26 decision 5).</para>
+/// </summary>
+public enum PlayerSaveScope
+{
+    /// <summary>
+    /// Position, HP and the writing server's map id. What a map server writes, and the
+    /// default everywhere.
+    /// </summary>
+    Full,
+
+    /// <summary>
+    /// The map-independent fields only — HP and max HP. <c>map_id</c>, <c>x</c> and
+    /// <c>y</c> are left exactly as the origin map wrote them. What a dungeon instance
+    /// writes; the stated cost is that position inside a dungeon is not durable.
+    /// </summary>
+    StatsOnly,
+}
+
 /// <summary>Abstraction for player data persistence.</summary>
 public interface IPlayerStore
 {
+    /// <summary>Write the whole row: map id, position and stats.</summary>
     Task SavePlayerAsync(PlayerState state, CancellationToken ct);
+
+    /// <summary>Read a player's row, or null when they have none.</summary>
     Task<PlayerState?> LoadPlayerAsync(string userId, CancellationToken ct);
+
+    /// <summary>
+    /// Write only the map-independent fields, leaving <c>map_id</c>, <c>x</c> and
+    /// <c>y</c> as they already stand. A player with no row yet gets one whose map id is
+    /// empty — <see cref="PlayerSpawn.SameMap"/> reads an empty id as "unattributable",
+    /// so the next join spawns them at that map's spawn point with the HP saved here,
+    /// which is the same outcome as no row at all except that the HP survives.
+    /// </summary>
+    /// <remarks>
+    /// The default implementation is a read-modify-write and is therefore NOT atomic: two
+    /// servers saving the same player concurrently can lose one update. That cannot happen
+    /// in this system — a player is live on exactly one server at a time — but a store
+    /// that can express the merge in one statement should override this, and
+    /// <see cref="PostgresPlayerStore"/> does.
+    /// </remarks>
+    /// <param name="userId">Player whose stats to write.</param>
+    /// <param name="hp">Current HP.</param>
+    /// <param name="maxHp">Maximum HP.</param>
+    /// <param name="ct">Cancellation token.</param>
+    async Task SavePlayerStatsAsync(string userId, int hp, int maxHp, CancellationToken ct)
+    {
+        var existing = await LoadPlayerAsync(userId, ct);
+        var merged = existing is null
+            ? new PlayerState(userId, 0, 0, hp, maxHp, string.Empty)
+            : existing with { Hp = hp, MaxHp = maxHp };
+        await SavePlayerAsync(merged, ct);
+    }
 }
 
 /// <summary>In-memory player store for development and testing.</summary>
@@ -32,6 +88,19 @@ public sealed class MemoryPlayerStore : IPlayerStore
         _store.TryGetValue(userId, out var state);
         return Task.FromResult(state);
     }
+
+    /// <inheritdoc />
+    public Task SavePlayerStatsAsync(string userId, int hp, int maxHp, CancellationToken ct)
+    {
+        // AddOrUpdate rather than the interface's load-then-save: the dictionary can do
+        // the merge atomically, so a concurrent full save cannot be lost between them.
+        _store.AddOrUpdate(
+            userId,
+            static (id, args) => new PlayerState(id, 0, 0, args.hp, args.maxHp, string.Empty),
+            static (_, existing, args) => existing with { Hp = args.hp, MaxHp = args.maxHp },
+            (hp, maxHp));
+        return Task.CompletedTask;
+    }
 }
 
 /// <summary>
@@ -46,14 +115,42 @@ public sealed class AsyncSaver
     private readonly TimeSpan _interval;
     private readonly ILogger _logger;
     private readonly GameMetrics? _metrics;
+    private readonly PlayerSaveScope _scope;
+    private readonly double _degradedThreshold;
 
+    /// <summary>
+    /// Sweeps a degraded saver waits before restating the condition. Re-logging matters:
+    /// the failure that prompted this (#402) lasted 33 minutes and counting, and an
+    /// edge-triggered line alone scrolls out of a busy log and is then indistinguishable
+    /// from a saver that recovered.
+    /// </summary>
+    private const int RelogEverySweeps = 20;
+
+    private bool _degraded;
+    private int _degradedSweeps;
+
+    /// <summary>Build a saver over <paramref name="world"/>.</summary>
+    /// <param name="store">Where player rows are written.</param>
+    /// <param name="world">World whose player entities are snapshotted.</param>
+    /// <param name="mapId">Map id stamped on every full save.</param>
+    /// <param name="interval">Delay between sweeps.</param>
+    /// <param name="logger">Destination for per-sweep diagnostics.</param>
+    /// <param name="metrics">Optional counters; null runs uninstrumented.</param>
+    /// <param name="scope">
+    /// Which fields of a player are written. <see cref="PlayerSaveScope.Full"/> is the
+    /// default and what every map server uses; a dungeon instance passes
+    /// <see cref="PlayerSaveScope.StatsOnly"/> so it cannot overwrite the origin map's
+    /// id and coordinates (ADR-26 decision 5).
+    /// </param>
     public AsyncSaver(
         IPlayerStore store,
         EcsWorld world,
         string mapId,
         TimeSpan interval,
         ILogger logger,
-        GameMetrics? metrics = null)
+        GameMetrics? metrics = null,
+        PlayerSaveScope scope = PlayerSaveScope.Full,
+        double degradedThreshold = 0.5)
     {
         _store = store;
         _world = world;
@@ -61,7 +158,33 @@ public sealed class AsyncSaver
         _interval = interval;
         _logger = logger;
         _metrics = metrics;
+        _scope = scope;
+        _degradedThreshold = degradedThreshold;
     }
+
+    /// <summary>
+    /// Whether the most recent sweep that attempted anything failed at or above
+    /// <see cref="DegradedThreshold"/>. Diagnostics and tests; the operator-facing signal
+    /// is the log line raised on the transition.
+    /// </summary>
+    public bool IsDegraded => _degraded;
+
+    /// <summary>
+    /// Per-sweep failure ratio at or above which the sweep is reported as degraded.
+    /// </summary>
+    public double DegradedThreshold => _degradedThreshold;
+
+    /// <summary>Which fields this saver writes. Diagnostics and tests.</summary>
+    public PlayerSaveScope Scope => _scope;
+
+    /// <summary>
+    /// Persist one player entity under the configured <see cref="Scope"/>.
+    /// </summary>
+    private Task PersistAsync(EntityState p) => _scope == PlayerSaveScope.StatsOnly
+        ? _store.SavePlayerStatsAsync(p.Id, p.Hp, p.MaxHp, CancellationToken.None)
+        : _store.SavePlayerAsync(
+            new PlayerState(p.Id, p.Position.X, p.Position.Y, p.Hp, p.MaxHp, _mapId),
+            CancellationToken.None);
 
     /// <summary>Run the periodic save loop until cancellation.</summary>
     public async Task RunAsync(CancellationToken ct)
@@ -99,8 +222,7 @@ public sealed class AsyncSaver
         var p = entity.Value;
         try
         {
-            var state = new PlayerState(p.Id, p.Position.X, p.Position.Y, p.Hp, p.MaxHp, _mapId);
-            await _store.SavePlayerAsync(state, CancellationToken.None);
+            await PersistAsync(p);
             _metrics?.RecordPlayerSaveOk();
             return true;
         }
@@ -115,26 +237,90 @@ public sealed class AsyncSaver
     /// <summary>Save all current player entities to the store.</summary>
     public async Task SaveAllAsync()
     {
-        var players = _world.PlayerStates();
-        if (players.Count == 0) return;
+        // PersistablePlayerStates, not PlayerStates: a synthetic bot is a player in the
+        // archetype on purpose, and persisting one would create a player row per bot per
+        // restart, successfully and silently. See EntityTags.Bot.
+        var players = _world.PersistablePlayerStates();
 
+        // No early return on an empty sweep. "Nobody was online" and "everybody failed" are
+        // different facts and exactly one place decides what a sweep meant for the saver's
+        // health: EvaluateSweepHealth. A second zero-check here would shadow that one, and a
+        // shadowed guard is a guard no test can hold.
         int saved = 0;
+        int failed = 0;
+        Exception? lastError = null;
         foreach (var p in players)
         {
             try
             {
-                var state = new PlayerState(p.Id, p.Position.X, p.Position.Y, p.Hp, p.MaxHp, _mapId);
-                await _store.SavePlayerAsync(state, CancellationToken.None);
+                await PersistAsync(p);
                 saved++;
                 _metrics?.RecordPlayerSaveOk();
             }
             catch (Exception ex)
             {
+                failed++;
+                lastError = ex;
                 _metrics?.RecordPlayerSaveError();
                 _logger.LogWarning(ex, "Failed to save player {UserId}", p.Id);
             }
         }
 
         _logger.LogDebug("Saved {Count} players", saved);
+        EvaluateSweepHealth(players.Count, failed, lastError);
+    }
+
+    /// <summary>
+    /// Raise an operator-visible line when the sweep's failure ratio crosses
+    /// <see cref="DegradedThreshold"/>, and another when it recovers.
+    ///
+    /// <para>The per-player <c>LogWarning</c> above is not this signal. It fires once per
+    /// player per sweep, says nothing about the ratio, and at warning level it sits in the
+    /// same stream as routine noise — which is how a saver failing 9 attempts in 10 was
+    /// noticed only by someone reading <c>/metrics</c> by hand (#402). This is edge
+    /// triggered, so a healthy server is silent and a transition is one line at
+    /// <c>Error</c>.</para>
+    ///
+    /// <para>Called only for sweeps that attempted at least one player: a sweep with
+    /// nobody online is not evidence of health either way, so it must not clear a
+    /// standing degraded state.</para>
+    /// </summary>
+    private void EvaluateSweepHealth(int attempted, int failed, Exception? lastError)
+    {
+        if (attempted == 0) return;
+
+        double ratio = (double)failed / attempted;
+
+        if (ratio >= _degradedThreshold)
+        {
+            _degradedSweeps++;
+            if (!_degraded)
+            {
+                _degraded = true;
+                _logger.LogError(
+                    lastError,
+                    "Player save sweep DEGRADED: {Failed}/{Attempted} saves failed ({Ratio:P0} >= {Threshold:P0}). "
+                    + "Position and HP are not being persisted; the ADR-6 crash-loss window no longer holds.",
+                    failed, attempted, ratio, _degradedThreshold);
+            }
+            else if (_degradedSweeps % RelogEverySweeps == 0)
+            {
+                _logger.LogError(
+                    lastError,
+                    "Player save sweep still DEGRADED after {Sweeps} sweeps: {Failed}/{Attempted} saves failed ({Ratio:P0}).",
+                    _degradedSweeps, failed, attempted, ratio);
+            }
+
+            return;
+        }
+
+        if (_degraded)
+        {
+            _logger.LogInformation(
+                "Player save sweep recovered after {Sweeps} degraded sweeps: {Failed}/{Attempted} saves failed ({Ratio:P0}).",
+                _degradedSweeps, failed, attempted, ratio);
+            _degraded = false;
+            _degradedSweeps = 0;
+        }
     }
 }

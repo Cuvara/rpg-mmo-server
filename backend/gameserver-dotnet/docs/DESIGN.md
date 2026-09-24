@@ -31,6 +31,11 @@ through a UPM git dependency rather than as a compiled assembly (ADR-10):
   framework. The server wraps shared logic with its own I/O layer.
 - **All game constants centralized** — damage formulas, speed caps, cooldown
   durations, AOI radius — all live in `Shared.GameLogic` so both sides agree.
+  The AOI radius is the exception worth naming: `GameConstants.DefaultAoiRadius`
+  is the DEFAULT, and the effective value is a deployment setting
+  (`GAMESERVER_AOI_RADIUS`). It is server-only either way — it filters what a
+  client is told, never what a client computes — so nothing about it has to agree
+  across the boundary.
 - **Value types (struct) for performance** — hot-path data structures are
   structs to avoid GC pressure, which matters for both server tick loops and
   Unity DOTS jobs.
@@ -489,11 +494,152 @@ All validation is server-authoritative:
 ## Disconnect and Reconnect
 
 - On TCP disconnect, the server holds the player entity for a grace period:
-  **30 seconds** on map servers, **60 seconds** on dungeon servers.
+  **30 seconds** on map servers, **60 seconds** on dungeon servers. The window is
+  `ServerOptions.HoldTtl` and nothing else — the composition root derives it from
+  `--mode`, so there is one place to read it and one place to change it.
 - During the hold, the entity is marked inactive (no AI targeting, no damage).
 - If the client reconnects with a valid session token within the window, it
   resumes with full state. Otherwise the entity is removed and the session is
   invalidated.
+
+## Dungeon mode
+
+`--mode=dungeon` selects an **instanced** server: one live world per party, not one per
+map id. Three behaviours besides the longer reconnect hold hang off it, all of them
+implementing ADR-26, and all of them gated in exactly one place each.
+
+### It does not appear in the map index (decision 8)
+
+The registry holds two keys. `servers:id:{server_id}` is a HASH and the source of truth:
+it carries the dialable composed address and the heartbeat TTL. `servers:map:{map_id}` is
+a SET, and it is the index the gateway's `FindServer` searches.
+
+A dungeon pod writes the **hash** — the gateway allocates the pod, learns its name, and
+then waits for exactly that hash to appear so it can read the address — and never joins
+the **index**. An indexed instance would be handed to an unrelated player as if it were a
+map, and a dungeon fleet pins no `GAMESERVER_MAP_ID`, so the key it wrote would be the
+empty one. Heartbeat, TTL and the re-register-on-wipe repair are unchanged: they all live
+on the hash.
+
+Expressed as `RegistrationScope` (`MapIndexed` / `HashOnly`), passed to
+`IServerRegistry.RegisterAsync`. `GameServerHost` narrows the scope itself from the mode,
+so a caller that builds `RegistrationOptions` without thinking about dungeons cannot get
+this wrong.
+
+**The map-id fallback is the hazard, not a missing map id.** A dungeon fleet pins no
+`GAMESERVER_MAP_ID`, and `Program.cs` resolves `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`
+— so a dungeon pod *carries* the map fleet's own id. Nothing in the registration scope
+reads the map id; it comes from the mode alone, so such a pod still registers no map and
+two dungeon replicas beside the map pod are **one** live server for `map_01`, not three.
+The server logs that fallback at Warning on boot, naming where the value goes (this pod's
+`servers:id:` hash) and where it does not (the map index), because a dungeon hash reading
+`map_01` is otherwise an alarming thing to find. Deregistration is safe for the same
+reason the index is: the registry removes only its own server id from the set, so a
+dungeon pod leaving cannot evict the real map server.
+
+### It does not persist `map_id` or position (decision 5)
+
+`player_states` holds **one row per player** with a single `map_id`, and
+`PlayerSpawn.Resolve` discards saved coordinates whose row belongs to another map. A
+dungeon server saving the row in full would therefore stamp the dungeon's id over the
+player's origin map, and their next join on that map would put them at its **spawn point**
+instead of where they left — a silent, permanent teleport as the price of a dungeon run.
+
+In dungeon mode `AsyncSaver` runs at `PlayerSaveScope.StatsOnly` and calls
+`IPlayerStore.SavePlayerStatsAsync`, which writes HP and max HP and leaves `map_id`, `x`
+and `y` untouched. `PostgresPlayerStore` expresses that as a single upsert whose
+`DO UPDATE` clause names only `hp` and `max_hp`, so the merge is atomic. A player with no
+row yet gets one with an **empty** map id, which `PlayerSpawn.SameMap` reads as
+unattributable — the same spawn-point outcome as no row at all, with the HP preserved.
+
+**The stated cost**: position inside a dungeon is not durable. A disconnect past the 60s
+hold returns the player to the origin map where they stood, not to the dungeon. There is
+deliberately no second row per player, and no encounter-level checkpoint — ADR-26
+decision 4 defers that until there is an encounter worth losing.
+
+### It shuts itself down when it empties (decision 6)
+
+After the last member leaves **and** that member's hold expires with no reconnect, the pod
+reports `Shutdown` to the Agones sidecar and ends its own run. Not on a timer and not by
+an external reaper: the pod is the only party that knows both facts, and a dungeon pod
+that outlives its party can never be allocated again, because the gateway keys allocation
+on a party that no longer exists.
+
+The rule is `GameServerHost.ShouldShutdownEmptyInstance`, and every term of it is there to
+stop a specific wrong shutdown:
+
+| Term | Without it |
+|------|-----------|
+| dungeon mode | a map server would end itself the moment it emptied |
+| has ever had a player | a freshly scheduled pod would shut down at boot, racing the party to its own instance |
+| no live connections | somebody is still playing |
+| no pending holds | two members leaving together: the first hold to expire would take the pod down while the second is still inside their reconnect window |
+
+It is evaluated after a hold expires and after a duplicate-login kick (which removes an
+entity outright and schedules no hold of its own, so nothing else would notice that the
+last member had gone).
+
+### It releases itself if its party never arrives (the join deadline)
+
+The `has ever had a player` term above has a cost, and it was **measured, not predicted**:
+a pod that is allocated and then **never joined** satisfies the rule forever. It sits
+`Allocated`, Agones does not reclaim an Allocated pod (ADR-16), and the replica is gone
+until an operator releases it by hand. Two runs of `backend/smoketest/cmd/dungeonprobe` on
+dev — which asks the gateway for an address and never dials the game server — consumed both
+replicas of a two-replica fleet permanently, after which every further party got
+`all servers busy, retry shortly`. In production the same shape is any client that receives
+`{ServerAddr, JoinToken}` and then crashes, is killed, or loses connectivity before dialling.
+
+The fix is **not** another term in decision 6's rule: the pod cannot tell "my party has not
+arrived yet" from "my party is never arriving" without a clock. So it gets one.
+
+`GameServerHost.ShouldShutdownUnjoinedInstance` is a second, separate rule:
+
+| Term | Without it |
+|------|-----------|
+| dungeon mode | a quiet map server would end itself; a map server is allocated for nobody in particular, so "nobody joined" is not a fault there |
+| has **never** had a player | it would kill a live party mid-run, and a pod that emptied after a real run, both of which are decision 6's business |
+| no handshake in flight | the party's join is already on the wire; an accepted socket still inside the handshake has not set `everHadPlayer` yet |
+| a positive deadline | there would be no way to opt out, and the mechanism could not be disabled without a second flag |
+
+**The two rules cannot both fire.** Decision 6 requires `everHadPlayer`; the deadline
+requires its negation. They partition the space on that one term, so the deadline cannot
+weaken decision 6 by construction rather than by care — `TheTwoShutdownRules_AreMutuallyExclusive`
+pins it over the cross product of their shared inputs.
+
+**Where the clock starts: `Allocated`, and the pod really can know.** Not boot. A dungeon
+fleet pins no `GAMESERVER_MAP_ID`, so it is the one fleet shape ADR-18 says *should* carry
+spare `Ready` replicas, and a pod parked in that buffer for an hour is not leaking — Agones
+can still scale it away. The sidecar's `GET /gameserver` carries `status.state`, surfaced as
+`IAgonesSdk.GetStateAsync()` and already polled by `AgonesAllocationGate` for the
+register-on-allocated gate; the deadline reuses that gate verbatim rather than
+re-implementing it. With Agones **disabled** — compose, a local run, every test — there is no
+allocation to observe and no allocator to leak a replica to, so the clock starts at start-up:
+a dungeon process started by hand was started for a party that is about to arrive.
+
+**Why 90s and not the 30s join-token TTL.** ADR-26 named `constants.JoinTokenTTL` as the
+natural candidate, reasoning that the allocation is unusable once the token expires. That is
+true of the token and false of the deadline, because **the two clocks do not start
+together**. This one starts at `Allocated`; the gateway mints the token *after* that — it
+allocates, waits up to `registry.DefaultAllocationWaitTimeout` (15s) for the pod to publish
+its registry entry, and only then signs a token that lives a further `constants.JoinTokenTTL`
+(30s). The last legitimate arrival is therefore **~45s after Allocated**, and a 30s deadline
+would kill pods out from under parties still holding a valid token. `GAMESERVER_JOIN_DEADLINE_SECONDS`
+/ `--join-deadline-seconds` defaults to **90s**, twice that worst case: long enough that no
+honest join loses its instance, short enough that a leaked pod is reclaimed within a fleet's
+scale-up latency rather than never. `0` disables it, and the start-up banner says so out loud.
+
+**`Stopwatch`, never `DateTime.UtcNow`.** This host's `CLOCK_REALTIME` runs 10-17% fast and
+has been observed stepping backwards (#153), so a wall-clock budget silently shrinks under
+exactly the load the deadline exists to tolerate.
+
+**A live party is protected twice, deliberately.** The watch loop consults the rule *first*
+and treats it as the sole authority on whether the pod dies; only once the rule has declined
+does it notice `EverHadPlayer` and stop polling. Mutation-testing the two separately shows
+each absorbs a single-point break in the other — the live mid-run and emptied-instance tests
+fail only when both the rule's `!everHadPlayer` term and the loop's exit leg are removed
+together. That is the intended shape for the one failure mode here that destroys a live
+party's dungeon; the pure rule tests still catch either break on its own.
 
 ### Measured constants (2026-08-12)
 
@@ -506,7 +652,7 @@ to avoid repeating that is to say what a number is *of*.
 
 | Constant | Specified | Measured — how | Result |
 |---|---|---|---|
-| AOI radius (`GameConstants.DefaultAoiRadius`) | 50.0 units | **server**: distance between two players' persisted `player_states` rows, compared against whether each appeared in the other's snapshots | **61.00 units** apart → mutually invisible |
+| AOI radius (`GameConstants.DefaultAoiRadius`, the default — `GAMESERVER_AOI_RADIUS` overrides it per deployment, and the measurement below is of a server running the default) | 50.0 units | **server**: distance between two players' persisted `player_states` rows, compared against whether each appeared in the other's snapshots | **61.00 units** apart → mutually invisible |
 | | | **client**: Unity client tracking at what separation a remote player left its world set | last visible **50.5**, absent by **62.2** |
 | Map-server entity hold | 30 s | **server, gauge sampling**: lag of `gameserver_entities` behind `players_online` across two disconnects | **29 s** and **32 s**, then converged |
 | | | **server, log end-to-end**: disconnect line to "Entity hold expired" line, across three two-process runs | **30, 31, 30, 30, 30, 31 s** |
@@ -1820,6 +1966,17 @@ Two semantics were decided here and are worth stating:
   admission disagree with the `players_online` the registry publishes: a server that
   lost fifty players to a network blip would advertise fifty free slots and refuse
   every one of them for thirty seconds.
+- A user inside the reconnect hold window is **out of reach**. `PlayerTag.Linkdead` is
+  set when the hold starts and cleared when a session reattaches, and
+  `PlayerTargetBuffer` — the one place the enemy systems ask where the players are —
+  skips a held player, so it is neither chased, attacked, nor counted toward wave size.
+  Without it a held entity was still a target: with player respawn on, a dropped
+  connection meant killed during the grace, revived at the spawn point, and that spawn
+  point persisted by the eviction save. The CD smoke test caught it on the dev cluster —
+  it walked to x=4.83, disconnected, and its row came back x=0 y=0 hp=79/100. The point
+  of holding the entity is that reconnecting within the grace puts the player back where
+  they were; a held player that can be killed defeats it. **Not covered:** a *player*
+  attacking a held player by id still resolves — there is no PvP content to exercise it.
 
 **Bounded ingestion** (`EcsWorld.PushInput` with `InputIngress`). Coalescing moved from
 the tick to ingest, under the same input lock: a movement-only input **replaces** the

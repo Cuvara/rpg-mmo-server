@@ -7,6 +7,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`results/2026-09-18-importance/` — the importance A/B**, 200 players x 3 repeats per arm
+  on `cluster` and `spread`, one binary and one env-var pair apart. Measured **-47.3%** and
+  **-47.2%** downstream bytes with snapshot cadence and ack latency unchanged; the cost is
+  per-entity staleness of one snapshot period. Written up as BENCHMARK.md Part XIV, which
+  also records that the first attempt measured a schedule that was inert, that every unit
+  test passed against it, and that reading `snapshot_deferred_by_interval` off a running
+  server is what caught it.
+
+### Fixed
+- **The harness judged every run against the wrong tick budget, and would have judged it
+  against the wrong snapshot bound if that had been "corrected" naively.** One package
+  constant, `TickBudget = 1/DefaultTickRate` = 66.67ms, served two independent rates. It was
+  right for the single-rate server and has been wrong since ADR-13 made 60/15 the default.
+  - `gameserver_tick_duration_seconds` times a **base** tick, which runs at
+    `SIM_CRITICAL_HZ`. At 60Hz its budget is **16.67ms**, so 66.67ms is four times too
+    generous: a server spending 40ms per base tick — 2.4x over — was reported as
+    comfortably passing, and the header printed `tick budget 66.67ms @ 15Hz` for a server
+    that had not run at 15Hz since the default changed. BENCHMARK.md Part VI recorded this
+    in 2026-08-15 and it was never acted on.
+  - Simply narrowing the constant to 1/60 would have introduced a second, louder defect:
+    the same number also bounded **snapshot cadence**, which is governed by `SIM_WORLD_HZ`
+    because replication is gated to the world group (ADR-13 decision 7). Every level in
+    every sweep would have failed for delivering snapshots every 66.7ms — exactly when they
+    are supposed to arrive. **The fix is two numbers, not a corrected one.**
+  - Both are now read off the game server's `/status` at the start of each run
+    (`load/rates.go`), recorded in the result as `tick_budget_sec`,
+    `snapshot_period_sec`, `sim_critical_hz`, `sim_world_hz` and `rates_source`, and
+    printed in the header. `Evaluate` reads them off the **Result**, not off a constant, so
+    a sweep loaded from disk evaluates to the verdict it had when it was taken, and a
+    result file predating the fields still evaluates exactly as it always did.
+  - When `/status` cannot be reached the run proceeds against the pre-ADR-13 assumption and
+    **says so** — `rates from ASSUMED (/status unreachable)` in the header, `rates_source`
+    in the JSON. A run judged against rates nobody confirmed is still a run; one that does
+    not admit it is a number nobody can check.
+  - The `cmd/loadtest` package doc and `README.md` carried the same stale 66.67ms claim and
+    are corrected rather than deleted.
+
+
+### Added
+
+- **ADR-25: updated for the new `readHello` signature.** The sealed client callback now
+  returns the server's Ed25519 `server_signature` as a third `[]byte`. The load generator
+  continues to verify the *binding* and report `sealed_binding_verified` — it mints its own
+  join tokens, so it holds the secret and that check is meaningful here. It does not verify
+  identity: it is the server side wearing a client costume, and the peer that proves the
+  identity path is the smoke test.
 
 - **`-sealed`: the load generator can speak a sealed session**, so the gameplay hop can be
   exercised encrypted end to end rather than only in unit tests.

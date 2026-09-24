@@ -98,6 +98,27 @@ public sealed class RedisEventStream : IEventStream, IAsyncDisposable
     public long PublishFailures => Interlocked.Read(ref _publishFailures);
 
     /// <summary>
+    /// Publish failures since the last success. <b>Zero means the last attempt worked</b>;
+    /// non-zero means this stream is failing right now.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the difference between a health field and a configuration label.
+    /// <see cref="PublishFailures"/> is cumulative and therefore says nothing about *now* —
+    /// a stream that failed a thousand times last week and works today reports the same
+    /// large number as one that is failing this second. This resets on success, so it
+    /// answers the question an operator is actually asking.
+    /// </para>
+    /// <para>
+    /// It costs nothing to publish: the counter was already maintained for the recovery log
+    /// line. It simply had no route to <c>/status</c>, which is why the endpoint could report
+    /// a healthy <c>redis</c> while <c>events_dropped</c> climbed past twenty thousand
+    /// (#407).
+    /// </para>
+    /// </remarks>
+    public long ConsecutiveFailures => Interlocked.Read(ref _consecutiveFailures);
+
+    /// <summary>
     /// Connect to Redis and return a publishing stream over that connection.
     /// </summary>
     /// <remarks>

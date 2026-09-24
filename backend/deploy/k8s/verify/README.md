@@ -72,7 +72,7 @@ be reported as "the probe could not be built".
 | `cluster.workloads` | every Deployment/StatefulSet/DaemonSet in those namespaces has all declared replicas Ready | readiness is the probe's opinion; a workload with no readiness probe passes while broken |
 | `cluster.pvcs` | each declared PVC is `Bound` | nothing about the data on it, nor about PVCs nobody declared |
 | `cluster.fleet` | the Agones fleet exists and carries ≥ `VERIFY_FLEET_MIN_REPLICAS` GameServers | nothing about which map those pods serve — that is layer 3 |
-| `cluster.autoscaler` | no `FleetAutoscaler` targets a fleet whose pod template pins one `GAMESERVER_MAP_ID` for every replica | nothing about fleets it does not name, and nothing about a map id supplied per pod through `valueFrom` — that case is reported as unpinned and the rule stands down |
+| `cluster.autoscaler` | no `FleetAutoscaler` targets **any** fleet in `VERIFY_NAMESPACES` whose pod template pins one `GAMESERVER_MAP_ID` for every replica | nothing about fleets outside `VERIFY_NAMESPACES`, and nothing about a map id supplied per pod through `valueFrom` — that case is reported as unpinned and the rule stands down. It also says nothing about whether a *permitted* autoscaler is correctly **sized**: buffer sizing is a capacity question and nothing here measures capacity |
 | `cluster.restarts` | no container in the namespaces restarted within the last `VERIFY_RESTART_WINDOW` seconds (default 1800), **and** every container is `Running` right now — so an active crash loop fails at any age | restarts **older** than the window are a WARN naming every container, and are not judged: the check says nothing about why they died. It also cannot see a crash that predates the current pod, because `restartCount` resets when a pod is recreated |
 | `cluster.secrets` | each declared Secret exists and every key decodes to a non-empty value | nothing about the value being *correct*. Values are never printed — only key names and byte lengths |
 
@@ -94,6 +94,23 @@ Measured on k3d 2026-08-18: `1 -> 2` replicas put a second member into
 `backend/deploy/docs/K3S.md`. A fleet with a per-pod map id does not trip this
 check, which is the point — it must stop being an error the moment the real fix
 lands.
+
+Since 2026-09-13 it **sweeps every Fleet in `VERIFY_NAMESPACES`** rather than the
+single fleet a target names, because there are two fleets in `rpg-k8s-realtime`
+now and the old form could not see an autoscaler placed on the other one. That
+same change admitted the project's first `FleetAutoscaler` —
+`app/70-fleetautoscaler-dungeon.yaml`, on the **dungeon** fleet, whose pods pin
+no map id and register no map (ADR-26 decision 8), so its spare Ready pods are
+idle instances rather than second live servers. Nothing was loosened to allow it:
+a template with no `GAMESERVER_MAP_ID` already read as unpinned.
+`tests/autoscaler_rule_test.sh` runs the rule offline against the real shape of
+both fleets and shows the two different answers — FAIL for the map-pinned one,
+PASS for the map-less one — so the prohibition can be demonstrated without
+creating the forbidden object on a shared cluster:
+
+```bash
+bash backend/deploy/k8s/verify/tests/autoscaler_rule_test.sh
+```
 
 `cluster.restarts` is scoped by **time**, and this is a deliberate narrowing the
 verdict prints out loud. `restartCount` is cumulative for the life of a pod and
@@ -272,6 +289,21 @@ JWT_SECRET=<the deployment's secret> ./verify.sh --target dev-agones
 
 Exit code `0` = `VERIFY=PASS`, `1` = `VERIFY=FAIL`, `2` = the suite could not
 run (bad target, missing `JWT_SECRET`).
+
+**A run that verified nothing is `VERIFY=FAIL`.** Layers are selected by
+**number**; `--layer data` matches no check, and until this rule existed it
+printed `checks: 0 ... VERIFY=PASS` with exit 0. An empty selection, or a run in
+which every check was skipped, now fails and says which.
+
+**The Nakama scheme comes from the cluster, not the target file.**
+`k8s-dev` and `k8s-stg` read the cluster's own meta-hop opt-in (the
+`tls-cert-path` key of the `nakama-config` ConfigMap, ADR-24) through
+`lib/nakama_endpoint.sh`. Opted in: `https://` with a pin read out of the
+`nakama-tls` Secret and passed as `--cacert`. Not opted in: `http://`. An
+explicitly set `VERIFY_NAKAMA_URL` always wins. This used to be a literal
+`http://`, relying on `dev-up.sh` to export the https URL -- which works by hand
+and never in CD, where `dev-up.sh` and `verify.sh` run in separate steps and an
+export cannot cross them.
 
 `JWT_SECRET` is required and never stored in a target file. The value the
 running gateway uses:

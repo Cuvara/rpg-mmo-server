@@ -11,6 +11,9 @@ namespace GameServer.Registry;
 ///   servers:id:{server_id}   HASH  server_id, map_id, addr, transport,
 ///                                  capacity, player_count   (+ TTL)
 ///   servers:map:{map_id}     SET   server ids on that map   (index, no TTL)
+///
+/// Hash fields: server_id, map_id, addr, transport, capacity, player_count,
+/// identity_key. Mirrors shared/storage/redisstore/registry.go byte for byte.
 /// </code>
 /// The hash is the source of truth: a server disappears on its own once it stops
 /// heartbeating, and the gateway prunes the map index lazily on lookup. Key
@@ -30,6 +33,10 @@ public sealed class RedisServerRegistry : IServerRegistry
     private const string FieldTransport = "transport";
     private const string FieldCapacity = "capacity";
     private const string FieldPlayerCount = "player_count";
+    // ADR-25. Written by this process, read by the Go gateway's infoFromFields()
+    // with no translation layer, so the name and the base64 encoding of its value
+    // must change on both sides in one commit or not at all.
+    private const string FieldIdentityKey = "identity_key";
 
     /// <summary>
     /// Sets player_count only if the hash still exists, so a stale writer cannot
@@ -106,14 +113,21 @@ return 1
     private IDatabase Db => _mux.GetDatabase();
 
     /// <inheritdoc />
-    public async Task RegisterAsync(ServerInfo info, CancellationToken ct)
+    public async Task RegisterAsync(ServerInfo info, RegistrationScope scope, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var key = (RedisKey)ServerKey(info.ServerId);
         var db = Db;
 
-        // Same three operations, same order, as the Go TxPipeline: HSET, EXPIRE,
-        // SADD. Batched so they travel as one round trip.
+        // Same operations, same order, as the Go TxPipeline: HSET, EXPIRE, SADD.
+        // Batched so they travel as one round trip.
+        //
+        // The SADD — and ONLY the SADD — is conditional. Under
+        // RegistrationScope.HashOnly the hash and its TTL are written exactly as
+        // before, so the gateway still reads this pod's dialable address and the
+        // entry still expires on its own when the pod dies; what is skipped is the
+        // map index, which would otherwise advertise a dungeon instance to
+        // FindServer (ADR-26 decision 8).
         var batch = db.CreateBatch();
         var hset = batch.HashSetAsync(key,
         [
@@ -123,16 +137,22 @@ return 1
             new HashEntry(FieldTransport, info.Transport),
             new HashEntry(FieldCapacity, info.Capacity),
             new HashEntry(FieldPlayerCount, info.PlayerCount),
+            new HashEntry(FieldIdentityKey, info.IdentityKey),
         ]);
         var expire = batch.KeyExpireAsync(key, _ttl);
-        var sadd = batch.SetAddAsync(MapKey(info.MapId), info.ServerId);
+        Task<bool>? sadd = scope == RegistrationScope.MapIndexed
+            ? batch.SetAddAsync(MapKey(info.MapId), info.ServerId)
+            : null;
         batch.Execute();
 
-        await Task.WhenAll(hset, expire, sadd);
+        await hset;
+        await expire;
+        if (sadd != null) await sadd;
 
         _logger.LogInformation(
-            "Registered {ServerId} in Redis: map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s",
-            info.ServerId, info.MapId, info.Addr, info.Transport, info.Capacity, (int)_ttl.TotalSeconds);
+            "Registered {ServerId} in Redis: map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s scope={Scope} identity={IdentityKey}",
+            info.ServerId, info.MapId, info.Addr, info.Transport, info.Capacity, (int)_ttl.TotalSeconds, scope,
+            string.IsNullOrEmpty(info.IdentityKey) ? "(none)" : info.IdentityKey);
     }
 
     /// <inheritdoc />

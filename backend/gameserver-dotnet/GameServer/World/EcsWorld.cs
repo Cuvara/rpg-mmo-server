@@ -136,6 +136,26 @@ public enum EntityTags
 
     /// <summary>Driven by the enemy AI systems. Adds <see cref="EnemyAi"/>.</summary>
     EnemyAi = 1,
+
+    /// <summary>
+    /// A synthetic player driven by <c>BotPlayerSpawner</c>. Adds
+    /// <see cref="GameServer.Scaffolding.BotTag"/> <b>on top of</b> the player archetype,
+    /// so a bot is a player everywhere it should be — it is in <see cref="PlayerTag"/>
+    /// queries, it appears in snapshots, enemies chase it, and it is a target a real
+    /// player can attack.
+    ///
+    /// <para><b>The tag exists for the one place a bot must NOT be a player:
+    /// persistence.</b> <see cref="PlayerStates"/> is swept by <c>AsyncSaver</c> and every
+    /// entry is written to the game database keyed by its id, so without this tag a
+    /// development server with bots on would quietly create a player row per bot, per
+    /// restart, for ever. That is the kind of defect that compiles, passes CI, and is
+    /// found months later in the data — see <see cref="PersistablePlayerStates"/>.</para>
+    ///
+    /// <para>A tag rather than an id-prefix test, deliberately: a prefix convention is
+    /// enforced by nothing, and the failure when someone spawns a bot with the wrong id
+    /// is silent and in the database.</para>
+    /// </summary>
+    Bot = 2,
 }
 
 public sealed class EcsWorld : IDisposable
@@ -254,12 +274,16 @@ public sealed class EcsWorld : IDisposable
     /// queried once per viewer. See <see cref="SpatialGrid"/> for why this exists at all
     /// given that BENCHMARK.md Part V reverted the first one, and what changed since.
     ///
-    /// <para>Cell size is the default AOI radius: a query then covers at most a 3x3
-    /// neighbourhood, the smallest that can contain a circle of that radius. Smaller cells
-    /// mean more cell lookups per query for fewer candidates each; larger cells mean fewer
-    /// lookups over more candidates.</para>
+    /// <para>Cell size is the CONFIGURED AOI radius, not the compiled-in default: a query
+    /// then covers at most a 3x3 neighbourhood, the smallest that can contain a circle of
+    /// that radius. Smaller cells mean more cell lookups per query for fewer candidates
+    /// each; larger cells mean fewer lookups over more candidates. Both arms return
+    /// identical results at any cell size — <see cref="SpatialGrid.Query"/> derives the
+    /// cell span from the radius it is given rather than assuming 3x3 — so a stale cell
+    /// size would be a performance bug, not a correctness one, and correspondingly
+    /// invisible. Hence it is injected rather than read from the constant.</para>
     /// </summary>
-    private readonly SpatialGrid _grid = new(GameConstants.DefaultAoiRadius);
+    private readonly SpatialGrid _grid;
 
     /// <summary>
     /// True when <see cref="_grid"/> was rebuilt inside the current read scope and may be
@@ -329,6 +353,19 @@ public sealed class EcsWorld : IDisposable
     internal int AoiIndexOccupiedCells => _grid.OccupiedCells;
 
     /// <summary>
+    /// Cell size the spatial index was built with, which must be the deployment's AOI
+    /// radius. Diagnostics and tests.
+    /// </summary>
+    /// <remarks>
+    /// Exposed because a cell size that failed to follow the configured radius is a defect
+    /// with NO observable symptom: both arms return identical entities at any cell size, so
+    /// the differential tests stay green, the snapshots stay correct, and the only trace is
+    /// an index that narrows less than it should. There is nothing to assert on unless the
+    /// value itself is readable.
+    /// </remarks>
+    internal float AoiIndexCellSize => _grid.CellSize;
+
+    /// <summary>
     /// Occupancy threshold the gate compares against, overridable so the benchmark can
     /// force the index on for populations the shipped gate rejects — which is the only way
     /// to measure what the gate is giving up. Defaults to the shipped value; production
@@ -354,6 +391,12 @@ public sealed class EcsWorld : IDisposable
     public EcsWorld() : this(1) { }
 
     /// <summary>
+    /// Create a world with the default AOI cell size and room for
+    /// <paramref name="maxWorkerSlots"/> concurrent structural producers.
+    /// </summary>
+    public EcsWorld(int maxWorkerSlots) : this(maxWorkerSlots, GameConstants.DefaultAoiRadius) { }
+
+    /// <summary>
     /// Create a world whose deferred-structural queue has room for
     /// <paramref name="maxWorkerSlots"/> concurrent producers.
     ///
@@ -362,8 +405,15 @@ public sealed class EcsWorld : IDisposable
     /// <see cref="UpdateComponentsParallel"/>, and the slots are allocated up front
     /// because a worker must never allocate its queue on the hot path.</para>
     /// </summary>
-    public EcsWorld(int maxWorkerSlots)
+    /// <param name="aoiCellSize">
+    /// Spatial index cell size, which is the deployment's AOI radius
+    /// (<see cref="Server.AoiSettings"/>). Affects only how the index narrows a query;
+    /// both the index and the scan return the same entities at any value.
+    /// </param>
+    public EcsWorld(int maxWorkerSlots, float aoiCellSize)
     {
+        _grid = new SpatialGrid(aoiCellSize);
+
         if (maxWorkerSlots < 1)
         {
             throw new ArgumentOutOfRangeException(
@@ -737,9 +787,11 @@ public sealed class EcsWorld : IDisposable
                         Attack = combats[i].Attack,
                         Defense = combats[i].Defense,
                         CooldownUntilTick = combats[i].CooldownUntilTick,
+                        AbilityCooldownUntilTick = combats[i].AbilityCooldownUntilTick,
                         Speed = locomotions[i].Speed,
                         FacingBrad = locomotions[i].FacingBrad,
                         Action = locomotions[i].Action,
+                        ActionSeq = locomotions[i].ActionSeq,
                         LastInputTick = cursors[i].LastInputTick,
                     };
                     if (sink != null) sink.Add(composed);
@@ -804,7 +856,8 @@ public sealed class EcsWorld : IDisposable
                         // fetched, which is exactly why they were put there rather than
                         // in a component of their own — no extra GetSpan in this loop.
                         locomotions[i].FacingBrad,
-                        locomotions[i].Action);
+                        locomotions[i].Action,
+                        locomotions[i].ActionSeq);
                 }
 
                 matches++;
@@ -966,7 +1019,8 @@ public sealed class EcsWorld : IDisposable
                     // both looked healthy, which the differential tests catch by comparing
                     // whole views rather than positions.
                     locomotions[i].FacingBrad,
-                    locomotions[i].Action));
+                    locomotions[i].Action,
+                    locomotions[i].ActionSeq));
             }
         }
 
@@ -1767,6 +1821,52 @@ public sealed class EcsWorld : IDisposable
     }
 
     /// <summary>
+    /// Player-type entities that may be written to the player store: every
+    /// <see cref="PlayerStates"/> entry except the synthetic ones carrying
+    /// <see cref="GameServer.Scaffolding.BotTag"/>.
+    ///
+    /// <para><b>Why this is a separate method and not a filter at the call site.</b>
+    /// <c>AsyncSaver.SaveAllAsync</c> persists every entry it is handed, keyed by id. A
+    /// bot is a player in the archetype — deliberately, so enemies chase it and clients
+    /// render it — which means the periodic save and the shutdown save would both create a
+    /// player row per bot. Nothing would fail: the saves succeed, the metrics count them
+    /// as successes, and the rows are only ever noticed by somebody reading the table.
+    /// Putting the exclusion behind a named method means the persistence path cannot
+    /// acquire the bug by forgetting a predicate.</para>
+    /// </summary>
+    public List<EntityState> PersistablePlayerStates()
+    {
+        var result = new List<EntityState>();
+
+        _rwLock.EnterReadLock();
+        _iterationDepth++;
+        try
+        {
+            // _playersQuery, never _arch.Query(...) — see ScanRangeLocked and #176. The bot
+            // exclusion is a per-entity Has<> rather than a second WithNone query, because a
+            // new read-path query has to be pre-resolved into _readQueries and refreshed on
+            // every write-scope exit; this needs neither and cannot fall out of step with the
+            // archetype it filters.
+            foreach (ref var chunk in _playersQuery.GetChunkIterator())
+            {
+                int count = chunk.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    if (_arch.Has<GameServer.Scaffolding.BotTag>(chunk.Entity(i))) continue;
+                    result.Add(ComposeFromChunk(ref chunk, i));
+                }
+            }
+        }
+        finally
+        {
+            _iterationDepth--;
+            _rwLock.ExitReadLock();
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Apply any structural changes (spawn, despawn, archetype move) that were
     /// requested while a query was being iterated.
     ///
@@ -2038,6 +2138,7 @@ public sealed class EcsWorld : IDisposable
         }
 
         bool isEnemy = (tags & EntityTags.EnemyAi) != 0;
+        bool isBot = (tags & EntityTags.Bot) != 0;
 
         // Assigned once per distinct id string, for the life of the world — see _stableIds.
         if (!_stableIds.TryGetValue(state.Id, out int stable))
@@ -2056,6 +2157,17 @@ public sealed class EcsWorld : IDisposable
                 new Locomotion(state.Speed),
                 new InputCursor(state.LastInputTick),
                 default(EnemyAi))
+            : isBot
+            ? _arch.Create(
+                new EntityIdRef(state.Id, stable),
+                new EntityKind(state.Type),
+                new Position(state.Position),
+                default(Health),
+                default(Combat),
+                new Locomotion(state.Speed),
+                new InputCursor(state.LastInputTick),
+                default(PlayerTag),
+                default(GameServer.Scaffolding.BotTag))
             : isPlayer
             ? _arch.Create(
                 new EntityIdRef(state.Id, stable),
@@ -2137,9 +2249,11 @@ public sealed class EcsWorld : IDisposable
             Attack = combat.Attack,
             Defense = combat.Defense,
             CooldownUntilTick = combat.CooldownUntilTick,
+            AbilityCooldownUntilTick = combat.AbilityCooldownUntilTick,
             Speed = locomotion.Speed,
             FacingBrad = locomotion.FacingBrad,
             Action = locomotion.Action,
+            ActionSeq = locomotion.ActionSeq,
             LastInputTick = cursor.LastInputTick,
         };
     }
@@ -2165,9 +2279,11 @@ public sealed class EcsWorld : IDisposable
             Attack = combats[i].Attack,
             Defense = combats[i].Defense,
             CooldownUntilTick = combats[i].CooldownUntilTick,
+            AbilityCooldownUntilTick = combats[i].AbilityCooldownUntilTick,
             Speed = locomotions[i].Speed,
             FacingBrad = locomotions[i].FacingBrad,
             Action = locomotions[i].Action,
+            ActionSeq = locomotions[i].ActionSeq,
             LastInputTick = cursors[i].LastInputTick,
         };
     }
@@ -2192,11 +2308,16 @@ public sealed class EcsWorld : IDisposable
         combat.Attack = state.Attack;
         combat.Defense = state.Defense;
         combat.CooldownUntilTick = state.CooldownUntilTick;
+        combat.AbilityCooldownUntilTick = state.AbilityCooldownUntilTick;
 
         ref var locomotion = ref _arch.Get<Locomotion>(entity);
         locomotion.Speed = state.Speed;
         locomotion.FacingBrad = state.FacingBrad;
         locomotion.Action = state.Action;
+        // Assigned rather than advanced: this is a RESTORE of a composed state, not the
+        // entity entering an action. Advancing here would manufacture a retrigger every
+        // time a state round-tripped through components and back.
+        locomotion.ActionSeq = state.ActionSeq;
 
         ref var cursor = ref _arch.Get<InputCursor>(entity);
         cursor.LastInputTick = state.LastInputTick;

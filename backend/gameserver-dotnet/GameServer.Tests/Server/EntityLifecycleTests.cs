@@ -26,6 +26,69 @@ public class EntityLifecycleTests
     private const string ServerId = "gs-lifecycle";
     private static readonly TimeSpan ShortHold = TimeSpan.FromMilliseconds(300);
 
+    /// <summary>
+    /// #401: an ABRUPT disconnect — an RST, the shape <c>taskkill /F</c> on the client
+    /// produces — must drop the connection out of the registry the snapshot broadcast
+    /// iterates, not only out of <c>players_online</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The assertion is on <c>Connections</c>, deliberately.</b> The broadcast
+    /// walks the connection registry, not the player entities
+    /// (<c>TickLoop.CopyTo(_viewers)</c>), so a connection that outlives its player pays a
+    /// full AOI scan, delta encode and socket write every world tick while
+    /// <c>players_online</c> reads a truthful zero. Asserting <c>players_online == 0</c>
+    /// after a disconnect passes whether or not that is happening, which is exactly why
+    /// #401 had to be diagnosed from three 30s <c>snapshot_bytes</c> samples and a source
+    /// read.</para>
+    ///
+    /// <para>The two numbers are also asserted to AGREE at each stage. They are measured by
+    /// different means — <c>players_online</c> is a counter balanced by hand on join and
+    /// leave, <c>Connections</c> is the live size of the registry — and a gap between them
+    /// is the only local evidence that one of them is wrong.</para>
+    /// </remarks>
+    [Fact]
+    public async Task AbruptDisconnect_DropsTheConnectionTheBroadcastIterates()
+    {
+        using var metrics = new GameMetrics("map_lifecycle", $"test.{Guid.NewGuid():N}");
+        await using var h = await Harness.StartAsync(metrics);
+
+        var client = await h.JoinAsync("user-abrupt");
+
+        Assert.Equal(1, h.Server.Connections);
+        Assert.Equal(1, metrics.PlayersOnline);
+
+        // RST, not FIN: zero linger makes Close abort the connection the way a killed
+        // process does, rather than shutting it down politely.
+        client.Client.LingerState = new System.Net.Sockets.LingerOption(true, 0);
+        client.Close();
+
+        // Polled here rather than through Harness.WaitForAsync because that helper's
+        // failure message names the ENTITY count, and a diagnostic that sends the next
+        // reader to look at something that is not there is worse than a bare failure.
+        //
+        // BOTH numbers, not just the connection count. The teardown unregisters the
+        // connection and then balances the gauge, two statements apart, so a wait on the
+        // connection count alone returns inside that gap and the players_online assertion
+        // below fails on a state that is one line old rather than on a defect. That is the
+        // first thing this test did, and it read exactly like a real leak in the other
+        // direction.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        while ((h.Server.Connections != 0 || metrics.PlayersOnline != 0)
+               && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(25);
+        }
+
+        Assert.True(h.Server.Connections == 0,
+            $"the connection outlived its player: connections={h.Server.Connections}, " +
+            $"players_online={metrics.PlayersOnline}, entities={h.Server.EntityCount}, " +
+            $"holds={h.Server.PendingHolds} 15s after an abrupt disconnect. Every " +
+            "registered connection costs an AOI scan, a delta encode and a socket write " +
+            "per world tick, whatever players_online reads (#401)");
+        Assert.Equal(0, metrics.PlayersOnline);
+        Assert.Equal(metrics.PlayersOnline, h.Server.Connections);
+    }
+
     /// <summary>A clean join → disconnect leaves nothing behind once the hold expires.</summary>
     [Fact]
     public async Task CleanDisconnect_RemovesEntityAndZeroesTheGauge()

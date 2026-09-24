@@ -178,24 +178,26 @@ and with `--all` Agones itself. `--fleets-only` keeps the namespaces.
 
 ## Manifests
 
+This table listed the deleted Go-image manifests **twice**, in two blocks that
+disagreed with each other and with the directory, for long enough that "the
+manifests" meant different things depending on which block a reader stopped at.
+Rewritten 2026-09-13 (ADR-14 stage 8) to list what `ls deploy/agones/` actually
+returns. What was deleted, and why, is the section below — the history is kept
+there rather than as rows for files that do not exist.
+
 | File | Purpose |
 |------|---------|
-| `agones/fleet-map.yaml` | ⚠️ superseded (Go image) — prod map fleet, config from Secret/ConfigMap |
-| `agones/fleet-dungeon.yaml` | ⚠️ superseded (Go image) — prod dungeon fleet, `replicas: 0` (allocate on demand) |
-| `agones/fleet-map-dev.yaml` | ⚠️ superseded (Go image `rpg-mmo/gameserver:dev`), but this is what the cluster is running |
-| `agones/fleet-dungeon-dev.yaml` | ⚠️ superseded, dungeon mode, `replicas: 0` |
-| `agones/fleet-map-dotnet-dev.yaml` | **The current one.** C# server, `rpg-mmo/gameserver-dotnet:dev`, health **enabled**, `GAME_DB_URL` from the Secret — see below |
-| `agones/autoscaler.yaml` / `autoscaler-dev.yaml` | Buffer autoscaler (prod 2/1–10, dev 1/1–2) — both still target the superseded map fleets |
-| `agones/fleet-map.yaml` | Prod map fleet — `ghcr.io/cuvara/rpg-mmo-gameserver:latest`, config from Secret/ConfigMap |
-| `agones/fleet-dungeon.yaml` | Prod dungeon fleet, `replicas: 0` (allocate on demand) |
-| `agones/fleet-map-dev.yaml` | Local image `rpg-mmo/gameserver:dev`, `IfNotPresent`, literal env, `replicas: 1` |
-| `agones/fleet-dungeon-dev.yaml` | Same, dungeon mode, `replicas: 0` |
-| `agones/autoscaler.yaml` / `autoscaler-dev.yaml` | Buffer autoscaler (prod 2/1–10, dev 1/1–2) |
-| `agones/allocation.yaml` / `allocation-dev.yaml` | `GameServerAllocation` — `kubectl create`, never `apply` |
-| `agones/fleet-map-dotnet-dev.yaml` | **The only fleet.** C# server, `rpg-mmo/gameserver-dotnet:dev`, `replicas: 1`, health **enabled**, postgres player store — see below |
+| `agones/fleet-map-dotnet-dev.yaml` | **The only fleet in this directory.** C# server, `rpg-mmo/gameserver-dotnet:dev`, `replicas: 1`, health **enabled**, postgres player store — see below. Applied by `k3s/setup-dev.sh`, restored by `k8s/rollback-to-compose.sh` |
 | `agones/secret-example.yaml` | Template for the `rpg-realtime-secrets` Secret. Dev placeholders only; not the real object |
-| `agones/allocation-dev.yaml` | `GameServerAllocation` — `kubectl create`, never `apply` |
+| `agones/allocation-dev.yaml` | `GameServerAllocation` — `kubectl create`, never `apply`. Hand allocation, off the deploy path |
 | `k3s/namespaces.yaml` | `rpg-realtime` / `rpg-meta` / `rpg-data` |
+
+The fleets of the **app tier** (`deploy/k8s/app/`, namespace
+`rpg-k8s-realtime`) are a different set and are documented in
+`deploy/k8s/app/README.md`: `50-fleet-map.yaml`, `60-fleet-dungeon.yaml` and —
+since 2026-09-13 — `70-fleetautoscaler-dungeon.yaml`, the project's first
+`FleetAutoscaler`. Do not read the "no autoscaler" rule below as covering that
+file; read the section it points to.
 
 ### Which fleet is real
 
@@ -417,7 +419,7 @@ memory:
   servers claiming `map_01` and two disconnected copies of the world — ADR-2's
   invariant broken by the replica count alone, with no allocation involved.
 
-### Why there is no autoscaler
+### Why there is no autoscaler on a MAP fleet (and why the dungeon fleet has one)
 
 `autoscaler.yaml` and `autoscaler-dev.yaml` were deleted along with the fleets
 they targeted. They are not coming back for the *map* fleet, and the reason is
@@ -446,6 +448,26 @@ Buffer autoscaling becomes coherent when there is a fleet whose pods really are
 spare capacity until handed out — the **dungeon** fleet, ADR-14 stage 6. Write it
 then, against that fleet, with a per-instance id. ADR-14 stage 7 should be read
 as belonging to stage 6, not to the map fleet.
+
+> **That fleet now exists, and so does the autoscaler (2026-09-13, ADR-14 stage
+> 7).** `deploy/k8s/app/70-fleetautoscaler-dungeon.yaml` is a Buffer policy
+> (`bufferSize: 2`, `minReplicas: 2`, `maxReplicas: 6`, 30s sync) on
+> `rpg-k8s-realtime/dungeon-servers-dotnet-k8s`. Both counts above fail to reach
+> that fleet: its pods **are** allocated in normal operation — one instance per
+> party (ADR-26 decision 2) — so the buffer is genuinely drawn down, and they pin
+> no `GAMESERVER_MAP_ID` and register no map (ADR-26 decision 8), so a spare
+> replica claims no world. `maxReplicas: 6` is a **leak bound**, not a capacity
+> figure: ADR-26 measured that an Allocated-but-never-joined pod is never
+> reclaimed, and without a ceiling the autoscaler would replace every leaked pod
+> indefinitely.
+>
+> Two ordering rules come with it, both because a `minReplicas` floor overrides a
+> manual scale. It is **not** part of the bulk `apply`: `dev-up.sh` applies it
+> *after* pinning the image, since a floor would otherwise create pods on the
+> moving `:develop` tag — the race `60-fleet-dungeon.yaml`'s `replicas: 0`
+> exists to prevent. And `K8S_DUNGEON_REPLICAS=0` **deletes** it rather than
+> scaling against it, or "out of service" would undo itself within 30s.
+> `rollback-to-compose.sh` deletes it before draining, for the same reason.
 
 #### Measured, 2026-08-18 (k3d `k3d-rpg-dev`, fleet `map-servers-dotnet-k8s`)
 
@@ -486,6 +508,20 @@ does not — so it stops being an error at exactly the moment the real fix lands
 Proven both ways on 2026-08-18: PASS with no autoscaler, FAIL with one created
 against this fleet (`maxReplicas: 1`, so the probe could not actually spawn the
 splitting pod), then deleted.
+
+**Two changes on 2026-09-13, neither of which loosens the rule.** First, it
+**sweeps every Fleet in `VERIFY_NAMESPACES`** instead of the single fleet a
+target file names — there are two fleets in `rpg-k8s-realtime` now, and a rule
+that inspects only the one a target happens to name would not have seen an
+autoscaler put on the other. Second, the decision is proven offline by
+`deploy/k8s/verify/tests/autoscaler_rule_test.sh`, which runs it against the real
+shape of both fleets and reports FAIL for the map-pinned one and PASS for the
+map-less one. That test exists because the only honest live proof of a
+prohibition is to create the forbidden object on a shared cluster and hope to
+remember to delete it — which is how the 2026-08-18 proof above had to be done.
+The map-id condition itself is unchanged and was never widened: a fleet with no
+`GAMESERVER_MAP_ID` at all already read as "not pinned" before this work, so the
+dungeon autoscaler required no exemption.
 
 ### Enabling the allocator
 

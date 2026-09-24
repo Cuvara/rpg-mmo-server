@@ -13,9 +13,12 @@ namespace GameServer.Scaffolding;
 /// inside one world write scope.
 ///
 /// <list type="bullet">
-///   <item>Spawns waves of "mob" entities from the map edges.</item>
-///   <item>Moves every living enemy toward the map center each tick.</item>
-///   <item>Despawns enemies that reach the center zone near (0,0), and reaps dead ones.</item>
+///   <item>Spawns waves of "mob" entities around the live players, or on a ring about
+///     the origin when nobody is online.</item>
+///   <item>Moves every living enemy toward the nearest live player each tick, or toward
+///     the origin when there is none.</item>
+///   <item>Reaps dead enemies, and despawns enemies that reach the centre zone near
+///     (0,0) while there is nothing to chase.</item>
 /// </list>
 ///
 /// <para>Enemies are regular <see cref="EntityState"/> entries with
@@ -32,14 +35,23 @@ namespace GameServer.Scaffolding;
 /// by hand; the archetype query cannot drift from the world because it <i>is</i> the
 /// world.</para>
 ///
+/// <para>Enemies also fight back: <see cref="EnemyAttackSystem"/> decides which of them
+/// swing at which player, and <see cref="PlayerRespawnSystem"/> gives HP reaching 0 a
+/// defined end. Neither implements any combat — the decision becomes ordinary queued
+/// input and <c>InputHandler</c> resolves it down the one combat path this server has, the
+/// same route <see cref="BotBrainSystem"/> takes. See <see cref="EnemyAiPhase.Attack"/>
+/// for why a fourth and fifth phase are the right place for them.</para>
+///
 /// <para>There is no "center-zone damage" phase. The old class comment and the tick
 /// loop's comment both claimed one; no code ever implemented it. Nothing was removed
-/// here — see the CHANGELOG.</para>
+/// here — see the CHANGELOG. The enemy damage that exists now is not that: it is
+/// range-based and aimed at a player, not a function of standing near (0,0).</para>
 /// </summary>
 public sealed class EnemySpawner : ISimulationPhase
 {
     private readonly EcsWorld _world;
     private readonly SimulationSchedule _schedule;
+    private readonly EnemyAiSettings _settings;
 
     /// <summary>
     /// The scope callback, built once. A lambda written inline at the call site captures
@@ -56,6 +68,20 @@ public sealed class EnemySpawner : ISimulationPhase
     private readonly Action<SimulationGroup, long, long>? _onGroupRan;
 
     /// <summary>
+    /// Attack decisions this tick, flushed as ordinary input after the write scope closes.
+    /// Scratch in the strict sense — filled and drained within one <see cref="Tick"/> —
+    /// and the same type <see cref="BotPlayerSpawner"/> uses, because it is the same job:
+    /// an entity with no connection deciding to attack. A second buffer of the same shape
+    /// would be a second place for the "decide inside the scope, push outside it" rule to
+    /// be got wrong.
+    /// </summary>
+    [SimulationScratch]
+    private readonly BotDecisionBuffer _decisions = new();
+
+    /// <summary>Counters for <c>/status</c>. See <see cref="EnemyAttackStats"/>.</summary>
+    private readonly EnemyAttackStats _attacks = new();
+
+    /// <summary>
     /// Single-rate construction: every group runs at <paramref name="tickRate"/>, which is
     /// the pre-multi-rate server exactly. Kept because it is what the characterization and
     /// byte-identity tests construct, and their whole value is that they were not rewritten
@@ -66,19 +92,36 @@ public sealed class EnemySpawner : ISimulationPhase
     {
     }
 
+    /// <summary>
+    /// Single-rate construction with explicit settings. Tests that want a particular
+    /// population or a particular placement use this rather than setting environment
+    /// variables, which a test process shares with every other test in it.
+    /// </summary>
+    public EnemySpawner(EcsWorld world, int tickRate, EnemyAiSettings settings, ILogger logger)
+        : this(world, SimulationRates.Uniform(tickRate), logger, settings: settings)
+    {
+    }
+
     /// <param name="onGroupRan">
     /// Optional observer called once per group that runs, with the group and the
     /// start/end <see cref="System.Diagnostics.Stopwatch"/> timestamps. The host uses it to
     /// record per-group metrics without this type depending on the metric set.
     /// </param>
+    /// <param name="settings">
+    /// Every tuning knob the AI has. Null means <see cref="EnemyAiSettings.Default"/>,
+    /// which is the compiled-in set and, on a world with no live players, the behaviour
+    /// this class had before it was configurable.
+    /// </param>
     public EnemySpawner(
         EcsWorld world,
         SimulationRates rates,
         ILogger logger,
-        Action<SimulationGroup, long, long>? onGroupRan = null)
+        Action<SimulationGroup, long, long>? onGroupRan = null,
+        EnemyAiSettings? settings = null)
     {
         _world = world;
         _onGroupRan = onGroupRan;
+        _settings = settings ?? EnemyAiSettings.Default;
 
         // dt is the WORLD group's timestep, not the base tick's, because that is the rate
         // these systems actually run at. This is the rule the whole design turns on: a
@@ -93,9 +136,14 @@ public sealed class EnemySpawner : ISimulationPhase
         // ordering was three method calls in a private method and nothing said so.
         _schedule = new SimulationSchedule(
             rates,
-            new EnemySpawnSystem(dt, logger),
-            new EnemyMoveSystem(dt),
-            new EnemyReapSystem(logger));
+            new EnemySpawnSystem(dt, _settings, logger),
+            new EnemyMoveSystem(dt, _settings),
+            new EnemyAttackSystem(rates, _settings, _decisions, _attacks),
+            // WorldEvery as the one-shot hold, for the reason GameServer passes it to
+            // InputHandler: an action written on one group and sampled on another has to
+            // survive one sampling period or it reaches the wire on a coin flip.
+            new PlayerRespawnSystem(_settings, _attacks, rates.WorldEvery, logger),
+            new EnemyReapSystem(_settings, logger));
 
         _runSchedule = (tick, writer) => _schedule.RunDue(writer, tick, _onGroupRan);
     }
@@ -105,6 +153,21 @@ public sealed class EnemySpawner : ISimulationPhase
     /// it is answered by the world and cannot drift from it.
     /// </summary>
     public int AliveCount => _world.CountWith<EnemyAi>();
+
+    /// <summary>
+    /// The tuning in force. Published so <c>/status</c> can report what this server is
+    /// actually doing rather than what the manifest that was supposed to have produced it
+    /// says — an already-allocated GameServer does not necessarily reflect that manifest,
+    /// since its environment is fixed at pod creation.
+    /// </summary>
+    public EnemyAiSettings Settings => _settings;
+
+    /// <summary>
+    /// What enemy-side combat has done. Published for <c>/status</c>; see
+    /// <see cref="EnemyAttackStats"/> for why the throttle counter in particular is worth
+    /// an endpoint field.
+    /// </summary>
+    public EnemyAttackStats Attacks => _attacks;
 
     /// <summary>The systems this phase runs, in the order they run. Diagnostics and tests.</summary>
     public IReadOnlyList<IEcsSystem> Systems => _schedule.SystemsIn(SimulationGroup.World);
@@ -134,5 +197,12 @@ public sealed class EnemySpawner : ISimulationPhase
     {
         if (!_schedule.AnyDue(currentTick)) return;
         _world.UpdateComponents(currentTick, _runSchedule);
+
+        // Outside the scope, deliberately and not as a tidiness choice: PushInput takes
+        // the world's read lock to resolve the id, the lock is not recursive, and calling
+        // it from inside UpdateComponents throws. The one-tick delay between deciding and
+        // striking is the delay a real client has — see BotPlayerSpawner, which pays it
+        // for the same reason.
+        _decisions.Flush(_world, currentTick);
     }
 }

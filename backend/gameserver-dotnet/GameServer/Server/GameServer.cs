@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading.Channels;
 using System.Net;
 using System.Net.Sockets;
@@ -128,6 +129,59 @@ public class ServerOptions
     public int MaxSnapshotBytes { get; set; } = Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
 
     /// <summary>
+    /// Area-of-interest radius in world units (<c>GAMESERVER_AOI_RADIUS</c>), validated by
+    /// <see cref="AoiSettings"/>.
+    /// </summary>
+    /// <remarks>
+    /// The other half of <see cref="MaxSnapshotBytes"/>, and the half that acts first. The
+    /// budget is a tail cap that deliberately does not engage during known-good play; the
+    /// radius decides how much there is to cap in the first place, and population inside a
+    /// circle grows with its SQUARE — halving the radius quarters the expected entity
+    /// count, which is a far larger lever on downstream bandwidth than anything downstream
+    /// of it. It also sets the spatial index's cell size (<c>EcsWorld</c>), so the two
+    /// cannot be configured apart.
+    /// </remarks>
+    public AoiSettings Aoi { get; set; } = AoiSettings.Default;
+
+    /// <summary>
+    /// Replication-importance weights (<c>GAMESERVER_IMPORTANCE</c>), validated by
+    /// <see cref="ImportanceSettings"/>. Defaults to the pre-importance ordering.
+    /// </summary>
+    /// <remarks>
+    /// Decides the ORDER entities are emitted in when the downlink budget bites; it never
+    /// decides how many bytes go out, which is <see cref="MaxSnapshotBytes"/>, nor which
+    /// entities are candidates at all, which is <see cref="Aoi"/>.
+    /// </remarks>
+    public ImportanceSettings Importance { get; set; } = ImportanceSettings.Default;
+
+    /// <summary>
+    /// Per-importance send intervals (<c>GAMESERVER_REPLICATION_SCHEDULE</c>), validated by
+    /// <see cref="ReplicationSchedule"/>. Defaults to off.
+    /// </summary>
+    public ReplicationSchedule ReplicationSchedule { get; set; } = ReplicationSchedule.Off;
+
+    /// <summary>
+    /// Whether field-level delta encoding may be used at all
+    /// (<c>GAMESERVER_FIELD_DELTA</c>). Defaults to on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is a KILL SWITCH, not a policy knob. Field-delta is otherwise enabled per
+    /// connection purely by protocol version match, which makes the feature impossible to
+    /// measure against itself: the control arm needs a client on version 1, and the server
+    /// refuses one. Every bandwidth figure for this feature was therefore a before/after
+    /// across two builds — see #381.
+    /// </para>
+    /// <para>
+    /// Turning it off produces valid version-2 frames. <c>changed_fields == 0</c> is
+    /// specified to mean "every field present", which is exactly what a sender that does
+    /// not implement the feature emits, so a v2 client needs no knowledge of this setting
+    /// and the same client can measure both arms minutes apart.
+    /// </para>
+    /// </remarks>
+    public bool FieldDelta { get; set; } = true;
+
+    /// <summary>
     /// Whether the gameplay hop requires a sealed session
     /// (<c>GAMESERVER_SEALED</c>: <c>off</c> or <c>require</c>).
     /// </summary>
@@ -154,6 +208,28 @@ public class ServerOptions
     /// </para>
     /// </remarks>
     public Net.Sealed.SealedRequirement SealedTransport { get; set; } = Net.Sealed.SealedRequirement.Disabled;
+
+    /// <summary>
+    /// This pod's Ed25519 identity, used to sign the sealed handshake (ADR-25).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Defaults to a freshly generated pair rather than to null, so that an entry point or
+    /// a test which forgets to set it still signs with a real per-process key instead of
+    /// crashing or -- far worse -- sending an empty signature that a client would read as
+    /// "this build predates ADR-25". There is no setter path that loads key material from
+    /// configuration, and that omission is the design: see <see cref="Net.Sealed.ServerIdentity"/>.
+    /// </para>
+    /// <para>
+    /// The public half must also reach the registry, or the gateway has nothing to hand the
+    /// client and the signature cannot be checked by anyone. <c>Program.cs</c> generates one
+    /// identity and passes it to both this and <c>RegistrationOptions.IdentityKey</c>;
+    /// two separately generated identities would produce a signature that never verifies,
+    /// which is a failure mode worth naming because it looks exactly like a man in the
+    /// middle.
+    /// </para>
+    /// </remarks>
+    public Net.Sealed.ServerIdentity ServerIdentity { get; set; } = Net.Sealed.ServerIdentity.Generate();
     /// <summary>
     /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
     /// client auth token. The game server itself never sees that token; this is
@@ -169,6 +245,17 @@ public class ServerOptions
     public string JoinTokenSecret { get; set; } = "";
     /// <summary>Play area for this map. Movement is clamped into these bounds.</summary>
     public MapBounds MapBounds { get; set; } = MapBounds.Default;
+
+    /// <summary>
+    /// The content set abilities resolve against, or null to run with none.
+    /// </summary>
+    /// <remarks>
+    /// Null is a legitimate configuration and is what every test that does not care about
+    /// abilities passes: <c>InputHandler</c> substitutes
+    /// <see cref="Shared.GameLogic.Content.ContentDatabase.Empty"/>, so a cast then fails as
+    /// "unknown ability" rather than as a null reference.
+    /// </remarks>
+    public Shared.GameLogic.Content.ContentDatabase? Content { get; set; }
 
     /// <summary>
     /// Delta snapshots between full keyframes. 0 or less disables delta encoding
@@ -236,6 +323,42 @@ public class ServerOptions
     /// </summary>
     public bool RegisterOnAllocated { get; set; }
 
+    /// <summary>
+    /// The default join deadline: 90 seconds. See <see cref="DungeonJoinDeadline"/> for
+    /// why it is not <c>constants.JoinTokenTTL</c>.
+    /// </summary>
+    public static readonly TimeSpan DefaultDungeonJoinDeadline = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// How long an instanced dungeon pod waits for its <b>first</b> player before ending its
+    /// own run — <c>GAMESERVER_JOIN_DEADLINE_SECONDS</c> / <c>--join-deadline-seconds</c>.
+    /// Zero or negative disables the deadline. Ignored outside dungeon mode.
+    ///
+    /// <para><b>Why it exists.</b> ADR-26 decision 6 will not shut down a pod that has never
+    /// had a player, because a freshly scheduled pod must not race the party it was
+    /// allocated for. The cost of that term, measured on dev, is that a pod which is
+    /// allocated and then <i>never joined</i> satisfies the rule forever: it sits
+    /// <c>Allocated</c>, Agones does not reclaim an Allocated pod (ADR-16), and the replica
+    /// is gone until an operator releases it by hand. Two <c>cmd/dungeonprobe</c> runs
+    /// consumed a two-replica fleet permanently. In production the same shape is any client
+    /// that receives <c>{ServerAddr, JoinToken}</c> and dies before dialling.</para>
+    ///
+    /// <para><b>Why 90s and not the 30s join-token TTL.</b> ADR-26 named
+    /// <c>constants.JoinTokenTTL</c> as the natural candidate, on the reasoning that the
+    /// allocation is unusable by anyone once the token expires. That is true of the token
+    /// and false of the deadline, because the two clocks do not start together: this one
+    /// starts when the pod observes <c>Allocated</c>, and the gateway mints the token
+    /// <i>after</i> that — it allocates, then waits up to
+    /// <c>registry.DefaultAllocationWaitTimeout</c> (15s) for this pod to publish its
+    /// registry entry, and only then signs a token that lives a further
+    /// <c>constants.JoinTokenTTL</c> (30s). The last legitimate arrival is therefore ~45s
+    /// after Allocated, and a 30s deadline would kill pods out from under parties still
+    /// holding a valid token. 90s is twice that worst case: long enough that no honest join
+    /// loses its instance, short enough that a leaked pod is reclaimed within a fleet's
+    /// scale-up latency rather than never.</para>
+    /// </summary>
+    public TimeSpan DungeonJoinDeadline { get; set; } = DefaultDungeonJoinDeadline;
+
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
 
@@ -278,11 +401,48 @@ public class ServerOptions
     /// </summary>
     public Func<EcsWorld, int>? StatusEntityCount { get; set; }
 
+    /// <summary>
+    /// The number the status endpoint publishes as <c>bots_alive</c>: synthetic players in
+    /// the world. Null means the server publishes 0.
+    /// </summary>
+    /// <remarks>
+    /// A second function rather than a second use of <see cref="StatusEntityCount"/>,
+    /// because they count different things and the endpoint publishes both. That is the
+    /// composing the old single-int phase member could not do.
+    /// </remarks>
+    public Func<EcsWorld, int>? StatusBotCount { get; set; }
+
+    /// <summary>
+    /// The enemy population cap in force right now, published as <c>enemy_ai_max_now</c>.
+    /// Null means the server publishes 0.
+    /// </summary>
+    /// <remarks>
+    /// A function of the <b>world</b>, not of the connection count, and that distinction
+    /// is the whole reason it exists. The cap scales on player entities; connections are a
+    /// different number, and they differ by every synthetic player on the map. Deriving
+    /// this from <c>players_online</c> reported a cap of 30 on a server actually running
+    /// 1110 — a field that looked precise and was wrong by 37x.
+    /// </remarks>
+    public Func<EcsWorld, int>? StatusEnemyCap { get; set; }
+
     /// <summary>Nakama HTTP API base URL (e.g. <c>http://rpg-nakama:7350</c>). Null disables economy integration.</summary>
     public string? NakamaUrl { get; set; }
 
     /// <summary>Nakama <c>runtime.http_key</c> for server-to-server RPC calls.</summary>
     public string NakamaHttpKey { get; set; } = "";
+
+    /// <summary>
+    /// Transport for the Nakama hop. Null uses .NET's default handler and therefore .NET's
+    /// own certificate validation, which is correct for <c>http://</c> and for an
+    /// <c>https://</c> Nakama holding a CA-issued certificate.
+    /// </summary>
+    /// <remarks>
+    /// The composition root sets this to <see cref="Nakama.NakamaTlsPin.CreatePinnedHandler"/>
+    /// when <c>NAKAMA_TLS_PIN</c> names a certificate — the meta hop running its own TLS with
+    /// a self-signed certificate (ADR-24). It is the same seam the batcher tests use to script
+    /// Nakama's answers, which is why there is one property and not two.
+    /// </remarks>
+    public HttpMessageHandler? NakamaHttpHandler { get; set; }
 
     /// <summary>
     /// How this server describes itself in the registry. Required when
@@ -314,6 +474,13 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly TickLoop _tickLoop;
     private readonly AsyncSaver _saver;
     private readonly InputHandler _inputHandler;
+
+    /// <summary>
+    /// Events produced by the current tick. Cleared by the tick loop before input runs and
+    /// read by every connection's gather in the same tick — see
+    /// <see cref="Snapshot.TickEventBuffer"/> for why its lifetime is exactly one tick.
+    /// </summary>
+    private readonly Snapshot.TickEventBuffer _tickEvents = new();
     private readonly IPlayerStore _playerStore;
     private readonly IAgonesSdk _agonesSdk;
     private readonly EventPublisher? _publisher;
@@ -326,6 +493,12 @@ public sealed class GameServerHost : IAsyncDisposable
     /// the existing per-connection input budget does not, which is the gap this closes.
     /// </summary>
     private readonly Input.InputAnomalyTracker _anomalies = new();
+
+    /// <summary>
+    /// Audits the ACCEPTED attack rate per account. Constructed in the body rather than
+    /// initialised here because it needs the resolved tick rate.
+    /// </summary>
+    private readonly Input.AttackRateAudit _attackRates;
 
     /// <summary>
     /// Frame arrival-order measurement for ADR-22's open question on whether the
@@ -391,6 +564,14 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
     private int _shutdownStarted;
 
+    /// <summary>
+    /// Whether a teardown has been started. True as soon as a caller wins the race in
+    /// <see cref="ShutdownAsync"/>, i.e. well before the teardown finishes — so a test
+    /// asserting that a server has NOT decided to stop does not have to outwait the 2s
+    /// client drain to find out.
+    /// </summary>
+    public bool ShutdownStarted => Volatile.Read(ref _shutdownStarted) != 0;
+
     /// <summary>0 until the first player join has reported Allocate to Agones, 1 afterwards.</summary>
     private int _allocateReported;
 
@@ -402,14 +583,71 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _holds = new();
 
     /// <summary>
+    /// Whether this process is an instanced dungeon rather than an open-world map. Read
+    /// once from <see cref="ServerOptions.Mode"/>, because three separate behaviours hang
+    /// off it (ADR-26 decisions 5, 6 and 8) and a string compare at each of them is three
+    /// chances to spell it differently.
+    /// </summary>
+    private readonly bool _isDungeon;
+
+    /// <summary>The one spelling of dungeon mode. Case-insensitive; everything else is a map.</summary>
+    /// <param name="mode">The configured <c>--mode</c> value.</param>
+    /// <returns>True when <paramref name="mode"/> selects an instanced dungeon.</returns>
+    internal static bool IsDungeonMode(string? mode) =>
+        string.Equals(mode, "dungeon", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>0 until a player has joined this process, 1 afterwards. Never resets.</summary>
+    private int _everHadPlayer;
+
+    /// <summary>
+    /// Whether any player has ever joined this process. A dungeon pod that has not had one
+    /// yet is a pod waiting for its party, not an empty instance — see
+    /// <see cref="ShouldShutdownEmptyInstance"/>.
+    /// </summary>
+    public bool EverHadPlayer => Volatile.Read(ref _everHadPlayer) != 0;
+
+    /// <summary>
     /// Entities currently in the world — the exact value the <c>gameserver_entities</c>
     /// gauge publishes. Exposed so lifecycle tests assert the number an operator sees
     /// rather than a parallel count that could agree while the gauge lies.
     /// </summary>
     public int EntityCount => _world.EntityCount;
 
+    /// <summary>
+    /// Connections currently registered in <see cref="ConnectionManager"/> — the set the
+    /// snapshot broadcast iterates, and the exact value the <c>gameserver_connections</c>
+    /// gauge and <c>/status</c>'s <c>connections</c> publish.
+    /// </summary>
+    /// <remarks>
+    /// <b>Deliberately distinct from <c>players_online</c>, and the two disagreeing is the
+    /// diagnostic signal.</b> <c>players_online</c> is an independently balanced counter
+    /// (<see cref="GameMetrics.PlayerJoined"/>/<see cref="GameMetrics.PlayerLeft"/>), not
+    /// derived from this set, so a leaked registration or a missed balance shows up as a
+    /// gap between them and nowhere else. Broadcast cost is paid per CONNECTION, so this is
+    /// the number that explains snapshot bandwidth; <c>players_online</c> is the number an
+    /// operator reads to decide a pod is idle. #401 was diagnosed from three 30s samples
+    /// and a source read precisely because this number was not published.
+    /// </remarks>
+    public int Connections => _connections.Count;
+
     /// <summary>Reconnect holds currently pending. Diagnostics and tests.</summary>
     public int PendingHolds => _holds.Count;
+
+    /// <summary>
+    /// Whether <paramref name="userId"/>'s entity is held out of enemies' reach for a
+    /// reconnect (<see cref="PlayerTag.Linkdead"/>). False for an unknown id. Tests only:
+    /// it takes the world write lock and allocates a closure, so it is not for the tick path.
+    /// </summary>
+    internal bool IsLinkdead(string userId)
+    {
+        bool linkdead = false;
+        _world.UpdateComponents(writer =>
+        {
+            EntityHandle handle = writer.Resolve(userId);
+            if (handle.IsValid) linkdead = writer.PlayerTagOf(in handle).Linkdead;
+        });
+        return linkdead;
+    }
 
     /// <summary>
     /// Accepted transports currently inside the join handshake — the value the
@@ -450,22 +688,57 @@ public sealed class GameServerHost : IAsyncDisposable
     public int EnemiesAlive => _options.StatusEntityCount?.Invoke(_world) ?? 0;
 
     /// <summary>
+    /// The number the status endpoint publishes as <c>bots_alive</c>. Supplied by the
+    /// composition root for the same reason <see cref="EnemiesAlive"/> is.
+    /// </summary>
+    public int BotsAlive => _options.StatusBotCount?.Invoke(_world) ?? 0;
+
+    /// <summary>The number the status endpoint publishes as <c>enemy_ai_max_now</c>.</summary>
+    public int EnemyCapNow => _options.StatusEnemyCap?.Invoke(_world) ?? 0;
+
+    /// <summary>
     /// Attack-path counters for <c>/status</c>. Single-writer (tick thread), read
     /// without synchronisation — see <see cref="Input.InputHandler.AttackTelemetry"/>.
     /// </summary>
     public Input.InputHandler.AttackTelemetry AttackStats => _inputHandler.Attacks;
+
+    /// <summary>Ability-path counters, for <c>/status</c>.</summary>
+    public Input.InputHandler.AbilityTelemetry AbilityStats => _inputHandler.Abilities;
+
+    /// <summary>
+    /// Events dropped because one tick produced more than <see cref="Snapshot.TickEventBuffer.Capacity"/>.
+    /// </summary>
+    public long TickEventsDropped => _tickEvents.Dropped;
 
     /// <summary>
     /// Per-account refused-input counts and anomaly scores. Observation only.
     /// </summary>
     public Input.InputAnomalyTracker Anomalies => _anomalies;
 
+    /// <summary>The accepted-attack-rate audit (roadmap A4). Observation only.</summary>
+    public Input.AttackRateAudit AttackRates => _attackRates;
+
     /// <summary>Frame arrival-order measurement. See <see cref="Observability.FrameOrderProbe"/>.</summary>
     public Observability.FrameOrderProbe FrameOrder => _frameOrder;
+
+    /// <summary>
+    /// The AOI radius this host actually built its world and tick loop with. Tests.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ServerOptions.Aoi"/> has to reach TWO places — the spatial index's cell
+    /// size and the gather radius — and wiring only one of them produces a server that is
+    /// entirely correct and quietly slower, which no snapshot assertion can see. These
+    /// expose what was wired rather than what was asked for, so a test can compare them.
+    /// </remarks>
+    internal float WiredAoiRadius => _tickLoop.AoiRadius;
+
+    /// <summary>The spatial index cell size this host's world was built with. Tests.</summary>
+    internal float WiredAoiCellSize => _world.AoiIndexCellSize;
 
     public GameServerHost(ServerOptions options)
     {
         _options = options;
+        _isDungeon = IsDungeonMode(options.Mode);
         _loggerFactory = options.LoggerFactory ?? Microsoft.Extensions.Logging.LoggerFactory.Create(b =>
             b.AddConsole().SetMinimumLevel(LogLevel.Information));
         _logger = _loggerFactory.CreateLogger<GameServerHost>();
@@ -486,12 +759,13 @@ public sealed class GameServerHost : IAsyncDisposable
         // Worker slots exist for the gather; the simulation schedule is still serial.
         // One slot is the old world exactly.
         _gatherWorkers = options.GatherWorkers < 1 ? 1 : options.GatherWorkers;
-        _world = new EcsWorld(_gatherWorkers);
+        _world = new EcsWorld(_gatherWorkers, options.Aoi.Radius);
         _metrics?.SetEntityCountProvider(() => _world.EntityCount);
         _connections = new ConnectionManager();
         _admission = new AdmissionController(_connections, options.Capacity);
         _handshakes = new HandshakeGate(options.MaxPendingHandshakes);
         _metrics?.SetPendingHandshakesProvider(() => _handshakes.Pending);
+        _metrics?.SetConnectionCountProvider(() => _connections.Count);
 
         // Ingestion bounds (F04). The world-wide bound defaults to "every admitted player
         // spending their whole per-tick budget at once", which is the largest drain a
@@ -512,13 +786,15 @@ public sealed class GameServerHost : IAsyncDisposable
             _nakamaClient = new Nakama.NakamaClient(
                 options.NakamaUrl,
                 options.NakamaHttpKey,
-                _loggerFactory.CreateLogger<Nakama.NakamaClient>());
+                _loggerFactory.CreateLogger<Nakama.NakamaClient>(),
+                options.NakamaHttpHandler);
             // One reward_kills call per killer per flush, instead of two HTTP RPCs and
             // two meta-DB transactions per kill (#233).
             _killBatcher = new Nakama.KillRewardBatcher(
                 _nakamaClient,
                 options.MapId,
-                _loggerFactory.CreateLogger<Nakama.KillRewardBatcher>());
+                _loggerFactory.CreateLogger<Nakama.KillRewardBatcher>(),
+                _metrics);
         }
 
         var eventStream = options.EventStream ?? new NoopEventStream();
@@ -526,6 +802,12 @@ public sealed class GameServerHost : IAsyncDisposable
 
         SimulationRates rates = options.SimulationRates ?? SimulationRates.Uniform(options.TickRate);
         _rates = rates;
+
+        // Same two inputs the per-attack cooldown uses, so the audit's bound is derived
+        // from the rule it is auditing rather than restated next to it.
+        _attackRates = new Input.AttackRateAudit(
+            rates.MovementHz,
+            Shared.GameLogic.Components.GameConstants.AttackCooldownTicks(rates.MovementHz));
 
         _inputHandler = new InputHandler(
             _world,
@@ -562,7 +844,33 @@ public sealed class GameServerHost : IAsyncDisposable
                         userId, InputRejection.Label(reason));
                     _metrics?.RecordAnomalyAlert();
                 }
-            });
+            },
+            // Accepted attacks feed the rate audit. Keyed on the account so it survives the
+            // reconnect that resets the entity's cooldown -- which is the hole it exists to
+            // see (AttackRateAudit).
+            (userId, tick) =>
+            {
+                if (_attackRates.RecordAccepted(userId, tick))
+                {
+                    _logger.LogWarning(
+                        "Accepted attack rate for {UserId} exceeded what the cooldown permits " +
+                        "({Permitted} in {Window} ticks). Observation only, no action taken.",
+                        userId, _attackRates.Permitted, _attackRates.WindowTicks);
+                    _metrics?.RecordAttackRateViolation();
+                }
+            },
+            _tickEvents,
+            options.Content,
+            // How long a one-shot action stays latched, in BASE ticks: exactly one world
+            // interval. Actions are written on the critical group and sampled by the
+            // snapshot gather on the world group, so at the 60/15 default only one write
+            // in four can ever be observed. Without this an attack reaches the wire on a
+            // one-in-four coin flip and reads as "the animation sometimes does not play".
+            //
+            // Derived from the schedule rather than configured, for the same reason the
+            // cooldown is: the value that makes it correct is the sampling period, and a
+            // second knob that can disagree with the schedule is a knob that will.
+            oneShotHoldTicks: rates.WorldEvery);
 
         // The observer is handed to the phase at construction rather than set afterwards:
         // a phase must hold no mutable instance state (ADR-12), and a settable observer is
@@ -577,9 +885,10 @@ public sealed class GameServerHost : IAsyncDisposable
         _tickLoop = new TickLoop(
             _world,
             _inputHandler,
+            _tickEvents,
             _connections,
             rates,
-            GameConstants.DefaultAoiRadius,
+            options.Aoi.Radius,
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
             options.KeyframeInterval,
@@ -597,7 +906,12 @@ public sealed class GameServerHost : IAsyncDisposable
             options.MapId,
             options.SaveInterval,
             _loggerFactory.CreateLogger<AsyncSaver>(),
-            _metrics);
+            _metrics,
+            // A dungeon instance writes HP and nothing else. Writing the row in full here
+            // would stamp the instance's id over the player's origin map, and they would
+            // come back to that map's spawn point rather than where they left — a silent
+            // permanent teleport as the price of a dungeon run (ADR-26 decision 5).
+            _isDungeon ? PlayerSaveScope.StatsOnly : PlayerSaveScope.Full);
 
         if (options.ServerRegistry != null)
         {
@@ -607,9 +921,18 @@ public sealed class GameServerHost : IAsyncDisposable
                     $"{nameof(ServerOptions.Registration)} is required when {nameof(ServerOptions.ServerRegistry)} is set",
                     nameof(options));
             }
+
+            // The MODE decides the scope, not the composition root: a dungeon pod must
+            // never reach the map index, whoever built the options and whatever they put
+            // in them (ADR-26 decision 8). The hash is still written — it is where the
+            // gateway reads this instance's dialable address from.
+            var registration = _isDungeon
+                ? options.Registration with { Scope = RegistrationScope.HashOnly }
+                : options.Registration;
+
             _registration = new RegistrationService(
                 options.ServerRegistry,
-                options.Registration,
+                registration,
                 () => _connections.Count,
                 _loggerFactory.CreateLogger<RegistrationService>());
         }
@@ -798,6 +1121,33 @@ public sealed class GameServerHost : IAsyncDisposable
 
                 await _registration.StartAsync(_cts.Token);
             }
+        }
+
+        // The bounded join deadline (ADR-26). Dungeon mode only — a map server is
+        // allocated for nobody in particular, so "nobody joined" is not a fault there — and
+        // only when a positive deadline is configured. It runs in the background for the
+        // same reason the allocation gate does: it may wait a long time for Allocated, and
+        // the listener has to be accepting and the health loop pinging throughout.
+        //
+        // Fire-and-forget rather than held: ShutdownAsync must not await this task, because
+        // this task is one of the callers of ShutdownAsync.
+        if (_isDungeon && _options.DungeonJoinDeadline > TimeSpan.Zero)
+        {
+            var deadlineCt = _cts.Token;
+            _ = Task.Run(async () =>
+            {
+                try { await WatchJoinDeadlineAsync(deadlineCt); }
+                catch (OperationCanceledException) { /* shutdown raced the deadline */ }
+                catch (Exception ex)
+                {
+                    // Unobserved, this would take the process down at a GC rather than at
+                    // the fault. A failed deadline watch must degrade to the pre-existing
+                    // behaviour (the pod leaks), not to a crash.
+                    _logger.LogError(ex,
+                        "The dungeon join-deadline watch failed; this instance will not " +
+                        "release itself if its party never arrives");
+                }
+            }, CancellationToken.None);
         }
 
         // Start background tasks
@@ -1260,7 +1610,10 @@ public sealed class GameServerHost : IAsyncDisposable
                 _world.UpdateComponents(userId, static (id, writer) =>
                 {
                     EntityHandle handle = writer.Resolve(id);
-                    if (handle.IsValid) writer.InputCursorOf(in handle) = default;
+                    if (!handle.IsValid) return;
+                    writer.InputCursorOf(in handle) = default;
+                    // Back in reach: the hold that made it untargetable is over.
+                    writer.PlayerTagOf(in handle).Linkdead = false;
                 });
             }
 
@@ -1285,6 +1638,22 @@ public sealed class GameServerHost : IAsyncDisposable
                 SessionKey = Net.Security.SessionKey.Derive(_options.JoinTokenSecret, claims.Jti),
             };
             conn.DeltaState.MaxSnapshotBytes = _options.MaxSnapshotBytes;
+        conn.DeltaState.ImportanceWeights = _options.Importance.Weights;
+        // The distance factor normalises by this, so a connection scored against the wrong
+        // radius would weight distance wrongly on every candidate -- invisibly, because the
+        // ordering would still look plausible.
+        conn.DeltaState.AoiRadius = _options.Aoi.Radius;
+        conn.DeltaState.Schedule = _options.ReplicationSchedule;
+        // The BASE rate, not the world rate: the encoder compares against the tick it is
+        // handed, and that is TickLoop.CurrentTick, which advances at the critical rate even
+        // though snapshots are only built on world ticks. See SnapshotDeltaState.TickHz.
+        conn.DeltaState.TickHz = _tickLoop.Rates.BaseHz;
+        conn.DeltaState.WorldEvery = _tickLoop.Rates.WorldEvery;
+        // Field-level delta requires the client to have proved it speaks protocol version 2
+        // (exact match, not AcceptedUnversioned) AND to be using Protobuf, which the encoder
+        // re-checks via intern. An unversioned client cannot merge partial entities safely.
+        conn.DeltaState.FieldDelta =
+            _options.FieldDelta && joinReq.ProtocolVersion == WireProtocol.ProtocolVersion;
 
             // Register connection, retiring the reservation under the same lock it was
             // taken under. The one way this fails: the reservation was a replacement of a
@@ -1327,6 +1696,10 @@ public sealed class GameServerHost : IAsyncDisposable
             // or down Redis must never delay a player entering the world.
             _registration?.NotifyPlayerCountChanged();
             NotifyAgonesAllocatedOnce();
+            // Latched here, next to the Agones allocate report, because it means the same
+            // thing: this process has served a player. A dungeon instance that empties may
+            // shut itself down; one that has never filled may not (ADR-26 decision 6).
+            Volatile.Write(ref _everHadPlayer, 1);
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 5: Send JoinTokenResp
@@ -1411,7 +1784,8 @@ public sealed class GameServerHost : IAsyncDisposable
                 try
                 {
                     outcome = await Net.Sealed.SealedHandshakeServer.RunAsync(
-                        conn, _options.JoinTokenSecret, claims.Jti, _logger, handshakeToken);
+                        conn, _options.JoinTokenSecret, claims.Jti, _options.ServerIdentity,
+                        _logger, handshakeToken);
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
@@ -1546,7 +1920,14 @@ public sealed class GameServerHost : IAsyncDisposable
                     input.Tick,
                     input.MoveX,
                     input.MoveY,
-                    input.AttackTargetId), conn.Ingress);
+                    input.AttackTargetId,
+                    input.AbilityId,
+                    input.AbilityTargetId,
+                    // Read unconditionally rather than only when AbilityId is non-zero: the
+                    // aim is meaningless without an ability and the simulation says so, and
+                    // a branch here would be a second place that has to agree about which
+                    // field gates which. Two float copies cost less than that agreement.
+                    new Vec2(input.AimX, input.AimY)), conn.Ingress);
                 switch (ingest)
                 {
                     case InputIngestResult.Coalesced:
@@ -1776,6 +2157,10 @@ public sealed class GameServerHost : IAsyncDisposable
             _world.RemoveEntity(userId);
             _metrics?.PlayerLeft();
             _registration?.NotifyPlayerCountChanged();
+
+            // A kick removes the entity outright and schedules no hold, so nothing else
+            // would ever notice that this was the last member of the party.
+            ShutdownIfInstanceFinished();
         }
         conn.Close();
 
@@ -1791,6 +2176,231 @@ public sealed class GameServerHost : IAsyncDisposable
         var resp = WireProtocol.NewEnvelope(MsgType.TransferMapResp,
             new TransferMapResponse { Ok = false, Error = error }, conn.Encoding);
         await conn.WriteOneAsync(resp);
+    }
+
+    /// <summary>
+    /// Whether an instance that has just lost an entity should now end its own process.
+    ///
+    /// <para>Pure, and static, so the rule can be tested exhaustively without a socket:
+    /// every one of the four conditions below has a case that gets it wrong, and three of
+    /// them are races that are painful to stage against a live host.</para>
+    ///
+    /// <list type="bullet">
+    ///   <item><b>Dungeon only.</b> A map server is long-lived by definition (ADR-2, one
+    ///   live server per map id); an empty map is a quiet map, not a finished one.</item>
+    ///   <item><b>It must have had a player.</b> Otherwise a freshly scheduled pod shuts
+    ///   itself down at boot, before the party it was allocated for can dial in.</item>
+    ///   <item><b>No live connections.</b> Somebody is still playing.</item>
+    ///   <item><b>No pending holds.</b> Two members leaving together schedule two holds;
+    ///   the first to expire must not take the pod down while the second is still inside
+    ///   its 60s reconnect window.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="isDungeon">Whether this process runs an instanced dungeon.</param>
+    /// <param name="everHadPlayer">Whether any player has ever joined this process.</param>
+    /// <param name="connections">Live player connections right now.</param>
+    /// <param name="pendingHolds">Reconnect holds still running right now.</param>
+    /// <returns>True when the instance is finished and should report Shutdown to Agones.</returns>
+    internal static bool ShouldShutdownEmptyInstance(
+        bool isDungeon, bool everHadPlayer, int connections, int pendingHolds) =>
+        isDungeon && everHadPlayer && connections == 0 && pendingHolds == 0;
+
+    /// <summary>
+    /// Whether a dungeon instance whose party never arrived should now end its own process —
+    /// the bounded join deadline that closes ADR-26's measured allocation leak.
+    ///
+    /// <para><b>This does not weaken <see cref="ShouldShutdownEmptyInstance"/>; it cannot.</b>
+    /// That rule requires <c>everHadPlayer</c> and this one requires <c>!everHadPlayer</c>,
+    /// so for any input at most one of the two is true and neither can ever fire on the
+    /// other's case. A pod mid-run, and a pod that emptied after a real run, are both
+    /// <c>everHadPlayer == true</c> and are therefore decided by decision 6 alone, exactly
+    /// as before. <c>GameServerHost_ShutdownRulesAreMutuallyExclusive</c> pins that.</para>
+    ///
+    /// <list type="bullet">
+    ///   <item><b>Dungeon only.</b> A map server is long-lived by definition (ADR-2) and is
+    ///   allocated for nobody in particular, so "nobody joined" is not a fault there.</item>
+    ///   <item><b>It must never have had a player.</b> The complement of decision 6.</item>
+    ///   <item><b>No handshake in flight.</b> A socket that has been accepted and is still
+    ///   inside the join handshake has not set <c>everHadPlayer</c> yet. Shutting down on
+    ///   the deadline instant would kill the party it exists to wait for, with the arrival
+    ///   already on the wire. Non-zero means "wait another slice", not "never".</item>
+    ///   <item><b>A positive deadline.</b> Zero or negative disables the mechanism, which
+    ///   is how a deployment opts out without a second flag.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="isDungeon">Whether this process runs an instanced dungeon.</param>
+    /// <param name="everHadPlayer">Whether any player has ever joined this process.</param>
+    /// <param name="pendingHandshakes">Accepted sockets still inside the join handshake.</param>
+    /// <param name="waited">Monotonic time since the clock started — see
+    /// <see cref="WatchJoinDeadlineAsync"/> for where that is. Must come from a
+    /// <see cref="Stopwatch"/>: this host's <c>CLOCK_REALTIME</c> runs 10-17% fast and has
+    /// been observed stepping backwards (#153), so a wall-clock budget silently shrinks
+    /// under exactly the load it exists to tolerate.</param>
+    /// <param name="deadline">The configured deadline; zero or less disables it.</param>
+    /// <returns>True when the allocation has expired unused and the pod should report
+    /// Shutdown to Agones.</returns>
+    internal static bool ShouldShutdownUnjoinedInstance(
+        bool isDungeon, bool everHadPlayer, int pendingHandshakes,
+        TimeSpan waited, TimeSpan deadline) =>
+        isDungeon && !everHadPlayer && pendingHandshakes == 0
+        && deadline > TimeSpan.Zero && waited >= deadline;
+
+    /// <summary>
+    /// End the process when this dungeon instance has emptied for good.
+    ///
+    /// <para>Called from the paths that can leave the world without players: a reconnect
+    /// hold expiring, and a duplicate-login kick (which removes the entity outright and so
+    /// schedules no hold of its own). The pod is the only party that knows both that the
+    /// last member left and that their hold lapsed without a reconnect, which is why this
+    /// is neither a timer nor an external reaper (ADR-26 decision 6).</para>
+    ///
+    /// <para><see cref="ShutdownAsync"/> is idempotent and reports <c>Shutdown</c> to the
+    /// Agones sidecar at its tail, so this adds no second teardown path — it only decides
+    /// when the existing one runs. Fire-and-forget: the caller is a hold task, and the
+    /// teardown it starts drains connections and waits on the final save.</para>
+    /// </summary>
+    private void ShutdownIfInstanceFinished()
+    {
+        if (!ShouldShutdownEmptyInstance(_isDungeon, EverHadPlayer, _connections.Count, _holds.Count))
+            return;
+        if (Volatile.Read(ref _shutdownStarted) != 0)
+            return;
+
+        _logger.LogInformation(
+            "Dungeon instance {ServerId} is empty and the last reconnect hold has expired; shutting down",
+            _options.ServerId);
+
+        _ = Task.Run(async () =>
+        {
+            try { await ShutdownAsync(); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Dungeon instance shutdown failed for {ServerId}", _options.ServerId);
+            }
+        });
+    }
+
+    /// <summary>
+    /// How often the join deadline is re-evaluated once the clock is running. Capped at a
+    /// quarter of the deadline so a short deadline (tests, a tuned fleet) is still observed
+    /// with resolution to spare, and floored at 50ms so a pathologically short one does not
+    /// become a busy loop.
+    /// </summary>
+    internal static TimeSpan JoinDeadlinePollInterval(TimeSpan deadline)
+    {
+        var quarter = TimeSpan.FromTicks(deadline.Ticks / 4);
+        var capped = quarter < TimeSpan.FromSeconds(1) ? quarter : TimeSpan.FromSeconds(1);
+        return capped < TimeSpan.FromMilliseconds(50) ? TimeSpan.FromMilliseconds(50) : capped;
+    }
+
+    /// <summary>
+    /// End a dungeon instance whose party never arrived (ADR-26, the allocation leak).
+    ///
+    /// <para><b>Where the clock starts, and how the pod knows.</b> Not at boot. A dungeon
+    /// fleet carries spare <c>Ready</c> replicas on purpose (ADR-18 unlocks exactly that
+    /// shape for a fleet pinning no map id), and a pod parked in that buffer for an hour is
+    /// not leaking — Agones can still scale it away. The clock therefore starts when the pod
+    /// observes its own GameServer at <c>Allocated</c>, which it <b>can</b> do: the sidecar's
+    /// <c>GET /gameserver</c> carries <c>status.state</c>, surfaced as
+    /// <see cref="IAgonesSdk.GetStateAsync"/> and already polled by
+    /// <see cref="AgonesAllocationGate"/> for the registration gate. That gate is reused here
+    /// verbatim rather than re-implemented. When <c>RegisterOnAllocated</c> is also armed the
+    /// two waits poll independently, which costs one extra small sidecar GET per second per
+    /// unallocated pod and keeps the two mechanisms from sharing a failure.</para>
+    ///
+    /// <para><b>With Agones disabled</b> — compose, a local run, every test — there is no
+    /// allocation to observe and no allocator to leak a pod to, so the clock starts at boot:
+    /// a dungeon process started by hand was started for a party that is about to arrive.
+    /// That is the only honest fallback; waiting for a state that can never be read would
+    /// disable the mechanism silently.</para>
+    ///
+    /// <para><see cref="Stopwatch"/>, never <c>DateTime.UtcNow</c>: this host's
+    /// <c>CLOCK_REALTIME</c> runs 10-17% fast and has been seen stepping backwards (#153),
+    /// and a wall-clock budget would shrink under exactly the load this exists to
+    /// tolerate.</para>
+    ///
+    /// <para>Fire-and-forget teardown, the same shape
+    /// <see cref="ShutdownIfInstanceFinished"/> uses, and for the same reason: this task must
+    /// not be what <see cref="ShutdownAsync"/> waits on, or a shutdown started from here
+    /// would wait on itself.</para>
+    /// </summary>
+    private async Task WatchJoinDeadlineAsync(CancellationToken ct)
+    {
+        var deadline = _options.DungeonJoinDeadline;
+
+        if (_agonesSdk.IsEnabled)
+        {
+            var gateLogger = _loggerFactory.CreateLogger("DungeonJoinDeadline");
+            if (!await AgonesAllocationGate.WaitForAllocatedAsync(_agonesSdk, ct, gateLogger)
+                    .ConfigureAwait(false))
+            {
+                // Cancelled before ever being allocated. A Ready pod that is shutting down
+                // was never leaking, so there is nothing for this path to say.
+                return;
+            }
+
+            _logger.LogInformation(
+                "Dungeon instance {ServerId} is Allocated; its party has {Deadline}s to join " +
+                "before the instance releases itself (ADR-26 join deadline)",
+                _options.ServerId, deadline.TotalSeconds);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Dungeon instance {ServerId} has {Deadline}s to receive its first player " +
+                "before it releases itself (ADR-26 join deadline; Agones is disabled, so the " +
+                "clock starts at start-up rather than at Allocated)",
+                _options.ServerId, deadline.TotalSeconds);
+        }
+
+        var waited = Stopwatch.StartNew();
+        var slice = JoinDeadlinePollInterval(deadline);
+
+        while (!ct.IsCancellationRequested)
+        {
+            // The rule is consulted FIRST and is the sole authority on whether this pod
+            // dies. The EverHadPlayer branch below it only stops the polling and says so in
+            // the log — it must never be what protects a live party, because then a wrong
+            // rule would be invisible to every test that drives a real host.
+            if (ShouldShutdownUnjoinedInstance(
+                    _isDungeon, EverHadPlayer, PendingHandshakes, waited.Elapsed, deadline))
+            {
+                if (Volatile.Read(ref _shutdownStarted) != 0)
+                    return;
+
+                _logger.LogWarning(
+                    "Dungeon instance {ServerId} was never joined within {Deadline}s; releasing " +
+                    "it rather than leaking the allocation. In production this is a client that " +
+                    "received its address and join token and died before dialling (ADR-26).",
+                    _options.ServerId, deadline.TotalSeconds);
+
+                _ = Task.Run(async () =>
+                {
+                    try { await ShutdownAsync(); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "Join-deadline shutdown failed for {ServerId}", _options.ServerId);
+                    }
+                });
+                return;
+            }
+
+            if (EverHadPlayer)
+            {
+                // The party arrived and the rule has already declined. The instance's life
+                // is decision 6's business from here, and this task has nothing further to
+                // decide, ever.
+                _logger.LogInformation(
+                    "Dungeon instance {ServerId} received its first player after {Elapsed:F1}s; " +
+                    "the join deadline no longer applies",
+                    _options.ServerId, waited.Elapsed.TotalSeconds);
+                return;
+            }
+
+            try { await Task.Delay(slice, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
     }
 
     /// <param name="countedOnline">
@@ -1829,9 +2439,11 @@ public sealed class GameServerHost : IAsyncDisposable
             return;
         }
 
-        var holdTtl = _options.Mode == "dungeon"
-            ? TimeSpan.FromSeconds(60)
-            : _options.HoldTtl;
+        // One source for the window: ServerOptions.HoldTtl, which the composition root
+        // already sets to 60s for a dungeon and 30s for a map. It used to be hardcoded to
+        // 60s here as well, so a dungeon host could not be given a shorter window — which
+        // made the empty-instance shutdown below untestable without a real 60s wait.
+        var holdTtl = _options.HoldTtl;
 
         var holdCts = new CancellationTokenSource();
         // Replace rather than overwrite: a superseded hold's CTS would otherwise never
@@ -1843,6 +2455,16 @@ public sealed class GameServerHost : IAsyncDisposable
             superseded.Dispose();
         }
         _holds[userId] = holdCts;
+
+        // Out of reach for the hold. A held entity is still a player in the world, so
+        // without this enemies chased and killed it, respawn moved it to the spawn point,
+        // and the eviction save persisted that -- a dropped connection cost the player
+        // their position. See PlayerTag.Linkdead. Cleared by the reattach below.
+        _world.UpdateComponents(userId, static (id, writer) =>
+        {
+            EntityHandle handle = writer.Resolve(id);
+            if (handle.IsValid) writer.PlayerTagOf(in handle).Linkdead = true;
+        });
 
         _logger.LogInformation("Player {UserId} disconnected, holding entity for {Ttl}",
             userId, holdTtl);
@@ -1869,6 +2491,10 @@ public sealed class GameServerHost : IAsyncDisposable
                 {
                     _world.RemoveEntity(userId);
                     _logger.LogInformation("Entity hold expired for {UserId}, entity removed", userId);
+
+                    // Checked AFTER the removal above, so the hold this task owns is
+                    // already out of _holds and cannot count itself as a reason to stay.
+                    ShutdownIfInstanceFinished();
                 }
                 else
                 {

@@ -43,9 +43,17 @@ human inspection and for the Unity DOTS sample, which polls it.
   "sim_background_hz": 5,
   "current_tick": 726335,
   "players_online": 12,
+  "connections": 12,
   "capacity": 100,
   "entities": 34,
   "enemies_alive": 22,
+  "enemy_ai": "chase=on max=30+45/player wave=2+6/player every 1.5s spawn@13 min=8 contact=1 hp=16 atk=5 def=2 speed=2.5",
+  "enemy_ai_max_now": 570,
+  "bots": "off",
+  "bots_alive": 0,
+  "player_saves_ok": 27,
+  "player_saves_error": 239,
+  "player_save_error_ratio": 0.8985,
   "attacks_received": 4210,
   "attacks_unresolved": 12,
   "attacks_rejected": 3980,
@@ -54,6 +62,8 @@ human inspection and for the Unity DOTS sample, which polls it.
   "last_attack_rejection": "target out of range",
   "redis": "connected",
   "event_stream": "redis",
+  "event_stream_health": "ok",
+  "event_stream_consecutive_failures": 0,
   "events_dropped": 0,
   "event_publish_failures": 0,
   "kick_consumer": "redis",
@@ -66,6 +76,29 @@ human inspection and for the Unity DOTS sample, which polls it.
   "uptime_seconds": 12105
 }
 ```
+
+### `redis`, `event_stream` and `kick_consumer` are CONFIGURATION, not health
+
+Those three are null checks on objects constructed at startup. Once the handle exists they
+answer the same thing for the life of the process, whatever happens to the dependency
+afterwards. This endpoint was observed reporting `"redis": "connected"` while the Redis
+container was `Exited (0)`, with `events_dropped` past 22,000 and climbing — the endpoint
+contradicting itself, because the two numbers that measure the thing disagreed with the field
+that names it (#407).
+
+They are kept, because "which backend is wired" is a legitimate question. They were only
+dangerous while they were the fields an operator would read as health.
+
+**Read `event_stream_health` for health.** It is `ok`, `failing`, `idle` (configured, nothing
+published yet) or `disabled`, derived from the publisher's consecutive-failure count — which
+resets on success, so it describes the present rather than the process's whole history.
+`event_stream_consecutive_failures` is that count; `event_publish_failures` is cumulative and
+cannot fall, so a stream that failed a thousand times last week and works today reports the
+same large number as one failing this second.
+
+**No I/O is performed to answer a status request.** A health endpoint that probes its
+dependencies on every scrape becomes a way to hammer them.
+
 
 **Every rate field names its group.** The server runs three simulation groups at
 three frequencies (ADR-13), so an unqualified "tick rate" is a question with three
@@ -83,14 +116,33 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `sim_world_hz` | World-group Hz — AI, spawning, **and the snapshot broadcast cadence**. This, not `tick_rate`, is what a client's interpolation buffer is sized against and what governs bandwidth per client |
 | `sim_background_hz` | Background-group Hz |
 | `capacity` | The admission limit (`GAMESERVER_CAPACITY`) this server enforces and publishes into the registry |
+| `player_saves_ok` / `player_saves_error` / `player_save_error_ratio` | Outcome of every player-state save attempt since process start, and the failed share of them in `[0,1]`. Same values as `gameserver_player_saves_total`, published here because **a ratio nobody can see is not a signal**: this endpoint is what people open on a dev box, and a sweep failing 9 attempts in 10 sat undetected for 7.8 hours behind a Prometheus counter nothing was scraping (#402). The save sweep is the only thing that persists position and HP, so a non-zero ratio means ADR-6's "≤30s of loss on a crash" is no longer true — the real window is *since the last success*, which is unbounded. **Read the pair, not the ratio alone.** The counters are cumulative over process lifetime, so a store that is down *right now* drives the ratio towards 1 without bound while `player_saves_ok` stays frozen at whatever it reached before the outage; a high lifetime ratio cannot by itself distinguish "failing steadily" from "was fine, then the database went away". The example above is the #402 reading, which was the second of those |
 | `attacks_received` / `attacks_unresolved` / `attacks_rejected` / `attacks_accepted` / `attack_kills` | Attack-path counters since process start. Every input carrying an attack target lands in exactly one of *unresolved* (target id no longer resolves — despawned or bogus), *rejected* (refused by `CombatLogic.ValidateAttack`: range, cooldown, dead attacker or target), or *accepted* (dealt damage); `attack_kills` counts accepted attacks that killed. These exist because a rejected attack is dropped with a Debug-level log on servers running at Information — without the counters, a client attacking out of range is indistinguishable from a client not attacking at all, which is precisely the ambiguity that stalled a live zero-kills investigation |
 | `last_attack_rejection` | Verbatim reason of the most recent rejection (e.g. `target out of range` — an interned constant since #249; the measured distance moved to the Debug-guarded rejection log), `null` until something is rejected. One string, most-recent-wins — a breadcrumb naming *why* attacks are being refused, not a log |
 | `event_stream` | Which `IEventStream` backs cross-server events: `redis` (publishing into `events:game`, the stream the gateway relay consumes — ADR-5) or `noop` (`REDIS_ADDR` unset, or the connection could not be built at startup — events are discarded) |
 | `events_dropped` / `event_publish_failures` | Loss counters of the Redis event stream, since process start — the same values as `gameserver_events_dropped_total` / `gameserver_events_publish_failures_total` above. Always `0` under `"event_stream": "noop"` |
 | `kick_consumer` | State of the duplicate-login kick consumer on `events:kick` (ADR-20): `redis` (consuming as group `gs:{server_id}`) or `disabled` (`REDIS_ADDR` unset, or the consumer failed to start — supersede events for this server are then never acted on, so a re-logging-in user keeps their old connection here) |
 | `players_kicked` | Duplicate-login kicks executed since process start — connections force-closed because a `session_superseded` event named their join-token jti. Same value as `gameserver_players_kicked_total`. Always `0` under `"kick_consumer": "disabled"` |
+| `connections` | Connections registered on this server: **the set the snapshot broadcast iterates**, and therefore what snapshot bandwidth is paid per. Same value as `gameserver_connections`. **Read it next to `players_online` and treat a disagreement as a defect** — see "`connections` vs `players_online`" below. Bots hold no connection and appear in neither; sockets still inside the handshake are `handshakes_pending`, also neither |
 | `handshakes_pending` | Accepted sockets currently inside the join handshake — **not** in `players_online` and **not** under `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` instead. Same value as `gameserver_handshakes_pending`. A number that sits at the bound is a pre-join flood (or a client fleet that connects and never joins) |
 | `handshakes_rejected` | Handshakes refused **before authentication** since process start, every reason summed: pool full at accept, no complete join frame by `GAMESERVER_HANDSHAKE_TIMEOUT_MS`, or a first frame that was not a well-formed `MsgJoinToken`. Same value as `sum(gameserver_handshakes_rejected_total)`. A capacity refusal is not one of these — that is an authenticated join, logged at Warning |
+| `aoi_radius` | Effective area-of-interest radius in world units (`GAMESERVER_AOI_RADIUS`, default 50). **Published because nothing else reveals it.** Two servers with identical rates, capacity and snapshot budget report completely different `snapshot_bytes` at the same population if their radii differ, and the radius is not on the wire — so before this field the only way to learn a pod's radius was to read the manifest that was supposed to have produced it, which an **already-allocated** GameServer does not necessarily reflect: its environment is fixed at pod creation and a fleet update reaches only new pods. |
+| `aoi_covers_whole_map` | True when `aoi_radius` reaches the map's diagonal, so interest management filters nothing and every entity appears in every snapshot for every client. Also logged at Warning once at startup. Legitimate in a small dungeon instance; on an open map it is the explanation for a bandwidth figure that looks inexplicable. |
+| `importance_profile` | Replication-importance profile in force (`GAMESERVER_IMPORTANCE`): `legacy`, `balanced`, or **`custom`** whenever any weight was overridden. Published for the same reason as `aoi_radius`: deployment-set, not on the wire, and two servers running different profiles are indistinguishable from any client. The label never claims a profile it is not running — a server reporting `balanced` with a replaced weight would be worse than one reporting nothing, because it invites a reader to look up what balanced means. |
+| `importance_weights` | The four weights with a data source, as they are actually running. `balanced` is a label; a custom profile is only readable as its numbers. |
+| `enemy_ai` | The enemy AI tuning in force (the `GAMESERVER_ENEMY_*` family), rendered as one line, or `off` when `GAMESERVER_ENEMIES=false`. Published for the same reason as `aoi_radius` and `importance_profile`: deployment-set, not on the wire, and two servers running different enemy tuning are indistinguishable from any client and from every other field here — `enemies_alive` answers "how many are there **now**", which is the same number on a server capped at 30 that has filled and one capped at 300 that has not. |
+| `enemy_ai_max_now` | Enemy population cap in force **at this instant**: `GAMESERVER_ENEMY_MAX + GAMESERVER_ENEMY_MAX_PER_PLAYER × players_online`. Rendered as well as configured, because the configuration is "30 + 45 per player" and the behaviour is a number, and an operator comparing it against `enemies_alive` needs the one that applies right now. **Counted from the world's player entities, not from `players_online`.** Those are different numbers and the difference is not academic: synthetic players (`bots`) are entities the cap scales on and are not connections, so a probe server with 24 bots and nobody logged in published a cap of 30 while actually running 1110 when this field was derived from the connection count. It still counts a dead player awaiting respawn, which the spawner does not, so it can read one allowance high during a wipe. |
+| `enemy_attacks_decided` | Enemy attacks decided and emitted as input since start; 0 with `GAMESERVER_ENEMY_ATTACKS=off` or with nothing in range. Counts **decisions, not landed hits**: an enemy decides on a world tick and the attack is validated on the next critical tick, so the gap between this and `attacks_accepted` is targets that another enemy killed in between. A small, non-zero gap during a wipe is expected; a large one means something is refusing attacks that the decision thought were legal. |
+| `enemy_attacks_throttled` | Enemy attacks **not** emitted because the target had already taken `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` hits in the current window. **The field that says whether the survivability cap is doing anything**, and the only one that does: "enemies are attacking and the cap is holding" and "enemies are not attacking at all" are indistinguishable from a player's HP bar, from `enemies_alive` and from every other field here, and they differ in exactly this counter. A crowd standing on a player with this at zero means the cap is not what is limiting the fight. |
+| `player_respawns` | Players returned to the map after their HP reached 0 (`GAMESERVER_PLAYER_RESPAWN`). **Includes synthetic players**, and a demo whose crowd is bots will show this climbing while `bots_alive` stays flat — which is the intended reading rather than a discrepancy: without the respawn rule a dead bot never acts again for the life of the process, so the population drains while the count does not move. |
+| `bots` | Synthetic-player configuration in force (`GAMESERVER_BOTS` and the `GAMESERVER_BOT_*` family), or `off`, which is the default. Published because bots are **indistinguishable from players in every other field here and on the wire** — that is the point of them and also the trap: a reader seeing a busy map and `players_online: 3` will conclude the count is broken. It is also the only signal that a server holds entities that will never be persisted. |
+| `bots_alive` | Synthetic players currently in the world. **Not** included in `players_online`, which counts connections — a bot holds none. It **is** included in the player count `enemy_ai_max_now` scales on, because the spawner counts entities. |
+| `replication_schedule` | Per-importance send intervals in force, **already converted to world ticks** at this server's `SIM_WORLD_HZ`. Rendered rather than named because the configured value is milliseconds and the behaviour is ticks: the same `266ms` is 4 ticks at 15Hz and 8 at 30Hz, and an operator comparing two pods needs the number that actually applies. |
+| `snapshot_deferred_by_interval` | Entity updates withheld because the entity's importance tier was not due. Distinct from `snapshot_entities_shed`, which is the byte budget biting: this is policy, that is pressure, and a deployment with the schedule off reports zero here for ever. |
+| `snapshot_entities_gathered` | Entities found in viewers' areas of interest, summed across every viewer every world tick — what the server **considered** in-interest, before the byte budget or the replication schedule withheld anything. Its pair is the client's own entity count: the two differing localises a loss to encode/decode, the two agreeing means the interest genuinely held that many. Read them together or neither is conclusive — before both existed, "the wire is delivering N" was an inference on both sides at once (Cuvara/Netcode#161). |
+| `snapshot_max_gather` | Largest single-viewer gather seen on this server. Kept beside the total because an **average hides the case that matters** — one client with an empty view among many full ones, which is the shape an anchor or interest bug makes. |
+| `snapshot_anchor_missing` | Viewer gathers **skipped** because the connection's own entity could not be resolved, so there was no position to centre its area of interest on. Brief non-zero around join and despawn is normal; sustained growth means a connection has outlived its entity and is being sent nothing. Read it as a *correctness* counter rather than a load one: before #385 this case was silent and anchored the AOI at `(0,0)` — the single most populated point on the map, where the mobs spawn — so the client received a busy, plausible view of somewhere it was not, with every other counter clean. |
+| `snapshot_max_state_age` | Longest gap, in **world ticks**, between an entity's state going stale for a client and being re-sent — the cost side of the schedule. **Not the same number as `snapshot_max_shed_age`**: a not-due entity is not a shed entity, so the budget's bookkeeping is blind to schedule deferrals, and reading one for the other reports a healthy zero while entities go seconds without an update. |
 | `inputs_dropped` | Client inputs discarded at ingest since process start (per-connection budget or world-wide queue cap, summed). Same value as `sum(gameserver_inputs_dropped_total)`. Movement coalesced in place is **not** a drop and not counted here |
 | `transfers_rejected` | `MsgTransferMap` requests refused because a transfer was already running on that connection. Same value as `gameserver_transfers_rejected_total` |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
@@ -146,10 +198,12 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_tick_processed_inputs_total` | counter | `map_id` | Inputs applied by the tick loop |
 | `gameserver_sim_group_duration_seconds` | histogram | `map_id`, `group` | Wall time of one run of a simulation group — `group=critical\|world\|background` |
 | `gameserver_sim_group_runs_total` | counter | `map_id`, `group` | Times a simulation group has run. The ratio between groups **is** the configured rate ratio |
+| `gameserver_nakama_reward_outcomes_total` | counter | `map_id`, `outcome` | Answers to Nakama's `reward_kills`, one per attempt including retries — `outcome=granted\|partial\|not_granted\|too_large\|unknown`. See below |
 | `gameserver_tick_overruns_total` | counter | `map_id` | Base ticks whose work exceeded the base period — see below |
 | `gameserver_tick_backlog_dropped_total` | counter | `map_id` | Base ticks discarded because the loop fell too far behind the wall clock — see below |
 | `gameserver_achieved_tick_hz` | gauge | `map_id` | **Measured** base-tick rate over a 2s window, from the monotonic clock. Compare with the configured `SIM_CRITICAL_HZ` — a healthy server has them equal. Never derived from wall time: a wall-clock rate on a host with a fast `CLOCK_REALTIME` reports a healthy loop as slow (#147/#153). `0` = not measured yet |
 | `gameserver_players_online` | gauge | `map_id` | Connected players |
+| `gameserver_connections` | gauge | `map_id` | Connections registered on this server — the set the snapshot broadcast iterates. Deliberately **not** derived from `players_online`, which is an independently balanced counter: the two disagreeing is the signal that one of them is lying (#401). This is the right denominator for `gameserver_snapshots_bytes_total` when they disagree |
 | `gameserver_entities` | gauge | — | Entities in the world |
 | `gameserver_snapshots_sent_total` | counter | `map_id` | Snapshot messages sent |
 | `gameserver_snapshots_bytes_total` | counter | `map_id` | Bytes of snapshot frames written to client sockets, envelope and 4-byte length prefix included. Divide by `gameserver_players_online` and by the scrape interval for the per-client downlink rate — the figure ADR-7's `< 50 KB/s` mobile threshold is about, and the one measured at 45.9 KB/s at 200 players |
@@ -158,7 +212,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_transport_encrypted` | gauge | `map_id`, `transport`, `cipher` | 1 when packets leave this server as ciphertext, 0 when they are cleartext. **0 is the default** — `transport=tcp` has no packet encryption and `TRANSPORT_KEY` defaults to empty — so alert on this being 0 rather than assuming it is 1. A **gauge** on purpose: a never-incremented counter is absent from `/metrics`, and "is this server encrypted" must never answer by being missing |
 | `gameserver_transport_authenticated` | gauge | `map_id`, `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. **Currently 0 on every supported configuration**: the KCP path is AES-CFB with a CRC32, and a CRC32 is linear, not a MAC. Separate from `transport_encrypted` so encryption cannot be read as integrity; published while 0 so that its becoming 1 is a visible event |
 | `gameserver_snapshots_max_shed_age` | gauge | `map_id` | Longest deferral, in snapshots, any entity on any live connection has reached. **High-water mark** — it does not fall while a connection lives, so read the rate of climb, not the level. The scheduler is strictly oldest-first, so it is bounded by the number of dirty entities in one observer's AOI and not by session length; a value that keeps climbing means the budget is too small for the crowd |
-| `gameserver_player_saves_total` | counter | `status=ok\|error` | Persistence results from the async saver |
+| `gameserver_player_saves_total` | counter | `status=ok\|error` | Persistence results from the async saver, **one increment per player per sweep** — not per sweep. A single stuck player therefore contributes an increment every sweep for as long as it is online, so read this against `players_online` before reading a large `error` total as a large number of distinct victims. Mirrored onto `/status` as `player_saves_ok` / `player_saves_error` / `player_save_error_ratio`, and crossing a per-sweep failure ratio of 50% also raises one `Error` log line (`Player save sweep DEGRADED`), because on a dev box this counter is not scraped by anything (#402) |
 | `gameserver_events_published_total` | counter | `type` | Cross-server events handed to the event stream by `EventPublisher`. With the Redis backend this counts hand-offs into the publish queue, not confirmed `XADD`s — subtract the two counters below for what actually reached the stream |
 | `gameserver_events_dropped_total` | counter | — | Events dropped **oldest-first** because the Redis event stream's bounded publish queue (4096) was full — i.e. Redis was unreachable long enough to fill it — or the event was offered after shutdown. Zero forever on a healthy server; any non-zero rate means the gateway relay is missing events |
 | `gameserver_events_publish_failures_total` | counter | — | Events dropped after exhausting the `XADD` retry budget (3 attempts with short backoff). Distinct from `dropped`: these reached the head of the queue and still could not be written. Sustained increments alongside a flat `dropped` means Redis is up but refusing writes (e.g. OOM under `noeviction`) |
@@ -247,12 +301,30 @@ cardinality a client could mint on demand.
 `gameserver_input_anomaly_alerts_total` — times an account's decaying score first crossed
 the alert threshold. **Observation only; no player is ever acted on.**
 
+`gameserver_combat_attack_rate_violations_total` — times an ACCOUNT landed more **accepted**
+attacks inside the audit window than one entity's cooldown permits. **Observation only; no
+player is ever acted on.**
+
+Read it differently from the rejection counters, because it is their complement rather than
+more of the same. Every attack counted here **passed validation** — the per-attack cooldown
+check is exact for one entity and blind to anything that hands an account a different one,
+and nothing persists a cooldown across entities. So an account exceeding the rate through
+such a route produces **no rejections at all**: `inputs_rejected` and the anomaly score
+stay flat, and this is the only series that moves.
+
+A non-zero value is not evidence of a known exploit — today a reconnect reattaches the same
+entity, cooldown intact, and the routes that do yield a fresh one cost more time than the
+500 ms cooldown they reset. Treat a rise as "a path that should not exist now does",
+whether that path is a cheat or a bug of ours.
+
 ### `/status`
 
 `inputs_rejected`, `inputs_rejected_by_reason` (every reason, always, including zeros),
 `anomaly_accounts_tracked`, `anomaly_accounts_over_threshold`, `anomaly_alerts`,
 `anomaly_accounts_dropped`, and `anomaly_top_accounts` — the per-account breakdown, which
 cannot be a metric label without unbounded cardinality.
+
+`attack_rate_violations` — the same count as the metric above.
 
 `anomaly_top_accounts` is ordered **by score, not by rejection count**. The account with
 the most rejections is usually the one with the worst connection, and putting that player
@@ -404,6 +476,8 @@ Useful queries:
 ```promql
 histogram_quantile(0.99, rate(gameserver_tick_duration_seconds_bucket[5m]))  # tick p99
 rate(gameserver_player_saves_total{status="error"}[5m])                      # save error rate
+sum(rate(gameserver_player_saves_total{status="error"}[5m]))
+  / sum(rate(gameserver_player_saves_total[5m]))                             # save FAILURE RATIO - alert >0.1
 sum(gameserver_players_online)                                               # CCU
 rate(gameserver_resyncs_total[5m])                                           # interning health
 rate(gameserver_tick_overruns_total[5m])                                     # base rate sustainable?
@@ -514,6 +588,53 @@ is not keeping up and needs either a lower `SIM_CRITICAL_HZ` or fewer players.
 and for the same reason as figures measured under a high resync rate: the server
 was not doing the work the numbers claim to describe.
 
+### `connections` vs `players_online` — disagreement is a DEFECT
+
+Unlike the pair below, these two must be **equal** at all times. They are two
+measurements of the same quantity by different means: `players_online` is a counter
+balanced by hand on join and on leave, `connections` is the live size of the
+registry the snapshot broadcast iterates. Neither is derived from the other, on
+purpose — that is the only reason a gap between them is observable at all.
+
+| Reading | Meaning |
+|---|---|
+| `connections == players_online` | healthy |
+| `connections > players_online` (e.g. `connections: 1`, `players_online: 0`) | connections are outliving their players. The server pays a full AOI scan, delta encode and socket write **per phantom viewer per world tick** for sockets nobody owns, while reporting a pod an operator would read as idle |
+| `connections < players_online` | the join/leave balance has drifted. `players_online` is what feeds capacity and allocation decisions, so this is the more dangerous direction |
+
+Bots (`GAMESERVER_BOTS`) are player entities holding no connection: they appear in
+neither number. Sockets still inside the join handshake appear in neither either —
+those are `handshakes_pending`.
+
+**Why the field exists.** #401 reported `snapshot_bytes` climbing at ~16.4 KB/s on a
+server reporting `players_online: 0`. With no connection count published, deciding
+between "a connection is leaking" and "`players_online` is lying" took three 30 s
+samples, a read of the broadcast source and a socket table out of the container. One
+request answers it now.
+
+### `snapshot_*` counters on an empty server — they must stand still
+
+With no connection registered, every `snapshot_*` counter must be **flat**: no
+viewer means no gather, no encode and no write. A steady climb with
+`connections: 0` is the #401 defect — the per-tick deltas were reset inside the
+"are there any viewers" branch while the recording calls ran unconditionally, so a
+world tick with no viewers recorded the **last connected client's tick, again**, at
+the world rate, for the life of the process.
+
+Two properties of that reading are worth keeping, because they are what identified
+it and would identify a recurrence:
+
+- **The climb was bit-exact.** `snapshot_bytes` rose by exactly 1140 and
+  `snapshot_entities_gathered` by exactly 279 every world tick. Real traffic varies
+  per tick because the delta varies; a perfectly constant per-tick increment is a
+  replayed value, not work.
+- **`snapshots_sent` stayed still while the others climbed.** It is the one counter
+  whose delta is reset at the top of the tick rather than inside the branch. Two
+  counters recorded three lines apart disagreeing is what located the bug.
+
+A second map on the same build, same bots and same enemies, that had never carried a
+client read 0 for all of them — the control arm that ruled out the bots.
+
 ### `gameserver_entities` vs `gameserver_players_online` — disagreement is CORRECT
 
 **These two gauges are expected to differ, and a difference is not a leak.** They
@@ -586,6 +707,45 @@ game server directly, because the gateway is a redirector and not in the gamepla
 data path ([ADR-3](../../docs/ARCHITECTURE-DECISIONS.md#adr-3--gateway-is-a-redirector-not-a-router)).
 A gateway counter here would always read zero, which is worse than absent: a
 permanently-zero series looks like a healthy signal rather than a missing one.
+
+### `gameserver_nakama_reward_outcomes_total` — the only thing watching the meta hop from the consumer's side
+
+The reward path fails **quietly by construction**: `NakamaClient` logs a warning
+and the batcher re-queues, so a hop that is broken for every player looks
+identical to a healthy one from inside the game. ADR-24 §8.1 recorded that
+nothing in the deployment noticed, and that the first notice in practice was a
+human reading pod logs. This counter is what replaced that.
+
+It is on the **consumer's** side on purpose. Nakama's own k8s probes answer for
+the metrics listener `:9100`, which the meta hop's TLS never covers — so they
+cannot see the client API on `:7350` be unreachable, untrusted or wedged. This
+counter can, because it is a record of what actually happened when this process
+tried to use it.
+
+Every failure mode that has genuinely occurred lands on a label:
+
+| What happened | Outcome |
+|---|---|
+| A stale `Allocated` GameServer left on a plaintext `NAKAMA_URL` after the hop moved to TLS. Nakama's TLS listener answers `400 Client sent an HTTP request to an HTTPS server`. **Measured on k3d-rpg-dev, 2026-09-13** — one pod, every reward RPC failing, the game itself playing perfectly | `not_granted` |
+| A self-signed Nakama with no `NAKAMA_TLS_PIN`: .NET refuses the certificate, `HttpRequestException` before any answer | `unknown` |
+| The client-API mux wedged while `:9100` still answers — the gap ADR-24 §8.1 names | `unknown` (timeout) |
+| Gold committed, leaderboard write failed | `partial` |
+| Batch over Nakama's per-batch cap — **the batcher splitting as designed, not a failure** | `too_large` |
+
+**`granted` is counted too, and that is not padding.** The alert reads a ratio,
+and a failure counter with no denominator cannot tell "the hop is broken" from
+"nobody killed anything" — the second being the normal state of an idle map.
+`too_large` is excluded from the failure side for the mirror-image reason: a
+routine background rate is somewhere for a real signal to hide.
+
+**Counted in the batcher, not in `NakamaClient`.** The batcher is the one place
+that sees every answer exactly once, retries included, so a hop that fails and is
+retried forever shows a rising non-granted rate rather than one lost kill.
+
+`deploy/monitoring/alerts.yaml` turns it into the repository's **first alert
+rule** — `NakamaRewardsNotLanding` fires when more than half of the answers on a
+map have not landed for ten minutes. Read that file before changing the labels
+here; the expression names them.
 
 ## Testing
 

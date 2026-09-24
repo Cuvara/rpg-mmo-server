@@ -21,8 +21,14 @@ public static class RegistryDefaults
         TimeSpan.FromMilliseconds(Math.Max(1000, ttl.TotalMilliseconds / 3));
 }
 
-/// <summary>Everything the registration service needs to describe this server.</summary>
-public sealed class RegistrationOptions
+/// <summary>
+/// Everything the registration service needs to describe this server.
+///
+/// <para>A record so a host can derive one option set from another with <c>with</c> —
+/// the dungeon host narrows <see cref="Scope"/> that way, from the mode rather than from
+/// the composition root, so there is exactly one place that decides it.</para>
+/// </summary>
+public sealed record RegistrationOptions
 {
     public required string ServerId { get; init; }
     public required string MapId { get; init; }
@@ -39,6 +45,27 @@ public sealed class RegistrationOptions
     public string Transport { get; init; } = "tcp";
     public int Capacity { get; init; } = 100;
     public TimeSpan Ttl { get; init; } = RegistryDefaults.HeartbeatTtl;
+
+    /// <summary>
+    /// How far this server publishes itself: hash plus map index (the default, and what
+    /// every map server does), or hash only. A dungeon instance is
+    /// <see cref="RegistrationScope.HashOnly"/> — ADR-26 decision 8. See
+    /// <see cref="RegistrationScope"/> for why the hash is never optional.
+    /// </summary>
+    public RegistrationScope Scope { get; init; } = RegistrationScope.MapIndexed;
+
+    /// <summary>
+    /// This pod's Ed25519 identity public key in base64 (ADR-25), taken from
+    /// <see cref="GameServer.Net.Sealed.ServerIdentity.PublicKeyBase64"/>.
+    /// </summary>
+    /// <remarks>
+    /// Publishing it is what lets the gateway hand it to a client, and republishing it on
+    /// every heartbeat repair is what keeps a re-created entry complete — a repaired entry
+    /// missing this field would silently stop a client from requiring identity against a
+    /// server that is perfectly capable of it. That is why it lives on the options and is
+    /// rebuilt by <c>BuildInfo</c> rather than being written once at first registration.
+    /// </remarks>
+    public string IdentityKey { get; init; } = "";
 }
 
 /// <summary>
@@ -128,7 +155,8 @@ public sealed class RegistrationService : IAsyncDisposable
         PublicAddr,
         _options.Transport,
         _options.Capacity,
-        _playerCount());
+        _playerCount(),
+        _options.IdentityKey);
 
     /// <summary>
     /// Register immediately, then start the heartbeat loop.
@@ -198,7 +226,7 @@ public sealed class RegistrationService : IAsyncDisposable
     {
         try
         {
-            await _registry.RegisterAsync(BuildInfo(), ct);
+            await _registry.RegisterAsync(BuildInfo(), _options.Scope, ct);
             Interlocked.Increment(ref _registerCount);
             _lastPublishedCount = _playerCount();
             return true;

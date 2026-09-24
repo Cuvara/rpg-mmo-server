@@ -304,9 +304,13 @@ public class AgonesLifecycleTests
         public int RegisterSequence { get; private set; }
         public int DeregisterSequence { get; private set; }
 
-        public Task RegisterAsync(ServerInfo info, CancellationToken ct)
+        /// <summary>The scope of the most recent registration.</summary>
+        public RegistrationScope? LastScope { get; private set; }
+
+        public Task RegisterAsync(ServerInfo info, RegistrationScope scope, CancellationToken ct)
         {
             if (RegisterSequence == 0) RegisterSequence = _clock.Next();
+            LastScope = scope;
             Calls.Enqueue("register");
             Registered.TrySetResult();
             return Task.CompletedTask;

@@ -46,6 +46,11 @@ check_flow_smoke() {
     --strict-addr
     --expect-migration-version "${VERIFY_GAME_MIGRATION:-1}"
   )
+  # The meta hop's pin (ADR-24). The smoketest refuses an https URL without it
+  # rather than failing inside an x509 message several steps from the cause.
+  if [ -n "${VERIFY_NAKAMA_TLS_CERT:-}" ]; then
+    args+=(--nakama-tls-cert "$VERIFY_NAKAMA_TLS_CERT")
+  fi
   local db_mode
   if [ -n "${VERIFY_GAME_DB_URL:-}" ]; then
     args+=(--game-db-url "$VERIFY_GAME_DB_URL" --require-db)
@@ -82,21 +87,67 @@ check_flow_smoke() {
     sealed_mode="SEALED gameplay hop (chacha20-poly1305 over protobuf)"
   fi
 
+  # Gateway-hop TLS (ADR-23). Same shape as VERIFY_SEALED above and the same
+  # rule: this must match the deployment, and a mismatch is a REAL failure.
+  #
+  # It has to be here or this check becomes the thing that breaks when TLS is
+  # turned on. A TLS listener cannot answer a plaintext client in a language it
+  # understands, so an unpinned smoke run against a TLS gateway fails with a
+  # bare `read length: EOF` -- no mention of TLS, from either end. Measured on
+  # k3d-rpg-dev 2026-09-13, alongside the two cases that DO name themselves: the
+  # correct pin passes, and a different valid self-signed certificate is refused
+  # with "gateway certificate does not match the pin".
+  #
+  # The pin is a FILE PATH, and dev-up.sh writes it out of the cluster's own
+  # gateway-tls Secret, so the verifier pins what the gateway actually serves
+  # rather than a copy someone remembered to update.
+  # THE CLUSTER decides whether TLS is on, not a target file and not whether a
+  # pin file happens to exist. Both of those can disagree with the deployment,
+  # and each disagreement fails in a way that blames the wrong thing: a stale
+  # pin against a plaintext gateway fails the handshake, and a missing pin
+  # against a TLS gateway fails with a bare EOF.
+  local tls_mode="plaintext gateway hop"
+  local gw_tls_path
+  gw_tls_path=$(k get configmap gateway-config -n rpg-k8s-realtime \
+    -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+
+  if [ -n "$gw_tls_path" ]; then
+    local pin="${VERIFY_GATEWAY_TLS_CERT:-${RPG_K8S_RUN_DIR:-/tmp/claude-1000/rpg-k8s-dev}/gateway-tls.crt}"
+    if [ ! -r "$pin" ]; then
+      fail "the gateway terminates TLS but no pinned certificate is readable" \
+        "a readable PEM the gateway's certificate must match" \
+        "gateway-config names $gw_tls_path; no pin at $pin" \
+        "dev-up.sh writes it out of the gateway-tls Secret on every deploy -- re-run the deploy, or set VERIFY_GATEWAY_TLS_CERT"
+      return
+    fi
+    args+=(--gateway-tls-cert "$pin")
+    tls_mode="TLS gateway hop, certificate PINNED ($pin)"
+  elif [ -n "${VERIFY_GATEWAY_TLS_CERT:-}" ]; then
+    # A pin was supplied for a gateway that is not serving TLS. Refusing rather
+    # than ignoring it: somebody believes this hop is encrypted and it is not,
+    # which is exactly the state nothing else in this deployment would reveal.
+    fail "a gateway pin was supplied but the gateway is NOT terminating TLS" \
+      "either TLS on (gateway-config tls-cert-path) or no pin" \
+      "pin=$VERIFY_GATEWAY_TLS_CERT; gateway-config names no tls-cert-path" \
+      "kubectl --context $KUBE_CONTEXT -n rpg-k8s-realtime get configmap gateway-config -o yaml"
+    return
+  fi
+
   local out rc
   out=$(JWT_SECRET="$VERIFY_JWT_SECRET" "$bin" "${args[@]}" 2>&1); rc=$?
   echo "$out" | sed 's/^/      | /'
   if [ $rc -ne 0 ] || [[ "$out" != *"SMOKE=PASS"* ]]; then
     fail "the end-to-end flow did not complete" \
-      "SMOKE=PASS and exit 0 ($sealed_mode)" "exit=$rc; last line: $(echo "$out" | tail -1)" \
+      "SMOKE=PASS and exit 0 ($sealed_mode; $tls_mode)" "exit=$rc; last line: $(echo "$out" | tail -1)" \
       "the transcript above -- the first failing step names the hop"
     return
   fi
   if [ -z "${VERIFY_GAME_DB_URL:-}" ]; then
-    warn "flow passed but WITHOUT persistence: $db_mode ($sealed_mode). Movement and snapshots are proven; the player_states write and the reload after the hold are NOT."
+    warn "flow passed but WITHOUT persistence: $db_mode ($sealed_mode; $tls_mode). Movement and snapshots are proven; the player_states write and the reload after the hold are NOT."
     return
   fi
   VERIFY_SMOKE_OUTPUT="$out"
-  pass "SMOKE=PASS with --strict-addr, $db_mode, $sealed_mode"
+  pass "SMOKE=PASS with --strict-addr, $db_mode, $sealed_mode, $tls_mode"
 }
 
 # Attribute the GATEWAY, not just the registry. registry.stack_identity proves

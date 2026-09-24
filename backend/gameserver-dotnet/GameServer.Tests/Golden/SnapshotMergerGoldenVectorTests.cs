@@ -13,17 +13,22 @@ public class SnapshotMergerGoldenVectorTests
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
-    // speed/facingBrad/action are optional so every pre-existing case in the fixture
-    // keeps parsing unchanged. All three defaults are also default(T), so it does not
+    // speed/facingBrad/action/changedFields are optional so every pre-existing case in
+    // the fixture keeps parsing unchanged. All defaults are default(T), so it does not
     // matter whether System.Text.Json honours the declared default or substitutes the
     // type's — they agree.
     //
-    // `speed` is a hex bit pattern like x/y (it is a float and decimal text does not
-    // round-trip identically through two serializers); facingBrad and action are plain
-    // integers, which are already exact.
+    // `speed` and x/y are hex bit patterns (floats do not round-trip identically through
+    // two serializers); facingBrad, action, and changedFields are plain integers.
+    //
+    // `changedFields` is the wire field 13 mask (protocol version 2+). Zero means "all
+    // fields present" — identical to omitting the field. Non-zero means a partial update:
+    // only the bits that are set have valid data; the merger keeps its last-known value
+    // for every unset bit. See Shared.GameLogic.Systems.SnapshotFieldBits.
     private record SnapEntity(
         string Id, string Type, string X, string Y, int Hp, int MaxHp,
-        string? Speed = null, uint FacingBrad = 0, int Action = 0);
+        string? Speed = null, uint FacingBrad = 0, int Action = 0,
+        uint ChangedFields = 0);
 
     private record ExpectedEntity(
         string Id, int Hp, string X, string Y,
@@ -88,7 +93,16 @@ public class SnapshotMergerGoldenVectorTests
                     e.Hp, e.MaxHp,
                     e.Speed == null ? 0f : GoldenVectors.Float(e.Speed),
                     e.FacingBrad,
-                    (EntityAction)e.Action);
+                    (EntityAction)e.Action,
+                    // NAMED, not positional. The ten-argument overload that used to accept
+                    // this positionally was removed in Shared.GameLogic 0.6.0 precisely
+                    // because a positional uint here binds to whatever the overload set
+                    // offers -- which is how a retrigger counter once became a field mask
+                    // (Cuvara/Netcode#159). actionSeq is stated rather than defaulted: the
+                    // golden corpus does not exercise it, and 0 here is that absence, not a
+                    // value under test.
+                    actionSeq: 0u,
+                    changedFields: e.ChangedFields);
             }
 
             var snapshot = new SnapshotData(

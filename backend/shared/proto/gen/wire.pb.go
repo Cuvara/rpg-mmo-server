@@ -289,6 +289,102 @@ func (EntityAction) EnumDescriptor() ([]byte, []int) {
 	return file_wire_proto_rawDescGZIP(), []int{2}
 }
 
+// GameEventType enumerates the EDGE-TRIGGERED things that happen in the world.
+//
+// Numbers are FROZEN once shipped. Append only; never renumber.
+//
+// WHY AN EVENT CHANNEL EXISTS AT ALL. Everything else the server sends a client
+// is LEVEL-triggered state: where an entity is, how much HP it has, what it is
+// doing. That is the right shape for state, and it is the wrong shape for
+// occurrences. "This entity took 12 damage" is not recoverable from two HP
+// values a tick apart — a heal and a hit in the same tick net out, a delta
+// snapshot may not carry the entity at all if it also regenerated back, and an
+// entity that leaves the AOI mid-fight simply stops reporting. A client that
+// infers damage numbers from HP deltas is wrong in exactly the cases a player
+// notices, and it is wrong silently.
+//
+// ZERO IS RESERVED and means "not sent / unknown", following the same rule as
+// EntityType and EntityAction. A receiver MUST ignore an event it does not
+// recognise rather than guessing: events are presentation, so dropping an
+// unknown one costs a missing damage number, while guessing costs a wrong one.
+type GameEventType int32
+
+const (
+	GameEventType_GAME_EVENT_TYPE_UNSPECIFIED GameEventType = 0
+	// `target` took `amount` damage from `source`. `amount` is the damage
+	// APPLIED, after mitigation — the number a player expects to see float off a
+	// head, not the pre-defense roll.
+	GameEventType_GAME_EVENT_TYPE_DAMAGE GameEventType = 1
+	// `target` was healed `amount` by `source`.
+	GameEventType_GAME_EVENT_TYPE_HEAL GameEventType = 2
+	// `target` died. `source` is the killer, or 0 when nothing killed it (a
+	// despawn, a zone, a disconnect).
+	//
+	// This is NOT redundant with EntityAction.Dead, and the difference is the
+	// whole reason the event channel exists: `Dead` is a state that persists for
+	// as long as the corpse does, so a client joining afterwards sees Dead and
+	// cannot tell whether the death just happened. The event says it happened
+	// now, which is what a death animation, a sound and a kill feed all need.
+	GameEventType_GAME_EVENT_TYPE_DEATH GameEventType = 3
+	// `source` successfully cast `ability_id`. Emitted when the cast RESOLVES on
+	// the server, which is the only moment both sides agree on.
+	GameEventType_GAME_EVENT_TYPE_ABILITY_CAST GameEventType = 4
+	// `target` gained `amount` experience. Sent only to the entity's own
+	// connection — see the visibility note on GameEvent.
+	GameEventType_GAME_EVENT_TYPE_XP_GAIN GameEventType = 5
+	// `target` reached level `amount`.
+	GameEventType_GAME_EVENT_TYPE_LEVEL_UP GameEventType = 6
+)
+
+// Enum value maps for GameEventType.
+var (
+	GameEventType_name = map[int32]string{
+		0: "GAME_EVENT_TYPE_UNSPECIFIED",
+		1: "GAME_EVENT_TYPE_DAMAGE",
+		2: "GAME_EVENT_TYPE_HEAL",
+		3: "GAME_EVENT_TYPE_DEATH",
+		4: "GAME_EVENT_TYPE_ABILITY_CAST",
+		5: "GAME_EVENT_TYPE_XP_GAIN",
+		6: "GAME_EVENT_TYPE_LEVEL_UP",
+	}
+	GameEventType_value = map[string]int32{
+		"GAME_EVENT_TYPE_UNSPECIFIED":  0,
+		"GAME_EVENT_TYPE_DAMAGE":       1,
+		"GAME_EVENT_TYPE_HEAL":         2,
+		"GAME_EVENT_TYPE_DEATH":        3,
+		"GAME_EVENT_TYPE_ABILITY_CAST": 4,
+		"GAME_EVENT_TYPE_XP_GAIN":      5,
+		"GAME_EVENT_TYPE_LEVEL_UP":     6,
+	}
+)
+
+func (x GameEventType) Enum() *GameEventType {
+	p := new(GameEventType)
+	*p = x
+	return p
+}
+
+func (x GameEventType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (GameEventType) Descriptor() protoreflect.EnumDescriptor {
+	return file_wire_proto_enumTypes[3].Descriptor()
+}
+
+func (GameEventType) Type() protoreflect.EnumType {
+	return &file_wire_proto_enumTypes[3]
+}
+
+func (x GameEventType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use GameEventType.Descriptor instead.
+func (GameEventType) EnumDescriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{3}
+}
+
 // Envelope is the top-level wire message.
 //
 // `type` is field 1 and is always >= 1 for any real message, so proto3 never
@@ -489,10 +585,24 @@ func (x *AuthResponse) GetProtocolVersion() uint32 {
 	return 0
 }
 
-// EnterWorldRequest asks the gateway to assign a map server.
+// EnterWorldRequest asks the gateway to assign a game server.
+//
+// `party_id` selects between the two things this one message can ask for, and
+// ADR-26 decision 1 is the reason there is only one message:
+//
+//	empty     -> a MAP server for `map_id`, the flow that has always existed.
+//	non-empty -> a DUNGEON INSTANCE of the content named by `map_id`, for this
+//	             party. The first member's request allocates a pod; every later
+//	             member is handed the SAME address, because the instance is
+//	             keyed by the party and not by the content (ADR-26 decision 2).
+//
+// The gateway verifies the caller really is a member of the named party against
+// Nakama, once per entry (ADR-26 decision 3). A client that names a party it is
+// not in is refused; it is not quietly given a map.
 type EnterWorldRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	MapId         string                 `protobuf:"bytes,1,opt,name=map_id,json=mapId,proto3" json:"map_id,omitempty"`
+	PartyId       string                 `protobuf:"bytes,2,opt,name=party_id,json=partyId,proto3" json:"party_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -534,18 +644,53 @@ func (x *EnterWorldRequest) GetMapId() string {
 	return ""
 }
 
+func (x *EnterWorldRequest) GetPartyId() string {
+	if x != nil {
+		return x.PartyId
+	}
+	return ""
+}
+
 // EnterWorldResponse contains the game server address and join token.
 //
 // `transport` tells the client which realtime transport the target game server
 // speaks ("tcp" or "kcp"). Empty means "tcp".
 type EnterWorldResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ServerAddr    string                 `protobuf:"bytes,1,opt,name=server_addr,json=serverAddr,proto3" json:"server_addr,omitempty"`
-	JoinToken     string                 `protobuf:"bytes,2,opt,name=join_token,json=joinToken,proto3" json:"join_token,omitempty"`
-	Transport     string                 `protobuf:"bytes,3,opt,name=transport,proto3" json:"transport,omitempty"`
-	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	ServerAddr string                 `protobuf:"bytes,1,opt,name=server_addr,json=serverAddr,proto3" json:"server_addr,omitempty"`
+	JoinToken  string                 `protobuf:"bytes,2,opt,name=join_token,json=joinToken,proto3" json:"join_token,omitempty"`
+	Transport  string                 `protobuf:"bytes,3,opt,name=transport,proto3" json:"transport,omitempty"`
+	Error      string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	// The game server's Ed25519 IDENTITY public key, 32 bytes (ADR-25).
+	//
+	// Generated by the pod at startup, never persisted, never configured; it
+	// reaches this message by travelling pod -> Redis registry entry -> gateway.
+	// It is the key that verifies `SealedServerHello.server_signature` on the
+	// gameplay hop, and it is a NEW field number because field 5 is reserved
+	// forever -- see above for why that reservation is not negotiable.
+	//
+	// WHAT A CLIENT MAY CONCLUDE FROM IT, WHICH IS LESS THAN IT LOOKS. This
+	// message crosses the GATEWAY hop, which is plaintext in every environment
+	// today (ADR-23's TLS is implemented and defaults off). An attacker able to
+	// man-in-the-middle the gameplay hop is on the same network path as this hop,
+	// so he substitutes this key and then forges a signature that verifies
+	// against it. Checking the signature therefore proves the gameplay peer holds
+	// the key NAMED HERE -- nothing more -- and that is only an identity claim
+	// when this message itself arrived authenticated.
+	//
+	// So a client MUST report two different things: that it checked the
+	// signature, and whether the hop that delivered this key was authenticated.
+	// Only the conjunction is `server_identity_verified` (ADR-25 decision 6). An
+	// instrument that reports the strong claim on the weak evidence is worse than
+	// no instrument.
+	//
+	// Empty means the gateway has no key for that server -- an older game server,
+	// or a registry entry written before this field existed. A client that
+	// REQUIRES identity must refuse the join rather than continue unverified:
+	// there is no negotiation and no fallback (ADR-22 decision 3).
+	ServerPublicKey []byte `protobuf:"bytes,6,opt,name=server_public_key,json=serverPublicKey,proto3" json:"server_public_key,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *EnterWorldResponse) Reset() {
@@ -604,6 +749,13 @@ func (x *EnterWorldResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *EnterWorldResponse) GetServerPublicKey() []byte {
+	if x != nil {
+		return x.ServerPublicKey
+	}
+	return nil
 }
 
 // JoinTokenRequest is sent by the client to authenticate with a game server.
@@ -770,8 +922,49 @@ type InputMessage struct {
 	MoveX          float32                `protobuf:"fixed32,2,opt,name=move_x,json=moveX,proto3" json:"move_x,omitempty"`
 	MoveY          float32                `protobuf:"fixed32,3,opt,name=move_y,json=moveY,proto3" json:"move_y,omitempty"`
 	AttackTargetId string                 `protobuf:"bytes,4,opt,name=attack_target_id,json=attackTargetId,proto3" json:"attack_target_id,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Content id of the ability the player is trying to use this tick, as defined
+	// in the content set served at /content (ADR-19). ZERO MEANS "NO ABILITY",
+	// which is why ability ids are allocated from 1 in the content validator: a
+	// proto3 zero is elided, so id 0 and "this client sent no ability" would be
+	// the same bytes and the server could not tell a missing field from a real
+	// ability.
+	//
+	// This is a REQUEST, not a result. The server validates it against the
+	// content set, the caster's state and its cooldown, and the only thing the
+	// client learns about the outcome is what comes back in the snapshot: a
+	// GAME_EVENT_TYPE_ABILITY_CAST event if it resolved, nothing if it did not.
+	// There is deliberately no per-input acknowledgement — an input that failed
+	// is already described by the world not changing, and a rejection channel
+	// would be a second, contradictable account of the same fact.
+	//
+	// Abilities are NOT client-predicted. Prediction covers movement only
+	// (Documentation~/PREDICTION.md): movement is a pure function of input the
+	// client already has, while an ability outcome depends on cooldowns, content
+	// and other entities' state that the client can only guess at. A mispredicted
+	// ability is visible as a cast that plays and then un-happens, which is worse
+	// than a cast that starts one round trip late.
+	AbilityId uint32 `protobuf:"varint,5,opt,name=ability_id,json=abilityId,proto3" json:"ability_id,omitempty"`
+	// Target entity for a targeted ability, empty for self- and ground-targeted
+	// ones. Same id space as `attack_target_id` — the server-side entity id, not
+	// a handle, because input travels client -> server and the interning table is
+	// built by the SERVER for its own outbound snapshots. A client has no handle
+	// to send that the server would recognise.
+	AbilityTargetId string `protobuf:"bytes,6,opt,name=ability_target_id,json=abilityTargetId,proto3" json:"ability_target_id,omitempty"`
+	// Aim point in world coordinates for a ground-targeted ability. Ignored for
+	// self- and entity-targeted ones.
+	//
+	// Sent as a plain pair of floats rather than being folded into move_x/move_y:
+	// they are different quantities (a POINT in world space against a DIRECTION),
+	// and an input that both moves and aims elsewhere is ordinary — a player
+	// strafing while dropping an area effect behind them.
+	//
+	// Zero is a legitimate aim point (world origin), so a receiver must not read
+	// (0,0) as "not aimed". `ability_id` is what says whether any of this is
+	// meaningful: aim fields are only read when it is non-zero.
+	AimX          float32 `protobuf:"fixed32,7,opt,name=aim_x,json=aimX,proto3" json:"aim_x,omitempty"`
+	AimY          float32 `protobuf:"fixed32,8,opt,name=aim_y,json=aimY,proto3" json:"aim_y,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InputMessage) Reset() {
@@ -830,6 +1023,34 @@ func (x *InputMessage) GetAttackTargetId() string {
 		return x.AttackTargetId
 	}
 	return ""
+}
+
+func (x *InputMessage) GetAbilityId() uint32 {
+	if x != nil {
+		return x.AbilityId
+	}
+	return 0
+}
+
+func (x *InputMessage) GetAbilityTargetId() string {
+	if x != nil {
+		return x.AbilityTargetId
+	}
+	return ""
+}
+
+func (x *InputMessage) GetAimX() float32 {
+	if x != nil {
+		return x.AimX
+	}
+	return 0
+}
+
+func (x *InputMessage) GetAimY() float32 {
+	if x != nil {
+		return x.AimY
+	}
+	return 0
 }
 
 // EntitySnapshot is a single entity's visible state.
@@ -951,7 +1172,80 @@ type EntitySnapshot struct {
 	// fall back to idle: an old server would otherwise freeze every entity in the
 	// world into an idle pose, which looks like a broken animator rather than a
 	// missing field.
-	Action        EntityAction `protobuf:"varint,11,opt,name=action,proto3,enum=rpgmmo.wire.v1.EntityAction" json:"action,omitempty"`
+	Action EntityAction `protobuf:"varint,11,opt,name=action,proto3,enum=rpgmmo.wire.v1.EntityAction" json:"action,omitempty"`
+	// Retrigger counter for `action`, incremented by the server every time the
+	// entity ENTERS an action, including re-entering the one it is already in.
+	//
+	// WHY THIS EXISTS. `action` is level-triggered and says so at length above: it
+	// reports the state an entity is in, not that a state was entered. Two attacks
+	// in a row therefore put identical bytes on the wire for both of them, and a
+	// renderer driving an animator from `action` alone plays the attack once and
+	// then holds — the second swing never fires. That is not a renderer bug and no
+	// amount of client-side edge detection on `action` can fix it, because the
+	// edge genuinely is not in the data.
+	//
+	// The enum's own documentation calls this out and defers it as "an animation
+	// system concern". It is not: the server is the only party that knows an
+	// action was re-entered, so the edge has to be MANUFACTURED here or it does
+	// not exist anywhere. This field is that edge, in one varint.
+	//
+	// SEMANTICS. A receiver retriggers when the value CHANGES, not when it
+	// increases. It is a per-entity counter that wraps at 2^32 and is reset when
+	// the server restarts or the entity respawns, so "greater than" is not a safe
+	// test and a receiver that uses one stops retriggering for 4 billion actions
+	// after a single wrap. Inequality has no such failure mode.
+	//
+	// ZERO MEANS "NOT SENT". The counter is allocated from 1 for the same reason
+	// as every other zero-reserving field in this file: a server that predates
+	// this field and an entity whose counter happens to be zero must not look the
+	// same. A receiver seeing zero keeps its existing behaviour — drive the
+	// animator from `action` alone and accept that repeats do not retrigger —
+	// rather than treating it as an edge, which would retrigger every animation on
+	// every snapshot from an old server.
+	//
+	// Sent on every mention of an entity, never interned, for the same reason as
+	// `speed` and `facing_brad`: a receiver that resolves a handle expects
+	// complete state.
+	ActionSeq uint32 `protobuf:"varint,12,opt,name=action_seq,json=actionSeq,proto3" json:"action_seq,omitempty"`
+	// Field-level delta mask. Non-zero on a DELTA (full=false) snapshot means this
+	// entity entry is a PARTIAL UPDATE: only the fields whose bit is set are
+	// present, and the receiver MUST keep its last-known value for every unset
+	// field rather than resetting it to the proto3 default (zero).
+	//
+	// Bit assignments:
+	//
+	//	0x0001 → x          (field 3)
+	//	0x0002 → y          (field 4)
+	//	0x0004 → hp         (field 5)
+	//	0x0008 → max_hp     (field 6)
+	//	0x0010 → type / type_name (fields 7 / 2)
+	//	0x0020 → speed      (field 9)
+	//	0x0040 → facing_brad (field 10)
+	//	0x0080 → action     (field 11)
+	//	0x0100 → action_seq (field 12)
+	//
+	// ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
+	// delta never sets this field; a receiver that sees 0 MUST apply the same rule
+	// as on a keyframe — every field takes its wire value (including proto3 defaults
+	// of zero). That is the safe, backwards-compatible direction: an old sender
+	// never sets the field, the new receiver treats zero as "all present", and
+	// behaviour is unchanged. An old receiver ignores the field (proto3 unknown
+	// fields) and zeros every unset field, which is wrong — that failure is why
+	// this field is gated behind a protocol version bump (version 2).
+	//
+	// NEVER SET ON KEYFRAMES (full=true). A keyframe always carries complete state
+	// for every entity; the receiver re-establishes its view from scratch on a
+	// keyframe and field masking would be meaningless.
+	//
+	// NEVER SET ON A FIRST INTRODUCTION. When `id` is present (first mention of an
+	// entity to this connection), the server MUST send all fields so the client can
+	// construct a complete initial state. A receiver that sees a non-zero mask with
+	// `id` non-empty is receiving a server-side bug; it SHOULD treat it as a full
+	// update (mask = 0) rather than attempting to merge against an entity it never
+	// received.
+	//
+	// Introduced in protocol version 2.
+	ChangedFields uint32 `protobuf:"varint,13,opt,name=changed_fields,json=changedFields,proto3" json:"changed_fields,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1063,6 +1357,199 @@ func (x *EntitySnapshot) GetAction() EntityAction {
 	return EntityAction_ENTITY_ACTION_UNSPECIFIED
 }
 
+func (x *EntitySnapshot) GetActionSeq() uint32 {
+	if x != nil {
+		return x.ActionSeq
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetChangedFields() uint32 {
+	if x != nil {
+		return x.ChangedFields
+	}
+	return 0
+}
+
+// GameEvent is one edge-triggered occurrence, addressed to entities by the SAME
+// interned handles the surrounding snapshot uses.
+//
+// WHY THIS RIDES SnapshotMessage RATHER THAN BEING ITS OWN MsgType. Three
+// reasons, and the first is the load-bearing one:
+//
+//  1. HANDLES. Entity ids are interned per connection and the table RESETS AT
+//     EVERY KEYFRAME (see EntitySnapshot.handle). An event in a separate
+//     message would either have to carry full string ids — ~17 bytes per
+//     participant, on the one message class that fires hardest during combat —
+//     or resolve handles against a table whose lifetime it does not share,
+//     which is a race that produces events attributed to the WRONG ENTITY. A
+//     wrong damage number is far worse than a missing one. Riding the snapshot
+//     makes the handle table and the events that use it the same message, so
+//     they cannot disagree.
+//
+//  2. TICK. Every event belongs to the tick that produced it. The snapshot
+//     already carries that tick, so nesting costs zero bytes to say when an
+//     event happened, where a separate message pays a uint64 per batch and
+//     still has to be ordered against the snapshot stream by the receiver.
+//
+//  3. ORDERING. One stream, one order, already reliable. No new connection
+//     state, no new MsgType, no second thing to reconnect.
+//
+// The cost is that events only travel when a snapshot does, which for a
+// connection receiving snapshots every tick is not a delay anyone can perceive.
+//
+// VISIBILITY. Events are filtered per connection exactly like entities are: a
+// connection is sent an event only when it can see at least one of the
+// participants, and private events (XP, level) only when the receiver IS the
+// subject. This is the same AOI rule the entity set already obeys, applied to
+// occurrences — an event channel that leaked the whole world would be a
+// wallhack shipped as a feature.
+type GameEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Type  GameEventType          `protobuf:"varint,1,opt,name=type,proto3,enum=rpgmmo.wire.v1.GameEventType" json:"type,omitempty"`
+	// Interned handle of the entity that CAUSED this, or 0 for "none / the
+	// world". Resolved against the same table as EntitySnapshot.handle in the
+	// snapshot carrying this event.
+	//
+	// A handle here may name an entity NOT present in this snapshot's `entities`
+	// list: a delta only carries entities whose state changed, and the killer of
+	// something in your AOI need not have moved. That is legal and expected. It
+	// may NOT name an entity the connection has no binding for — a receiver that
+	// sees one has lost interning state and must ask for a keyframe, the same
+	// recovery path EntitySnapshot.id documents.
+	Source uint32 `protobuf:"varint,2,opt,name=source,proto3" json:"source,omitempty"`
+	// Interned handle of the entity this HAPPENED TO. 0 for events with no
+	// subject.
+	Target uint32 `protobuf:"varint,3,opt,name=target,proto3" json:"target,omitempty"`
+	// Magnitude: damage dealt, health restored, experience gained, level reached.
+	// Meaning is per `type` and is documented on each value above.
+	//
+	// SIGNED, and sint32 rather than int32, because the zigzag encoding keeps a
+	// small negative cheap. Damage and healing are both reported POSITIVE under
+	// their own event types rather than as one signed quantity — a client that
+	// colours a number by its sign would show mitigated-to-zero damage and a
+	// zero heal identically. The sign is available for the cases that genuinely
+	// need it (an absorb, a level lost) without overloading the common ones.
+	Amount int32 `protobuf:"zigzag32,4,opt,name=amount,proto3" json:"amount,omitempty"`
+	// Content id of the ability involved, 0 when none. Same id space as
+	// InputMessage.ability_id, so a damage event can say which ability dealt it.
+	AbilityId uint32 `protobuf:"varint,5,opt,name=ability_id,json=abilityId,proto3" json:"ability_id,omitempty"`
+	// Presentation flags: bit 0 = critical, bit 1 = the target was immune or the
+	// effect was fully mitigated, bit 2 = the effect came from a periodic source
+	// rather than a direct one.
+	//
+	// A bitfield rather than more enum values because these COMBINE — a critical
+	// periodic tick is one event, not two — and because a receiver that does not
+	// understand a bit ignores it and still shows a correct number, where an
+	// unrecognised enum value means the whole event is dropped.
+	Flags uint32 `protobuf:"varint,6,opt,name=flags,proto3" json:"flags,omitempty"`
+	// Full entity ids, used ONLY by a receiver that is not interning — the legacy JSON
+	// encoding, which has no handle table and for which `source`/`target` are always
+	// zero. Empty on every Protobuf connection.
+	//
+	// This mirrors EntitySnapshot's own id/handle duality exactly, and for the same
+	// reason: the two encodings share one schema, and an encoding without interning
+	// still has to be able to name an entity. The alternative considered was to send no
+	// events at all on a JSON connection. It was rejected because a silently
+	// encoding-dependent feature is the kind of difference that is discovered by a
+	// player on the wrong client, not by a test — and because "JSON is legacy" is a
+	// reason to keep it simple, not a licence to make it wrong.
+	//
+	// A receiver prefers the handle when it is non-zero and falls back to these
+	// otherwise, which is the same precedence rule EntitySnapshot documents for
+	// `type`/`type_name`.
+	SourceId      string `protobuf:"bytes,7,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
+	TargetId      string `protobuf:"bytes,8,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GameEvent) Reset() {
+	*x = GameEvent{}
+	mi := &file_wire_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GameEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GameEvent) ProtoMessage() {}
+
+func (x *GameEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GameEvent.ProtoReflect.Descriptor instead.
+func (*GameEvent) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *GameEvent) GetType() GameEventType {
+	if x != nil {
+		return x.Type
+	}
+	return GameEventType_GAME_EVENT_TYPE_UNSPECIFIED
+}
+
+func (x *GameEvent) GetSource() uint32 {
+	if x != nil {
+		return x.Source
+	}
+	return 0
+}
+
+func (x *GameEvent) GetTarget() uint32 {
+	if x != nil {
+		return x.Target
+	}
+	return 0
+}
+
+func (x *GameEvent) GetAmount() int32 {
+	if x != nil {
+		return x.Amount
+	}
+	return 0
+}
+
+func (x *GameEvent) GetAbilityId() uint32 {
+	if x != nil {
+		return x.AbilityId
+	}
+	return 0
+}
+
+func (x *GameEvent) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+func (x *GameEvent) GetSourceId() string {
+	if x != nil {
+		return x.SourceId
+	}
+	return ""
+}
+
+func (x *GameEvent) GetTargetId() string {
+	if x != nil {
+		return x.TargetId
+	}
+	return ""
+}
+
 // SnapshotMessage is a world state update sent to the client.
 //
 // Either a KEYFRAME (full = true, `entities` is the complete AOI set and the
@@ -1075,17 +1562,29 @@ type SnapshotMessage struct {
 	Tick  uint64                 `protobuf:"varint,1,opt,name=tick,proto3" json:"tick,omitempty"`
 	// Highest client input tick the server has accepted for the receiving player;
 	// the client's reconciliation anchor. Zero means "no input accepted yet".
-	AckTick       uint64            `protobuf:"varint,2,opt,name=ack_tick,json=ackTick,proto3" json:"ack_tick,omitempty"`
-	Full          bool              `protobuf:"varint,3,opt,name=full,proto3" json:"full,omitempty"`
-	Entities      []*EntitySnapshot `protobuf:"bytes,4,rep,name=entities,proto3" json:"entities,omitempty"`
-	Removed       []string          `protobuf:"bytes,5,rep,name=removed,proto3" json:"removed,omitempty"`
+	AckTick  uint64            `protobuf:"varint,2,opt,name=ack_tick,json=ackTick,proto3" json:"ack_tick,omitempty"`
+	Full     bool              `protobuf:"varint,3,opt,name=full,proto3" json:"full,omitempty"`
+	Entities []*EntitySnapshot `protobuf:"bytes,4,rep,name=entities,proto3" json:"entities,omitempty"`
+	Removed  []string          `protobuf:"bytes,5,rep,name=removed,proto3" json:"removed,omitempty"`
+	// Edge-triggered occurrences produced by the tick this snapshot reports, in
+	// the order the simulation produced them. Empty on most snapshots.
+	//
+	// Sent on DELTAS AND KEYFRAMES ALIKE, and never re-sent. A keyframe restates
+	// the world's STATE because a client may have missed a delta; it does not
+	// restate its HISTORY, because an event that has already been shown must not
+	// be shown twice. A client that missed the snapshot carrying an event has
+	// missed the event — permanently, by design. Events are presentation, and a
+	// damage number arriving late is worse than one that never arrives.
+	//
+	// See GameEvent for why these live here rather than in a message of their own.
+	Events        []*GameEvent `protobuf:"bytes,6,rep,name=events,proto3" json:"events,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SnapshotMessage) Reset() {
 	*x = SnapshotMessage{}
-	mi := &file_wire_proto_msgTypes[9]
+	mi := &file_wire_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1097,7 +1596,7 @@ func (x *SnapshotMessage) String() string {
 func (*SnapshotMessage) ProtoMessage() {}
 
 func (x *SnapshotMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[9]
+	mi := &file_wire_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1110,7 +1609,7 @@ func (x *SnapshotMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotMessage.ProtoReflect.Descriptor instead.
 func (*SnapshotMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{9}
+	return file_wire_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SnapshotMessage) GetTick() uint64 {
@@ -1148,6 +1647,13 @@ func (x *SnapshotMessage) GetRemoved() []string {
 	return nil
 }
 
+func (x *SnapshotMessage) GetEvents() []*GameEvent {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
 // DisconnectMessage is sent by either side to end the session politely.
 // The JSON encoding sends an empty object here; the field is reserved for a
 // future reason string and is optional in both encodings.
@@ -1160,7 +1666,7 @@ type DisconnectMessage struct {
 
 func (x *DisconnectMessage) Reset() {
 	*x = DisconnectMessage{}
-	mi := &file_wire_proto_msgTypes[10]
+	mi := &file_wire_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1172,7 +1678,7 @@ func (x *DisconnectMessage) String() string {
 func (*DisconnectMessage) ProtoMessage() {}
 
 func (x *DisconnectMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[10]
+	mi := &file_wire_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1185,7 +1691,7 @@ func (x *DisconnectMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisconnectMessage.ProtoReflect.Descriptor instead.
 func (*DisconnectMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{10}
+	return file_wire_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DisconnectMessage) GetReason() string {
@@ -1205,7 +1711,7 @@ type ResyncRequest struct {
 
 func (x *ResyncRequest) Reset() {
 	*x = ResyncRequest{}
-	mi := &file_wire_proto_msgTypes[11]
+	mi := &file_wire_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1217,7 +1723,7 @@ func (x *ResyncRequest) String() string {
 func (*ResyncRequest) ProtoMessage() {}
 
 func (x *ResyncRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[11]
+	mi := &file_wire_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1230,7 +1736,7 @@ func (x *ResyncRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResyncRequest.ProtoReflect.Descriptor instead.
 func (*ResyncRequest) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{11}
+	return file_wire_proto_rawDescGZIP(), []int{12}
 }
 
 // TransferMapRequest is sent by the client to request a map transfer.
@@ -1246,7 +1752,7 @@ type TransferMapRequest struct {
 
 func (x *TransferMapRequest) Reset() {
 	*x = TransferMapRequest{}
-	mi := &file_wire_proto_msgTypes[12]
+	mi := &file_wire_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1258,7 +1764,7 @@ func (x *TransferMapRequest) String() string {
 func (*TransferMapRequest) ProtoMessage() {}
 
 func (x *TransferMapRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[12]
+	mi := &file_wire_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1271,7 +1777,7 @@ func (x *TransferMapRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferMapRequest.ProtoReflect.Descriptor instead.
 func (*TransferMapRequest) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{12}
+	return file_wire_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TransferMapRequest) GetMapId() string {
@@ -1292,7 +1798,7 @@ type TransferMapResponse struct {
 
 func (x *TransferMapResponse) Reset() {
 	*x = TransferMapResponse{}
-	mi := &file_wire_proto_msgTypes[13]
+	mi := &file_wire_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1304,7 +1810,7 @@ func (x *TransferMapResponse) String() string {
 func (*TransferMapResponse) ProtoMessage() {}
 
 func (x *TransferMapResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[13]
+	mi := &file_wire_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1317,7 +1823,7 @@ func (x *TransferMapResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferMapResponse.ProtoReflect.Descriptor instead.
 func (*TransferMapResponse) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{13}
+	return file_wire_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *TransferMapResponse) GetOk() bool {
@@ -1346,7 +1852,7 @@ type PingMessage struct {
 
 func (x *PingMessage) Reset() {
 	*x = PingMessage{}
-	mi := &file_wire_proto_msgTypes[14]
+	mi := &file_wire_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1358,7 +1864,7 @@ func (x *PingMessage) String() string {
 func (*PingMessage) ProtoMessage() {}
 
 func (x *PingMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[14]
+	mi := &file_wire_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1371,7 +1877,7 @@ func (x *PingMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingMessage.ProtoReflect.Descriptor instead.
 func (*PingMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{14}
+	return file_wire_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PingMessage) GetTimestamp() int64 {
@@ -1394,7 +1900,7 @@ type PongMessage struct {
 
 func (x *PongMessage) Reset() {
 	*x = PongMessage{}
-	mi := &file_wire_proto_msgTypes[15]
+	mi := &file_wire_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1406,7 +1912,7 @@ func (x *PongMessage) String() string {
 func (*PongMessage) ProtoMessage() {}
 
 func (x *PongMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[15]
+	mi := &file_wire_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1419,7 +1925,7 @@ func (x *PongMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PongMessage.ProtoReflect.Descriptor instead.
 func (*PongMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{15}
+	return file_wire_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PongMessage) GetTimestamp() int64 {
@@ -1448,7 +1954,7 @@ type KickMessage struct {
 
 func (x *KickMessage) Reset() {
 	*x = KickMessage{}
-	mi := &file_wire_proto_msgTypes[16]
+	mi := &file_wire_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1460,7 +1966,7 @@ func (x *KickMessage) String() string {
 func (*KickMessage) ProtoMessage() {}
 
 func (x *KickMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[16]
+	mi := &file_wire_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1473,7 +1979,7 @@ func (x *KickMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KickMessage.ProtoReflect.Descriptor instead.
 func (*KickMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{16}
+	return file_wire_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *KickMessage) GetReason() string {
@@ -1499,7 +2005,7 @@ type SealedClientHello struct {
 
 func (x *SealedClientHello) Reset() {
 	*x = SealedClientHello{}
-	mi := &file_wire_proto_msgTypes[17]
+	mi := &file_wire_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1511,7 +2017,7 @@ func (x *SealedClientHello) String() string {
 func (*SealedClientHello) ProtoMessage() {}
 
 func (x *SealedClientHello) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[17]
+	mi := &file_wire_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1524,7 +2030,7 @@ func (x *SealedClientHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SealedClientHello.ProtoReflect.Descriptor instead.
 func (*SealedClientHello) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{17}
+	return file_wire_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SealedClientHello) GetPublicKey() []byte {
@@ -1564,14 +2070,47 @@ type SealedServerHello struct {
 	// Set when the server refuses the handshake. The client MUST NOT retry
 	// without encryption: there is no cleartext fallback by design, because a
 	// protocol that can be talked down to cleartext will be.
-	Error         string `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Error string `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	// Ed25519 signature, 64 bytes, over the server's per-pod IDENTITY key
+	// (ADR-25). This is the replacement for `binding` above, and it exists
+	// because `binding` is a SYMMETRIC MAC under JOIN_TOKEN_SECRET: a client able
+	// to verify it would hold the key the gateway mints join tokens with, and
+	// could forge a token for any player on any server. `binding_verified` is
+	// therefore permanently false for every shipped client, and no configuration
+	// reaches true. An asymmetric signature has no such problem -- the client
+	// needs only the public half.
+	//
+	// The signed input is NOT the transcript. It is:
+	//
+	//	"cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00
+	//	  || identity_public (32)
+	//
+	// where `transcript` is EXACTLY the bytes described on `binding` above,
+	// unchanged byte for byte. That is deliberate: key derivation
+	// (DeriveDirectionKeys) and the HMAC binding keep their current bytes and
+	// their current cross-implementation vectors, so this field adds a guarantee
+	// without invalidating one. The identity key is inside the signed input
+	// because a signature that does not name its signer authenticates a statement
+	// ABOUT a key rather than a key, and the NUL separators are load-bearing for
+	// the same re-splitting reason given on `binding`.
+	//
+	// The server ALWAYS signs. There is no negotiation and no fallback: a client
+	// that has been told to check and cannot is refused, never downgraded. A
+	// client that ignores this field behaves exactly as it did before, which is
+	// what makes the server-and-gateway-first migration order safe.
+	//
+	// The public half needed to check this arrives out of band, in
+	// EnterWorldResponse.server_public_key -- read the note there before
+	// concluding that a verified signature means the server is authenticated. It
+	// does not, while the gateway hop is plaintext.
+	ServerSignature []byte `protobuf:"bytes,4,opt,name=server_signature,json=serverSignature,proto3" json:"server_signature,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SealedServerHello) Reset() {
 	*x = SealedServerHello{}
-	mi := &file_wire_proto_msgTypes[18]
+	mi := &file_wire_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1583,7 +2122,7 @@ func (x *SealedServerHello) String() string {
 func (*SealedServerHello) ProtoMessage() {}
 
 func (x *SealedServerHello) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[18]
+	mi := &file_wire_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1596,7 +2135,7 @@ func (x *SealedServerHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SealedServerHello.ProtoReflect.Descriptor instead.
 func (*SealedServerHello) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{18}
+	return file_wire_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SealedServerHello) GetPublicKey() []byte {
@@ -1620,6 +2159,13 @@ func (x *SealedServerHello) GetError() string {
 	return ""
 }
 
+func (x *SealedServerHello) GetServerSignature() []byte {
+	if x != nil {
+		return x.ServerSignature
+	}
+	return nil
+}
+
 var File_wire_proto protoreflect.FileDescriptor
 
 const file_wire_proto_rawDesc = "" +
@@ -1636,16 +2182,18 @@ const file_wire_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12)\n" +
-	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"*\n" +
+	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"E\n" +
 	"\x11EnterWorldRequest\x12\x15\n" +
-	"\x06map_id\x18\x01 \x01(\tR\x05mapId\"\x9b\x01\n" +
+	"\x06map_id\x18\x01 \x01(\tR\x05mapId\x12\x19\n" +
+	"\bparty_id\x18\x02 \x01(\tR\apartyId\"\xc7\x01\n" +
 	"\x12EnterWorldResponse\x12\x1f\n" +
 	"\vserver_addr\x18\x01 \x01(\tR\n" +
 	"serverAddr\x12\x1d\n" +
 	"\n" +
 	"join_token\x18\x02 \x01(\tR\tjoinToken\x12\x1c\n" +
 	"\ttransport\x18\x03 \x01(\tR\ttransport\x12\x14\n" +
-	"\x05error\x18\x04 \x01(\tR\x05errorJ\x04\b\x05\x10\x06R\vsession_key\"S\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12*\n" +
+	"\x11server_public_key\x18\x06 \x01(\fR\x0fserverPublicKeyJ\x04\b\x05\x10\x06R\vsession_key\"S\n" +
 	"\x10JoinTokenRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12)\n" +
 	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\x9a\x01\n" +
@@ -1654,12 +2202,17 @@ const file_wire_proto_rawDesc = "" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x1b\n" +
 	"\ttick_rate\x18\x04 \x01(\rR\btickRate\x12)\n" +
-	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\"z\n" +
+	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\"\xef\x01\n" +
 	"\fInputMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
 	"\x06move_y\x18\x03 \x01(\x02R\x05moveY\x12(\n" +
-	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xb5\x02\n" +
+	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\x12\x1d\n" +
+	"\n" +
+	"ability_id\x18\x05 \x01(\rR\tabilityId\x12*\n" +
+	"\x11ability_target_id\x18\x06 \x01(\tR\x0fabilityTargetId\x12\x13\n" +
+	"\x05aim_x\x18\a \x01(\x02R\x04aimX\x12\x13\n" +
+	"\x05aim_y\x18\b \x01(\x02R\x04aimY\"\xfb\x02\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -1673,13 +2226,27 @@ const file_wire_proto_rawDesc = "" +
 	"\vfacing_brad\x18\n" +
 	" \x01(\rR\n" +
 	"facingBrad\x124\n" +
-	"\x06action\x18\v \x01(\x0e2\x1c.rpgmmo.wire.v1.EntityActionR\x06action\"\xaa\x01\n" +
+	"\x06action\x18\v \x01(\x0e2\x1c.rpgmmo.wire.v1.EntityActionR\x06action\x12\x1d\n" +
+	"\n" +
+	"action_seq\x18\f \x01(\rR\tactionSeq\x12%\n" +
+	"\x0echanged_fields\x18\r \x01(\rR\rchangedFields\"\xf5\x01\n" +
+	"\tGameEvent\x121\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x1d.rpgmmo.wire.v1.GameEventTypeR\x04type\x12\x16\n" +
+	"\x06source\x18\x02 \x01(\rR\x06source\x12\x16\n" +
+	"\x06target\x18\x03 \x01(\rR\x06target\x12\x16\n" +
+	"\x06amount\x18\x04 \x01(\x11R\x06amount\x12\x1d\n" +
+	"\n" +
+	"ability_id\x18\x05 \x01(\rR\tabilityId\x12\x14\n" +
+	"\x05flags\x18\x06 \x01(\rR\x05flags\x12\x1b\n" +
+	"\tsource_id\x18\a \x01(\tR\bsourceId\x12\x1b\n" +
+	"\ttarget_id\x18\b \x01(\tR\btargetId\"\xdd\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +
 	"\x04full\x18\x03 \x01(\bR\x04full\x12:\n" +
 	"\bentities\x18\x04 \x03(\v2\x1e.rpgmmo.wire.v1.EntitySnapshotR\bentities\x12\x18\n" +
-	"\aremoved\x18\x05 \x03(\tR\aremoved\"+\n" +
+	"\aremoved\x18\x05 \x03(\tR\aremoved\x121\n" +
+	"\x06events\x18\x06 \x03(\v2\x19.rpgmmo.wire.v1.GameEventR\x06events\"+\n" +
 	"\x11DisconnectMessage\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x0f\n" +
 	"\rResyncRequest\"+\n" +
@@ -1698,12 +2265,13 @@ const file_wire_proto_rawDesc = "" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"2\n" +
 	"\x11SealedClientHello\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x01 \x01(\fR\tpublicKey\"b\n" +
+	"public_key\x18\x01 \x01(\fR\tpublicKey\"\x8d\x01\n" +
 	"\x11SealedServerHello\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x01 \x01(\fR\tpublicKey\x12\x18\n" +
 	"\abinding\x18\x02 \x01(\fR\abinding\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error*\xcf\x03\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12)\n" +
+	"\x10server_signature\x18\x04 \x01(\fR\x0fserverSignature*\xcf\x03\n" +
 	"\aMsgType\x12\x18\n" +
 	"\x14MSG_TYPE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rMSG_TYPE_AUTH\x10\x01\x12\x16\n" +
@@ -1737,7 +2305,15 @@ const file_wire_proto_rawDesc = "" +
 	"\x12ENTITY_ACTION_IDLE\x10\x01\x12\x18\n" +
 	"\x14ENTITY_ACTION_MOVING\x10\x02\x12\x1b\n" +
 	"\x17ENTITY_ACTION_ATTACKING\x10\x03\x12\x16\n" +
-	"\x12ENTITY_ACTION_DEAD\x10\x04BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
+	"\x12ENTITY_ACTION_DEAD\x10\x04*\xde\x01\n" +
+	"\rGameEventType\x12\x1f\n" +
+	"\x1bGAME_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16GAME_EVENT_TYPE_DAMAGE\x10\x01\x12\x18\n" +
+	"\x14GAME_EVENT_TYPE_HEAL\x10\x02\x12\x19\n" +
+	"\x15GAME_EVENT_TYPE_DEATH\x10\x03\x12 \n" +
+	"\x1cGAME_EVENT_TYPE_ABILITY_CAST\x10\x04\x12\x1b\n" +
+	"\x17GAME_EVENT_TYPE_XP_GAIN\x10\x05\x12\x1c\n" +
+	"\x18GAME_EVENT_TYPE_LEVEL_UP\x10\x06BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
 
 var (
 	file_wire_proto_rawDescOnce sync.Once
@@ -1751,41 +2327,45 @@ func file_wire_proto_rawDescGZIP() []byte {
 	return file_wire_proto_rawDescData
 }
 
-var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_wire_proto_goTypes = []any{
 	(MsgType)(0),                // 0: rpgmmo.wire.v1.MsgType
 	(EntityType)(0),             // 1: rpgmmo.wire.v1.EntityType
 	(EntityAction)(0),           // 2: rpgmmo.wire.v1.EntityAction
-	(*Envelope)(nil),            // 3: rpgmmo.wire.v1.Envelope
-	(*AuthRequest)(nil),         // 4: rpgmmo.wire.v1.AuthRequest
-	(*AuthResponse)(nil),        // 5: rpgmmo.wire.v1.AuthResponse
-	(*EnterWorldRequest)(nil),   // 6: rpgmmo.wire.v1.EnterWorldRequest
-	(*EnterWorldResponse)(nil),  // 7: rpgmmo.wire.v1.EnterWorldResponse
-	(*JoinTokenRequest)(nil),    // 8: rpgmmo.wire.v1.JoinTokenRequest
-	(*JoinTokenResponse)(nil),   // 9: rpgmmo.wire.v1.JoinTokenResponse
-	(*InputMessage)(nil),        // 10: rpgmmo.wire.v1.InputMessage
-	(*EntitySnapshot)(nil),      // 11: rpgmmo.wire.v1.EntitySnapshot
-	(*SnapshotMessage)(nil),     // 12: rpgmmo.wire.v1.SnapshotMessage
-	(*DisconnectMessage)(nil),   // 13: rpgmmo.wire.v1.DisconnectMessage
-	(*ResyncRequest)(nil),       // 14: rpgmmo.wire.v1.ResyncRequest
-	(*TransferMapRequest)(nil),  // 15: rpgmmo.wire.v1.TransferMapRequest
-	(*TransferMapResponse)(nil), // 16: rpgmmo.wire.v1.TransferMapResponse
-	(*PingMessage)(nil),         // 17: rpgmmo.wire.v1.PingMessage
-	(*PongMessage)(nil),         // 18: rpgmmo.wire.v1.PongMessage
-	(*KickMessage)(nil),         // 19: rpgmmo.wire.v1.KickMessage
-	(*SealedClientHello)(nil),   // 20: rpgmmo.wire.v1.SealedClientHello
-	(*SealedServerHello)(nil),   // 21: rpgmmo.wire.v1.SealedServerHello
+	(GameEventType)(0),          // 3: rpgmmo.wire.v1.GameEventType
+	(*Envelope)(nil),            // 4: rpgmmo.wire.v1.Envelope
+	(*AuthRequest)(nil),         // 5: rpgmmo.wire.v1.AuthRequest
+	(*AuthResponse)(nil),        // 6: rpgmmo.wire.v1.AuthResponse
+	(*EnterWorldRequest)(nil),   // 7: rpgmmo.wire.v1.EnterWorldRequest
+	(*EnterWorldResponse)(nil),  // 8: rpgmmo.wire.v1.EnterWorldResponse
+	(*JoinTokenRequest)(nil),    // 9: rpgmmo.wire.v1.JoinTokenRequest
+	(*JoinTokenResponse)(nil),   // 10: rpgmmo.wire.v1.JoinTokenResponse
+	(*InputMessage)(nil),        // 11: rpgmmo.wire.v1.InputMessage
+	(*EntitySnapshot)(nil),      // 12: rpgmmo.wire.v1.EntitySnapshot
+	(*GameEvent)(nil),           // 13: rpgmmo.wire.v1.GameEvent
+	(*SnapshotMessage)(nil),     // 14: rpgmmo.wire.v1.SnapshotMessage
+	(*DisconnectMessage)(nil),   // 15: rpgmmo.wire.v1.DisconnectMessage
+	(*ResyncRequest)(nil),       // 16: rpgmmo.wire.v1.ResyncRequest
+	(*TransferMapRequest)(nil),  // 17: rpgmmo.wire.v1.TransferMapRequest
+	(*TransferMapResponse)(nil), // 18: rpgmmo.wire.v1.TransferMapResponse
+	(*PingMessage)(nil),         // 19: rpgmmo.wire.v1.PingMessage
+	(*PongMessage)(nil),         // 20: rpgmmo.wire.v1.PongMessage
+	(*KickMessage)(nil),         // 21: rpgmmo.wire.v1.KickMessage
+	(*SealedClientHello)(nil),   // 22: rpgmmo.wire.v1.SealedClientHello
+	(*SealedServerHello)(nil),   // 23: rpgmmo.wire.v1.SealedServerHello
 }
 var file_wire_proto_depIdxs = []int32{
 	1,  // 0: rpgmmo.wire.v1.EntitySnapshot.type:type_name -> rpgmmo.wire.v1.EntityType
 	2,  // 1: rpgmmo.wire.v1.EntitySnapshot.action:type_name -> rpgmmo.wire.v1.EntityAction
-	11, // 2: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
-	3,  // [3:3] is the sub-list for method output_type
-	3,  // [3:3] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	3,  // 2: rpgmmo.wire.v1.GameEvent.type:type_name -> rpgmmo.wire.v1.GameEventType
+	12, // 3: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
+	13, // 4: rpgmmo.wire.v1.SnapshotMessage.events:type_name -> rpgmmo.wire.v1.GameEvent
+	5,  // [5:5] is the sub-list for method output_type
+	5,  // [5:5] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_wire_proto_init() }
@@ -1798,8 +2378,8 @@ func file_wire_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   19,
+			NumEnums:      4,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

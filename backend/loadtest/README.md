@@ -76,13 +76,33 @@ runs are directly comparable.
 
 A level is **DEGRADED** if any of these fails:
 
-- tick p99 > 66.67ms (the 15Hz budget — ADR-7's acceptance threshold), or more
+- tick p99 > the base-tick budget (ADR-7's acceptance threshold), or more
   than 1% of ticks above the 50ms histogram edge;
-- client snapshot interval p99 > 2× the tick period;
+- client snapshot interval p99 > 2× the **snapshot** period;
 - any player failed to join or dropped mid-run;
 - clients received < 95% of the snapshots the server says it enqueued
   (`Connection.cs` uses a 64-deep bounded channel with `DropOldest`, so a client
   the writer cannot keep up with loses frames silently).
+
+> **Two rates, two bounds, read off the server.** The tick budget is
+> `1/SIM_CRITICAL_HZ` and the snapshot period is `1/SIM_WORLD_HZ`. They were the
+> same 66.67ms on the single-rate server and have not been equal since ADR-13 made
+> 60/15 the default, so the harness fetches both from the game server's `/status`
+> at the start of every run instead of assuming them.
+>
+> Until this was fixed the harness used one constant, `1/15s`, for both — and got
+> both wrong in opposite directions. `gameserver_tick_duration_seconds` times a
+> BASE tick, so at 60Hz a budget of 66.67ms is four times too generous: a server
+> spending 40ms per base tick, 2.4× over, was reported as comfortably passing.
+> Narrowing that one constant to 1/60 would then have failed every level on
+> snapshot cadence, condemning a perfectly healthy 66.7ms interval for breaching a
+> 33.3ms bound no server was ever meant to meet. The fix is two numbers, not a
+> corrected one.
+>
+> If `/status` cannot be reached the run still proceeds against the pre-ADR-13
+> assumption, the header says `rates from ASSUMED (...)`, and the result JSON
+> records `rates_source`. Bandwidth figures do not depend on either rate; the tick
+> and cadence verdicts do.
 
 A level is **INVALID** — a stronger statement than DEGRADED — when it did not
 measure what its label claims. DEGRADED means "the server could not keep up",

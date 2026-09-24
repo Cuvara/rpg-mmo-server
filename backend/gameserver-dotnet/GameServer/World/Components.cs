@@ -117,6 +117,18 @@ public struct Combat
     /// never wall-clock — see <see cref="EntityState.CooldownUntilTick"/>.
     /// </summary>
     public ulong CooldownUntilTick;
+
+    /// <summary>
+    /// Simulation tick at which the ABILITY cooldown expires. Separate from
+    /// <see cref="CooldownUntilTick"/>, which governs the basic attack only.
+    /// </summary>
+    /// <remarks>
+    /// One slot for all abilities — a global cooldown, not a per-ability one. The reason
+    /// this is not a map is on <see cref="EntityState.AbilityCooldownUntilTick"/>: this
+    /// component is composed per entity per tick inside the world write lock, and a
+    /// dictionary here would put an allocation and a hash lookup on that path.
+    /// </remarks>
+    public ulong AbilityCooldownUntilTick;
 }
 
 /// <summary>Movement capability, and the presentation state derived from moving.</summary>
@@ -166,6 +178,50 @@ public struct Locomotion
     /// one that is genuinely standing still.
     /// </summary>
     public EntityAction Action;
+
+    /// <summary>
+    /// Retrigger counter for <see cref="Action"/>, in the wire's own form: 0 means
+    /// "never set", and a live counter skips zero on wrap.
+    /// </summary>
+    /// <remarks>
+    /// Advanced by <c>Shared.GameLogic.Systems.ActionStateLogic.Advance</c> — the rule the
+    /// Unity client reads this counter under — whenever the entity ENTERS an action,
+    /// including re-entering the one it is already in. That is the whole point:
+    /// <see cref="Action"/> is level-triggered, so two attacks in a row are identical bytes
+    /// and an animator driven from it alone plays the swing once. The edge is not in the
+    /// level field and no receiver can recover it.
+    ///
+    /// <para>Never written directly. Every write to <see cref="Action"/> goes through
+    /// <see cref="ActionTransitions.Enter"/> so that the counter cannot drift away from
+    /// the field it describes.</para>
+    /// </remarks>
+    public uint ActionSeq;
+
+    /// <summary>
+    /// Base tick until which a one-shot <see cref="Action"/> is latched and may not be
+    /// overwritten by a continuous one. Zero means "nothing latched".
+    /// </summary>
+    /// <remarks>
+    /// <b>Why a latch is needed at all, and why the counter alone is not enough.</b>
+    /// Actions are written on the CRITICAL group (every base tick) and sampled by the
+    /// snapshot gather on the WORLD group (every <c>WorldEvery</c> base ticks). At the
+    /// 60/15 default that is one write in four that any client can observe. An attack
+    /// sets <see cref="EntityAction.Attacking"/> on one base tick and the next tick with
+    /// movement input overwrites it, so at 60/15 an attack already reaches the wire only
+    /// if it happens to land on a world tick — a one-in-four coin flip that reads as "the
+    /// animation sometimes does not play".
+    ///
+    /// <para>Bumping <see cref="ActionSeq"/> does not fix that on its own: the counter
+    /// changes, so the entity is dirty and is sent, but the value sent is whatever
+    /// <see cref="Action"/> holds at the sample point — which is the state that clobbered
+    /// the attack. The latch is what keeps the one-shot alive until at least one world
+    /// tick has been able to see it.</para>
+    ///
+    /// <para>Server-side only; it never reaches the wire. <see cref="EntityAction.Dead"/>
+    /// is terminal and overrides the latch, because a corpse must not keep swinging.</para>
+    /// </remarks>
+    public ulong ActionHoldUntilTick;
+
 
     public Locomotion(float speed) => Speed = speed;
 }
@@ -226,15 +282,32 @@ public struct InputCursor
 /// <c>EntityKind.Value == "player"</c>. It exists so the persistence sweep is an
 /// archetype query rather than a full scan with a string comparison per entity.
 /// <para>
-/// Carries a byte because a zero-size component would make the chunk's element
-/// stride zero, which is not a shape worth relying on in a pre-1.0 library.
+/// It must carry a field because a zero-size component would make the chunk's element
+/// stride zero, which is not a shape worth relying on in a pre-1.0 library. That field
+/// used to be an unused byte; it is now <see cref="Linkdead"/>.
 /// </para>
 /// </summary>
 [EcsComponent]
 public struct PlayerTag
 {
-    /// <summary>Unused; present only to give the tag a non-zero size.</summary>
-    public byte Reserved;
+    /// <summary>
+    /// True while the player's connection is gone and the entity is only being HELD for a
+    /// reconnect (<c>ServerOptions.HoldTtl</c>: 30s on a map, 60s in a dungeon). Set when the
+    /// hold starts, cleared when a new session reattaches; eviction removes the entity.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why it exists.</b> A held entity is still a player in the world, so enemies
+    /// chased and hit it. With player respawn on, a dropped connection meant: killed during
+    /// the grace window, revived at the spawn point, and that spawn point persisted by the
+    /// eviction save. Measured on the dev cluster: the smoke test walked to x=4.83,
+    /// disconnected, and its row came back as x=0 y=0 hp=79/100 -- killed, respawned at
+    /// full health, hit again, saved. Reconnecting inside the grace is supposed to put the
+    /// player back where they were; that is the whole point of holding the entity.</para>
+    /// <para>It is a field on an existing component rather than a tag component of its own
+    /// so that toggling it is a write, not a structural change: no archetype move on every
+    /// disconnect, and nothing new to register for AOT.</para>
+    /// </remarks>
+    public bool Linkdead;
 }
 
 

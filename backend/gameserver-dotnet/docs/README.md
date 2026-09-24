@@ -73,7 +73,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 
 | Flag | Environment variable | Default | Description |
 |------|----------------------|---------|-------------|
-| `--mode` | `GAMESERVER_MODE` | `map` | `map` or `dungeon` (dungeon uses a 60s reconnect hold) |
+| `--mode` | `GAMESERVER_MODE` | `map` | `map` or `dungeon`. Dungeon mode changes **three** things, all from ADR-26: a **60s** reconnect hold instead of 30s; the pod writes its `servers:id:` registry hash but **never joins the `servers:map:` index**, so `FindServer` cannot hand one party's instance to an unrelated player (decision 8); and the pod **persists only the map-independent player fields** — HP and max HP — leaving `map_id`, `x` and `y` as the origin map wrote them (decision 5). A dungeon instance also **ends its own process** once the last member has left and their hold has expired with no reconnect (decision 6). See `docs/DESIGN.md`, "Dungeon mode" |
 | `--addr` | `GAMESERVER_ADDR` | `:9000` | Game traffic listen address |
 | `--map-id` | `GAMESERVER_MAP_ID` | `map_01` | Map identifier, also the `map_id` metric label |
 | `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
@@ -83,6 +83,9 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--max-inputs-per-tick` | `GAMESERVER_MAX_INPUTS_PER_TICK` | `32` | Most inputs one connection may queue between two tick drains. Movement-only inputs **coalesce in place** (newest wins) and occupy one slot however often they are sent; inputs carrying an attack target are kept distinct and budgeted by this. Beyond it inputs are dropped and counted as `gameserver_inputs_dropped_total{reason="connection_budget"}` |
 | `--max-pending-inputs` | `GAMESERVER_MAX_PENDING_INPUTS` | `0` → capacity × per-tick budget | World-wide cap on the pending input queue between two drains. `0` derives it as `GAMESERVER_CAPACITY × GAMESERVER_MAX_INPUTS_PER_TICK` — every admitted player spending their whole budget at once still fits. Beyond it inputs are dropped and counted as `reason="queue_full"` |
 | `--max-snapshot-bytes` | `GAMESERVER_MAX_SNAPSHOT_BYTES` | `8192` | **Per-connection downlink budget**: most bytes of snapshot *payload* one client may be sent per snapshot. The counterpart to `--max-inputs-per-tick` on the other direction of the wire — before it, the AOI radius was the only bound on a snapshot, and a radius bounds *area*, not how many entities stand inside it. `0` disables it and restores the pre-budget encoder exactly. **Protobuf connections only** (every byte figure in the encoder is a protobuf size; a JSON frame for the same snapshot is several times larger, so a JSON stream is bounded only by the AOI radius). It is a **tail cap, not a shaper** — but it engages earlier than first documented: measured live, a stock server starts shedding at **~200 entities in one observer's AOI** (keyframes only; the steady delta stream is clipped from ~317). The original "~2.7× the mean snapshot, never engages" derivation sized the cap against a *delta-weighted* mean and was wrong; a keyframe costs ~41 B/entity against a delta's ~26. See "Downlink budget" in `docs/DESIGN.md` for the corrected derivation and the measured table. When it does, entities are **deferred, never dropped** — see "Downlink budget" in `docs/DESIGN.md`. Reported as `max_snapshot_bytes` on `/status`, with `snapshot_bytes`, `snapshot_entities_shed`, `snapshot_removals_deferred` and `snapshot_max_shed_age` |
+| `--aoi-radius` | `GAMESERVER_AOI_RADIUS` | `50` | **Area-of-interest radius in world units.** The single largest lever on downstream bandwidth: population inside a circle grows with the SQUARE of the radius, so halving it quarters the expected entity count per snapshot — a bigger effect than anything downstream of it, including `--max-snapshot-bytes`, which is a tail cap on what the radius already selected. It is also the spatial index's **cell size** (`EcsWorld`), so the two cannot be configured apart. **Refused at startup, never defaulted:** an unparseable, zero, negative, non-finite or absurd value exits 2 with a named reason (`GameServer/Server/AoiSettings.cs`) — a typo that silently ran a fleet at 50 while its manifest said 5 is the exact divergence this refuses to allow. Parsed with InvariantCulture, so `12.5` and never `12,5`. A radius that reaches the map's **diagonal** logs a warning at startup: interest management then filters nothing and every entity is in every snapshot, which is legitimate in a small dungeon instance and a mistake on an open map, and the server cannot tell which it is looking at. **Not on the wire** — a client cannot ask for it; read `aoi_radius` (and `aoi_covers_whole_map`) from `/status` |
+| `--importance` | `GAMESERVER_IMPORTANCE` | `legacy` | **Which entities are emitted FIRST when the per-connection downlink budget bites.** Not how many bytes go out (`--max-snapshot-bytes`) and not which entities are candidates at all (`--aoi-radius`) — purely the order among candidates. `legacy` is every factor zero: self, then longest-deferred, then nearest, which is what shipped before importance existed. `balanced` additionally ranks on visible-state change (10), combat (6), entity type (3) and distance (2). **Deferral age stays dominant in both** — it sits ABOVE the score in the comparison, because the starvation bound (max deferral is the size of the dirty set, independent of session length) is a consequence of the comparison being strictly oldest-first; folding age into the weighted sum would make fairness a function of the weights. Per-factor overrides `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}`; weighting a factor this server has no data for (`PARTY`, `PVP`, `BOSS`, `QUEST`, `VISIBILITY`, `ZONE`, `INTERACTION`) **exits 2** rather than being accepted and ignored. Reported as `importance_profile` and `importance_weights` on `/status`; the label reads `custom` whenever a weight was overridden, so it never claims a profile it is not running |
+| `--replication-schedule` | `GAMESERVER_REPLICATION_SCHEDULE` | `off` | **How often an entity of a given importance is re-sent.** `off` (default) means every dirty entity is due every world tick. `tiered` withholds lower-importance entities for a configured interval: score ≥ 8 every tick, score ≥ 3 for 133ms, otherwise 266ms. **Intervals are configured in milliseconds and converted through `SIM_WORLD_HZ`** — a tick count means nothing without the rate that advances it, so the same setting is 2 and 4 ticks at 15Hz and 4 and 8 at 30Hz, holding the same wall time. `tiered` without importance weights **exits 2**: every score would be zero, every entity would land in the slowest band, and the result would be a uniform staleness increase rather than a policy. **An edge is never deferred** — a health change or an action retrigger goes out immediately, because withholding one is a dropped event rather than a late update. **A keyframe never applies intervals**, since the client discards anything a keyframe does not list. Applies whether or not the byte budget is on. Reported as `replication_schedule` on `/status` with `snapshot_deferred_by_interval` and `snapshot_max_state_age` — the last of which is NOT `snapshot_max_shed_age`: that counts budget deferrals, this counts schedule ones. See ADR-27 |
 | `--sim-critical-hz` | `SIM_CRITICAL_HZ` | `60` | Frequency of the **critical** group (input, movement, combat). This is also the **base tick rate** of the loop — every other group is derived from it |
 | `--sim-world-hz` | `SIM_WORLD_HZ` | `15` | Frequency of the **world** group (AI, spawning, despawning) **and of the snapshot broadcast**. Must divide `SIM_CRITICAL_HZ` exactly and must not exceed it, or the server exits with code 2 |
 | `--sim-background-hz` | `SIM_BACKGROUND_HZ` | `5` | Frequency of the **background** group (work that tolerates a whole interval of delay). Must divide `SIM_CRITICAL_HZ` exactly and must not exceed `SIM_WORLD_HZ` |
@@ -92,6 +95,25 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--gather-workers` | `GAMESERVER_GATHER_WORKERS` | `1` | Threads the AOI gather may use. `1` is serial. Above `1` it applies only from 500 viewers up — measured gain is 2.0-2.7x at 500 viewers / 4 workers, inside the noise at 200, a loss at 50 (see `docs/DESIGN.md`, "Where the tick budget goes") |
 | `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
 | `--map-height` | `GAMESERVER_MAP_HEIGHT` | `1000` | Map height in world units |
+| *(none)* | `GAMESERVER_ENEMIES` | on | Enemy AI on/off. `false` disables the spawner entirely; `/status` then reports `enemy_ai: "off"` and `enemies_alive: 0` |
+| *(none)* | `GAMESERVER_ENEMY_CHASE` | `on` | **Enemies chase the nearest LIVE player.** `off` restores the pre-change AI in full: every enemy walks to the origin and despawns on arrival. Same vocabulary as `GAMESERVER_FIELD_DELTA` (`on/true/1/yes`, `off/false/0/no`); anything else **exits 2** |
+| *(none)* | `GAMESERVER_ENEMY_MAX` | `30` | Enemy population cap with **nobody online**. The pre-change cap, unchanged |
+| *(none)* | `GAMESERVER_ENEMY_MAX_PER_PLAYER` | `45` | Extra enemies allowed **per live player**, added to `GAMESERVER_ENEMY_MAX`. The cap in force is `MAX + MAX_PER_PLAYER × livePlayers`, bounded at 20 000. Additive rather than multiplicative so an empty server is exactly the pre-change server while a four-player group gets a 210-enemy world |
+| *(none)* | `GAMESERVER_ENEMY_WAVE_SIZE` | `2` | Enemies per wave with nobody online |
+| *(none)* | `GAMESERVER_ENEMY_WAVE_SIZE_PER_PLAYER` | `6` | Extra enemies per wave per live player, bounded at 2 000. Scales **with the cap, not by taste**: filling a 75-enemy cap two at a time takes 56s, so a bigger cap without a bigger wave is decoration |
+| *(none)* | `GAMESERVER_ENEMY_WAVE_INTERVAL` | `1.5` | Seconds between waves |
+| *(none)* | `GAMESERVER_ENEMY_SPAWN_DISTANCE` | `13` | World units from the anchor an enemy is placed at — a **randomly chosen live player**, or the origin when nobody is online (which is the ring the pre-change spawner always used). Choosing the anchor per enemy is what spreads a wave across the whole player population instead of onto one ring |
+| *(none)* | `GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE` | `8` | Closest an enemy is placed to **any** live player. The spawn distance only guarantees separation from the anchor; in a crowd a placement can land in a bystander's lap, and map-edge clamping can pull one back across it. Best-effort: 6 samples of the circle, then the last candidate is taken anyway, because a wave that silently spawns fewer entities the tighter the crowd gets is the threadbare fight returning through the door marked "safety check". **Must be strictly less than `GAMESERVER_ENEMY_SPAWN_DISTANCE`** or the server exits 2 — at or above it, every candidate including the one it was measured from is rejected |
+| *(none)* | `GAMESERVER_ENEMY_CONTACT_RANGE` | `1` | How close a chaser closes before it stops advancing. Inside `GameConstants.AttackRange` (3.0) so the player can hit what is standing on them, and non-zero so a ring of chasers does not jitter across the target every tick |
+| *(none)* | `GAMESERVER_ENEMY_HP` / `_ATTACK` / `_DEFENSE` / `_SPEED` | `16` / `5` / `2` / `2.5` | Per-enemy stats, unchanged from the compiled-in values |
+| *(none)* | `GAMESERVER_ENEMY_ATTACKS` | `on` | **Enemies attack back.** `off` restores the one-directional fight: enemies close to the contact range and stand there while players hit them. Same vocabulary as `GAMESERVER_FIELD_DELTA`; anything else **exits 2**. Enemy attacks go through the ordinary input path (`EcsWorld.PushInput` → `InputHandler` → `CombatLogic`), exactly as bot attacks do, so damage, range, cooldown, the `Damage`/`Death` game events and the kill reward are all the one combat path this server has — there is no second damage formula |
+| *(none)* | `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` | `3` | **The survivability cap, and the only thing that bounds what one player can take.** At most this many enemy attacks LAND on one player per `GAMESERVER_ENEMY_ATTACK_INTERVAL`, however many enemies are standing on them — a player surrounded by 327 enemies takes exactly what a player surrounded by 3 takes. Bounded at 1 000. `0` means enemies never land a hit (a valid setting, not a refused one). **Read the arithmetic below before raising it** |
+| *(none)* | `GAMESERVER_ENEMY_ATTACK_INTERVAL` | `0.5` | Seconds between one player's incoming-damage windows. The period the cap above is expressed over, rounded **up** to a whole number of world ticks (at the default 15Hz world rate, 0.5s → 8 world ticks → 0.533s). Values below the server's own 500ms attack cooldown (`GameConstants.AttackCooldownMs`) do **not** produce more damage — the enemy's own cooldown is charged by the same `InputHandler` a player's is — so the effective interval is `max(this, 0.5s)` |
+| *(none)* | `GAMESERVER_PLAYER_RESPAWN` | `on` | **A player whose HP reaches 0 is returned to the map spawn point at full HP on the next world tick.** Named for the player rather than the enemy because it governs a player rule; it lives in this family because enemy attacks are what make player death reachable. `off` restores the pre-existing behaviour, which is not a design but an absence — see "Death and respawn" below |
+| *(none)* | `GAMESERVER_BOTS` | `0` (**off**) | **Synthetic players.** `N > 0` spawns N bots: real player-type entities that move and attack through the ordinary input path, so clients render them, enemies chase them, and they are legitimate targets. A battle royale is a crowd of *players* as much as of enemies, and this project can only put three real clients on a map. **They are development/demo scaffolding**: not persisted, no connection, no capacity, and not an AI to ship to players. Logged as a startup WARNING whenever non-zero, because a busy map with `players_online: 3` otherwise reads as a broken counter |
+| *(none)* | `GAMESERVER_BOT_SPREAD` | `120` | Radius of the disc bots are scattered over at startup. Deliberately wide: bots are what the enemy spawner anchors on, so where the bots are is where the fight is, and clustering them rebuilds the conveyor belt with extra steps |
+| *(none)* | `GAMESERVER_BOT_ENGAGE_RANGE` | `40` | How far a bot travels to engage an enemy. Beyond it the bot wanders — a "nearest enemy anywhere" rule collapses every bot onto whichever corner is busiest |
+| *(none)* | `GAMESERVER_BOT_HP` / `_ATTACK` / `_DEFENSE` / `_SPEED` | `100` / `10` / `5` / `4` | Per-bot stats. The defaults match a real player's except for speed, which is higher so bots visibly circulate |
 | `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret for the Nakama→client auth token. Only used here as the `JOIN_TOKEN_SECRET` fallback |
 | `--join-token-secret` | `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | HS256 secret the **gateway** signs join tokens with. Comma-separated (`current,previous`) to rotate — see below |
 | `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`. Empty, `off`, `none` or `disabled` turns it off — same vocabulary as the Go gateway. An address that parses as none of those disables the endpoint and logs an error; it does not stop the server |
@@ -106,6 +128,169 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--register-on-allocated` | `GAMESERVER_REGISTER_ON_ALLOCATED=true` | off | Hold the registry entry back until Agones reports this GameServer **Allocated**, instead of publishing it right after Ready. Agones-only; ignored (with a warning) when Agones is off — see below |
 | `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration, the `events:game` publisher, and the duplicate-login kick consumer on `events:kick` (ADR-20) |
 | `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
+
+### Enemy combat: the survivability arithmetic
+
+**327 enemies attacking is not a fight, it is an instant delete**, and lowering the
+per-enemy damage does not fix it: `CombatLogic.CalculateDamage` floors at
+`GameConstants.MinDamage` (1), so three hundred enemies deal at least three hundred
+damage per round however weak each one is. A per-enemy cooldown does not fix it either —
+three hundred enemies each respecting the same 500ms cooldown still deliver three hundred
+hits every 500ms. The bound has to be expressed on the **target**, which is what
+`GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` is.
+
+Worst case a player can take:
+
+```
+damage per hit  = max(1, GAMESERVER_ENEMY_ATTACK - player defense)
+damage per sec  = GAMESERVER_ENEMY_ATTACKERS_PER_TARGET x damage per hit
+                  / GAMESERVER_ENEMY_ATTACK_INTERVAL
+time to die     = player HP / damage per sec
+```
+
+At the shipped defaults and a default player (HP 100, defense 5, enemy attack 5):
+
+| Setting | Damage/hit | Damage/sec | Time to die from full |
+|---|---|---|---|
+| **defaults** (`3` per `0.5s`) | 1 | 6 | **16.7 s** |
+| `ATTACKERS_PER_TARGET=1`, `INTERVAL=1` | 1 | 1 | 100 s |
+| `ENEMY_ATTACK=20` (defaults otherwise) | 15 | 90 | 1.1 s |
+| `ATTACKERS_PER_TARGET=20` | 1 | 40 | 2.5 s |
+
+The number is **independent of the enemy population**, which is the property the cap
+exists to give: 16.7 seconds surrounded by twenty enemies, and 16.7 seconds surrounded by
+three hundred. `EnemyAiSettings.WorstCaseDamagePerSecond` computes it in code, and
+`EnemyAiSettingsTests.WorstCaseDamagePerSecond_IsWhatTheKnobsSay` is the table above as a
+test.
+
+Rounding, stated because it moves the third decimal: the interval is rounded up to whole
+world ticks, so the default 0.5s is really 8/15 = 0.533s and the default worst case is
+5.63 damage/second, i.e. 17.8 seconds. The table uses the configured interval.
+
+`/status` publishes `enemy_attacks_decided` and `enemy_attacks_throttled`. The second is
+the one that matters: a crowd on a player with `enemy_attacks_throttled` at zero means the
+cap is **not** what is limiting the fight, and the limit is somewhere you have not looked.
+
+### Death and respawn
+
+Before enemy attacks existed, a player's HP could not reach 0 in normal play, and what
+happens when it does was never designed. What the code does is: nothing reaps a dead
+player (`EnemyReapSystem` only queries the enemy archetype), `InputHandler` refuses every
+input from it for the life of the process, the enemy AI stops counting it as somebody to
+fight, and `AsyncSaver` persists `hp = 0`. There is no `dead` column in `player_states`,
+so `PlayerSpawn.Resolve` restores that 0 verbatim on the next join — **on any server** —
+and the character is dead permanently.
+
+`GAMESERVER_PLAYER_RESPAWN=on` (the default) gives that a defined end and nothing more:
+the player is dead for at most one world tick — long enough for the `Death` game event and
+the `Dead` action to be sampled by a snapshot, so the death is observable — and is then
+back at the map's spawn point with its own `MaxHp`. There is no death screen, no timed
+respawn, no corpse, no penalty and no schema change; a timed respawn needs a per-entity
+tick to count down to, which is a component field and a wire consideration, and is
+deliberately not done here.
+
+It applies to **every** cause of death, not just enemies: the system asks the world who is
+dead rather than being told by whatever killed them. It applies to synthetic players
+(`GAMESERVER_BOTS`) too, which matters more than it sounds — a dead bot never acts again
+for the life of the process, so without this a demo silently drains its own crowd while
+`bots_alive` still reports the full count.
+
+**Every `GAMESERVER_ENEMY_*` value is parsed strictly**, the same rule as
+`GAMESERVER_AOI_RADIUS` and `GAMESERVER_FIELD_DELTA`: an unparseable, out-of-range or
+unrecognised value **exits 2 with a named reason** rather than falling back to the
+default. These knobs decide how many entities exist and where they go, so a typo that
+silently ran a fleet at the default while its manifest said something else is a fight
+nobody configured — and no counter, log line or wire field would report it. Decimals are
+InvariantCulture, so `12.5` and never `12,5`. The values actually in force are published
+as `enemy_ai` (and the derived `enemy_ai_max_now`) on `/status`, because an
+already-allocated Agones GameServer keeps the environment it was created with and a fleet
+update reaches only new pods.
+
+### Adding a knob: strict parsing is only half of it
+
+A `GAMESERVER_*` knob is **two** things — the constant the server parses, and a line in the
+`environment:` block of **every** compose service that runs the game server. Docker forwards
+nothing a service did not declare, so a knob with only the first half is documented,
+strictly parsed, settable in `deploy/.env` and **silently ignored**: the server runs its
+compiled default, `/status` reports that default truthfully, and the strict parser cannot
+help because it never sees a value to refuse. There is no log line, no counter and no wire
+field that differs.
+
+That has now happened **seven** times here. `GameServer.Tests/Deploy/ComposeEnvPassthroughTests.cs`
+is now the mechanical link: it reflects over every `GAMESERVER_*` constant the assembly
+declares and fails `dotnet test` if any is missing from `gameserver-dotnet` in
+`backend/deploy/docker-compose.yml` or from `gameserver-dotnet-map02` in
+`backend/deploy/docker-compose.override.yml`. **Both**, because map_02 declares its own block
+and inherits nothing — a one-service fix leaves the two maps reading the same `.env`
+differently, which is harder to find than the original gap. Write each entry as
+`NAME: ${NAME:-}` so an unset variable stays unset. A knob that genuinely should not be
+passed through goes in that file's `Excluded` dictionary **with a reason**. That dictionary
+held nothing until #404 and now holds seven entries — not because the bar dropped, but
+because the gate's input widened to the names `Program.cs` used to read from inline
+literals, and seven of those are genuinely not compose knobs: two are Agones-only
+(`GAMESERVER_ADVERTISE_HOST`, `GAMESERVER_REGISTER_ON_ALLOCATED`, and compose runs no
+sidecar), two are per-map and are written as literals in each service block like
+`GAMESERVER_MAP_ID` (`GAMESERVER_MAP_WIDTH`/`_HEIGHT`), one is a one-shot invocation mode
+that would stop every server in the stack from serving if it were forwarded
+(`GAMESERVER_MIGRATE_ONLY`), and two cannot take effect because of values compose itself
+pins — `GAMESERVER_TICK_RATE` is overridden by the `SIM_*` rates compose always sets, and
+`GAMESERVER_JOIN_DEADLINE_SECONDS` is dungeon-only while both compose services pin
+`GAMESERVER_MODE: map`. Each entry says which.
+
+**The gate's scope, and the two holes that used to be in it.** It covers names declared as
+`const string` — **56** today, up from 31. It still does **not** cover names built by
+concatenation *at runtime*, which exist nowhere as a whole string and which neither
+reflection nor a grep can enumerate.
+
+The other two gaps this paragraph used to list are closed, and the same mechanism closed
+both. *Names read from an inline literal* (25 of them, including
+`GAMESERVER_MAX_SNAPSHOT_BYTES` — the knob whose absence produced the only passthrough
+defect a player could see) are declared in `GameServer/ServerEnv.cs` as of #404 and are
+gated like any other; that change immediately exposed a **seventh** instance,
+`GAMESERVER_FIELD_DELTA`, which had been added to `gameserver-dotnet` and never to
+`gameserver-dotnet-map02`. *The Kubernetes manifests* are read as of #400 by
+`GameServer.Tests/Deploy/FleetEnvPassthroughTests.cs`, which gates all **three** fleets —
+`deploy/agones/fleet-map-dotnet-dev.yaml`, `deploy/k8s/app/50-fleet-map.yaml` and
+`deploy/k8s/app/60-fleet-dungeon.yaml`. Before it, those manifests declared 9
+`GAMESERVER_*` names against compose's 41, so the entire enemy-AI, combat and bot surface
+was unreachable on a cluster; they declare 48 now, each as a `configMapKeyRef` against
+`gameserver-config` with `optional: true`, so a cluster that sets nothing keeps the
+defaults. Both gates take their list of knobs from one `DeclaredKnobs` helper, so neither
+can drift from the other.
+
+Unlike the compose gate, the fleet gate's exclusions are not and cannot be empty: a fleet is
+not a machine with a config file. `GAMESERVER_ID` is **forbidden** there (it beats
+`POD_NAME`, and every pod would then register under one id and reject every join),
+`GAMESERVER_PUBLIC_ADDR` cannot carry a port only known at scheduling time, and
+`GAMESERVER_TRANSPORT` is coupled to the port's `protocol:`, which no environment variable
+can change. Two more are per-fleet rather than global: `GAMESERVER_JOIN_DEADLINE_SECONDS` is
+excluded on the two *map* fleets and **required** on the dungeon one, and `GAMESERVER_MAP_ID`
+is the reverse — which is why those exclusions are keyed by manifest. A single global entry
+would have excused the one deployment where the knob does something.
+
+Declaring a new knob's name as a constant is what brings it under the gate, and that is
+worth doing deliberately: `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}` were
+assembled from a prefix and four suffixes, which is why the gate could not see the *first*
+of the incidents above. Written as `const string` — `EnvVar + "_W_DISTANCE"` is a
+compile-time constant, so each is a real literal in the assembly — they came under the gate
+and it found a fifth instance at once: all four had been added to `gameserver-dotnet` when
+that gap was first fixed and never to `gameserver-dotnet-map02`, so setting a weight changed
+map_01's replication policy and silently left map_02 on the profile's own. The seven
+*refused* `_W_` factors stay assembled from suffixes on purpose — a knob the server exits 2
+on must not be demanded in compose.
+
+
+**Bots count as players everywhere the simulation asks the world**, which is the point and
+also the thing to know before turning them on. The enemy population cap is
+`GAMESERVER_ENEMY_MAX + GAMESERVER_ENEMY_MAX_PER_PLAYER × players`, and a bot is one of
+those players — so `GAMESERVER_BOTS=24` at the default allowance is a **1110-enemy world
+before a single real client connects**. The server computes that number and logs it at
+startup rather than leaving it to be discovered from a snapshot size; lower
+`GAMESERVER_ENEMY_MAX_PER_PLAYER` alongside it. The one place a bot is deliberately *not*
+a player is **persistence**: the save sweep reads `PersistablePlayerStates()`, which
+excludes them by archetype tag (not by id), so a development server with bots on never
+writes a player row for one.
+
 
 #### Realtime transport (`--transport`, `TRANSPORT_KEY`)
 

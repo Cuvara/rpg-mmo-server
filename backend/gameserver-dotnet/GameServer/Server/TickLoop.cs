@@ -44,8 +44,24 @@ public sealed class TickLoop
     private long _snapshotFramesWrittenDelta;
     private long _snapshotBytesDelta;
     private long _snapshotEntitiesShedDelta;
+
+    /// <summary>
+    /// Viewer gathers skipped this tick because the viewer's own entity could not be
+    /// resolved (#385). Written from the gather workers, so every update is interlocked.
+    /// </summary>
+    private long _snapshotAnchorMissingDelta;
+
+    /// <summary>
+    /// Entities gathered across every viewer this tick, and the largest single viewer's
+    /// gather. The total gives a rate; the max is what a single client could have seen,
+    /// and averaging alone would hide one client with an empty view among many full ones.
+    /// </summary>
+    private long _snapshotEntitiesGatheredDelta;
+    private int _snapshotMaxGather;
     private long _snapshotRemovalsDeferredDelta;
     private int _snapshotMaxShedAge;
+    private long _snapshotDeferredByIntervalDelta;
+    private int _snapshotMaxStateAge;
 
     /// <summary>
     /// Scratch map (entity -> index of the newest input in this tick's drained batch).
@@ -161,15 +177,37 @@ public sealed class TickLoop
         ISimulationPhase? simulationPhase = null,
         double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds,
         int gatherWorkers = 1)
-        : this(world, handler, connections, SimulationRates.Uniform(tickRate), aoiRadius,
+        : this(world, handler, null, connections, SimulationRates.Uniform(tickRate), aoiRadius,
                logger, metrics, keyframeInterval, simulationPhase, achievedRateWindowSeconds,
                gatherWorkers)
+    {
+    }
+
+    /// <summary>
+    /// Overload without an event buffer, for the tests and benchmarks that drive the loop
+    /// and discard occurrences.
+    /// </summary>
+    public TickLoop(
+        EcsWorld world,
+        InputHandler handler,
+        ConnectionManager connections,
+        SimulationRates rates,
+        float aoiRadius,
+        ILogger logger,
+        GameMetrics? metrics = null,
+        int keyframeInterval = GameConstants.DefaultKeyframeInterval,
+        ISimulationPhase? simulationPhase = null,
+        double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds,
+        int gatherWorkers = 1)
+        : this(world, handler, null, connections, rates, aoiRadius, logger, metrics,
+               keyframeInterval, simulationPhase, achievedRateWindowSeconds, gatherWorkers)
     {
     }
 
     public TickLoop(
         EcsWorld world,
         InputHandler handler,
+        GameServer.Snapshot.TickEventBuffer? tickEvents,
         ConnectionManager connections,
         SimulationRates rates,
         float aoiRadius,
@@ -183,6 +221,7 @@ public sealed class TickLoop
         _rateMeter = new AchievedRateMeter(achievedRateWindowSeconds);
         _world = world;
         _handler = handler;
+        _tickEvents = tickEvents;
         _connections = connections;
         _simulationPhase = simulationPhase;
         _rates = rates;
@@ -195,8 +234,16 @@ public sealed class TickLoop
         _gatherWorkers = gatherWorkers < 1 ? 1 : gatherWorkers;
     }
 
+    /// <summary>
+    /// This tick's occurrences, or null when the host does not collect them.
+    /// </summary>
+    private readonly GameServer.Snapshot.TickEventBuffer? _tickEvents;
+
     /// <summary>The rate configuration this loop runs.</summary>
     public SimulationRates Rates => _rates;
+
+    /// <summary>AOI radius every gather on this loop uses. Diagnostics and tests.</summary>
+    internal float AoiRadius => _aoiRadius;
 
     /// <summary>
     /// Whether the world group — and therefore the snapshot broadcast — is due on the
@@ -212,7 +259,33 @@ public sealed class TickLoop
     {
         for (int i = 0; i < _viewerCount; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
+            if (!_viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents))
+            {
+                Interlocked.Increment(ref _snapshotAnchorMissingDelta);
+                continue;
+            }
+
+            RecordGather(_viewers[i].LastGatherCount);
+        }
+    }
+
+    /// <summary>
+    /// Accumulate one viewer's gather size. Interlocked throughout because the parallel
+    /// slice path calls this from the gather workers.
+    /// </summary>
+    private void RecordGather(int count)
+    {
+        Interlocked.Add(ref _snapshotEntitiesGatheredDelta, count);
+
+        // Compare-exchange loop rather than a plain compare-and-write: two workers reading
+        // the same stale maximum would otherwise both decide they are the largest and the
+        // smaller of them could land last.
+        int observed = Volatile.Read(ref _snapshotMaxGather);
+        while (count > observed)
+        {
+            int prior = Interlocked.CompareExchange(ref _snapshotMaxGather, count, observed);
+            if (prior == observed) break;
+            observed = prior;
         }
     }
 
@@ -239,7 +312,15 @@ public sealed class TickLoop
 
         for (int i = from; i < to; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
+            // Interlocked because this slice runs on a gather worker: the parallel path
+            // is the one where several viewers can fail in the same tick.
+            if (!_viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents))
+            {
+                Interlocked.Increment(ref _snapshotAnchorMissingDelta);
+                continue;
+            }
+
+            RecordGather(_viewers[i].LastGatherCount);
         }
     }
 
@@ -543,6 +624,49 @@ public sealed class TickLoop
         }
         _viewerCount = Math.Min(viewers, _viewers.Length);
 
+        // Reset EVERY per-tick snapshot delta HERE: on every world tick, before the
+        // gather, and OUTSIDE the viewer-count guard below.
+        //
+        // WHY BEFORE THE GATHER. These are filled by the gather and by the viewer loop
+        // that follows it, and recorded at the bottom of the tick. Resetting them in one
+        // tidy block down there put the reset AFTER the thing that writes them, so they
+        // were zeroed every tick between being accumulated and being recorded, and
+        // `snapshot_entities_gathered`, `snapshot_max_gather` and `snapshot_anchor_missing`
+        // could only ever report 0. That is the failure those counters exist to expose,
+        // in the counters themselves: a healthy-looking zero meaning "not measured"
+        // rather than "nothing happened". Caught by reading /status on a live server
+        // carrying 165 enemies and 3 players — 15MB of snapshots sent, every gather
+        // counter zero.
+        //
+        // WHY OUTSIDE THE GUARD (#401). The fix for that first failure moved the resets
+        // INSIDE `if (_viewerCount > 0)`, which broke the other end of the same range: the
+        // recording calls at the bottom of this method are unconditional, so on a world
+        // tick with NO viewers every delta kept the value the last tick WITH a viewer left
+        // behind, and was recorded again. The last connected client's final tick was then
+        // replayed into the counters 15 times a second for the life of the process.
+        // Observed on map_01 with players_online=0 and no established socket on the game
+        // port: snapshot_bytes climbing by exactly 1140 and entities_gathered by exactly
+        // 279 per world tick, forever — ~16.4 KB/s of snapshots that were never gathered,
+        // never encoded and never written. `snapshots_sent` was the one counter that stayed
+        // still, because `_snapshotsThisTick` is the one field reset at the top of the tick
+        // rather than inside the guard; that disagreement is what identified the mechanism.
+        //
+        // So: unconditional reset, unconditional record. A world tick with no viewers must
+        // record a zero, because zero is what happened. Do not move these back inside the
+        // guard, and do not make the recording conditional instead — a counter that stops
+        // being written is indistinguishable from a server that stopped ticking.
+        _snapshotAnchorMissingDelta = 0;
+        _snapshotEntitiesGatheredDelta = 0;
+        _snapshotMaxGather = 0;
+        _snapshotsCoalescedDelta = 0;
+        _snapshotFramesWrittenDelta = 0;
+        _snapshotBytesDelta = 0;
+        _snapshotEntitiesShedDelta = 0;
+        _snapshotRemovalsDeferredDelta = 0;
+        _snapshotMaxShedAge = 0;
+        _snapshotDeferredByIntervalDelta = 0;
+        _snapshotMaxStateAge = 0;
+
         if (_viewerCount > 0)
         {
             // Phase A — gather. One read lock for the whole broadcast.
@@ -574,17 +698,17 @@ public sealed class TickLoop
 
             // Each connection reports its own delta. Summing running totals over the
             // tick's scratch viewers is not a delta -- see Connection.TakeSnapshotCounters.
-            _snapshotsCoalescedDelta = 0;
-            _snapshotFramesWrittenDelta = 0;
-            _snapshotBytesDelta = 0;
-            _snapshotEntitiesShedDelta = 0;
-            _snapshotRemovalsDeferredDelta = 0;
-            _snapshotMaxShedAge = 0;
+            // The accumulators were zeroed above, with the gather counters, so that a
+            // viewerless tick zeroes them too.
             for (int i = 0; i < _viewerCount; i++)
             {
                 _viewers[i].TakeSnapshotCounters(
                     out long c, out long w, out long b,
                     out long shed, out long deferred, out int shedAge);
+                _viewers[i].DeltaState.TakeScheduleCounters(
+                    out long byInterval, out int stateAge);
+                _snapshotDeferredByIntervalDelta += byInterval;
+                if (stateAge > _snapshotMaxStateAge) _snapshotMaxStateAge = stateAge;
                 _snapshotsCoalescedDelta += c;
                 _snapshotFramesWrittenDelta += w;
                 _snapshotBytesDelta += b;
@@ -601,6 +725,25 @@ public sealed class TickLoop
             Array.Clear(_viewers, 0, _viewerCount);
         }
 
+        // Cleared HERE — after the gather has staged them on every connection — and NOT at
+        // the top of each base tick.
+        //
+        // THE BUG THIS FIXES, because it is not visible from either half. Input runs on the
+        // CRITICAL group, every base tick (60 Hz by default). Snapshots ship on the WORLD
+        // group, every fourth one (15 Hz). Clearing at the top of each base tick therefore
+        // threw away every event produced on a tick that was not also a broadcast tick —
+        // three ticks in four — so an attack landed, the victim's HP fell, and no damage
+        // event ever reached anyone. Every unit test on both sides still passed, because
+        // each half was correct in isolation; only a real socket showed it.
+        // TickEventBroadcastTests sweeps all four phases and fails on three of them
+        // if this moves back.
+        //
+        // Bounded rather than unbounded: at worst the buffer holds one broadcast interval's
+        // events, and TickEventBuffer.Capacity caps it anyway. Reached on the viewerless
+        // path too, so a server with nobody connected does not accumulate forever.
+        _tickEvents?.Clear();
+
+
         // Metrics: recorded once per tick, no per-entity allocation.
         if (_metrics != null)
         {
@@ -611,6 +754,10 @@ public sealed class TickLoop
             _metrics.RecordSnapshotBudget(
                 _snapshotBytesDelta, _snapshotEntitiesShedDelta,
                 _snapshotRemovalsDeferredDelta, _snapshotMaxShedAge);
+            _metrics.RecordSnapshotSchedule(
+                _snapshotDeferredByIntervalDelta, _snapshotMaxStateAge);
+            _metrics.RecordSnapshotAnchorMissing(_snapshotAnchorMissingDelta);
+            _metrics.RecordSnapshotGather(_snapshotEntitiesGatheredDelta, _snapshotMaxGather);
             _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());
         }
     }

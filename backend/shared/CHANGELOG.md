@@ -6,6 +6,130 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Gameplay v2 in `shared/messages`.** `InputMessage` gains `AbilityID`, `AbilityTargetID`,
+  `AimX`/`AimY`; `EntitySnapshot` gains `ActionSeq`; `SnapshotMessage` gains `Events`, with a
+  new `GameEvent` / `GameEventType`. Both directions of the Protobuf conversion in `proto.go`
+  carry them.
+
+  The gateway never reads a snapshot or an input, so production Go is unaffected — but the
+  integration and load harnesses drive the wire through this package, and a Go client that
+  silently dropped the fields could not have tested them. It was the missing third language
+  of a contract whose other two were already done.
+- **`EntitySnapshot.changed_fields` (proto field 13, `uint32`) — field-level delta mask
+  (protocol version 2+).** Non-zero on a delta entity means only the bits that are set have
+  their wire fields present; the receiver keeps its last-known value for every unset bit. Zero
+  means "all fields present" — preserving the pre-v2 rule so a sender that never sets the field
+  is a supported configuration (an old receiver ignoring it via proto3 unknown-field skip is
+  exactly the same bytes it always saw). Bit assignments:
+  `x=0x0001, y=0x0002, hp=0x0004, max_hp=0x0008, type=0x0010, speed=0x0020,
+  facing_brad=0x0040, action=0x0080, action_seq=0x0100`.
+  NEVER set on keyframes; NEVER set on a first introduction.
+- **`WireProtocolVersion` bumped 1 → 2.** The merge algorithm changed: a delta entity with a
+  non-zero mask is a partial update, not a full replace. A pre-v2 receiver ignoring the mask
+  and zeroing every absent field would produce entities at the origin with 0 HP — the silent
+  failure the version number exists to make loud.
+- **`Shared.GameLogic.Systems.ActionStateLogic` — the action/retrigger-counter rule, now
+  in the module both sides compile.** The type already existed in the client's copy of the
+  package (`com.rpgmmo.shared-gamelogic` 0.5.0) and is adopted here **byte-identically**,
+  rather than the server growing its own: the client decides whether to retrigger an
+  animation by comparing counters the server produced, so two implementations of the rule
+  would not fail anything — they would play the wrong animations, which no test on either
+  side can see. `Advance(ref action, ref seq, next)` moves the counter when an action is
+  ENTERED, where re-entering a retriggerable action (Attacking) counts and re-asserting a
+  continuous one (Idle, Moving, Dead) does not, and skips zero on wrap because zero is the
+  wire's "not sent".
+- **`EntitySnapshot.action_seq` (field 12) — the animation edge a level-triggered field
+  cannot carry.** `action` says what state an entity is in, never that a state was
+  entered, so two attacks in a row are identical bytes and an animator driven from it
+  alone plays the swing once and holds. The edge is genuinely not in the data and no
+  receiver-side detection recovers it; only the sender knows. The counter increments on
+  every action ENTRY, including re-entering the action already held.
+  **Receivers retrigger on inequality, never on increase** — it wraps at 2^32 and resets
+  across a restart or a respawn, so a greater-than test would stop retriggering for four
+  billion actions with nothing reporting an error. **Zero means "not sent"**, the same
+  rule as `facing_brad`, and the sender skips zero on wrap so a live counter never takes
+  it. The Unity client has consumed this field since before the server sent it
+  (`com.cuvara.netcode` `EntitySnapshot.ActionSeq`, same field number); this closes a
+  drift in which the client was ready and the server emitted nothing.
+- **ADR-25: the game server's per-pod Ed25519 identity, on the wire and in the registry.**
+  `shared/sealed/identity.go` defines the signed input
+  `"cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00 || identity_public(32)` plus
+  `SignIdentity`, `VerifyIdentity` and the registry encoding helpers. **The transcript is
+  wrapped, never modified** -- `DeriveKeys` and the HMAC binding keep reading exactly the
+  bytes `Transcript()` already produced, so ADR-22's cross-implementation vectors stay valid
+  and the signature gets one of its own (`TestInteropIdentityVector`, asserting the same
+  three constants as `ServerIdentityInteropTests.cs`).
+
+  **Why an asymmetric signature at all**: the existing `binding` is an HMAC under
+  `JOIN_TOKEN_SECRET`, the key the gateway *mints join tokens with*, so a client able to
+  verify it could forge a token for any player on any server. `binding_verified` is
+  therefore permanently false for every shipped client and no configuration reaches true.
+  An Ed25519 signature needs only the public half.
+
+  Wire: `SealedServerHello.server_signature = 4` and `EnterWorldResponse.server_public_key
+  = 6`, both **new numbers**. Field 5 of `EnterWorldResponse` stays reserved -- an old peer
+  would read whatever occupied it as 32 bytes of key material -- and `binding` keeps field 2
+  and its current meaning, because one field number with two meanings is how two versions
+  come to disagree silently about a byte. Adding fields is backward-compatible: a peer that
+  sends neither still parses (`TestAPeerThatSendsNeitherFieldStillParses`).
+
+  `storage.ServerInfo` gains `IdentityKey`, carried in the Redis hash field `identity_key`
+  as standard padded base64 of 32 raw bytes. **That field name and encoding are a
+  cross-language contract** -- the C# game server writes the entry and the Go gateway reads
+  it with no translation layer -- so `redisstore` and
+  `GameServer/Registry/RedisServerRegistry.cs` must change together. An entry with no such
+  field reads as an empty key and is **not** an error: that is a pre-ADR-25 server, and
+  failing there would take a whole map offline for an un-upgraded pod.
+
+### Fixed
+- **Committed Protobuf bindings regenerated from `wire.proto`.** `proto/gen/wire.pb.go` was
+  stale relative to the gameplay-v2 schema: it carried no `AbilityId`, `AbilityTargetId`,
+  `AimX`/`AimY` on `InputMessage` and no `Events` on `SnapshotMessage`, while the hand-written
+  `messages/proto.go` already referenced all of them. The module therefore did not compile
+  (`pb.AbilityId undefined (type wirepb.InputMessage has no field or method AbilityId)`), which
+  also broke every downstream consumer that builds this package — including the `kcpprobe` Go
+  harness the C# KCP interop tests shell out to. Regenerated with the versions CI pins,
+  protoc 29.3 and protoc-gen-go v1.36.6; no hand edits, and `wire.proto` itself is unchanged.
+
+### Changed
+- **`sealed.RunClientHandshake` reports THREE facts about identity, not one, and the split
+  is the point (ADR-25 decision 6).** `IdentityChecked` means a signature verified under the
+  key the caller supplied. `IdentityKeyHopAuthenticated` is what the caller asserted about
+  the hop that delivered that key. Only their conjunction, `IdentityVerified`, means "this
+  is the real game server".
+
+  Over a plaintext gateway hop -- every environment today, because ADR-23's TLS is
+  implemented and defaults off -- a client has checked a signature against a key an attacker
+  on its own network path could have chosen, and `IdentityVerified` stays **false** while
+  `IdentityChecked` is true. An instrument that reported the strong claim on the weak
+  evidence would be worse than no instrument. The strong state is reachable with no protocol
+  change and no client release the day gateway TLS is on, and that reachability is asserted
+  (`TestIdentityVerifiedBecomesTrueOverAnAuthenticatedHop`) rather than assumed -- an
+  always-false boolean is the dead end ADR-25 rejected Option D for.
+
+  `ClientHandshakeConfig.ServerPublicKey` is the requirement switch: **non-empty means
+  require identity**, and a missing, malformed or non-verifying signature ends the handshake
+  with an error and no session. No negotiation, no fallback (ADR-22 decision 3). Empty means
+  the gateway had no key, and the handshake proceeds exactly as before -- which is what makes
+  the gateway-and-server-first migration order safe.
+
+  **Breaking for callers**: the `readHello` callback now returns `serverSignature` as a
+  third `[]byte`. Updated in the load generator, the smoke test, `killprobe` and the
+  integration suite.
+- **`EnterWorldRequest.party_id` (field 2) and `storage.DungeonIndex`** for ADR-26. The wire
+  field is additive in both encodings -- `omitempty` on the JSON side keeps a map entry
+  byte-identical to what a pre-ADR-26 peer produces, so the field is not merely
+  Protobuf-compatible.
+
+  `DungeonIndex` carries two keys rather than one because allocation and lookup answer
+  different questions: `ClaimAllocation` elects exactly one member of a party to do the
+  allocating, and `Publish`/`Lookup` carry the result the others read. Entries expire, and
+  that is not incidental -- a claim that never expired would wedge a party permanently after
+  one gateway crash, and a mapping that outlived its pod would hand a client an address that
+  is not answering. `MemoryDungeonIndex` honours the TTLs and takes an injectable clock, so a
+  test can reach expiry without sleeping.
+
+### Added
 
 - **`transport.PostureTLS` and `TransportPosture.TLS`** — the confidentiality posture now
   accounts for a listener that terminates TLS itself (ADR-23). `Posture` is unchanged and is

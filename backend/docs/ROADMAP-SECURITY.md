@@ -60,21 +60,30 @@ eviction is keyed by it (ADR-20).
 
 ### 1.2 What is missing, ranked by value against effort
 
-These are the items that would actually reduce cheating. **This is where the budget should
-go, ahead of §2.**
+**Read this before planning from it: A1, A2 and A3 are DONE.** This table listed all six
+as open until 2026-09-12, and the three that shipped between 2026-09-09 and 2026-09-11 were
+never struck off — so a reader planning from it would have re-specified work that already
+exists in the tree. The done rows are kept, not deleted, because the reasoning in them is
+what the implementations were built against.
 
-| # | Gap | Why it matters | Effort |
-|---|---|---|---|
-| A1 | **No telemetry on rejected input.** `ValidationLogic` returns an error string and the server drops the input; nothing counts rejections per player over time. | A cheater probing the rules generates a rejection pattern no honest client produces. Today that signal is discarded. **Counting it is cheap and it is the foundation every later detection rests on.** | Low |
-| A2 | **No per-account rate/anomaly budget.** `MaxInputsPerConnection` is a per-tick cap, not a behavioural budget. | Distinguishes "hit the cap once on a lag spike" from "sat at the cap for ten minutes". | Low |
-| A3 | **No replay protection on the game hop.** Nothing binds a packet to a session and a position in the stream. | A captured packet can be re-sent. A session-keyed MAC with a sequence number closes this — and this is the one place §2's work genuinely helps anti-cheat. | Medium |
-| A4 | **Attack validation is per-attack, not per-rate.** `ValidateAttack` checks range and cooldown for one attack; nothing audits sustained attack rate against what the cooldown permits. | Cooldown bypass is the classic combat cheat. | Medium |
-| A5 | **No server-side plausibility audit on position.** Integration is authoritative, so position cannot be forged directly — but there is no check that a client's *claimed* input pattern is physically plausible over time. | Defence in depth; low priority precisely because A-authority already holds. | Medium |
-| A6 | **Client-side anti-cheat: none.** | Deliberate. Client-side anti-cheat on an IL2CPP build raises the cost of cheating, it does not prevent it, and it is defeated once and then defeated forever by everyone. **Do not invest here before A1-A4.** | High, low value |
+| # | Gap | State | Why it matters | Effort |
+|---|---|---|---|---|
+| A1 | **Telemetry on rejected input.** `ValidationLogic` returns an error string and the server drops the input; nothing counted rejections per player over time. | ✅ **DONE.** `GameServer/Input/InputRejection.cs` is a bounded reason enum (bounded deliberately: the reason *strings* embed attacker-controlled values, so they are unusable as metric labels). `InputHandler` classifies at every rejection site; `GameMetrics.RecordInputRejected` counts per reason, pre-seeded at zero so a reason that never fires is still visible. Pinned by `GameServer.Tests/Input/InputRejectionTelemetryTests.cs`. | A cheater probing the rules generates a rejection pattern no honest client produces. **Counting it is cheap and it is the foundation every later detection rests on.** | Low |
+| A2 | **Per-account rate/anomaly budget.** `MaxInputsPerConnection` is a per-tick cap, not a behavioural budget. | ✅ **DONE, record-only.** `GameServer/Input/InputAnomalyTracker.cs` keeps a decaying per-account score (60s half-life, 4096 accounts tracked, weighted per rejection reason) keyed on the join token's user id, so it survives a reconnect. **It flags and records; it never acts on a player** — the false-positive rate of any threshold here is still unmeasured, and most rejection reasons rise with latency. Enforcement is a later, smaller change once a baseline exists to choose a threshold against. | Distinguishes "hit the cap once on a lag spike" from "sat at the cap for ten minutes". | Low |
+| A3 | **Replay protection on the game hop.** Nothing bound a packet to a session and a position in the stream. | ✅ **DONE** via ADR-22 sealed sessions, deployed to dev and staging at `GAMESERVER_SEALED=require`. The per-direction sequence number is the replay counter, and it is AEAD-authenticated rather than bolted on. Residual, recorded at ADR-22 and not closed by it: `binding_verified=false` — the transcript signer is symmetric under `JOIN_TOKEN_SECRET`, so a client able to verify the binding could forge join tokens. **Addressed beside it, not in it, by ADR-25 (backend shipped 2026-09-13)**: a per-pod Ed25519 signature a client can check with only a public key. `binding_verified` itself stays false for ever. | A captured packet can be re-sent. | Medium |
+| A4 | **Attack validation is per-attack, not per-rate.** `CombatLogic.ValidateAttack` checks range and cooldown for one attack, against `CooldownUntilTick` on the attacker's **entity** — exact for one entity, structurally blind to anything that hands an account a different one. | ✅ **DONE, record-only (2026-09-12).** `GameServer/Input/AttackRateAudit.cs` audits ACCEPTED attacks per **account** over a sliding tick-space window against what the cooldown permits; `gameserver.combat.attack_rate.violations` and `/status attack_rate_violations`. **No live exploit is claimed:** a reconnect inside the hold window reattaches the same entity with its cooldown intact, and the routes that do yield a fresh entity (map transfer, absence past the hold TTL) are far slower than the 500 ms cooldown they reset. The value is the blind spot, not a patch: an account exceeding the rate through any such route is **never refused**, so A1's counters and A2's score stay silent and this is the only counter that moves. `AttackRateAuditSeamTests` demonstrates that against a real world and a real `InputHandler`. | Cooldown bypass is the classic combat cheat. | Medium |
+| A5 | **No server-side plausibility audit on position.** Integration is authoritative, so position cannot be forged directly — but there is no check that a client's *claimed* input pattern is physically plausible over time. | ⬜ OPEN. | Defence in depth; low priority precisely because A-authority already holds. | Medium |
+| A6 | **Client-side anti-cheat: none.** | ⬜ OPEN, deliberately. | Client-side anti-cheat on an IL2CPP build raises the cost of cheating, it does not prevent it, and it is defeated once and then defeated forever by everyone. **Do not invest here before A1-A4.** | High, low value |
 
-**Recommendation: A1 and A2 first.** They are days, not weeks, they are pure server-side,
-they need no protocol change, and without them nothing else can be measured. A detection
-system built before the telemetry exists is a system nobody can tune.
+**Recommendation, updated 2026-09-12: A4 is done; A2's enforcement step is next, and it is
+still blocked on the same missing thing.** A1 and A2
+delivered what they promised — there is now a per-reason rejection count and a decaying
+per-account score — so the thing that was blocking every later detector (no telemetry to
+tune against) is gone. A4 shipped the same day as record-only telemetry. What remains before
+anything here can ACT on a player is unchanged and is not code: **a baseline measured from
+real sessions.** Every threshold in A2 and A4 is currently a defensible guess, and a
+detector that kicks before anyone has seen its false-positive curve gets switched off after
+the first bad night, taking the telemetry with it. A5 is the next code item.
 
 ---
 
@@ -372,6 +381,14 @@ inventing a cipher.
      |---|---|
      | JSON | refused — `encoding_cannot_seal` |
      | protobuf, sealing | **`SMOKE=PASS`**, `sealed=true binding_verified=false`, 16 snapshots |
+
+     Since ADR-25's backend shipped (2026-09-13) that row also carries
+     `identity_checked`, `key_hop_authenticated` and `server_identity_verified`. On a
+     plaintext gateway hop a PASS reads `identity_checked=true key_hop_authenticated=false
+     server_identity_verified=false`: the signature was checked against a key an attacker on
+     the path could have chosen, so the strong claim is withheld. That is ADR-25 decision 6,
+     and it is why the three are reported separately rather than collapsed into one boolean
+     somebody would quote as "authenticated".
      | protobuf, no hello | refused — `sealed handshake failed (NoHello)` |
 
      `binding_verified=false` is the shipped-client state and is reported rather than
@@ -393,7 +410,7 @@ inventing a cipher.
      `SealedHandshakeServer` remarks).
 
      **The fix is decided and is [ADR-25](ARCHITECTURE-DECISIONS.md#adr-25--the-game-server-proves-its-identity-with-an-ed25519-key-it-generates-per-pod-the-clients-trust-in-that-key-is-the-gateway-hops-trust-not-its-own)
-     (2026-09-12). It is NOT implemented.** Not ADR-23, which parked a pinned identity key
+     (2026-09-12). Its BACKEND HALF SHIPPED 2026-09-13; the Unity client half has not.** Not ADR-23, which parked a pinned identity key
      for the *gateway* hop and is where this pointer used to send people. The game server
      signs the sealed handshake with an **Ed25519 key it generates per pod at startup**,
      whose public half travels pod -> registry -> gateway -> `enter_world_resp`. Per pod,
@@ -402,6 +419,29 @@ inventing a cipher.
      mounted into the most player-exposed process in the system. New field numbers only
      (`SealedServerHello.server_signature = 4`); the transcript bytes do not change, so
      ADR-22's cross-implementation vectors stay valid and old clients do not break.
+
+     **What is live as of 2026-09-13, and what is not.** The game server generates the
+     keypair and signs; the registry carries the public half as `identity_key`; the gateway
+     relays it in `enter_world_resp`; and the Go client half (`shared/sealed`) verifies it
+     and refuses a session on any failure, which the smoke test now exercises as the
+     closest thing here to a shipped player. **Unity verifies as of 2026-09-13**
+     (`Cuvara/Netcode` v0.38.0-v0.38.2): `ServerIdentityVerifier` plus the plumbing that
+     reads `server_public_key` off `enter_world_resp` and `server_signature` off the sealed
+     hello, with `Verified` computed as the conjunction of "the signature checked out" and
+     "the key arrived over an authenticated hop" in one place, so no call site can re-derive
+     it and get it wrong.
+
+     **ADR-25 decision 8's IL2CPP go/no-go probe RAN on 2026-09-13 and the answer is GO** --
+     on Windows, at `High` stripping, all eight self-checks passing in a built player
+     including the negative case (a flipped signature byte refused). `Minimal` was not run
+     separately and **Android is unmeasured**, which matters because the BouncyCastle
+     CIL-Linker failure `link.xml` guards against was reported on Android. The exact scope,
+     and why "`link.xml` is load-bearing" is NOT among the things this measured, is recorded
+     at ADR-25 decision 8.
+
+     **`binding_verified` is unchanged and is still false.** It was not repaired and cannot
+     be. The identity signature sits beside it as the reachable replacement, and the two
+     must not be read as one field improving.
 
      **And the honest half, which decides how it may be reported.** The key is delivered
      over the gateway hop, so it is exactly as trustworthy as that hop -- plaintext in every
@@ -625,10 +665,15 @@ inventing a cipher.
    certificate the client already trusts, or the pin shipped with the client. That is a
    deployment decision, and it is the remaining work on this step.
 
-   **And a second thing now waits on it.** ADR-25 (step 5) delivers the game server's
-   identity key over this hop, so the gameplay hop's man-in-the-middle defence is worth
-   nothing until this flag is on. The two do not merge into one task -- ADR-25 can be built
-   first and composes -- but neither may be *reported* as MITM protection alone.
+   **And a second thing now waits on it -- as of 2026-09-13 it is built and waiting.**
+   ADR-25 (step 5) delivers the game server's identity key over this hop, so the gameplay
+   hop's man-in-the-middle defence is worth nothing until this flag is on. The two do not
+   merge into one task -- ADR-25 *was* built first and composes -- but neither may be
+   *reported* as MITM protection alone. The backend now states that itself rather than
+   leaving it to a reader: a client reports `server_identity_verified` only when the key
+   arrived over an authenticated hop, so **turning this flag on is what flips that field**,
+   with no protocol change and no client release. Until then the smoke test prints
+   `key_hop_authenticated=false` on every passing run.
 
 7. **The meta hop is settled by [ADR-24](ARCHITECTURE-DECISIONS.md#adr-24--the-meta-hop-gets-nakamas-own-tls-but-the-credential-worth-stealing-there-is-a-default-valued-static-key-not-a-token)
    (2026-09-10) — and the confidentiality half turned out not to be the important half.**
@@ -668,34 +713,68 @@ inventing a cipher.
    same second returns a **byte-identical** token — a 2 s sleep produced the predicted five.
    Both were caught only because a number was written down before it was measured.
 
-   **MEASURED on k3d-rpg-dev, 2026-09-12 — the plumbing works and TWO blockers are real.**
+   **MEASURED on k3d-rpg-dev, 2026-09-12 — the plumbing works and TWO blockers were real.**
    With `NAKAMA_TLS_CERT/_KEY` set, Nakama terminates TLS on its own port: `https://` answers
-   200 and plain `http://` gets 400. Neither blocker is code that is missing; both are
-   decisions that have to be made before it can be turned on anywhere.
+   200 and plain `http://` gets 400. Neither blocker was code that was missing; both were
+   decisions that had to be made before it could be turned on anywhere.
 
-   - **Nakama's own k8s probes break.** All three (`startup`, `readiness`, `liveness`) are
-     `httpGet` with no `scheme`, which means HTTP, so with TLS on they fail with
-     `client sent an HTTP request to an HTTPS server` and the pod never becomes Ready — the
-     rollout timed out with the container itself perfectly healthy. There is no
-     per-environment overlay to vary the probe in, so the fix must be one spec that works
-     both ways: `scheme: HTTPS` is wrong when TLS is off, and an exec probe needs a shell
-     and curl in the Nakama image. Recorded at the probes themselves in
-     `k8s/data/nakama.yaml`.
+   **BOTH ARE NOW CLOSED (2026-09-13).** Kept in full below rather than deleted, because the
+   rejected options are the useful part — each of them looks obviously right until it is
+   measured. The flag still **defaults off**; what changed is that turning it on is a deploy
+   rather than a blocked task. The recipe is `deploy/k8s/data/README.md` §"Turning the meta
+   hop's TLS on", which is four coordinated edits plus two Secrets, and a compose variant.
 
-   - **The Unity client refuses a self-signed certificate, and cannot be pinned the way the
-     gateway hop can.** With the client pointed at `https://` it fails every request with
-     `Curl error 60: Cert verify failed. Certificate is not correctly signed by a trusted
-     CA. UnityTls error code: 7`. That refusal is correct — but the gateway hop's answer
-     does not transfer. That hop is `SslStream` inside `TcpTransport`, where
-     `TlsOptions.PinnedCertificate` pins an exact DER; the Nakama hop goes through Nakama's
-     SDK on `UnityWebRequestAdapter`, i.e. Unity's own HTTP stack, which needs a
-     `CertificateHandler` to pin at all. So this hop needs **either a CA-trusted
-     certificate, or a pinning `CertificateHandler` written for it** — the latter is real
-     client work, not configuration.
+   - **Blocker 1 — Nakama's own k8s probes broke.** All three (`startup`, `readiness`,
+     `liveness`) were `httpGet` with no `scheme`, which means HTTP, so with TLS on they failed
+     with `client sent an HTTP request to an HTTPS server` and the pod never became Ready —
+     the rollout timed out with the container itself perfectly healthy.
 
-   Note also that turning this on moves a third party: the C# game server calls Nakama's
-   reward RPCs over `NAKAMA_URL`, which `k8s/app/20-configmaps.yaml` pins to `http://`. It
-   has to move to `https://` in the same change, and it has its own trust decision.
+     **Fixed by moving the probes off the port whose protocol changes.** They now GET `/` on
+     the metrics listener `:9100`, which `--socket.ssl_certificate` does not cover, so one
+     spec works in both modes with no overlay. The three alternatives were each rejected on a
+     measurement: `scheme: HTTPS` is wrong when TLS is off, which is the default everywhere;
+     `/nakama/nakama healthcheck` is hardcoded to `http.Get("http://localhost:" + port)` in
+     v3.40.0 and breaks identically (**which means compose's healthcheck had the same
+     unrecorded bug** — it is now `healthcheck 9100`); and the image ships no `curl`, `wget`,
+     `nc`, `python3` or `openssl`, so no other exec probe exists. `tcpSocket` was rejected
+     for being mode-independent but unable to tell a wedged Nakama from a healthy one.
+
+     **The cost, recorded:** `:9100` is a different `http.Server` in the same process than
+     the client API, so the probes prove the process is serving HTTP, not that the API mux
+     answers. Narrow, because the old target was a static 200 that checked no dependency.
+
+   - **Blocker 2 — the Unity client refused a self-signed certificate**, failing every
+     request with `Curl error 60: Cert verify failed … UnityTls error code: 7`. That refusal
+     is correct, and the gateway hop's answer did not transfer: that hop is `SslStream` in
+     `TcpTransport` with `TlsOptions.PinnedCertificate`, while this one goes through Nakama's
+     SDK on Unity's own HTTP stack, which pins only through a `CertificateHandler`.
+
+     **Fixed by writing one.** `PinnedCertificateHandler` compares the presented DER against
+     a pinned DER byte for byte; because the stock `UnityWebRequestAdapter` never sets
+     `certificateHandler`, the client also ships its own Nakama `IHttpAdapter` to install it.
+     `-cuvara-nakama-tls-cert <PEM>` turns it on. **There is no accept-anything path** — the
+     handler throws on an empty pin and nothing exposes a "trust all" switch — which is what
+     keeps ADR-24 decision 4 intact rather than quietly rewritten. That decision *was*
+     rewritten in one respect: "dev therefore runs the flag off" rested on a false choice
+     between `InsecureSkipVerify` and plaintext, and pinning is the third option.
+
+     **Two limits, because they are not obvious.** `CertificateHandler` is **not called on
+     WebGL** (the browser does the handshake), so a WebGL player needs a CA-issued
+     certificate and pinning must not be claimed for it; and the pin is the leaf, so a
+     certificate rotation is a client change.
+
+   **The third consumer moved with them.** The C# game server calls Nakama's reward RPCs over
+   `NAKAMA_URL`, which `k8s/app/20-configmaps.yaml` pins to `http://`. It now has its own pin,
+   `NAKAMA_TLS_PIN` (`GameServer/Nakama/NakamaTlsPin.cs`), and refuses to start when a pin is
+   set against a non-`https` URL — the same "set together or not at all" rule as the
+   certificate pair. Without it, an `https` Nakama with a self-signed certificate would fail
+   every reward RPC on certificate validation while the game itself kept working: the quiet
+   failure this hop specialises in.
+
+   **Still open on this hop**, unchanged by the above: the console `:7351` and metrics `:9100`
+   are plaintext and published on `0.0.0.0` in compose; the Nakama→Postgres DSN specifies no
+   `sslmode`; credentials still ride URL query strings into Nakama's access log; and the flag
+   is not actually **on** anywhere yet.
 
 8. Only then revisit Option D, against whatever the hosting shape has become.
 

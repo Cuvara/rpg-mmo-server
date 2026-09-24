@@ -5,6 +5,90 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The gateway failed EVERY dungeon entry the moment the meta hop's TLS went on, and the
+  client saw only "internal error".** It reads `NAKAMA_URL` from the same ConfigMap key the
+  game server does, so it followed the URL to `https://` — with no pin, and Nakama's
+  certificate is self-signed by design:
+
+  ```
+  enter world failed  map=dungeon_01 party=eba24465... reason=no_assignment
+    err="assign dungeon: party membership: call party_get: ...
+         tls: failed to verify certificate: x509: certificate signed by unknown authority"
+  ```
+
+  **Map play was unaffected**, so nothing else looked wrong — the gateway was healthy, the
+  fleets were Ready, the smoke test passed. Only dungeon entry was dead, and only for as long
+  as nobody tried one.
+
+  `NAKAMA_TLS_PIN` (new, read from the same `nakama-tls-pin` ConfigMap key the game server
+  uses, so the two cannot disagree about which certificate Nakama presents) fixes it, with
+  `RootCAs` rather than `InsecureSkipVerify` — the hostname is still checked, and an
+  accept-anything client would defeat the point of pinning.
+
+  **A mismatch is now a startup refusal, not a per-entry failure**: an https URL with no pin,
+  or a pin against a plaintext URL, exits 2 with the reason. Before this the process started
+  cleanly and the fault surfaced one dungeon entry at a time, as a message naming nothing.
+
+  Found by `dungeonprobe`'s negative control, which asserts that an outsider's refusal **names
+  the party**. It did not — it said "internal error" — and that assertion is the only reason
+  this was caught rather than read as a working refusal.
+
+## [Unreleased]
+
+### Added
+- **ADR-25: the gateway relays the game server's identity key.** `AssignResult` gains
+  `ServerPublicKey`, decoded from the target's `identity_key` registry field, and
+  `EnterWorldResponse` carries it to the client at new field 6. The gateway **never
+  generates, stores or validates** this key -- it relays the one the pod published, which
+  adds no trust relationship the client did not already have, since an attacker who can
+  rewrite `ServerAddr` in this same message already redirects the player anywhere.
+
+  **An absent or malformed key never fails an assignment.** A pre-ADR-25 server publishes
+  none, and a garbage value decodes to none; in both cases the join proceeds and a client
+  that requires identity refuses one hop later at the sealed handshake, where the error can
+  actually name encryption. Failing here would turn one bad registry write into a map-wide
+  outage. The enter-world log line carries `server_key=<bool>` -- the presence, not the key
+  -- because the ABSENCE is the entire explanation for a client that will not seal, and that
+  has to be findable without reading Redis by hand.
+
+  **What this does NOT buy while the gateway hop is plaintext**, which it is everywhere
+  today: an attacker positioned to man-in-the-middle the gameplay hop is on the same path as
+  this hop, substitutes the key here, and forges a signature that verifies. The change
+  converts a free break into one that also requires owning this hop, and composes so that
+  turning ADR-23's TLS flag on closes both at once. It is not man-in-the-middle protection
+  until then, and the client's reporting says so (`sealed.ClientResult.IdentityVerified`).
+- **Dungeon entry (ADR-26 / ADR-14 stage 6).** `EnterWorldRequest` gains `party_id`; a
+  non-empty value means "an instance of the content named by `map_id`, for this party".
+  There is no `MsgEnterDungeon` -- a second message type would duplicate the auth, budget,
+  rate-limit and error paths `handleEnterWorld` already owns, and the copies would drift.
+
+  The instance is keyed by the **party**, not the content id: `AssignDungeon` looks up
+  `dungeon:party:{party_id}`, and only the first member to arrive allocates. That election
+  is the part worth reading -- four members entering at the same instant would otherwise
+  allocate four pods and orphan three of them immediately, since nothing would ever look
+  them up again. It is an election rather than a lock: losers wait for the winner's
+  **answer**, not for a released lock, so a winner that dies costs the claim TTL rather
+  than serialising the whole party.
+
+  Membership is verified against Nakama's `party_get` over the server-to-server HTTP key,
+  **before** allocating and never per tick. An allocation is the most expensive thing an
+  unauthorised request could trigger, so the check runs first. The two client-fault
+  outcomes are kept distinct from each other and from an outage: `not a member of that
+  party`, `party does not exist`, and a wrapped transport error. Collapsing them would
+  report a Nakama outage to players as a permissions problem and make them retry a refusal
+  forever.
+
+  `AllocateDungeon` is deliberately not `FindServer` with a different argument: `FindServer`
+  asks "who serves this map" and allocates only when nobody does, while this asks for a
+  **new** instance every call. It waits on the pod's own `servers:id:` entry rather than a
+  map index, because a dungeon pod is absent from `servers:map:` by design and because the
+  allocation response carries the node address, which ADR-16 measured as not dialable.
+
+  Off unless configured: `WithDungeons` treats an index without a membership authority (or
+  the reverse) as "dungeons off" rather than half-on, and a deployment with neither keeps
+  serving maps and refuses dungeon entry with a message that says so.
+
 ### Added
 
 - **Gateway-hop TLS, terminated in the gateway process — `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`
