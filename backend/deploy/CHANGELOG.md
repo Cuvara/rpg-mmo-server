@@ -7,6 +7,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The verification suite pinned every cluster's gateway against DEV's certificate.**
+  `checks_flow.sh` fell back to `${RPG_K8S_RUN_DIR:-/tmp/claude-1000/rpg-k8s-dev}/gateway-tls.crt`,
+  and CD sets `RPG_K8S_RUN_DIR` on the deploy step only, so the verify step always took dev's
+  directory. Correct on dev by accident; wrong everywhere else. The first staging deploy with
+  gateway TLS failed `gateway certificate does not match the pin (presented 930 bytes, pinned
+  930)` -- dev's certificate (sha256 `5A:AA:6F...`) against staging's (`39:45:51...`), same
+  size, different key. The pin is now read out of the **target cluster's own** `gateway-tls`
+  Secret, the same principle the Nakama pin follows. Verified against staging with the run
+  directory deliberately left pointing at dev: `gateway_auth` passes, and the whole smoke
+  passes over TLS on both hops.
+- **Turning the meta hop's TLS on did not take effect until Nakama restarted, and the
+  procedure did not say so.** Nakama reads `nakama-config` at start-up and a ConfigMap change
+  does not restart a pod; `apply.sh` rolls Nakama only when its Deployment spec changes, which
+  is true the first time the optional TLS refs arrive and false on any cluster that already
+  has them. `k8s/data/README.md` Step 4 now restarts it explicitly, and `dev-up.sh`'s https
+  probe failure names the cause when Nakama still answers plaintext.
+
+### Changed
+
+- **TLS is ON for both client hops on staging** (ADR-23, ADR-24), with its own pinned
+  self-signed pair (not dev's). Cluster-side opt-in only -- Secrets and ConfigMap keys --
+  no manifest change. Production stays off until it has a host (#425).
+
+### Fixed
+
 - **Backups of dev and staging backed up nothing, and a restore of the meta database did
   not work.** Found by the first PostgreSQL restore drill ever run (`docs/DISASTER-RECOVERY.md`,
   "Failure drill: PostgreSQL restore"):
