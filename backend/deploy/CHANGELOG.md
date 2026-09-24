@@ -44,6 +44,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
      runner, and the PostgreSQL dump it gates is deliberately fatal. Retried in `backup.sh`,
      `redis-backup.sh` and `redis-restore.sh`.
 
+- **`cluster.restarts` failed forever on a completed init container.** The classifier read
+  every container that is not `running` as a crash loop, "at any age". An init container is
+  *supposed* to end `terminated` with exit 0, so any pod whose init container had restarted
+  once -- a host reboot is enough -- failed every deploy until someone deleted the pod: the
+  permanent-red trap the check's own `restartCount` note exists to prevent. Surfaced on the
+  first deploy that reached verification: Nakama's `migrate` init container, restarted once
+  by a reboot, now `Completed`. A completed init container (exit 0) is now settled and aged
+  by its completion time; a failed init container, a crash-looping one, a terminated **main**
+  container and a restart inside the window all still fail. Six fixtures cover exactly those
+  cases; on the live dev cluster develop's classifier reports 1 RECENT, this one 0 RECENT and
+  10 OLD, the `migrate` container still named as a warning rather than dropped.
+
 - **`verify.sh` reported `VERIFY=PASS` for a run that verified nothing.** Found while fixing
   the above: `--layer data` (layers are numbered) selected zero checks and printed
   `checks: 0 ... VERIFY=PASS`, exit 0. An empty run, or one where every check skipped, now
