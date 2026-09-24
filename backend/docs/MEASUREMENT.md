@@ -35,6 +35,20 @@ Incidents:
 
 ### An exit code cannot tell a pass from a skip
 
+**A reviewer reads each line and each line is correct; only an instrument that can disagree
+with both sees it.** That is the shape §2 already records — the reflection guard whose
+mutation was drawn from the same wrong assumption the guard was testing, two checks sharing
+one blind spot and producing zero signal — and it is the shape of everything below. It
+recurred twice more in #413, once in a refusal message and once in a re-run:
+
+- A refusal named a world rate for the operator to raise to. The test asserted the rate was
+  present and that the bands no longer collapsed at it. Both passed on a mutation
+  recommending **16Hz**, which does not divide the 60Hz base rate: the divisibility gate
+  skipped itself, and the collapse check then answered "not collapsed" about an empty array.
+  Two assertions, both vacuous, agreeing — and an operator sent to a rate the server rejects,
+  which costs a restart to discover. Only the mutation surfaced it; the lines read correctly.
+- And the case this entry is named for.
+
 `dotnet test` exits **0** when every selected test passed, and **0** when it selected
 nothing, and **0** when everything it selected was skipped. The three are the same reading.
 
