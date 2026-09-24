@@ -146,8 +146,30 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
       # hoc on this host, and a tag left behind by an earlier build is
       # indistinguishable by name from a fresh one. Compare the stamped
       # revision against the commit we are pinning, and refuse on a mismatch.
-      rev=$(docker image inspect "$img" \
-        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)
+      # Retried, and failing LOUDLY. This was a bare `rev=$(docker ... 2>/dev/null)`
+      # under `set -e`: when the Docker Desktop shim flaked on this one call, the
+      # assignment failed, the script exited, and 2>/dev/null had already thrown
+      # away the only message -- CD logged the heading above and then exit 1 with
+      # nothing between. The inspect in the `if` one line up had just succeeded,
+      # so the image was there; only the shim was not.
+      # stdout only into rev: shim noise on stderr must never become the revision,
+      # or it would trip the mismatch refusal below on an image that is correct.
+      rev=""; rev_ok=0; rev_err="$(mktemp)"
+      for _attempt in 1 2 3 4 5; do
+        if rev=$(docker image inspect "$img" \
+             --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>"$rev_err"); then
+          rev_ok=1; break
+        fi
+        sleep 2
+      done
+      if [ "$rev_ok" != 1 ]; then
+        echo "::error::could not read the revision label of $img after 5 attempts: $(tr '\n' ' ' < "$rev_err")" >&2
+        echo "  The image exists (the inspect just above succeeded), so this is the docker" >&2
+        echo "  CLI failing, not a missing build. Re-run the job." >&2
+        rm -f "$rev_err"
+        exit 1
+      fi
+      rm -f "$rev_err"
       if [ -n "$rev" ] && [ "$rev" != "unknown" ] && [ "$rev" != "$GIT_SHA" ]; then
         echo "::error::$img is stamped with revision $rev but this run pins $GIT_SHA." >&2
         echo "  Rebuild it, or pass GATEWAY_IMAGE/GAMESERVER_IMAGE explicitly." >&2
@@ -759,8 +781,12 @@ say "stop the compose dev stack (containers and volumes are KEPT)"
 # and the naive loop spent minutes here.
 running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 to_stop=""
+# A here-string, not `printf ... | grep -q`. Under pipefail that pipe reports a
+# MATCH as failure: grep -q exits on the first hit, printf takes SIGPIPE writing the
+# rest, and the pipeline status is printf's. A running container then read as not
+# running and was never stopped -- CD logged "printf: write error: Broken pipe" here.
 for c in $COMPOSE_DEV_CONTAINERS; do
-  printf '%s\n' "$running" | grep -qx "$c" && to_stop="$to_stop $c"
+  grep -qx "$c" <<<"$running" && to_stop="$to_stop $c"
 done
 if [ -n "$to_stop" ]; then
   echo "stopping:$to_stop"
@@ -770,7 +796,7 @@ fi
 running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 still_up=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  printf '%s\n' "$running" | grep -qx "$c" && still_up="$still_up $c"
+  grep -qx "$c" <<<"$running" && still_up="$still_up $c"
 done
 if [ -n "$still_up" ]; then
   echo "ERROR: compose dev containers still running:$still_up" >&2

@@ -114,7 +114,7 @@ say "start the compose dev stack"
 existing="$(docker ps -a --format '{{.Names}}' 2>/dev/null || true)"
 to_start=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  if printf '%s\n' "$existing" | grep -qx "$c"; then
+  if grep -qx "$c" <<<"$existing"; then
     to_start="$to_start $c"
   else
     echo "WARNING: container $c does not exist -- bring it up with docker compose instead" >&2
@@ -128,7 +128,7 @@ fi
 running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 missing=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  printf '%s\n' "$running" | grep -qx "$c" || missing="$missing $c"
+  grep -qx "$c" <<<"$running" || missing="$missing $c"
 done
 if [ -n "$missing" ]; then
   echo "ERROR: compose dev containers did not start:$missing" >&2

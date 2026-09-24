@@ -5,6 +5,54 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CD on `develop` was red on every run for three days, for four independent reasons.**
+  Fifteen consecutive `CD — Build & Deploy` runs on `develop` failed or were cancelled from
+  2026-09-21. Grouped by the job that failed rather than by the last line printed, they
+  split into four defects -- three of them silent, which is why a green `CI` beside a red
+  `CD` went unexamined:
+
+  1. **`data.nakama_health` probed a TLS Nakama over plain HTTP** (the dominant one). The dev
+     cluster is opted into meta-hop TLS (ADR-24) through the optional `nakama-config` keys.
+     `dev-up.sh` discovers that and exports the https URL and pin -- **inside its own
+     process**. CD runs `dev-up.sh` and `verify.sh` in separate steps, so the export never
+     arrived, `targets/k8s-dev.env` fell back to its literal `http://127.0.0.1:7001`, and
+     every deploy failed with `status 400` -- Nakama's answer to "Client sent an HTTP
+     request to an HTTPS server". Both k8s targets now resolve the scheme from the cluster
+     through `verify/lib/nakama_endpoint.sh`, the way they already read the server key.
+     Measured on the same cluster: develop's target `FAIL data.nakama_health`; this one 6/6
+     on layer 2. Staging, which did not opt in, resolves to `http://` and answers 200.
+  2. **`printf ... | grep -qx` under `pipefail` reported a match as a miss.** `grep -q` exits
+     on the first hit, `printf` takes SIGPIPE, and the pipeline status is `printf`'s. In
+     `dev-up.sh`'s "stop the compose dev stack" a running container therefore read as
+     stopped (CD logged `printf: write error: Broken pipe`). Reproduced deterministically:
+     50 of 50 misses with the match on line 1 of a long list, 0 of 50 with a here-string.
+     All five sites (`dev-up.sh` x2, `rollback-to-compose.sh` x2, `checks_registry.sh`) now
+     use `grep -qx ... <<<"$list"`.
+  3. **The image-import step died silently.** `rev=$(docker image inspect ... 2>/dev/null)`
+     under `set -e`: one Docker Desktop shim flake failed the assignment, the script exited,
+     and `2>/dev/null` had already discarded the only message. The log showed the step
+     heading, then `exit 1`. Now retried five times, stderr kept out of the revision value
+     (so shim chatter cannot trip the revision-mismatch refusal), and a persistent failure
+     names itself.
+  4. **`Back up databases` made one shim flake fatal.** `detect_docker` tried `docker info`
+     once per candidate; it failed on develop after nine consecutive successes on the same
+     runner, and the PostgreSQL dump it gates is deliberately fatal. Retried in `backup.sh`,
+     `redis-backup.sh` and `redis-restore.sh`.
+
+- **`verify.sh` reported `VERIFY=PASS` for a run that verified nothing.** Found while fixing
+  the above: `--layer data` (layers are numbered) selected zero checks and printed
+  `checks: 0 ... VERIFY=PASS`, exit 0. An empty run, or one where every check skipped, now
+  fails and names which. Proved both ways: the empty selection exits 1, layer 2 still exits
+  0 with 6/6.
+
+  **Why the compose dev stack keeps going down.** `COMPOSE_DEV_CONTAINERS` names
+  `rpg-gateway rpg-nakama rpg-redis rpg-postgres rpg-postgres-game`, and every k8s-mode dev
+  deploy stops them by design -- the cluster replaces them. Anyone using the compose stack on
+  the same box will see Nakama and the gateway `Exited (0)` after a `develop` push. That is
+  intended, and recorded here because it reads as a crash.
+
 ### Added
 
 - **The three Agones fleet manifests now declare 48 `GAMESERVER_*` names instead of 9, and a
