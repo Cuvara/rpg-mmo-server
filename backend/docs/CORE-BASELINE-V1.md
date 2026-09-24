@@ -13,10 +13,11 @@ what was proven can be relied on without re-deriving it.
 
 | | |
 |---|---|
-| `rpg-mmo-server` | `develop` @ `c2c034e` |
-| `IndieRPGMMOAdventure` | `develop` @ `0553af8` |
-| `com.cuvara.netcode` | **v0.44.0** (manifest **and** lock) |
-| `com.rpgmmo.shared-gamelogic` | **sgl-v0.6.0** |
+| `rpg-mmo-server` | `develop` @ **`ac1eec2`** — CI green, **CD green** (see §0) |
+| `IndieRPGMMOAdventure` | `develop` @ **`285a5a2`** — CI green |
+| `com.cuvara.netcode` | **v0.44.0** (manifest **and** lock, hash `2ed3df16`) |
+| `com.rpgmmo.shared-gamelogic` | **sgl-v0.6.0** (manifest **and** lock, hash `c33bfd10`) |
+| Released as | tag **`core-baseline-v1`** in both repositories |
 | Wire protocol | **version 2** (Protobuf default; legacy JSON still accepted, distinguished by the first body byte) |
 | Simulation rates | `SIM_CRITICAL_HZ=60`, `SIM_WORLD_HZ=15` (ADR-13) |
 
@@ -24,6 +25,27 @@ what was proven can be relied on without re-deriving it.
 been *demonstrated*, not when the code exists.** Everything below names its evidence.
 
 ---
+
+## 0. The baseline was cut on a green deploy, not a green build
+
+`CD — Build & Deploy` on `develop` had been red on **every run from 2026-09-13 to 2026-09-24**
+while `CI` stayed green beside it. Getting it green found six defects, three of them silent,
+and one of them was a gameplay bug the red CD had been hiding. The baseline commit `ac1eec2`
+is the first develop commit since 2026-09-13 whose **own** CD run deployed to the dev cluster
+and passed verification:
+
+```
+checks: 24  PASS 20  FAIL 0  SKIP 2  WARN 2
+VERIFY=PASS
+SMOKE=PASS with --strict-addr, persistence checks REQUIRED,
+           SEALED gameplay hop (chacha20-poly1305 over protobuf),
+           TLS gateway hop, certificate PINNED
+```
+
+The two skips are by design (Unity PlayMode needs an operator-produced result file; the
+unknown-map refusal allocates a server that is never reclaimed, #424). This matters for the
+rest of the file: a row below that says *demonstrated* means demonstrated by that pipeline
+or by a built player, and "the build is green" was never that.
 
 ## 1. What gameplay may rely on
 
@@ -38,13 +60,16 @@ backend and prove nothing about whether anyone can reach it.
 | **Open-world map session** | Three built Windows players on one map, 60 Hz server tick, ~300 entities. |
 | **Party → dungeon instance** (ADR-26) | Two built Unity players created a party through Nakama, joined by id, and **both landed on `127.0.0.1:7019`** — one instance — with `players_online: 2`. An outsider was refused with `not a member of that party`, and map entry on the same gateway was unaffected. |
 | **Sealed transport** (ADR-22/23/24) | `GAMESERVER_SEALED=require` is the shipped default. Both players above were refused on first join for not sealing and escalated themselves; `sealed_cipher: chacha20-poly1305`. |
+| **Reconnect within the grace restores the player** | A dropped connection holds the entity for `HoldTtl` (30 s map, 60 s dungeon), and during the hold it is **out of reach** — not chased, attacked or counted by enemies (`PlayerTag.Linkdead`). Before this, a held player was killed, respawned at the origin and saved there. Demonstrated by the develop CD smoke: walked to `x=5.9167`, disconnected, waited out the hold, rejoined **at `x=5.9167`** with `hp=100/100` — the same step that had read `x=0 y=0 hp=79`. |
 | **Server-authoritative reward** | Wallet `{}` → `{"gold": 20}` measured on staging over a sealed session, **with a negative control**. |
 | **Android parity** | An Android player (`ANDROID_ABIS=arm64,x86_64`) on an x86_64 emulator went IN WORLD against the dev cluster and took the full ADR-22 escalation. An Android client is configured by `backend.env` in `persistentDataPath` — Android has neither argv nor env. |
 | **Prediction and reconciliation** | `LocalMovePredictor` + reconciliation in `com.cuvara.netcode`, ~170 Editor assertions, **golden vectors shared with the server**. |
 | **Shared simulation** (ADR-10) | `Shared.GameLogic` compiles into both sides: `MovementSystem`, `CombatLogic`, `AoiLogic`, `SnapshotMerger`, `ValidationLogic`. Client and server therefore agree on movement, combat, **visibility** and snapshot merge semantics. |
 
-Test surface behind it: **~1656** C# tests, **~234** Go tests, **~170** netcode Editor
-assertions.
+Test surface behind it, at `ac1eec2`: **1685** C# tests (**1661 passed, 0 failed, 24 skipped**
+— the skips are Redis/Postgres-gated and run in CI), **~234** Go tests, **~170** netcode
+Editor assertions. CI fails a run that selected or executed nothing (`Verify test counters`),
+so a green here is not an empty selection.
 
 ---
 
@@ -133,6 +158,12 @@ to defer; these are not. Gameplay that adds a new occurrence-shaped field must s
 
 **The observer's own entity is never deferred**, because for self the position *is* the
 reconciliation anchor (ADR-27 decision 9).
+
+**A held player is out of reach.** Any gameplay system that picks targets among players must
+honour `PlayerTag.Linkdead`, the way `PlayerTargetBuffer` does for the enemy systems. A new
+system that queries `PlayerTag` directly and forgets it will reintroduce "killed for losing
+your connection". Not yet covered: a *player* attacking a held player by id still resolves,
+because there is no PvP content to exercise it.
 
 ---
 

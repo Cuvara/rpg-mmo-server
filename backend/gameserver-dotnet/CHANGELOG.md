@@ -37,8 +37,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   players" straight out of the summary box, which would have put a stale ceiling into the one
   document gameplay is meant to rely on.
 
-### Fixed
-
 - **`KcpTransportTests.SealAndOpen_RoundTrip(1)` failed one run in 256, by construction.** It
   asserted a sealed payload differs from its plaintext. `Seal` draws a fresh nonce per packet,
   so a ciphertext equals its plaintext whenever every keystream byte over it is zero -- for a
