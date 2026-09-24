@@ -17,12 +17,15 @@
 #   db/redis-backup.sh                       # back up, keep 7
 #   db/redis-backup.sh --dir /tmp/b --keep 3 # custom destination + retention
 #   db/redis-backup.sh --skip-missing        # container absent -> warn, exit 0
+#   db/redis-backup.sh --kube-context k3d-rpg-dev   # back up the IN-CLUSTER statefulset
 #
 # Environment overrides (flags win):
 #   REDIS_BACKUP_DIR  destination root       (default $BACKUP_DIR/redis, else /var/backups/rpg-mmo/redis)
 #   BACKUP_KEEP       archives kept          (default 7)
 #   REDIS_CONTAINER   container name         (default rpg-redis)
 #   REDIS_PASSWORD    AUTH password          (default empty = no auth)
+#   BACKUP_KUBE_CONTEXT    kubectl context -> k8s mode (default: unset = compose)
+#   BACKUP_KUBE_NAMESPACE  namespace of statefulset/redis (default rpg-k8s-data)
 #
 # Output:
 #   $REDIS_BACKUP_DIR/redis-<UTC timestamp>.rdb   (restorable with redis-restore.sh)
@@ -36,6 +39,9 @@ REDIS_BACKUP_DIR="${REDIS_BACKUP_DIR:-$BACKUP_DIR/redis}"
 BACKUP_KEEP="${BACKUP_KEEP:-7}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-rpg-redis}"
 SKIP_MISSING=0
+KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
+KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
+REDIS_STATEFULSET="${REDIS_STATEFULSET:-redis}"
 
 # ---------------------------------------------------------------- arg parsing
 while [ $# -gt 0 ]; do
@@ -55,6 +61,10 @@ while [ $# -gt 0 ]; do
 	--skip-missing)
 		SKIP_MISSING=1
 		shift
+		;;
+	--kube-context)
+		KUBE_CTX="${2:?--kube-context needs a context name}"
+		shift 2
 		;;
 	-h | --help)
 		sed -n '2,32p' "${BASH_SOURCE[0]}"
@@ -104,29 +114,56 @@ detect_docker() {
 	return 1
 }
 
-DOCKER="$(detect_docker)" || die "docker not available (tried docker, docker.exe)"
+# Two transports. k8s mode reaches statefulset/redis through `kubectl exec`; otherwise
+# the compose container through `docker exec`. Dev and staging keep Redis in k3d, and the
+# k8s deploy stops the compose container, so without k8s mode CD logged "container
+# 'rpg-redis' not running -- skipping redis backup" on every dev and staging deploy and
+# backed up nothing (#430) -- the same wrong-target shape backup.sh had.
+if [ -n "$KUBE_CTX" ]; then
+	command -v kubectl >/dev/null 2>&1 || die "--kube-context given but kubectl is not on PATH"
+	TARGET_DESC="statefulset/$REDIS_STATEFULSET in $KUBE_NS ($KUBE_CTX)"
+else
+	DOCKER="$(detect_docker)" || die "docker not available (tried docker, docker.exe)"
+	TARGET_DESC="container '$REDIS_CONTAINER'"
+fi
 
-container_running() {
-	[ "$("$DOCKER" inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
+# r_exec <command...> -- run a command inside the Redis container, either transport.
+r_exec() {
+	if [ -n "$KUBE_CTX" ]; then
+		kubectl --context "$KUBE_CTX" -n "$KUBE_NS" exec "statefulset/$REDIS_STATEFULSET" -- "$@"
+	else
+		"$DOCKER" exec "$REDIS_CONTAINER" "$@"
+	fi
+}
+
+target_running() {
+	if [ -n "$KUBE_CTX" ]; then
+		[ "$(kubectl --context "$KUBE_CTX" -n "$KUBE_NS" get statefulset "$REDIS_STATEFULSET" \
+			-o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ]
+	else
+		[ "$("$DOCKER" inspect -f '{{.State.Running}}' "$REDIS_CONTAINER" 2>/dev/null)" = "true" ]
+	fi
 }
 
 # redis_cli <args...> — run redis-cli inside the container, with AUTH if set.
 redis_cli() {
 	if [ -n "${REDIS_PASSWORD:-}" ]; then
-		"$DOCKER" exec "$REDIS_CONTAINER" redis-cli -a "$REDIS_PASSWORD" --no-auth-warning "$@"
+		r_exec redis-cli -a "$REDIS_PASSWORD" --no-auth-warning "$@"
 	else
-		"$DOCKER" exec "$REDIS_CONTAINER" redis-cli "$@"
+		r_exec redis-cli "$@"
 	fi
 }
 
 # ----------------------------------------------------------------------- main
-if ! container_running "$REDIS_CONTAINER"; then
+if ! target_running; then
 	if [ "$SKIP_MISSING" -eq 1 ]; then
-		warn "container '$REDIS_CONTAINER' not running -- skipping redis backup"
+		warn "$TARGET_DESC not running -- skipping redis backup (NOTHING backed up)"
+		echo "::warning title=redis-backup.sh::Redis was not backed up ($TARGET_DESC not running)"
 		exit 0
 	fi
-	die "container '$REDIS_CONTAINER' not running (use --skip-missing to tolerate)"
+	die "$TARGET_DESC not running (use --skip-missing to tolerate)"
 fi
+log "target: $TARGET_DESC"
 
 mkdir -p "$REDIS_BACKUP_DIR" 2>/dev/null ||
 	die "cannot create '$REDIS_BACKUP_DIR' (permission denied?) -- set REDIS_BACKUP_DIR to a writable path"
@@ -179,7 +216,7 @@ OUT="$REDIS_BACKUP_DIR/redis-$STAMP.rdb"
 # Write to .partial so an interrupted run never leaves a file that looks like a
 # usable backup. `docker exec cat` keeps the bytes on stdout: no host-path
 # translation, which is what breaks `docker cp` under WSL/docker.exe.
-if ! "$DOCKER" exec "$REDIS_CONTAINER" cat /data/dump.rdb >"$OUT.partial" 2>"$OUT.err"; then
+if ! r_exec cat /data/dump.rdb >"$OUT.partial" 2>"$OUT.err"; then
 	warn "copy of /data/dump.rdb failed:"
 	cat "$OUT.err" >&2 || true
 	rm -f "$OUT.partial" "$OUT.err"
@@ -188,18 +225,27 @@ fi
 rm -f "$OUT.err"
 
 # ---------------------------------------------------------------- verify
-# An RDB file starts with the ASCII magic "REDIS" followed by a 4-digit version.
-# This catches truncation and the classic "we copied an error message" failure.
+# Two checks, and neither is the old one. The old check read the 5-byte "REDIS" magic
+# and a size > 16, and its comment said that "catches truncation" -- it cannot: an RDB
+# cut anywhere after its header passes it. That is the same flaw `pg_restore --list` had
+# (it reads only the table of contents), and the PostgreSQL restore drill proved it by
+# accepting an archive truncated to 131072 of 133030 bytes.
 #
-# Retry with a sync in between: on WSL drvfs mounts (/mnt/*) a file read
-# immediately after the redirect closes can briefly appear truncated. The
-# PostgreSQL backup hit exactly this (see backup.sh) — same mitigation here.
+#   1. redis-check-rdb inside the container validates the WHOLE file on the server's
+#      disk, including the trailing CRC64 checksum.
+#   2. The local copy's md5 must equal the file's md5 inside the container, so a copy
+#      that dropped bytes on the way out is caught even though (1) passed.
+#
+# Retry with a sync in between: on WSL drvfs mounts (/mnt/*) a file read immediately
+# after the redirect closes can briefly appear short.
+r_exec redis-check-rdb /data/dump.rdb >/dev/null 2>&1 ||
+	die "redis-check-rdb rejected /data/dump.rdb inside $TARGET_DESC -- the snapshot itself is corrupt"
+remote_md5="$(r_exec md5sum /data/dump.rdb 2>/dev/null | cut -c1-32)"
 verify_ok=0
 for attempt in 1 2 3; do
 	sync "$OUT.partial" 2>/dev/null || sync
-	magic="$(head -c 5 "$OUT.partial" 2>/dev/null || true)"
-	size="$(wc -c <"$OUT.partial" 2>/dev/null || echo 0)"
-	if [ "$magic" = "REDIS" ] && [ "$size" -gt 16 ]; then
+	local_md5="$(md5sum <"$OUT.partial" | cut -c1-32)"
+	if [ -n "$remote_md5" ] && [ "$local_md5" = "$remote_md5" ]; then
 		verify_ok=1
 		break
 	fi
@@ -207,7 +253,7 @@ for attempt in 1 2 3; do
 done
 if [ "$verify_ok" -ne 1 ]; then
 	rm -f "$OUT.partial"
-	die "verification failed: not an RDB file (magic='${magic:-}', size=${size:-0}, 3 attempts)"
+	die "verification failed: local copy md5 ${local_md5:-?} != snapshot md5 ${remote_md5:-?} (3 attempts)"
 fi
 
 mv "$OUT.partial" "$OUT"

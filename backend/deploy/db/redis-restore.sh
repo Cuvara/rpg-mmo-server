@@ -22,6 +22,9 @@
 #   --yes            required acknowledgement for --mode live
 #   --keep-scratch   leave the scratch container/volume up for poking around
 #   --container NAME live container name                     (default rpg-redis)
+#   --kube-context C --mode live against statefulset/redis in rpg-k8s-data on cluster C
+#                    (dev and staging keep Redis in k3d). Scratch mode needs no cluster:
+#                    it only loads the file, so it rehearses a k3d backup unchanged.
 #
 # WHY THE AOF HAS TO GO, AND WHY DELETING IT IS NOT ENOUGH (measured 2026-08-06):
 #   The live server runs with `--appendonly yes`. On startup Redis prefers the
@@ -57,6 +60,9 @@ MODE="scratch"
 CONFIRMED=0
 KEEP_SCRATCH=0
 REDIS_CONTAINER="${REDIS_CONTAINER:-rpg-redis}"
+KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
+KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
+REDIS_STATEFULSET="${REDIS_STATEFULSET:-redis}"
 
 # ---------------------------------------------------------------- arg parsing
 while [ $# -gt 0 ]; do
@@ -80,6 +86,10 @@ while [ $# -gt 0 ]; do
 	--keep-scratch)
 		KEEP_SCRATCH=1
 		shift
+		;;
+	--kube-context)
+		KUBE_CTX="${2:?--kube-context needs a context name}"
+		shift 2
 		;;
 	-h | --help)
 		sed -n '2,38p' "${BASH_SOURCE[0]}"
@@ -113,6 +123,160 @@ die() {
 
 [ -f "$FILE" ] || die "no such file: $FILE"
 [ "$(head -c 5 "$FILE")" = "REDIS" ] || die "'$FILE' is not an RDB file (missing REDIS magic)"
+
+# ============================================================ k8s live restore
+# The same procedure as the compose live mode below, on a StatefulSet and its PVC:
+# stop Redis, seed the PVC from a pod running `--appendonly no` (so the RDB is actually
+# loaded -- see the header: with AOF on and no manifest, Redis 7 starts EMPTY and says
+# nothing), turn AOF on so appendonlydir is rewritten FROM the loaded data, start Redis.
+#
+# Verified by two checks, because a key COUNT cannot tell "restored" from "kept the old
+# dataset of the same size" -- the silent failure this procedure exists to prevent:
+#
+#   1. A SENTINEL key is written into the live Redis just before it is stopped. It cannot
+#      be in any earlier snapshot, so if it is present afterwards the old dataset survived.
+#   2. Every DURABLE key in the snapshot (no TTL) must exist afterwards with the same type.
+#      Volatile keys are excluded on purpose: servers:id:* carry a 10-15 s TTL, expire on
+#      load, and are re-created by heartbeats; live writers also add keys the moment Redis
+#      is back. An exact key-set comparison would fail on a correct restore.
+if [ -n "$KUBE_CTX" ] && [ "$MODE" = "live" ]; then
+	[ "$CONFIRMED" -eq 1 ] || {
+		echo "ERROR: --mode live destroys the current Redis dataset. Re-run with --yes." >&2
+		exit 2
+	}
+	command -v kubectl >/dev/null 2>&1 || die "--kube-context given but kubectl is not on PATH"
+	kl() { kubectl --context "$KUBE_CTX" -n "$KUBE_NS" "$@"; }
+	STS="$REDIS_STATEFULSET"
+	POD="${STS}-0"
+	PVC="data-${STS}-0"
+	SEED="redis-restore-seed-$$"
+
+	kl get statefulset "$STS" >/dev/null 2>&1 || die "no statefulset/$STS in $KUBE_NS ($KUBE_CTX)"
+	kl get pvc "$PVC" >/dev/null 2>&1 || die "no pvc/$PVC in $KUBE_NS ($KUBE_CTX)"
+	IMAGE="$(kl get statefulset "$STS" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+	FSGROUP="$(kl get statefulset "$STS" -o jsonpath='{.spec.template.spec.securityContext.fsGroup}')"
+
+	kcli() { local p="$1"; shift; kl exec "$p" -- redis-cli "$@" | tr -d '\r'; }
+	kwait() {
+		local p="$1" deadline=$((SECONDS + 90))
+		while [ "$SECONDS" -lt "$deadline" ]; do
+			[ "$(kcli "$p" PING 2>/dev/null)" = "PONG" ] && return 0
+			sleep 1
+		done
+		return 1
+	}
+	# kdurable <pod> -- "key type" for every key without a TTL, sorted.
+	kdurable() {
+		kl exec "$1" -- sh -c 'redis-cli --scan | sort | while read -r k; do
+			[ "$(redis-cli TTL "$k")" = "-1" ] && printf "%s %s\n" "$k" "$(redis-cli TYPE "$k")"; done' | tr -d '\r'
+	}
+	SENTINEL="redis-restore:sentinel"
+
+	warn "about to REPLACE the dataset of statefulset/$STS (pvc/$PVC, $KUBE_CTX) with $FILE"
+	log "before: $(kcli "$POD" DBSIZE 2>/dev/null || echo '?') keys"
+	# In a real disaster Redis may be down and the sentinel cannot be written; the restore
+	# still runs, and says its "old data replaced" check was not available.
+	if [ "$(kcli "$POD" SET "$SENTINEL" "$$-$(date -u +%s)" 2>/dev/null)" = "OK" ]; then
+		SENTINEL_SET=1
+		log "sentinel written to the live dataset (must be gone after the restore)"
+	else
+		SENTINEL_SET=0
+		warn "live Redis not answering -- no sentinel; 'old dataset replaced' cannot be proven"
+	fi
+
+	# Whatever happens, Redis comes back. On a failure after the wipe it comes back with
+	# whatever is on disk, which the error says -- a Redis that stays down takes the
+	# gateway's sessions and the server registry with it.
+	k8s_cleanup() {
+		kl delete pod "$SEED" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+		kl scale statefulset "$STS" --replicas=1 >/dev/null 2>&1 || true
+	}
+	trap k8s_cleanup EXIT
+
+	log "stopping statefulset/$STS"
+	kl scale statefulset "$STS" --replicas=0 >/dev/null || die "cannot scale $STS to 0"
+	kl wait --for=delete "pod/$POD" --timeout=120s >/dev/null 2>&1 || true
+	! kl get pod "$POD" >/dev/null 2>&1 || die "pod/$POD did not stop"
+
+	log "seed pod on pvc/$PVC (image $IMAGE)"
+	kl apply -f - >/dev/null <<EOF || die "cannot create the seed pod"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $SEED
+  labels: {app: redis-restore-seed}
+spec:
+  restartPolicy: Never
+  securityContext: {fsGroup: ${FSGROUP:-999}}
+  containers:
+    - name: seed
+      image: $IMAGE
+      command: ["sleep", "3600"]
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes:
+    - name: data
+      persistentVolumeClaim: {claimName: $PVC}
+EOF
+	kl wait --for=condition=Ready "pod/$SEED" --timeout=120s >/dev/null || die "seed pod never became Ready"
+
+	kl exec "$SEED" -- sh -c 'rm -rf /data/appendonlydir /data/appendonly.aof /data/dump.rdb' ||
+		die "cannot wipe the old dataset"
+	# kubectl cp, never `kubectl exec -i ... cat >`: that transport truncates uploads at
+	# 32 KiB multiples here (measured -- see DISASTER-RECOVERY.md, PostgreSQL drill).
+	kl cp "$FILE" "$SEED:/data/dump.rdb" -c seed >/dev/null || die "cannot copy the snapshot into the seed pod"
+	want="$(md5sum <"$FILE" | cut -c1-32)"
+	got="$(kl exec "$SEED" -- md5sum /data/dump.rdb | cut -c1-32)"
+	[ "$want" = "$got" ] || die "staged snapshot differs from $FILE (md5 $got, want $want)"
+	kl exec "$SEED" -- redis-check-rdb /data/dump.rdb >/dev/null 2>&1 ||
+		die "redis-check-rdb rejected the snapshot -- NOT loading it"
+
+	kl exec "$SEED" -- redis-server --appendonly no --dbfilename dump.rdb --dir /data --daemonize yes >/dev/null ||
+		die "cannot start redis in the seed pod"
+	kwait "$SEED" || die "seed redis never answered PING: the snapshot could not be loaded"
+	SEED_KEYS="$(kcli "$SEED" DBSIZE)"
+	SEED_DURABLE="$(kdurable "$SEED")"
+	[ "$(kcli "$SEED" EXISTS "$SENTINEL")" = "0" ] || die "the snapshot itself contains the sentinel -- wrong file?"
+	log "snapshot contains $SEED_KEYS keys, $(grep -c . <<<"$SEED_DURABLE") durable; rewriting AOF from it"
+
+	[ "$(kcli "$SEED" CONFIG SET appendonly yes)" = "OK" ] || die "could not enable AOF on the seed"
+	deadline=$((SECONDS + 120))
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		info="$(kcli "$SEED" INFO persistence)"
+		case "$info" in *aof_rewrite_in_progress:0*)
+			case "$info" in
+			*aof_last_bgrewrite_status:ok*) break ;;
+			*) die "AOF rewrite failed on the seed" ;;
+			esac
+			;;
+		esac
+		sleep 1
+	done
+	[ "$SECONDS" -lt "$deadline" ] || die "AOF rewrite did not finish within 120s"
+	kcli "$SEED" SHUTDOWN NOSAVE >/dev/null 2>&1 || true
+	kl delete pod "$SEED" --wait=true >/dev/null 2>&1 || true
+	log "AOF seeded"
+
+	log "starting statefulset/$STS"
+	kl scale statefulset "$STS" --replicas=1 >/dev/null || die "cannot scale $STS back to 1"
+	kl rollout status "statefulset/$STS" --timeout=180s >/dev/null || die "statefulset/$STS did not come back"
+	kwait "$POD" || die "pod/$POD does not answer PING"
+	trap - EXIT
+
+	LIVE_KEYS="$(kcli "$POD" DBSIZE)"
+	if [ "$SENTINEL_SET" -eq 1 ] && [ "$(kcli "$POD" EXISTS "$SENTINEL")" != "0" ]; then
+		die "restore verification FAILED: the sentinel written before the restore is still there -- the OLD dataset survived"
+	fi
+	LIVE_DURABLE="$(kdurable "$POD")"
+	missing="$(comm -23 <(printf '%s\n' "$SEED_DURABLE" | sort) <(printf '%s\n' "$LIVE_DURABLE" | sort) | grep . || true)"
+	[ -z "$missing" ] || die "restore verification FAILED: durable snapshot keys missing or retyped after restart: $(tr '\n' ',' <<<"$missing")"
+	log "restored: every one of the snapshot's $(grep -c . <<<"$SEED_DURABLE") durable keys present with its type;"
+	log "          $LIVE_KEYS keys live now (volatile/registry keys re-created by heartbeats)"
+	[ "$SENTINEL_SET" -eq 1 ] && log "          sentinel gone -- the old dataset was replaced"
+	log "NOTE: live game servers and gateways re-register and re-heartbeat on their own;"
+	log "      check with: kubectl --context $KUBE_CTX -n $KUBE_NS exec $POD -- redis-cli --scan --pattern 'servers:*'"
+	log "done"
+	exit 0
+fi
 
 # --------------------------------------------------------- toolchain: docker
 # Retried. One `docker info` per candidate made a single Docker Desktop shim flake
@@ -249,6 +413,22 @@ VOL="$("$DOCKER" inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.N
 [ -n "$VOL" ] || die "could not resolve the /data volume of '$REDIS_CONTAINER'"
 
 warn "about to REPLACE the dataset of '$REDIS_CONTAINER' (volume $VOL) with $FILE"
+
+# Sentinel + durable keys, as in k8s mode (see there): a key COUNT match cannot tell a
+# restore from a Redis that kept its old dataset, which is the failure this mode had once.
+SENTINEL="redis-restore:sentinel"
+cdurable() {
+	"$DOCKER" exec "$1" sh -c 'redis-cli --scan | sort | while read -r k; do
+		[ "$(redis-cli TTL "$k")" = "-1" ] && printf "%s %s\n" "$k" "$(redis-cli TYPE "$k")"; done' | tr -d '\r'
+}
+if [ "$(rcli "$REDIS_CONTAINER" SET "$SENTINEL" "$$-$(date -u +%s)" 2>/dev/null | tr -d '\r')" = "OK" ]; then
+	SENTINEL_SET=1
+	log "sentinel written to the live dataset (must be gone after the restore)"
+else
+	SENTINEL_SET=0
+	warn "live Redis not answering -- no sentinel; 'old dataset replaced' cannot be proven"
+fi
+
 log "stopping '$REDIS_CONTAINER'"
 "$DOCKER" stop "$REDIS_CONTAINER" >/dev/null || die "cannot stop '$REDIS_CONTAINER'"
 
@@ -281,7 +461,9 @@ if "$DOCKER" logs "$SEED" 2>&1 | grep -qi "Bad file format\|Short read or OOM\|I
 fi
 
 SEED_KEYS="$(rcli "$SEED" DBSIZE | tr -d '\r')"
-log "snapshot contains $SEED_KEYS keys; rewriting AOF from it"
+SEED_DURABLE="$(cdurable "$SEED")"
+[ "$(rcli "$SEED" EXISTS "$SENTINEL" | tr -d '\r')" = "0" ] || die "the snapshot itself contains the sentinel -- wrong file?"
+log "snapshot contains $SEED_KEYS keys, $(grep -c . <<<"$SEED_DURABLE") durable; rewriting AOF from it"
 [ "$(rcli "$SEED" CONFIG SET appendonly yes | tr -d '\r')" = "OK" ] ||
 	die "could not enable AOF on the seed container"
 
@@ -316,11 +498,20 @@ wait_ready "$REDIS_CONTAINER" || {
 	die "'$REDIS_CONTAINER' did not come back up"
 }
 
-# Hard gate. A live restore that silently lands 0 keys is worse than a failed
-# one: it destroys the dataset and reports success.
+# Hard gate. A live restore that silently lands 0 keys -- or silently keeps the old
+# dataset -- is worse than a failed one: it reports success. The key COUNT used to be the
+# whole gate; it cannot see the second case, and volatile keys (servers:id:*, 10-15 s TTL)
+# make an exact count flaky against a correct restore.
 LIVE_KEYS="$(rcli "$REDIS_CONTAINER" DBSIZE | tr -d '\r')"
-[ "$LIVE_KEYS" = "$SEED_KEYS" ] ||
-	die "restore verification FAILED: snapshot had $SEED_KEYS keys, live '$REDIS_CONTAINER' came back with $LIVE_KEYS"
+if [ "$SENTINEL_SET" -eq 1 ] && [ "$(rcli "$REDIS_CONTAINER" EXISTS "$SENTINEL" | tr -d '\r')" != "0" ]; then
+	die "restore verification FAILED: the sentinel written before the restore is still there -- the OLD dataset survived"
+fi
+LIVE_DURABLE="$(cdurable "$REDIS_CONTAINER")"
+missing="$(comm -23 <(printf '%s\n' "$SEED_DURABLE" | sort) <(printf '%s\n' "$LIVE_DURABLE" | sort) | grep . || true)"
+[ -z "$missing" ] ||
+	die "restore verification FAILED: durable snapshot keys missing or retyped: $(tr '\n' ',' <<<"$missing")"
+log "restored: all $(grep -c . <<<"$SEED_DURABLE") durable snapshot keys present; $LIVE_KEYS keys live"
+[ "$SENTINEL_SET" -eq 1 ] && log "sentinel gone -- the old dataset was replaced"
 
 report "$REDIS_CONTAINER"
 
