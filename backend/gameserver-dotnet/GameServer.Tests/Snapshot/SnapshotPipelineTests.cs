@@ -284,15 +284,40 @@ public class SnapshotPipelineTests
         rig.Tick(80);
         rig.Transports[0].Release();
 
-        // Give the writer time to drain whatever survived coalescing.
-        Thread.Sleep(500);
+        // Wait for the PROPERTY, not for a guessed amount of time. This used to be
+        // Thread.Sleep(500) twice and then assert, which raced the background writer: under
+        // a loaded CI runner the last snapshot had not been written yet and the client's view
+        // was one step behind the world -- "expected 23.2, actual 22.667" on a docs-only PR,
+        // where no code had changed. Coalescing is allowed to take its time; it is not allowed
+        // to lose state, and the difference only shows if the test waits for convergence.
         rig.Tick(2);
-        Thread.Sleep(500);
+        rig.World.TryGetSnapshotAnchor("p0", out Vec2 anchor, out _);
+        List<EntityState> truth = rig.World.GetEntitiesInRange(anchor, GameConstants.DefaultAoiRadius);
 
-        List<SnapshotMessage> snaps = ParseSnapshots(rig.Transports[0].Written);
-        Assert.NotEmpty(snaps);
+        Dictionary<string, (float X, float Y)> merged = new();
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            merged = MergeReceived(ParseSnapshots(rig.Transports[0].Written));
+            if (Converged(merged, truth)) break;
+            Thread.Sleep(20);
+        }
 
-        // Merge everything the client received, keyframes resetting the view.
+        Assert.NotEmpty(ParseSnapshots(rig.Transports[0].Written));
+
+        // Every entity the client can see must be at its true, current position. Reached only
+        // after convergence or the 10 s bound, so a failure here is state that never arrived.
+        foreach (EntityState e in truth)
+        {
+            Assert.True(merged.ContainsKey(e.Id), $"{e.Id} never reached the stalled client");
+            Assert.Equal(e.Position.X, merged[e.Id].X, precision: 3);
+            Assert.Equal(e.Position.Y, merged[e.Id].Y, precision: 3);
+        }
+    }
+
+    /// <summary>What a client reconstructs by merging every snapshot it received.</summary>
+    private static Dictionary<string, (float X, float Y)> MergeReceived(List<SnapshotMessage> snaps)
+    {
         var merged = new Dictionary<string, (float X, float Y)>();
         var handles = new Dictionary<uint, string>();
         foreach (SnapshotMessage s in snaps)
@@ -308,17 +333,17 @@ public class SnapshotPipelineTests
             }
             foreach (string removed in s.Removed) merged.Remove(removed);
         }
+        return merged;
+    }
 
-        // Every entity the client can see must be at its true, current position.
-        rig.World.TryGetSnapshotAnchor("p0", out Vec2 anchor, out _);
-        List<EntityState> truth = rig.World.GetEntitiesInRange(anchor, GameConstants.DefaultAoiRadius);
-
+    private static bool Converged(Dictionary<string, (float X, float Y)> merged, List<EntityState> truth)
+    {
         foreach (EntityState e in truth)
         {
-            Assert.True(merged.ContainsKey(e.Id), $"{e.Id} never reached the stalled client");
-            Assert.Equal(e.Position.X, merged[e.Id].X, precision: 3);
-            Assert.Equal(e.Position.Y, merged[e.Id].Y, precision: 3);
+            if (!merged.TryGetValue(e.Id, out var p)) return false;
+            if (MathF.Abs(p.X - e.Position.X) > 5e-4f || MathF.Abs(p.Y - e.Position.Y) > 5e-4f) return false;
         }
+        return true;
     }
 
     /// <summary>
