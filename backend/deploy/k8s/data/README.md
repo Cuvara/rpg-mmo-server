@@ -526,6 +526,12 @@ The probes need no edit — that is what moving them to `:9100` bought.
 
 ```bash
 KUBE_CONTEXT=k3d-rpg-dev ./apply.sh          # from k8s/data/ -- NOT plain `apply -k`, see the top of apply.sh
+# RESTART IT. Nakama reads nakama-config at start-up, and a ConfigMap change does not
+# restart a pod. apply.sh rolls Nakama only if its Deployment SPEC changed -- true the
+# first time the optional TLS refs arrive, false on any cluster that already has them.
+# Staging on 2026-09-24 was the second case: every step above done, Nakama still
+# plaintext, and the next deploy failed "Nakama does not answer /healthcheck on https".
+kubectl --context k3d-rpg-dev -n rpg-k8s-data rollout restart deploy/nakama
 kubectl --context k3d-rpg-dev -n rpg-k8s-data rollout status deploy/nakama --timeout=180s
 kubectl --context k3d-rpg-dev -n rpg-k8s-data logs deploy/nakama | grep -i "ssl mode"
 kubectl --context k3d-rpg-dev apply -f k8s/app/20-configmaps.yaml \

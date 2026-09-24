@@ -915,6 +915,13 @@ if ! curl -fsS --max-time 5 $nk_probe_args "${nk_probe_scheme}://127.0.0.1:${PUB
     echo "  The meta hop is on, so this was a TLS request verified against the pin at" >&2
     echo "  $nk_pin. A plaintext Nakama would fail here too, and so would a" >&2
     echo "  certificate that is not the one in the nakama-tls Secret." >&2
+    # Name the commonest cause instead of leaving it to be found: the opt-in was made
+    # after Nakama last started, and a ConfigMap change does not restart a pod.
+    if curl -fsS --max-time 5 "http://127.0.0.1:${PUBLISHED_NAKAMA_PORT}/healthcheck" >/dev/null 2>&1; then
+      echo "  Nakama DOES answer plaintext http on that port: it predates the TLS opt-in." >&2
+      echo "  Restart it so it reads nakama-config:" >&2
+      echo "    kubectl --context $KUBE_CONTEXT -n rpg-k8s-data rollout restart deploy/nakama" >&2
+    fi
   fi
   exit 1
 fi

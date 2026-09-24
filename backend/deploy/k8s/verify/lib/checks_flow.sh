@@ -112,12 +112,27 @@ check_flow_smoke() {
     -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
 
   if [ -n "$gw_tls_path" ]; then
-    local pin="${VERIFY_GATEWAY_TLS_CERT:-${RPG_K8S_RUN_DIR:-/tmp/claude-1000/rpg-k8s-dev}/gateway-tls.crt}"
-    if [ ! -r "$pin" ]; then
+    # Read out of THIS cluster's gateway-tls Secret, not from a run directory.
+    #
+    # It used to fall back to ${RPG_K8S_RUN_DIR:-/tmp/claude-1000/rpg-k8s-dev}/gateway-tls.crt.
+    # CD sets RPG_K8S_RUN_DIR on the deploy step only, so the verify step always took
+    # the default -- DEV's directory. That is correct on dev by accident and wrong on
+    # every other cluster: the first staging deploy with gateway TLS failed
+    #   gateway certificate does not match the pin (presented 930 bytes, pinned 930)
+    # because it pinned dev's certificate (sha256 5A:AA:6F...) against staging's
+    # (39:45:51...). Same size, different key, and nothing named the cause. The
+    # certificate the gateway actually serves comes from this Secret, so the pin does.
+    local pin="${VERIFY_GATEWAY_TLS_CERT:-}"
+    if [ -z "$pin" ]; then
+      pin="$(mktemp "${TMPDIR:-/tmp}/verify-gateway-pin.XXXXXX")"
+      k get secret gateway-tls -n rpg-k8s-realtime \
+        -o 'jsonpath={.data.tls\.crt}' 2>/dev/null | base64 -d >"$pin" 2>/dev/null || true
+    fi
+    if ! grep -q "BEGIN CERTIFICATE" "$pin" 2>/dev/null; then
       fail "the gateway terminates TLS but no pinned certificate is readable" \
-        "a readable PEM the gateway's certificate must match" \
-        "gateway-config names $gw_tls_path; no pin at $pin" \
-        "dev-up.sh writes it out of the gateway-tls Secret on every deploy -- re-run the deploy, or set VERIFY_GATEWAY_TLS_CERT"
+        "a PEM the gateway's certificate must match" \
+        "gateway-config names $gw_tls_path; no certificate at $pin" \
+        "kubectl --context $KUBE_CONTEXT -n rpg-k8s-realtime get secret gateway-tls, or set VERIFY_GATEWAY_TLS_CERT"
       return
     fi
     args+=(--gateway-tls-cert "$pin")
