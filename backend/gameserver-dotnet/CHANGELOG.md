@@ -45,6 +45,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`MEASUREMENT.md` §1 now leads with the shape the entries share:** a reviewer reads each
+  line and each line is correct; only an instrument that can disagree with both sees it. It
+  ties the §2 reflection guard — whose mutation was drawn from the same wrong assumption the
+  guard was testing — to the two recurrences in #413, including the refusal whose
+  recommendation of a 16Hz world rate passed two assertions that were both vacuous, and would
+  have sent an operator to a rate the server rejects.
+
 - **`MEASUREMENT.md` §1: an exit code cannot tell a pass from a skip.** `dotnet test` exits 0
   when everything passed, when it selected nothing, and when everything it selected was
   skipped — three readings an exit code cannot separate.
