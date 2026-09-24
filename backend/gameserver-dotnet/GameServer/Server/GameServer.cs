@@ -634,6 +634,22 @@ public sealed class GameServerHost : IAsyncDisposable
     public int PendingHolds => _holds.Count;
 
     /// <summary>
+    /// Whether <paramref name="userId"/>'s entity is held out of enemies' reach for a
+    /// reconnect (<see cref="PlayerTag.Linkdead"/>). False for an unknown id. Tests only:
+    /// it takes the world write lock and allocates a closure, so it is not for the tick path.
+    /// </summary>
+    internal bool IsLinkdead(string userId)
+    {
+        bool linkdead = false;
+        _world.UpdateComponents(writer =>
+        {
+            EntityHandle handle = writer.Resolve(userId);
+            if (handle.IsValid) linkdead = writer.PlayerTagOf(in handle).Linkdead;
+        });
+        return linkdead;
+    }
+
+    /// <summary>
     /// Accepted transports currently inside the join handshake — the value the
     /// <c>gameserver_handshakes_pending</c> gauge and <c>/status</c> publish.
     /// </summary>
@@ -1594,7 +1610,10 @@ public sealed class GameServerHost : IAsyncDisposable
                 _world.UpdateComponents(userId, static (id, writer) =>
                 {
                     EntityHandle handle = writer.Resolve(id);
-                    if (handle.IsValid) writer.InputCursorOf(in handle) = default;
+                    if (!handle.IsValid) return;
+                    writer.InputCursorOf(in handle) = default;
+                    // Back in reach: the hold that made it untargetable is over.
+                    writer.PlayerTagOf(in handle).Linkdead = false;
                 });
             }
 
@@ -2436,6 +2455,16 @@ public sealed class GameServerHost : IAsyncDisposable
             superseded.Dispose();
         }
         _holds[userId] = holdCts;
+
+        // Out of reach for the hold. A held entity is still a player in the world, so
+        // without this enemies chased and killed it, respawn moved it to the spawn point,
+        // and the eviction save persisted that -- a dropped connection cost the player
+        // their position. See PlayerTag.Linkdead. Cleared by the reattach below.
+        _world.UpdateComponents(userId, static (id, writer) =>
+        {
+            EntityHandle handle = writer.Resolve(id);
+            if (handle.IsValid) writer.PlayerTagOf(in handle).Linkdead = true;
+        });
 
         _logger.LogInformation("Player {UserId} disconnected, holding entity for {Ttl}",
             userId, holdTtl);

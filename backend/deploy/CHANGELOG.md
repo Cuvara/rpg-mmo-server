@@ -7,11 +7,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **CD on `develop` was red on every run for three days, for four independent reasons.**
-  Fifteen consecutive `CD — Build & Deploy` runs on `develop` failed or were cancelled from
-  2026-09-21. Grouped by the job that failed rather than by the last line printed, they
-  split into four defects -- three of them silent, which is why a green `CI` beside a red
-  `CD` went unexamined:
+- **CD on `develop` was red on every run for eleven days, for four independent reasons.**
+  The last green `CD — Build & Deploy` on `develop` was 2026-09-13 05:52 (`14522e9`); every
+  run since failed or was cancelled. The dev cluster's `nakama-config` TLS opt-in was created
+  at 08:41 the same morning. Grouped by the job that failed rather than by the last line
+  printed, the failures split into four defects -- three of them silent, which is why a
+  green `CI` beside a red `CD` went unexamined. They also **masked a fifth**, in the game
+  server: once the deploy got past them, the smoke test found a player killed during the
+  reconnect hold (see `backend/gameserver-dotnet/CHANGELOG.md`).
 
   1. **`data.nakama_health` probed a TLS Nakama over plain HTTP** (the dominant one). The dev
      cluster is opted into meta-hop TLS (ADR-24) through the optional `nakama-config` keys.

@@ -13,8 +13,8 @@
 #   GET http://127.0.0.1:7001/healthcheck: status 400
 #
 # against a perfectly healthy Nakama -- 400 being Nakama's answer to "Client sent
-# an HTTP request to an HTTPS server". CD on develop was red on every run for three
-# days for that reason alone. Reading the opt-in here means the target cannot
+# an HTTP request to an HTTPS server". CD on develop was red on every run for eleven
+# days, this being the most frequent of four causes. Reading the opt-in here means the target cannot
 # drift from the cluster it targets, which is the rule the server-key lookup in
 # the same files already follows.
 #

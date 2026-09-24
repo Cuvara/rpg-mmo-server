@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A player whose connection dropped could be killed during the reconnect grace, and was
+  then saved at the spawn point.** A disconnected entity stays in the world for
+  `ServerOptions.HoldTtl` (30s on a map, 60s in a dungeon) so a reconnect finds it where it
+  was. The hold was tracked only in `GameServerHost._holds`, invisible to the ECS, so a held
+  player was still a target: enemies chased and hit it, `PlayerRespawnSystem` revived it at
+  the spawn point at full health, and the eviction save persisted that.
+
+  Found by the CD smoke test once the deploy stopped failing earlier (see
+  `backend/deploy/CHANGELOG.md`): it walked to x=4.83, disconnected, and its row came back
+  `x=0 y=0 hp=79/100` — killed, revived at 100, hit for 21 more, saved. Every earlier smoke
+  row on the same cluster, from before enemies could attack, sits at x≈5.9 hp=100. The
+  failure had been **masked for eleven days** by the unrelated CD failure in front of it.
+
+  `PlayerTag`'s unused byte becomes `Linkdead`: set when the hold starts, cleared on
+  reattach. `PlayerTargetBuffer` — shared by the enemy attack, move, spawn and reap systems —
+  skips a held player. A field on an existing component rather than a new tag, so toggling
+  it is a write rather than an archetype move on every disconnect, and nothing new needs an
+  AOT hint.
+
+  Three tests, each proved by a mutation killed by name after a forced clean rebuild:
+  `APlayerHeldForReconnect_IsNotAttacked_AndIsAgainOnceItIsBack` and
+  `AHeldPlayer_IsNotKilledAndMovedToTheSpawnPoint` (both killed by removing the filter), and
+  `HeldPlayerOutOfReachTests` through a real server (killed by never setting the flag, and by
+  never clearing it). The second mutation is why the third test exists: with the flag never
+  set, **both enemy tests still pass** — a filter on a flag nobody raises protects no one.
+
 ### Changed
 
 - **ADR-27 decision 11 — the client's interpolation budget is shared with the network, and

@@ -1966,6 +1966,17 @@ Two semantics were decided here and are worth stating:
   admission disagree with the `players_online` the registry publishes: a server that
   lost fifty players to a network blip would advertise fifty free slots and refuse
   every one of them for thirty seconds.
+- A user inside the reconnect hold window is **out of reach**. `PlayerTag.Linkdead` is
+  set when the hold starts and cleared when a session reattaches, and
+  `PlayerTargetBuffer` — the one place the enemy systems ask where the players are —
+  skips a held player, so it is neither chased, attacked, nor counted toward wave size.
+  Without it a held entity was still a target: with player respawn on, a dropped
+  connection meant killed during the grace, revived at the spawn point, and that spawn
+  point persisted by the eviction save. The CD smoke test caught it on the dev cluster —
+  it walked to x=4.83, disconnected, and its row came back x=0 y=0 hp=79/100. The point
+  of holding the entity is that reconnecting within the grace puts the player back where
+  they were; a held player that can be killed defeats it. **Not covered:** a *player*
+  attacking a held player by id still resolves — there is no PvP content to exercise it.
 
 **Bounded ingestion** (`EcsWorld.PushInput` with `InputIngress`). Coalescing moved from
 the tick to ingest, under the same input lock: a movement-only input **replaces** the
