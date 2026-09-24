@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`KcpTransportTests.SealAndOpen_RoundTrip(1)` failed one run in 256, by construction.** It
+  asserted a sealed payload differs from its plaintext. `Seal` draws a fresh nonce per packet,
+  so a ciphertext equals its plaintext whenever every keystream byte over it is zero -- for a
+  one-byte payload, probability 1/256. It failed CI exactly that way (`expected not [0],
+  actual [0]`) on a PR that touched no crypto. The single comparison now applies from 8 bytes
+  (coincidence 2^-64); below that the test seals the same payload 64 times and requires at
+  least one to differ (false failure 256^-64 at one byte), so short payloads stay covered
+  rather than exempted. An identity-cipher mutation (both `Seal` and `Open` skipping crypto,
+  so the round trip still passes) is killed at lengths 1, 15, 16, 17 and 1329.
+
 - **A player whose connection dropped could be killed during the reconnect grace, and was
   then saved at the spawn point.** A disconnected entity stays in the world for
   `ServerOptions.HoldTtl` (30s on a map, 60s in a dungeon) so a reconnect finds it where it
