@@ -505,6 +505,87 @@ confirms recovery happens and is not a new, better number.
 
 ---
 
+## Failure drill: PostgreSQL restore
+
+**Drill run: 2026-09-24, against `k3d-rpg-dev`.** The first time either PostgreSQL
+database was ever restored from a backup. Until then `db/restore.sh` had been written and
+never run, and the Redis drill above was the only rehearsal.
+
+### What the drill found before it restored anything
+
+**CD's backup had been backing up nothing.** Dev and staging keep their databases in the
+cluster (`statefulset/postgres-meta`, `statefulset/postgres-game`), but `db/backup.sh`
+only knew the compose containers — which the k8s deploy stops. Called with
+`--skip-missing`, as CD calls it, it printed:
+
+```
+[backup] WARNING: container 'rpg-postgres' not running -- skipping meta
+[backup] WARNING: container 'rpg-postgres-game' not running -- skipping gamestate
+[backup] done
+```
+
+and the `Back up databases` job went green. That is the checkpoint that gates schema
+migrations. Both scripts now take `--kube-context` (CD passes it when
+`vars.DEPLOY_MODE == 'k8s'`), and `backup.sh` reports how many databases it actually
+dumped, raising a `::warning::` annotation when the answer is zero.
+
+### The restore failed the first time — and the check that should have caught it could not
+
+| Database | First attempt | Cause |
+|---|---|---|
+| gamestate (16 KiB) | restored | fits in one transport chunk |
+| **meta (130 KiB)** | **`could not read from input file: end of file` — 0 users restored** | the staged archive was truncated |
+
+`restore.sh` staged the archive inside the database pod with `kubectl exec -i … cat >`.
+Measured directly, that transport truncates **nondeterministically at 32 KiB multiples**
+— a 133030-byte archive arrived as 32768, 98304 and 131072 bytes on three tries — while
+`kubectl cp` was exact 5/5 in both directions and `docker exec -i` (compose mode) was exact
+5/5. Streaming *out* through `kubectl exec` stdout was exact 3/3, so the dumps themselves
+were intact; only uploads were affected.
+
+The verification that should have caught a bad archive could not. Both scripts checked
+with `pg_restore --list`, which reads only the table of contents at the **head** of the
+file. Negative control: an archive truncated to 131072 of 133030 bytes —
+
+| Check | Result on the truncated archive |
+|---|---|
+| `pg_restore --list` (old) | **passed — would have been accepted as a valid backup** |
+| `pg_restore -f /dev/null` (new, reads every data block) | rejected |
+
+Now: k8s mode stages with `kubectl cp`, every staged copy is compared to the local file by
+md5 before anything reads it, and both scripts verify with a full read. `restore.sh`
+verifies *after* staging, against the staged copy, and refuses before creating anything.
+
+### Result after the fixes
+
+Fresh backup in k8s mode, each database restored into a scratch database in the same
+instance, compared with the live one (no writes to live after the dump, so equality means
+something):
+
+| | Live | Restored |
+|---|---|---|
+| meta: tables | 20 | 20, **exact row counts identical** |
+| meta: users / devices / wallet ledger / storage | 500 / 499 / 25 / 560 | same |
+| meta: md5 over every user's id, username and wallet | `74d88c27916d…` | `74d88c27916d…` |
+| gamestate: `player_states` | 316 rows, md5 `a96b7f1ea64e…` | identical |
+| gamestate: `schema_migrations` | `1` (2026-08-18) | identical |
+
+Truncated archive fed to `restore.sh`: refused with `not a complete, readable pg_restore
+archive`, exit 1, and no scratch database created.
+
+**Rehearse with:**
+
+```bash
+db/backup.sh  --kube-context k3d-rpg-dev --dir /tmp/bk
+db/restore.sh --kube-context k3d-rpg-dev --file /tmp/bk/meta/meta-<stamp>.dump \
+              --db meta --target nakama_drill --yes
+# compare, then: DROP DATABASE nakama_drill
+```
+
+**Not covered:** Redis in k8s mode. `redis-backup.sh` has the same compose-only target and
+skips on k3d; Redis holds state that the running services re-register, so it is lower
+stakes, and it is tracked separately rather than fixed blind.
+
 ## Data durability: Redis
 
 Config in effect (`docker-compose.yml:134-143`):

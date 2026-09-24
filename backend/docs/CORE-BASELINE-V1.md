@@ -43,7 +43,7 @@ SMOKE=PASS with --strict-addr, persistence checks REQUIRED,
 ```
 
 The two skips are by design (Unity PlayMode needs an operator-produced result file; the
-unknown-map refusal allocates a server that is never reclaimed, #424). This matters for the
+unknown-map refusal allocates a map server that is never reclaimed). This matters for the
 rest of the file: a row below that says *demonstrated* means demonstrated by that pipeline
 or by a built player, and "the build is green" was never that.
 
@@ -186,8 +186,10 @@ because there is no PvP content to exercise it.
 - **#425** — production has never been deployed off this box. `GAMESERVER_PUBLIC_ADDR=127.0.0.1:9210`
   is handed to clients verbatim and the guard warns only on a *hostless* value, so loopback
   passes silently.
-- **#424** — an allocated dungeon pod that is never joined is never reclaimed. Any client that
-  receives an address and dies before dialling holds a slot forever.
+- ~~**#424** — an allocated dungeon pod that is never joined is never reclaimed.~~ **Was
+  already fixed** on 2026-09-13 (`9f7bae8`, a 90 s join deadline started at Allocated) and
+  listed here from a stale document. Demonstrated on 2026-09-24: allocated at 06:38:29, the
+  pod exited cleanly (`Succeeded`) at 06:40:08 and the fleet replaced it.
 
 Plus two owner decisions (gateway-hop and meta-hop TLS, both written and off by default).
 
