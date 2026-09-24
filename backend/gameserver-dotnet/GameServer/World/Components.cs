@@ -282,15 +282,32 @@ public struct InputCursor
 /// <c>EntityKind.Value == "player"</c>. It exists so the persistence sweep is an
 /// archetype query rather than a full scan with a string comparison per entity.
 /// <para>
-/// Carries a byte because a zero-size component would make the chunk's element
-/// stride zero, which is not a shape worth relying on in a pre-1.0 library.
+/// It must carry a field because a zero-size component would make the chunk's element
+/// stride zero, which is not a shape worth relying on in a pre-1.0 library. That field
+/// used to be an unused byte; it is now <see cref="Linkdead"/>.
 /// </para>
 /// </summary>
 [EcsComponent]
 public struct PlayerTag
 {
-    /// <summary>Unused; present only to give the tag a non-zero size.</summary>
-    public byte Reserved;
+    /// <summary>
+    /// True while the player's connection is gone and the entity is only being HELD for a
+    /// reconnect (<c>ServerOptions.HoldTtl</c>: 30s on a map, 60s in a dungeon). Set when the
+    /// hold starts, cleared when a new session reattaches; eviction removes the entity.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why it exists.</b> A held entity is still a player in the world, so enemies
+    /// chased and hit it. With player respawn on, a dropped connection meant: killed during
+    /// the grace window, revived at the spawn point, and that spawn point persisted by the
+    /// eviction save. Measured on the dev cluster: the smoke test walked to x=4.83,
+    /// disconnected, and its row came back as x=0 y=0 hp=79/100 -- killed, respawned at
+    /// full health, hit again, saved. Reconnecting inside the grace is supposed to put the
+    /// player back where they were; that is the whole point of holding the entity.</para>
+    /// <para>It is a field on an existing component rather than a tag component of its own
+    /// so that toggling it is a write, not a structural change: no archetype move on every
+    /// disconnect, and nothing new to register for AOT.</para>
+    /// </remarks>
+    public bool Linkdead;
 }
 
 

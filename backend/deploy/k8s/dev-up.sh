@@ -146,8 +146,30 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
       # hoc on this host, and a tag left behind by an earlier build is
       # indistinguishable by name from a fresh one. Compare the stamped
       # revision against the commit we are pinning, and refuse on a mismatch.
-      rev=$(docker image inspect "$img" \
-        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)
+      # Retried, and failing LOUDLY. This was a bare `rev=$(docker ... 2>/dev/null)`
+      # under `set -e`: when the Docker Desktop shim flaked on this one call, the
+      # assignment failed, the script exited, and 2>/dev/null had already thrown
+      # away the only message -- CD logged the heading above and then exit 1 with
+      # nothing between. The inspect in the `if` one line up had just succeeded,
+      # so the image was there; only the shim was not.
+      # stdout only into rev: shim noise on stderr must never become the revision,
+      # or it would trip the mismatch refusal below on an image that is correct.
+      rev=""; rev_ok=0; rev_err="$(mktemp)"
+      for _attempt in 1 2 3 4 5; do
+        if rev=$(docker image inspect "$img" \
+             --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>"$rev_err"); then
+          rev_ok=1; break
+        fi
+        sleep 2
+      done
+      if [ "$rev_ok" != 1 ]; then
+        echo "::error::could not read the revision label of $img after 5 attempts: $(tr '\n' ' ' < "$rev_err")" >&2
+        echo "  The image exists (the inspect just above succeeded), so this is the docker" >&2
+        echo "  CLI failing, not a missing build. Re-run the job." >&2
+        rm -f "$rev_err"
+        exit 1
+      fi
+      rm -f "$rev_err"
       if [ -n "$rev" ] && [ "$rev" != "unknown" ] && [ "$rev" != "$GIT_SHA" ]; then
         echo "::error::$img is stamped with revision $rev but this run pins $GIT_SHA." >&2
         echo "  Rebuild it, or pass GATEWAY_IMAGE/GAMESERVER_IMAGE explicitly." >&2
@@ -383,6 +405,40 @@ fi
 # including a no-op one.
 pre_gs=$($K get fleet "$K8S_FLEET" -n rpg-k8s-realtime \
   -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+pre_dungeon=$($K get fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+pre_gw=$($K get deploy gateway -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+
+# Render a manifest with its moving `:develop` image replaced by the image the cluster
+# is ALREADY running (or the pinned one, on a first deploy), so `apply` is image-neutral.
+#
+# Applying the raw manifests wrote `:develop` into the LIVE objects on every re-deploy,
+# and `:develop` is a hand-retagged image that lags the branch -- in the node it was
+# 307f1e8, 2026-08-17, five weeks old and older than dungeon-mode registration. The
+# dungeon manifest's `replicas: 0` only guards a FIRST deploy: once the fleet and its
+# Buffer autoscaler exist, the autoscaler holds the floor, so Agones rolled real pods
+# onto that image before the pin below. A five-week-old dungeon pod registers map_01
+# like a map server, and its registry entry outlives the pod until the heartbeat
+# expires -- a split world during every deploy. CD caught it once: the smoke test was
+# routed to dungeon-servers-...-7vh8n on map_01 and its join died with EOF, three
+# seconds before that entry expired. The gateway had the same shape.
+#
+# The pin logic below is unchanged and still owns every image CHANGE; this only stops
+# `apply` from making one of its own.
+render_image() {  # render_image <manifest> <moving-image> <image-to-use>
+  local out
+  out=$(sed "s|image: $2\$|image: $3|" "$1")
+  if ! grep -q "image: $3\$" <<<"$out"; then
+    echo "ERROR: $1 has no 'image: $2' line to pin; refusing to apply it unpinned." >&2
+    return 1
+  fi
+  if [ "$2" != "$3" ] && grep -q "image: $2\$" <<<"$out"; then
+    echo "ERROR: $1 still names $2 after pinning; refusing to apply a second moving image." >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
 
 say "apply the app tier (rpg-k8s-realtime)"
 # The Secret is NOT in the repo. It must already exist, or be applied from a
@@ -641,7 +697,12 @@ else
   echo "checked: the meta hop is plaintext (no TLS paths in nakama-config) -- ADR-24's default"
 fi
 
-$K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml" -f "$HERE/app/60-fleet-dungeon.yaml"
+render_image "$HERE/app/40-gateway.yaml" "rpg-mmo/gateway:develop" "${pre_gw:-$GATEWAY_IMAGE}" \
+  | $K apply -f -
+render_image "$HERE/app/50-fleet-map.yaml" "rpg-mmo/gameserver-dotnet:develop" "${pre_gs:-$GAMESERVER_IMAGE}" \
+  | $K apply -f -
+render_image "$HERE/app/60-fleet-dungeon.yaml" "rpg-mmo/gameserver-dotnet:develop" "${pre_dungeon:-$GAMESERVER_IMAGE}" \
+  | $K apply -f -
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is
 # scaled to 0 across the image change on purpose: every replica registers the
@@ -759,8 +820,12 @@ say "stop the compose dev stack (containers and volumes are KEPT)"
 # and the naive loop spent minutes here.
 running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 to_stop=""
+# A here-string, not `printf ... | grep -q`. Under pipefail that pipe reports a
+# MATCH as failure: grep -q exits on the first hit, printf takes SIGPIPE writing the
+# rest, and the pipeline status is printf's. A running container then read as not
+# running and was never stopped -- CD logged "printf: write error: Broken pipe" here.
 for c in $COMPOSE_DEV_CONTAINERS; do
-  printf '%s\n' "$running" | grep -qx "$c" && to_stop="$to_stop $c"
+  grep -qx "$c" <<<"$running" && to_stop="$to_stop $c"
 done
 if [ -n "$to_stop" ]; then
   echo "stopping:$to_stop"
@@ -770,7 +835,7 @@ fi
 running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 still_up=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  printf '%s\n' "$running" | grep -qx "$c" && still_up="$still_up $c"
+  grep -qx "$c" <<<"$running" && still_up="$still_up $c"
 done
 if [ -n "$still_up" ]; then
   echo "ERROR: compose dev containers still running:$still_up" >&2

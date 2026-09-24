@@ -112,6 +112,17 @@ summary() {
   fi
   echo "================================================================"
   if [ "$f" -gt 0 ]; then echo "VERIFY=FAIL"; return 1; fi
+  # A run that verified nothing is not a pass. `--layer data` (layers are
+  # numbered) selected zero checks and this printed `checks: 0 ... VERIFY=PASS`
+  # with exit 0 -- found while fixing the deploy it is meant to guard. An
+  # all-SKIP run is the same failure with a dependency involved: nothing was
+  # proved, and PASS would say something was.
+  if [ "${#R_ID[@]}" -eq 0 ]; then
+    echo "VERIFY=FAIL (no check ran -- a layer or filter selected nothing)"; return 1
+  fi
+  if [ "$p" -eq 0 ]; then
+    echo "VERIFY=FAIL (no check passed -- ${#R_ID[@]} ran, nothing was verified)"; return 1
+  fi
   if [ "$strict" = "1" ] && [ "$s" -gt 0 ]; then
     echo "VERIFY=FAIL (--strict: $s skipped check(s) count as failures)"; return 1
   fi

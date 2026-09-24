@@ -109,10 +109,32 @@ public class KcpTransportTests
         payload.CopyTo(packet.AsSpan(KcpCrypto.HeaderSize));
 
         crypto.Seal(packet);
-        if (payloadLength > 0) Assert.NotEqual(payload, packet[KcpCrypto.HeaderSize..]); // actually encrypted
+
+        // "Actually encrypted", asserted where it can be. A ciphertext equals its plaintext
+        // whenever every keystream byte over it is zero; Seal draws a fresh nonce per packet,
+        // so for ONE byte that is 1 run in 256 -- this assertion failed CI exactly that way
+        // (payloadLength 1: expected not [0], actual [0]) on a PR that touched no crypto.
+        // From 8 bytes the coincidence is 2^-64, so a single comparison means something.
+        if (payloadLength >= 8) Assert.NotEqual(payload, packet[KcpCrypto.HeaderSize..]);
 
         var opened = crypto.Open(packet);
         Assert.Equal(payload, opened.ToArray());
+
+        // Below 8 bytes one sample proves nothing, so take 64. A Seal that did not encrypt
+        // returns the plaintext every time; a working one does so in all 64 with probability
+        // 256^-64 at one byte. This keeps the short payloads covered instead of exempt.
+        if (payloadLength is > 0 and < 8)
+        {
+            int unchanged = 0;
+            for (int n = 0; n < 64; n++)
+            {
+                var again = new byte[KcpCrypto.HeaderSize + payloadLength];
+                payload.CopyTo(again.AsSpan(KcpCrypto.HeaderSize));
+                crypto.Seal(again);
+                if (again.AsSpan(KcpCrypto.HeaderSize).SequenceEqual(payload)) unchanged++;
+            }
+            Assert.True(unchanged < 64, "64 seals of a short payload all returned the plaintext: Seal is not encrypting");
+        }
     }
 
     [Fact]

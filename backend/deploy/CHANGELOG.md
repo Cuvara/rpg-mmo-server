@@ -5,6 +5,88 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CD on `develop` was red on every run for eleven days, for four independent reasons.**
+  The last green `CD — Build & Deploy` on `develop` was 2026-09-13 05:52 (`14522e9`); every
+  run since failed or was cancelled. The dev cluster's `nakama-config` TLS opt-in was created
+  at 08:41 the same morning. Grouped by the job that failed rather than by the last line
+  printed, the failures split into four defects -- three of them silent, which is why a
+  green `CI` beside a red `CD` went unexamined. They also **masked a fifth**, in the game
+  server: once the deploy got past them, the smoke test found a player killed during the
+  reconnect hold (see `backend/gameserver-dotnet/CHANGELOG.md`).
+
+  1. **`data.nakama_health` probed a TLS Nakama over plain HTTP** (the dominant one). The dev
+     cluster is opted into meta-hop TLS (ADR-24) through the optional `nakama-config` keys.
+     `dev-up.sh` discovers that and exports the https URL and pin -- **inside its own
+     process**. CD runs `dev-up.sh` and `verify.sh` in separate steps, so the export never
+     arrived, `targets/k8s-dev.env` fell back to its literal `http://127.0.0.1:7001`, and
+     every deploy failed with `status 400` -- Nakama's answer to "Client sent an HTTP
+     request to an HTTPS server". Both k8s targets now resolve the scheme from the cluster
+     through `verify/lib/nakama_endpoint.sh`, the way they already read the server key.
+     Measured on the same cluster: develop's target `FAIL data.nakama_health`; this one 6/6
+     on layer 2. Staging, which did not opt in, resolves to `http://` and answers 200.
+  2. **`printf ... | grep -qx` under `pipefail` reported a match as a miss.** `grep -q` exits
+     on the first hit, `printf` takes SIGPIPE, and the pipeline status is `printf`'s. In
+     `dev-up.sh`'s "stop the compose dev stack" a running container therefore read as
+     stopped (CD logged `printf: write error: Broken pipe`). Reproduced deterministically:
+     50 of 50 misses with the match on line 1 of a long list, 0 of 50 with a here-string.
+     All five sites (`dev-up.sh` x2, `rollback-to-compose.sh` x2, `checks_registry.sh`) now
+     use `grep -qx ... <<<"$list"`.
+  3. **The image-import step died silently.** `rev=$(docker image inspect ... 2>/dev/null)`
+     under `set -e`: one Docker Desktop shim flake failed the assignment, the script exited,
+     and `2>/dev/null` had already discarded the only message. The log showed the step
+     heading, then `exit 1`. Now retried five times, stderr kept out of the revision value
+     (so shim chatter cannot trip the revision-mismatch refusal), and a persistent failure
+     names itself.
+  4. **`Back up databases` made one shim flake fatal.** `detect_docker` tried `docker info`
+     once per candidate; it failed on develop after nine consecutive successes on the same
+     runner, and the PostgreSQL dump it gates is deliberately fatal. Retried in `backup.sh`,
+     `redis-backup.sh` and `redis-restore.sh`.
+
+- **Every re-deploy briefly ran five-week-old game servers, and one split the world.**
+  `dev-up.sh` applied the raw manifests, which name the moving `:develop` image, and pinned
+  the real image afterwards. `:develop` is hand-retagged and lags the branch: in the dev node
+  it was `307f1e8`, 2026-08-17, older than dungeon-mode registration (ADR-26). The dungeon
+  manifest's `replicas: 0` exists to stop exactly this, but only works on a **first** deploy
+  -- once the fleet and its Buffer autoscaler exist, the autoscaler holds the floor and Agones
+  rolled real pods onto `:develop` before the pin. A five-week-old dungeon pod registers
+  `map_01` like a map server, and its registry entry outlives the pod until its heartbeat
+  expires. CD caught it once: the smoke test was routed to `dungeon-servers-...-7vh8n` on
+  `map_01`, its join died with EOF, and the entry expired three seconds later -- a previous
+  run had passed only by timing. The gateway manifest had the same shape.
+
+  `apply` is now image-neutral: each manifest is rendered with the image the cluster is
+  already running (the pinned one on a first deploy), and refused if the line to pin is
+  missing or a moving image survives. The existing drain-and-pin logic still owns every
+  image change. Checked on the live cluster: `kubectl diff` of the raw dungeon manifest shows
+  the image going `42e484a -> :develop`; the rendered one shows no image change at all, and a
+  server-side dry run accepts all three objects.
+
+- **`cluster.restarts` failed forever on a completed init container.** The classifier read
+  every container that is not `running` as a crash loop, "at any age". An init container is
+  *supposed* to end `terminated` with exit 0, so any pod whose init container had restarted
+  once -- a host reboot is enough -- failed every deploy until someone deleted the pod: the
+  permanent-red trap the check's own `restartCount` note exists to prevent. Surfaced on the
+  first deploy that reached verification: Nakama's `migrate` init container, restarted once
+  by a reboot, now `Completed`. A completed init container (exit 0) is now settled and aged
+  by its completion time; a failed init container, a crash-looping one, a terminated **main**
+  container and a restart inside the window all still fail. Six fixtures cover exactly those
+  cases; on the live dev cluster develop's classifier reports 1 RECENT, this one 0 RECENT and
+  10 OLD, the `migrate` container still named as a warning rather than dropped.
+
+- **`verify.sh` reported `VERIFY=PASS` for a run that verified nothing.** Found while fixing
+  the above: `--layer data` (layers are numbered) selected zero checks and printed
+  `checks: 0 ... VERIFY=PASS`, exit 0. An empty run, or one where every check skipped, now
+  fails and names which. Proved both ways: the empty selection exits 1, layer 2 still exits
+  0 with 6/6.
+
+  **Why the compose dev stack keeps going down.** `COMPOSE_DEV_CONTAINERS` names
+  `rpg-gateway rpg-nakama rpg-redis rpg-postgres rpg-postgres-game`, and every k8s-mode dev
+  deploy stops them by design -- the cluster replaces them. Anyone using the compose stack on
+  the same box will see Nakama and the gateway `Exited (0)` after a `develop` push. That is
+  intended, and recorded here because it reads as a crash.
+
 ### Added
 
 - **The three Agones fleet manifests now declare 48 `GAMESERVER_*` names instead of 9, and a

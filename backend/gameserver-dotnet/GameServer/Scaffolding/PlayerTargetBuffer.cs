@@ -89,6 +89,11 @@ internal sealed class PlayerTargetBuffer
             ref readonly EntityHandle handle = ref _handles[i];
             if (!writer.IsAlive(in handle)) continue;
             if (writer.HealthOf(in handle).Dead) continue;
+            // A player held for reconnect has nobody behind it. Targeting it killed players
+            // for losing their connection (PlayerTag.Linkdead). Excluded here, once, so the
+            // chase, the attack and the population scaling all agree -- and a held player
+            // does not keep a wave spawning for somebody who is not there.
+            if (writer.PlayerTagOf(in handle).Linkdead) continue;
 
             _live[_count] = handle;
             _positions[_count++] = writer.PositionOf(in handle).Value;

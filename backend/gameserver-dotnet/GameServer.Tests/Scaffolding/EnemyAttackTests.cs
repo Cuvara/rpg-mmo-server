@@ -634,4 +634,80 @@ public class EnemyAttackTests
         Assert.True(fight.Entity("p1").Position.X > 0f,
             "a respawned player could not move, so the entity is alive and the player is not");
     }
+
+    // ── A player held for reconnect is out of reach ──────────────────────────
+
+    private static void SetLinkdead(Fight fight, string id, bool value) =>
+        fight.World.UpdateComponents(writer =>
+        {
+            EntityHandle handle = writer.Resolve(id);
+            Assert.True(handle.IsValid, $"{id} is not in the world");
+            writer.PlayerTagOf(in handle).Linkdead = value;
+        });
+
+    /// <summary>
+    /// Three arms over the same fight: an ordinary player is hit, a held one is not, and the
+    /// held one is hit again the moment the hold is lifted. The third arm is what makes the
+    /// second mean anything -- without it, "took no damage" would also be satisfied by the
+    /// flag doing nothing and the fight happening not to land a blow.
+    /// </summary>
+    [Fact]
+    public void APlayerHeldForReconnect_IsNotAttacked_AndIsAgainOnceItIsBack()
+    {
+        int ticks = WindowTicks * 4 + 2;
+
+        using (var control = new Fight(Settings()))
+        {
+            AddPlayer(control, "p1");
+            Surround(control, 6);
+            control.Run(ticks);
+            Assert.True(control.Hp("p1") < 100, "control arm: the fight landed no hit, so this test proves nothing");
+        }
+
+        using var fight = new Fight(Settings());
+        AddPlayer(fight, "p1");
+        Surround(fight, 6);
+        SetLinkdead(fight, "p1", true);
+        fight.Run(ticks);
+        Assert.Equal(100, fight.Hp("p1"));
+
+        SetLinkdead(fight, "p1", false);
+        fight.Run(ticks, from: (ulong)ticks + 1);
+        Assert.True(fight.Hp("p1") < 100, "released from the hold, the player should be in reach again");
+    }
+
+    /// <summary>
+    /// The incident itself. On the dev cluster the smoke test walked to x=4.83, dropped its
+    /// connection, and its saved row came back x=0 y=0 hp=79/100: killed during the 30s
+    /// reconnect grace, revived at the spawn point at full health, hit again, and persisted
+    /// there by the eviction save. A player one blow from death, surrounded, with respawn on,
+    /// reproduces it in the control arm -- and in the held arm stays exactly where and as
+    /// they were.
+    /// </summary>
+    [Fact]
+    public void AHeldPlayer_IsNotKilledAndMovedToTheSpawnPoint()
+    {
+        int ticks = WindowTicks * 4 + 2;
+
+        using (var control = new Fight(Settings(respawn: true)))
+        {
+            AddPlayer(control, "p1", hp: 1);
+            Surround(control, 6);
+            control.Run(ticks);
+            Vec2 at = control.Entity("p1").Position;
+            Assert.True(at.X != Centre.X || at.Y != Centre.Y,
+                "control arm: the player was neither killed nor respawned, so this test proves nothing");
+        }
+
+        using var fight = new Fight(Settings(respawn: true));
+        AddPlayer(fight, "p1", hp: 1);
+        Surround(fight, 6);
+        SetLinkdead(fight, "p1", true);
+        fight.Run(ticks);
+
+        EntityState held = fight.Entity("p1");
+        Assert.Equal(1, held.Hp);
+        Assert.Equal(Centre.X, held.Position.X);
+        Assert.Equal(Centre.Y, held.Position.Y);
+    }
 }

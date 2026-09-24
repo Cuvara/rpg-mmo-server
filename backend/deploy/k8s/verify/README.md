@@ -290,6 +290,21 @@ JWT_SECRET=<the deployment's secret> ./verify.sh --target dev-agones
 Exit code `0` = `VERIFY=PASS`, `1` = `VERIFY=FAIL`, `2` = the suite could not
 run (bad target, missing `JWT_SECRET`).
 
+**A run that verified nothing is `VERIFY=FAIL`.** Layers are selected by
+**number**; `--layer data` matches no check, and until this rule existed it
+printed `checks: 0 ... VERIFY=PASS` with exit 0. An empty selection, or a run in
+which every check was skipped, now fails and says which.
+
+**The Nakama scheme comes from the cluster, not the target file.**
+`k8s-dev` and `k8s-stg` read the cluster's own meta-hop opt-in (the
+`tls-cert-path` key of the `nakama-config` ConfigMap, ADR-24) through
+`lib/nakama_endpoint.sh`. Opted in: `https://` with a pin read out of the
+`nakama-tls` Secret and passed as `--cacert`. Not opted in: `http://`. An
+explicitly set `VERIFY_NAKAMA_URL` always wins. This used to be a literal
+`http://`, relying on `dev-up.sh` to export the https URL -- which works by hand
+and never in CD, where `dev-up.sh` and `verify.sh` run in separate steps and an
+export cannot cross them.
+
 `JWT_SECRET` is required and never stored in a target file. The value the
 running gateway uses:
 

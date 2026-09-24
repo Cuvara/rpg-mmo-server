@@ -321,19 +321,29 @@ def epoch(stamp):
 for pod in doc.get("items", []):
     meta = pod.get("metadata", {})
     status = pod.get("status", {})
-    statuses = (status.get("initContainerStatuses") or []) + (status.get("containerStatuses") or [])
-    for cs in statuses:
+    inits = status.get("initContainerStatuses") or []
+    statuses = [(cs, True) for cs in inits] + [(cs, False) for cs in (status.get("containerStatuses") or [])]
+    for cs, is_init in statuses:
         count = cs.get("restartCount", 0)
         if count <= 0:
             continue
         term = (cs.get("lastState") or {}).get("terminated") or {}
-        finished = term.get("finishedAt")
+        state = cs.get("state") or {}
+        term_now = state.get("terminated") or {}
+        # An INIT container is supposed to end terminated: exit 0 is its healthy steady
+        # state, not a crash. Reading it as "not running" failed every deploy, forever, on
+        # any pod whose init container had restarted once -- a host reboot is enough -- which
+        # is the permanent-red trap the restartCount note below exists to prevent. Its
+        # current termination also stands in for the age when lastState was not kept.
+        settled = is_init and term_now.get("exitCode") == 0
+        finished = term.get("finishedAt") or (term_now.get("finishedAt") if settled else None)
         exit_code = term.get("exitCode")
         reason = term.get("reason") or "?"
-        state = cs.get("state") or {}
         running = "running" in state
         if running:
             current = "Running since %s" % state["running"].get("startedAt", "?")
+        elif settled:
+            current = "Completed (init container, exit 0) at %s" % (term_now.get("finishedAt") or "?")
         elif "waiting" in state:
             current = "NOT running -- waiting: %s" % ((state["waiting"] or {}).get("reason") or "?")
         else:
@@ -348,7 +358,7 @@ for pod in doc.get("items", []):
             count, exit_code, reason, finished or "unknown", age_text, current)
         # Inside the window, of unknown age, or not running right now: the
         # deployment under test owns it. Anything else predates this run.
-        fresh = (not running) or age is None or age <= window
+        fresh = (not running and not settled) or age is None or age <= window
         print(("RECENT " if fresh else "OLD ") + detail)
 '
 
