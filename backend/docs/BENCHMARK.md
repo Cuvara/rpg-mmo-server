@@ -3299,3 +3299,67 @@ gaps that are already past the cover and change no conclusion.)
   decision 11's reasoning — no per-connection spread estimate exists, and one must not be
   invented from the 10s liveness ping — is unchanged.
 - **#423** (does the client render a 100ms gap smoothly). Every figure here is on the wire.
+
+## Part XXI — a real client renders a 100ms deferral as smoothly as none (2026-09-24)
+
+Closes #423. Part XX measured the wire. This Part measures the screen: whether a real Unity
+client renders an entity deferred at the schedule's ceiling any differently from one sent
+every world tick.
+
+**Setup.** Compose stack from develop @ `4647b44`, game server image built from that commit
+with `snapshot_max_update_gap_ms`. One `PlayClient` (IndieRPGMMOAdventure `50235a1`, merged as `17b7737`; netcode
+v0.45.0 DOTS Sample) launched with `-cuvara-motion-probe` and a **fresh device id per arm**,
+so the observer spawns in the enemy disc every time (median `observerDist` 11.8–12.4 in every
+arm, no window dropped). With one player the spawner holds **75 enemies** — its cap of 30 + 45
+per player — in the observer's AOI for the whole run, so every arm renders the same
+population. 150s of measurement per arm after join, loopback link (rtt 3ms), uncapped frame
+rate (median 450–510 fps). One variable moves between arms; the build, the map, the
+population and the observer distance do not.
+
+**The instrument check came first.** An instrument that reads the same on both sides of the
+150ms cover cannot certify anything inside it, so the positive controls ran before the
+comparison. The deferral in them comes from the byte budget, the only knob that pushes a
+per-entity gap past the cover without changing the snapshot rate for everything else.
+
+### §64 — the result
+
+`RenderMotionProbe` frozen frames are frames on which a moving entity's rendered transform did
+not move, split into **fresh** (the first 0.25s of an entity's life) and **steady**; aggregated
+by frame count across report windows, the first two windows (join) excluded.
+
+| arm | world Hz | schedule | budget B | server gap (`max_update_gap_ms`) | enemy frames (steady) | **enemy steady frozen** | p99/median step | worst/median step |
+|---|---|---|---|---|---|---|---|---|
+| A1 control | 20 | off | 8192 | 0 (nothing withheld) | 3,504,862 | **0.00%** | 2.18 | 20.2 |
+| A2 control | 20 | off | 8192 | 0 | 2,227,002 | **0.00%** | 2.20 | 19.9 |
+| B1 | 20 | **tiered** | 8192 | **100** (108,391 deferrals) | 3,933,770 | **0.00%** | 2.15 | 20.7 |
+| B2 | 20 | **tiered** | 8192 | **100** (108,383 deferrals) | 3,000,580 | **0.00%** | 2.21 | 18.4 |
+| C400 positive | 20 | off | **400** | 450 max; 73% of updates shed | 3,231,578 | **9.02%** | 2.70 | **130.5** |
+| C60 positive | 20 | off | **60** | 27,016 — starved | 2,168 | **97.80%** | — | — |
+
+- **Inside the cover it is invisible.** B defers every walking enemy to exactly the 105ms
+  ceiling quantised to 100ms. That is 2 world ticks: the gauge reads 100, and ~720 deferrals
+  a second is 75 enemies at 20Hz with every other tick withheld. The client renders it with 0
+  frozen steady frames in 6.9M, the same as the control's 0 in 5.7M. The step distribution
+  does not move either: p99/median is 2.15–2.21 against 2.18–2.20.
+- **Past the cover the same probe sees it at once.** In C400 the mean gap is about 185ms
+  (50ms ÷ 0.27 delivered) with a tail to 450ms. Steady frozen frames rise from 0.00% to 9.02%,
+  and worst/median from ~20 to 130 — the stall-then-jump shape. C60 starves the view outright.
+  So the probe can fail, and the zero in B is a measurement, not an instrument that cannot see.
+- **The server gap is verified, not assumed from configuration.** B's 100ms is read off
+  `snapshot_max_update_gap_ms`, the combined gauge from Part XX, not inferred from
+  `GAMESERVER_REPLICATION_SCHEDULE`. On a 3ms loopback link the client's arrival gap is that
+  plus nothing measurable.
+
+### §65 — what is not claimed
+
+- **Not a jittered link.** The link here is loopback, and the compose stack has no relay to
+  add spread in front of a real client. Part XX puts a ±25ms link at a 136.5ms p99 gap for
+  20Hz `tiered`, still inside the cover. The rendered effect of those last 36ms is inferred
+  from this Part, not observed. At ±60ms Part XX already shows tiering past the cover.
+- **Not fewer frames.** The client ran at ~450–510 fps. At 60 fps each frame covers ~8× more
+  time, so a hold of a given length is fewer frames but the same share; the ratio columns
+  are scale-free for that reason.
+- **Not a recommendation to turn it on.** ADR-27 decision 8 keeps the schedule `off` and
+  `SIM_WORLD_HZ` at 15. What this removes is the last unmeasured assumption under the
+  arithmetic in decisions 10–12, namely that "inside the budget" really means invisible.
+  Turning it on is now a bandwidth-versus-CPU decision (Part XX §61) and an operator's call.

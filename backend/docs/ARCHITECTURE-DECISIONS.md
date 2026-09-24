@@ -3998,8 +3998,13 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
       only: anything scoring ≥ 8 is sent every world tick and pays the faster rate in full.
     - **Nothing ships differently.** `SIM_WORLD_HZ` stays 15 and the schedule stays `off`
       (decision 8). The startup refusal already recommends 20Hz, and these numbers are what an
-      operator taking that advice gets. Turning it on is still gated on #423 (the client
-      rendering a 100ms gap smoothly), which nothing on the wire can answer.
+      operator taking that advice gets. Whether the client renders a 100ms gap smoothly
+      was #423, which nothing on the wire can answer. It was then measured on a real client
+      (BENCHMARK.md Part XXI): 20Hz `tiered` deferring 75 enemies to 100ms showed 0.00%
+      frozen steady frames in 6.9M, the same as the every-tick control. A positive control
+      past the cover, on the same probe and build, read 9.02%. So inside the budget really is
+      invisible on a clean link. Enabling it is an operator's bandwidth-versus-tick-CPU call,
+      not an open question.
     - **`MaxIntervalMs` does not reserve for shedding.** When the byte budget bites, it sets
       the gap by itself — 200–400ms at 120 bytes whatever the schedule does — so no reserve
       the schedule could hold back would restore the cover. The budget's protection is that
