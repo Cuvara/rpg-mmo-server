@@ -62,6 +62,7 @@ public sealed class TickLoop
     private int _snapshotMaxShedAge;
     private long _snapshotDeferredByIntervalDelta;
     private int _snapshotMaxStateAge;
+    private int _snapshotMaxUpdateGap;
 
     /// <summary>
     /// Scratch map (entity -> index of the newest input in this tick's drained batch).
@@ -666,6 +667,7 @@ public sealed class TickLoop
         _snapshotMaxShedAge = 0;
         _snapshotDeferredByIntervalDelta = 0;
         _snapshotMaxStateAge = 0;
+        _snapshotMaxUpdateGap = 0;
 
         if (_viewerCount > 0)
         {
@@ -706,9 +708,10 @@ public sealed class TickLoop
                     out long c, out long w, out long b,
                     out long shed, out long deferred, out int shedAge);
                 _viewers[i].DeltaState.TakeScheduleCounters(
-                    out long byInterval, out int stateAge);
+                    out long byInterval, out int stateAge, out int updateGap);
                 _snapshotDeferredByIntervalDelta += byInterval;
                 if (stateAge > _snapshotMaxStateAge) _snapshotMaxStateAge = stateAge;
+                if (updateGap > _snapshotMaxUpdateGap) _snapshotMaxUpdateGap = updateGap;
                 _snapshotsCoalescedDelta += c;
                 _snapshotFramesWrittenDelta += w;
                 _snapshotBytesDelta += b;
@@ -755,7 +758,11 @@ public sealed class TickLoop
                 _snapshotBytesDelta, _snapshotEntitiesShedDelta,
                 _snapshotRemovalsDeferredDelta, _snapshotMaxShedAge);
             _metrics.RecordSnapshotSchedule(
-                _snapshotDeferredByIntervalDelta, _snapshotMaxStateAge);
+                _snapshotDeferredByIntervalDelta, _snapshotMaxStateAge,
+                // Converted HERE, the one place that knows the base rate: the encoder's tick is
+                // TickLoop's base tick, and a gauge left in base ticks is read as world ticks
+                // (BENCHMARK.md §48 overstated a staleness 4x exactly that way).
+                (int)((long)_snapshotMaxUpdateGap * 1000 / _rates.BaseHz));
             _metrics.RecordSnapshotAnchorMissing(_snapshotAnchorMissingDelta);
             _metrics.RecordSnapshotGather(_snapshotEntitiesGatheredDelta, _snapshotMaxGather);
             _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());

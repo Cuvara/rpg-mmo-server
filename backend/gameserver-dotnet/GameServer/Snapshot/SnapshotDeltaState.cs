@@ -418,6 +418,77 @@ public sealed class SnapshotDeltaState
     public int MaxStateAge => Volatile.Read(ref _maxStateAge);
 
     /// <summary>
+    /// For each entity currently owed an update, the world tick from which the client's copy
+    /// counts as stale: the later of its last send and the tick before it was first withheld.
+    /// Set by whichever deferral source withholds it first — the schedule or the budget — and
+    /// consumed when it is finally sent. Absent means "nothing owed".
+    /// </summary>
+    /// <remarks>
+    /// The later of its last send and the previous encode, not simply the last send: an
+    /// entity that stood still for two seconds and then moved was not stale during the two
+    /// seconds — the client's copy was correct as of the previous snapshot — so its wait
+    /// starts there, not when it was last sent.
+    /// </remarks>
+    private readonly Dictionary<int, ulong> _owedFrom = new();
+
+    private int _maxUpdateGap;
+
+    /// <summary>
+    /// Longest wait, in <b>base</b> ticks (the encoder is handed TickLoop's tick), between an
+    /// entity's last send and the send that delivered an update it was owed — <b>whatever
+    /// withheld it</b>. High-water mark. Published in milliseconds as
+    /// <c>max_update_gap_ms</c>, converted where the base rate is known.
+    /// </summary>
+    /// <remarks>
+    /// <para>This is the number the client's interpolation cover is spent on, and neither
+    /// <see cref="MaxStateAge"/> nor <see cref="MaxShedAge"/> is it (#421). Each counts only
+    /// its own source: the schedule's age stops at the tick the entity comes due, the
+    /// budget's starts counting there, and an entity that is scheduled out and then shed
+    /// waits for the two together (BENCHMARK.md Part XX).</para>
+    ///
+    /// <para>An arrival gap at the client is this plus whatever the link spreads it by. Its
+    /// budget is <c>ReplicationSchedule.ClientInterpolationBudgetMs</c> minus the link's
+    /// share.</para>
+    ///
+    /// <para>A keyframe does not break a wait: an entity owed across it keeps its start and is
+    /// recorded when the keyframe (or the delta after a truncated keyframe) carries it.</para>
+    /// </remarks>
+    public int MaxUpdateGap => Volatile.Read(ref _maxUpdateGap);
+
+    /// <summary>Entities currently owed an update. Bounded by the visible set. Diagnostics/tests.</summary>
+    public int OwedRecords => _owedFrom.Count;
+
+    /// <summary>Start (or keep) the wait of an entity that is being withheld this tick.</summary>
+    private void NoteOwed(int key, ulong tick)
+    {
+        if (_owedFrom.ContainsKey(key)) return;
+        ulong from = _prevEncodingTick < tick ? _prevEncodingTick : 0;
+        if (_lastSentTick.TryGetValue(key, out ulong last) && last > from) from = last;
+        _owedFrom[key] = from;
+    }
+
+    /// <summary>End the wait of an entity being sent this tick, if it had one.</summary>
+    private void NoteSent(int key, ulong tick)
+    {
+        if (!_owedFrom.Remove(key, out ulong from) || tick <= from) return;
+        ulong gap = tick - from;
+        if (gap > int.MaxValue) gap = int.MaxValue;
+        if ((int)gap > _maxUpdateGap) Volatile.Write(ref _maxUpdateGap, (int)gap);
+    }
+
+    /// <summary>Drop waits of entities not in this encode's visible set.</summary>
+    private void PruneOwed()
+    {
+        if (_owedFrom.Count == 0) return;
+        foreach (var kv in _owedFrom)
+        {
+            if (!_seen.Contains(kv.Key)) _removedKeys.Add(kv.Key);
+        }
+        for (int i = 0; i < _removedKeys.Count; i++) _owedFrom.Remove(_removedKeys[i]);
+        _removedKeys.Clear();
+    }
+
+    /// <summary>
     /// Ticks each currently-deferred entity has been waiting, keyed like
     /// <see cref="_lastSent"/>. Absent means "nothing owed".
     /// </summary>
@@ -490,12 +561,13 @@ public sealed class SnapshotDeltaState
     }
 
     /// <summary>Schedule counters since the last call, same delta discipline as above.</summary>
-    internal void TakeScheduleCounters(out long deferredByInterval, out int maxStateAge)
+    internal void TakeScheduleCounters(out long deferredByInterval, out int maxStateAge, out int maxUpdateGap)
     {
         long d = EntitiesDeferredByInterval;
         deferredByInterval = d - _reportedDeferredByInterval;
         _reportedDeferredByInterval = d;
         maxStateAge = MaxStateAge;
+        maxUpdateGap = MaxUpdateGap;
     }
 
     /// <summary>One candidate's scheduling key. Struct, sorted in a reused array.</summary>
@@ -571,6 +643,14 @@ public sealed class SnapshotDeltaState
 
     /// <summary>Tick of the encode in flight, so the emit path can stamp send times.</summary>
     private ulong _encodingTick;
+
+    /// <summary>
+    /// Tick of the encode before this one. Snapshots are encoded on WORLD ticks while the tick
+    /// counter is the BASE tick, so "the previous snapshot" is not <c>tick - 1</c> — at 60/20
+    /// it is <c>tick - 3</c>. Using <c>tick - 1</c> made the first live run of
+    /// <see cref="MaxUpdateGap"/> under-read every gap by two base ticks.
+    /// </summary>
+    private ulong _prevEncodingTick;
 
     /// <summary>Unstaggered state — every keyframe cycle is exactly the full interval.</summary>
     public SnapshotDeltaState() : this(0) { }
@@ -694,6 +774,7 @@ public sealed class SnapshotDeltaState
         // flag on a JSON connection still gets the safe (all-fields) path.
         _fieldDelta = intern && FieldDelta;
         _observer = observer;
+        _prevEncodingTick = _encodingTick;
         _encodingTick = tick;
         // Latched once per encode: MaxSnapshotBytes is a settable property and a change
         // landing between the sizing pass and the emit pass would let the two disagree
@@ -958,8 +1039,11 @@ public sealed class SnapshotDeltaState
                 // to the schedule like one that was never sent -- so it would be due on the
                 // very next delta and the schedule would silently do nothing for any
                 // deployment running GAMESERVER_MAX_SNAPSHOT_BYTES=0.
+                NoteSent(e.Key, tick);
                 _lastSentTick[e.Key] = tick;
             }
+            // Everything visible was just sent; what is left owed is out of sight.
+            _owedFrom.Clear();
 
             LastPayloadBytes = 0;
             return msg;
@@ -1032,6 +1116,7 @@ public sealed class SnapshotDeltaState
 
             msg.Entities.Add(ToMsg(in e));
             _lastSent[e.Key] = view;
+            NoteSent(e.Key, tick);
             _lastSentTick[e.Key] = tick;
         }
 
@@ -1062,6 +1147,7 @@ public sealed class SnapshotDeltaState
             }
             _removedKeys.Clear();
         }
+        PruneOwed();
 
         LastPayloadBytes = 0;
         return msg;
@@ -1207,6 +1293,7 @@ public sealed class SnapshotDeltaState
     /// </remarks>
     private void PruneDeferrals()
     {
+        PruneOwed();
         if (_shedAge.Count > 0)
         {
             foreach (var kv in _shedAge)
@@ -1431,6 +1518,7 @@ public sealed class SnapshotDeltaState
     /// <summary>Track how long this entity has gone without the update it is owed.</summary>
     private void NoteStateAge(int key, ulong tick)
     {
+        NoteOwed(key, tick);
         if (!_lastSentTick.TryGetValue(key, out ulong last)) return;
         ulong age = tick - last;
         if (age > int.MaxValue) age = int.MaxValue;
@@ -1450,6 +1538,7 @@ public sealed class SnapshotDeltaState
             _handles.Remove(key);
             _shedAge.Remove(key);
             _lastSentTick.Remove(key);
+            _owedFrom.Remove(key);
         }
     }
 
@@ -1462,6 +1551,7 @@ public sealed class SnapshotDeltaState
         var ent = ToMsg(in e);
         msg.Entities.Add(ent);
         _lastSent[e.Key] = new SentView(in e);
+        NoteSent(e.Key, _encodingTick);
         _lastSentTick[e.Key] = _encodingTick;
         _shedAge.Remove(e.Key);
         return EntryBytes(ent);
@@ -1474,6 +1564,7 @@ public sealed class SnapshotDeltaState
     /// </summary>
     private int Defer(in EntityView e)
     {
+        NoteOwed(e.Key, _encodingTick);
         _shedAge.TryGetValue(e.Key, out int age);
         age++;
         _shedAge[e.Key] = age;

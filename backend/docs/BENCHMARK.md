@@ -3181,3 +3181,121 @@ hold them unrendered for one interval) rather than a bug fix.
 Nor does this Part say anything about a population where mobs outnumber players. Three
 players and six mobs is the shape available; the churn rate that drives the whole result is
 `EnemiesPerWave 2 / WaveIntervalSec 1.5` on a scaffolding spawner.
+
+## Part XX — tiering at a world rate that separates its bands, and the byte budget on top of it (2026-09-24)
+
+Closes the measurement half of #420 and #421. Bench:
+`GameServer.Tests/Bench/TieringRateMeasurement.cs` (`MEASURE_TIERING=1`, ~6 min), develop @
+`79f44ee` plus the `max_update_gap_ms` gauge from this change. In-process server, 10 walking
+players and one idle one; only the observer's **downlink** runs through `AdversityProxy`
+(80ms base + seeded one-way jitter, TCP, loopback). The observer is Protobuf because the byte
+budget only runs on interned connections.
+
+### §59 — the instrument
+
+The number is the **per-entity arrival gap**: time between two snapshots carrying the same
+mover, `Stopwatch`-timed where the bytes arrive. Not snapshot cadence, and not the client's
+staleness estimator (known-bad regime on this box, `MEASUREMENT.md`). Every arm carries the
+idle-entity guard — the idler's longest gap must exceed three cadence p99s, or the run is
+reported as `GUARD FAIL` instead of producing a number. All 30 arms passed it, with idle gaps
+of 1034–2096ms against cadence p99s of 39–164ms. Downlink is counted under the decoder, so it
+is every byte of every frame, length prefix included.
+
+### §60 — the matrix (third run; the first two agree to within noise on every column but the gauge)
+
+`p99`/`max`/`>150` are per-entity arrival gaps in ms; `>150` is the share of gaps past the
+client's cover. `updGap` is the new server gauge (ms, high-water since process start).
+
+| world Hz | profile | budget B | jitter | med | p99 | max | >150 | KB/s | updGap |
+|---|---|---|---|---|---|---|---|---|---|
+| 15 | off | 8192 | 0 | 66.7 | 76.5 | 84.6 | 0.00% | 5.08 | 0 |
+| 15 | off | 8192 | ±25 | 67.4 | 108.0 | 116.4 | 0.00% | 5.01 | 0 |
+| 15 | off | 8192 | ±60 | 62.9 | 163.6 | 163.9 | **5.88%** | 5.06 | 0 |
+| 20 | off | 8192 | 0 | 49.8 | 59.4 | 60.7 | 0.00% | 6.77 | 0 |
+| 20 | off | 8192 | ±25 | 49.0 | 100.2 | 102.5 | 0.00% | 6.76 | 0 |
+| 20 | off | 8192 | ±60 | 45.5 | 140.4 | 144.2 | 0.00% | 6.75 | 0 |
+| 20 | tiered | 8192 | 0 | 99.8 | 107.8 | 107.8 | 0.00% | **3.65** | 100 |
+| 20 | tiered | 8192 | ±25 | 99.9 | **136.5** | 136.5 | 0.00% | 3.65 | 100 |
+| 20 | tiered | 8192 | ±60 | 89.4 | 204.7 | 204.7 | **12.35%** | 3.64 | 100 |
+| 30 | off | 8192 | 0 | 33.5 | 41.8 | 43.6 | 0.00% | 10.16 | 0 |
+| 30 | off | 8192 | ±25 | 33.8 | 78.3 | 83.7 | 0.00% | 10.15 | 0 |
+| 30 | off | 8192 | ±60 | 23.2 | 126.8 | 134.3 | 0.00% | 10.22 | 0 |
+| 30 | tiered | 8192 | 0 | 99.9 | 114.2 | 114.2 | 0.00% | **3.93** | 100 |
+| 30 | tiered | 8192 | ±25 | 98.3 | **141.1** | 141.1 | 0.00% | 3.96 | 100 |
+| 30 | tiered | 8192 | ±60 | 98.2 | 190.0 | 190.0 | **11.76%** | 3.99 | 100 |
+| 15 | off | 120 | 0 | 208.8 | 399.9 | 400.3 | 100% | 1.58 | 416 |
+| 20 | off | 120 | 0 | 152.6 | 300.7 | 305.3 | 70.0% | 2.11 | 316 |
+| 20 | tiered | 120 | 0 | 153.0 | 348.5 | 356.2 | 75.7% | 2.10 | 366 |
+| 30 | off | 120 | 0 | 105.0 | 201.2 | 205.5 | 14.9% | 3.16 | 250 |
+| 30 | tiered | 120 | 0 | 102.6 | 233.9 | 264.7 | 8.7% | 3.23 | 266 |
+
+(The ±25/±60 rows of the 120-byte arms are in the bench output; they add the link's spread to
+gaps that are already past the cover and change no conclusion.)
+
+### §61 — #420: tiering works at 20Hz and 30Hz on the link it promises to serve, and costs less than today
+
+- **The bands separate and hold the cover at ±25ms.** Both rates defer the walking population
+  to exactly 100ms (2 world ticks at 20Hz, 3 at 30Hz — the 105ms ceiling quantised down) and
+  the p99 lands at 136.5ms and 141.1ms, inside 150. That is the `LinkSpreadAllowanceMs = 45`
+  arithmetic doing what ADR-27 decision 11 said it would, now seen at a rate where it has
+  something to do.
+- **At ±60ms tiering fails, as documented.** 12% of gaps are past the cover at both rates.
+  The allowance was never claimed to cover ±60; what is new is that **`off` at 15Hz fails at
+  ±60 too** (5.9%), while `off` at 20Hz and 30Hz does not (p99 140 and 127ms). A faster world
+  rate is by itself the remedy for a bad link; tiering spends exactly the slack that remedy
+  creates.
+- **The bandwidth trade is priced, and it goes the other way from the one #420 feared.**
+  Raising the world rate raises `off` linearly (5.08 → 6.77 → 10.16 KB/s), but `tiered` at
+  20Hz is **3.65 KB/s — 28% below the shipped 15Hz `off`** — and 3.93 KB/s at 30Hz (−23%).
+  Reason: a walking player in the bottom band is sent every 100ms, i.e. at 10Hz, against 15Hz
+  today; the faster rate is spent only on what scores ≥ 8.
+- **What that costs.** The median per-entity gap rises from 66.7ms to 100ms for the deferred
+  class. The cover absorbs it arithmetically; whether the client *renders* it smoothly is
+  #423's question and is not answered here. Tick CPU at 20/30Hz is not measured here either,
+  and cannot be on this host (ADR-7).
+- **What the population does not cover.** Ten walking players, no combat. Anything scoring
+  ≥ 8 (an HP or action change, an attacking player) goes every world tick, so a combat-heavy
+  population pays the faster rate's full cost for those entities. The −28% is the walking
+  case, not a capacity figure.
+
+### §62 — #421: under byte pressure no schedule holds the cover, and neither old gauge could say by how much
+
+- **When the budget bites, the budget sets the gap.** At 120 bytes (about three entities per
+  snapshot) every arm is far past 150ms, schedule or not: 400ms at 15Hz, 300ms at 20Hz, 200ms
+  at 30Hz with `off`. Reserving part of `MaxIntervalMs` for shedding cannot fix that — a
+  single shed of five snapshots is 167–333ms on its own — so **`MaxIntervalMs` does not
+  reserve for shedding.** The protection is that the budget is a tail cap sized not to bite at
+  known loads (8192 bytes, 0 shed at ~316 entities in one AOI, #403), and the new gauge is the
+  alarm for when it does.
+- **The two sources add on the same entity.** With the schedule on, the worst gap at 20Hz rises by
+  about one world period: 300 → 356ms. At 30Hz, the schedule also **reduces** contention for
+  the budget (1769 → 456 sheds over the window), because fewer entities are due each tick. So
+  the p99 barely moves (201 → 234ms) and the share past the cover falls (14.9% → 8.7%).
+- **Neither old gauge measures the gap, and neither does their sum.** `max_shed_age` counts
+  snapshots and `max_state_age` counts **base** ticks (not world ticks — the metric description
+  and `METRICS.md` said world ticks, which BENCHMARK §48 had already caught once). Converted
+  to ms, the 20Hz `tiered` 120-byte arm read shed age 250ms and state age 50ms, which sum to
+  300ms, against an observed worst gap of 356ms. Each gauge stops counting where the other
+  starts, and each is an age rather than a gap — it leaves off the final interval.
+- **`gameserver_snapshots_max_update_gap_ms` / `snapshot_max_update_gap_ms`** measures the
+  thing itself: the wait between an entity's last send and the send that delivered an update it
+  was owed, from whatever source, in milliseconds. It read 100 on every unpressured `tiered`
+  arm, against an observed clean maximum of 107.8–114.2ms (loopback timing adds the rest). On
+  pressured arms it reads 316–416 against observed maxima of 305–400; it is a high-water mark
+  since process start, so join-time keyframe truncation sits in it too. It never read below
+  the observed gap. `UpdateGapTests` pins it to the gap read off the encoded messages,
+  exactly, at encode strides of 1, 2, 3 and 4 base ticks.
+- **A defect the first live run found.** The first version started an entity's wait at
+  `tick − 1`, assuming an encode every tick. The encoder is handed the **base** tick and runs
+  on **world** ticks, so at 60/20 the previous snapshot is `tick − 3`. The gauge under-read every
+  gap by two base ticks (66 for a true 100), and the unit tests passed, because they encoded
+  every tick. They now sweep the stride.
+
+### §63 — what this Part does not settle
+
+- **#422** (per-connection link allowance). The rows above say what an adaptive version would
+  have to do on a ±60ms link: fall back to every-tick for that connection, which at 20Hz is
+  inside the cover (p99 140ms). They do not supply the estimate it would need, and ADR-27
+  decision 11's reasoning — no per-connection spread estimate exists, and one must not be
+  invented from the 10s liveness ping — is unchanged.
+- **#423** (does the client render a 100ms gap smoothly). Every figure here is on the wire.

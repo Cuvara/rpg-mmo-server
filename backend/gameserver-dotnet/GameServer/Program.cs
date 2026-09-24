@@ -1194,6 +1194,7 @@ metricsEndpoint?.SetStatusProvider(() =>
         FieldDelta = fieldDelta,
         SnapshotDeferredByInterval = metrics.SnapshotDeferredByInterval,
         SnapshotMaxStateAge = metrics.MaxStateAge,
+        SnapshotMaxUpdateGapMs = metrics.MaxUpdateGapMs,
         SnapshotBytes = metrics.SnapshotBytes,
         SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
         SnapshotAnchorMissing = metrics.SnapshotAnchorMissing,
