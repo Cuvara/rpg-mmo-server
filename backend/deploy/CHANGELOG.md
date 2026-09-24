@@ -7,6 +7,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Redis on dev and staging was backed up by nothing, and a Redis restore was verified by a
+  check that could not see a bad one (#430).** Found and proved by a drill on k3d
+  (`docs/DISASTER-RECOVERY.md`, "Failure drill: Redis on k3d"):
+  - `redis-backup.sh` and `redis-restore.sh` take `--kube-context` and reach
+    `statefulset/redis`; CD's existing `BACKUP_KUBE_CONTEXT` now reaches the Redis backup too.
+  - Backup verification read only the 5-byte `REDIS` magic and **passed an RDB truncated by 40
+    bytes**. It now runs `redis-check-rdb` on the file in the container (whole file, CRC64) and
+    compares the local copy's md5 with it.
+  - k8s live restore: stop the StatefulSet, seed the PVC with `--appendonly no`, rebuild the AOF
+    from the loaded data, start again. Uploads use `kubectl cp` (never `kubectl exec -i`, which
+    truncates here).
+  - Both live modes replaced the key-COUNT gate -- blind to a restore that kept the old dataset,
+    and flaky against volatile `servers:id:*` keys -- with a sentinel written before the stop
+    (must be gone afterwards) and a durable-key check. Re-introducing the August bug as a
+    mutation now fails with `the OLD dataset survived`.
+
+  Drilled on k3d dev and compose dev: marker written after the backup gone, durable keys back,
+  registry re-registered, the restored data identical after a second restart (loaded from the
+  AOF), and dev's verification 11 PASS / 0 FAIL afterwards.
+
+### Fixed
+
 - **The verification suite pinned every cluster's gateway against DEV's certificate.**
   `checks_flow.sh` fell back to `${RPG_K8S_RUN_DIR:-/tmp/claude-1000/rpg-k8s-dev}/gateway-tls.crt`,
   and CD sets `RPG_K8S_RUN_DIR` on the deploy step only, so the verify step always took dev's

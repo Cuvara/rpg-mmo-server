@@ -582,9 +582,69 @@ db/restore.sh --kube-context k3d-rpg-dev --file /tmp/bk/meta/meta-<stamp>.dump \
 # compare, then: DROP DATABASE nakama_drill
 ```
 
-**Not covered:** Redis in k8s mode. `redis-backup.sh` has the same compose-only target and
-skips on k3d; Redis holds state that the running services re-register, so it is lower
-stakes, and it is tracked separately rather than fixed blind.
+**Redis** had the same compose-only target and was fixed separately (#430) — see
+"Failure drill: Redis on k3d" below.
+
+## Failure drill: Redis on k3d
+
+**Drill run: 2026-09-24, against `k3d-rpg-dev` and the dev compose Redis.** Closes #430.
+
+`redis-backup.sh` targeted the compose `rpg-redis`, which the k8s deploy stops, so every dev
+and staging deploy logged `container 'rpg-redis' not running -- skipping redis backup` and
+moved on. Both Redis scripts now take `--kube-context` (CD already passes
+`BACKUP_KUBE_CONTEXT` for k8s environments, so no workflow change was needed).
+
+### The verification was the same weak kind the PostgreSQL one was
+
+| Check | On an RDB truncated by 40 bytes (10039 of 10079) |
+|---|---|
+| old: `REDIS` magic + size > 16 (its comment said it "catches truncation") | **passed** |
+| new: `redis-check-rdb` inside the container (whole file, CRC64) + md5 of the local copy against the file in the container | rejected |
+
+### Live restore on k3d, and why a key count is not a verification
+
+k8s live mode mirrors the compose procedure: scale `statefulset/redis` to 0, seed the PVC
+from a pod running `--appendonly no` (so the RDB is actually loaded), `CONFIG SET appendonly
+yes` so `appendonlydir` is rewritten from the loaded data, scale back to 1.
+
+The gate used to be `live DBSIZE == snapshot DBSIZE`. That cannot tell "restored" from "kept
+the old dataset of the same size" — the exact failure the August drill found — and it is
+flaky against a correct restore, because `servers:id:*` carry a 10–15 s TTL (a snapshot of 7
+keys loads as 4 once they expire) and live servers re-register the moment Redis is back. Both
+modes now use:
+
+1. **A sentinel** written into the live Redis just before it stops. It cannot be in any
+   earlier snapshot, so if it survives the restore, the old dataset did.
+2. **Every durable key** (no TTL) in the snapshot must exist afterwards with the same type;
+   extra keys from live writers are allowed.
+
+**Mutation:** re-introducing the August bug (drop `dump.rdb` next to the old AOF and restart)
+makes the script fail with `the sentinel written before the restore is still there -- the
+OLD dataset survived`.
+
+### Results
+
+| | k3d dev | compose dev |
+|---|---|---|
+| backup | `ok … 7 keys`, verified | `ok … 11 keys` (736 KB), verified |
+| marker written **after** the backup | gone after restore | gone after restore |
+| key written **before** the backup | — | kept |
+| durable keys after restore | all 4 present with types | all 11 present |
+| registry after restore | 3 `servers:id:*` re-registered within ~20 s | — |
+| second restart | **identical** durable set, `DB loaded from append only file` | — |
+| environment afterwards | verify layers 2–4: **11 PASS, 0 FAIL**, full smoke | — |
+
+The second-restart row is the one that matters: the in-memory dataset after a restore proves
+nothing about durability — only an AOF rebuilt from the snapshot survives the next restart.
+
+**Rehearse with:**
+
+```bash
+db/redis-backup.sh  --kube-context k3d-rpg-dev --dir /tmp/rb
+db/redis-restore.sh --file /tmp/rb/redis-<stamp>.rdb                      # scratch, safe
+db/redis-restore.sh --file /tmp/rb/redis-<stamp>.rdb --mode live --yes \
+                    --kube-context k3d-rpg-dev                            # DESTRUCTIVE
+```
 
 ## Data durability: Redis
 
