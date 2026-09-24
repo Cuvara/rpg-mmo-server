@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **BENCHMARK.md Part XXI — a real client renders a 100ms deferral as smoothly as none**
+  (#423). On one `PlayClient` with `RenderMotionProbe`, a fresh device id per arm, and 75
+  enemies in the AOI:
+  - 20Hz `tiered` (gauge-verified 100ms gaps) and the every-tick control both read **0.00%**
+    frozen steady enemy frames across 6.9M and 5.7M frames.
+  - A positive control past the cover (byte budget 400, 73% shed, gaps to 450ms) read
+    **9.02%**. It ran first, so the zero is a measurement rather than a blind instrument.
+  - Loopback link only; ADR-27 decision 12 is amended.
+
 - **`snapshot_max_update_gap_ms` — the wait a client experiences, whatever withheld it**
   (#421). New gauge (`gameserver_snapshots_max_update_gap_ms`, `/status`
   `snapshot_max_update_gap_ms`). It records the longest wait, in milliseconds, between an
