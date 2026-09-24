@@ -6,7 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`backend/docs/CORE-BASELINE-V1.md` — what gameplay may build on.**
+
+  `CORE-COMPLETION.md` answers *is the core done*. This answers the question after it: which
+  parts are stable enough to write gameplay against, and which are not. It pins the baseline
+  to two commits and two tags (`rpg-mmo-server develop c2c034e`, `IndieRPGMMOAdventure develop
+  0553af8`, netcode `v0.44.0`, `sgl-v0.6.0`, wire protocol 2, 60/15), lists the flows
+  demonstrated by **built players rather than probes**, the defaults content inherits and why
+  each matters, and what is explicitly not settled.
+
 ### Fixed
+
+- **`BENCHMARK.md`'s summary boxes told readers to size a fleet on a superseded figure.**
+
+  Two boxes at the top say bandwidth is the binding constraint and name **~93 players** as the
+  mobile ceiling. Both were written during Part II, **before id interning**. ADR-7's
+  `⛔ CURRENT STATE (2026-08-07, final)` block says the opposite: downstream bandwidth is
+  solved, its ceiling is **above 200 and no longer bracketed**, and **tick time binds now** at
+  a ceiling that is unknown and unknowable on this host.
+
+  The file already contradicted itself — its own ADR-7 threshold table marks the bandwidth
+  figure *"SUPERSEDED — now passes above 200"* — but the summary boxes are what a reader sees
+  first, and they are the ones that say what to do. Marked superseded in place rather than
+  deleted, with a pointer to ADR-7's block and #205, because the old figures are quoted
+  elsewhere.
+
+  Found while writing the baseline doc: the first draft repeated "size a fleet on ~93
+  players" straight out of the summary box, which would have put a stale ceiling into the one
+  document gameplay is meant to rely on.
 
 - **`KcpTransportTests.SealAndOpen_RoundTrip(1)` failed one run in 256, by construction.** It
   asserted a sealed payload differs from its plaintext. `Seal` draws a fresh nonce per packet,

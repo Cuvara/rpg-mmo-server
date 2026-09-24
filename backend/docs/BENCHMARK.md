@@ -24,6 +24,16 @@
 > was withdrawn on re-run. **The mobile bandwidth ceiling is still only ~93
 > players, and that, not the tick ceiling, is what should size a fleet.**
 
+> **⚠️ SUPERSEDED, 2026-09-24 — the two boxes above tell you to size a fleet on
+> bandwidth at ~93 players. Do not.** Both were written during Part II, before id
+> interning. ADR-7's `⛔ CURRENT STATE (2026-08-07, final)` block is the authority
+> and says the opposite: downstream bandwidth is **solved**, its **ceiling is above
+> 200 and no longer bracketed**, and **tick time is what binds now** — at a ceiling
+> that is UNKNOWN and unknowable on this machine. This file's own ADR-7 threshold
+> table already marks the bandwidth figure *"SUPERSEDED — now passes above 200"*;
+> the summary boxes were never updated to match. Quote ADR-7's block, not them.
+> See `CORE-BASELINE-V1.md` §2 and issue #205.
+
 > **⚠️ The ~150-player figure in Part I is STALE.** It predates Protobuf, the
 > entity-type enum and id interning — three changes that removed 81% of the wire
 > and with it the constraint that produced 150. **The current tick ceiling is
