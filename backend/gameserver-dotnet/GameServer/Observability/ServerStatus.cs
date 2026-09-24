@@ -575,6 +575,20 @@ public sealed class ServerStatus
     public int SnapshotMaxStateAge { get; set; }
 
     /// <summary>
+    /// Longest wait, in milliseconds, between an entity's last send and the send that
+    /// delivered an update it was owed — whatever withheld it (#421).
+    /// </summary>
+    /// <remarks>
+    /// The combined figure <c>snapshot_max_state_age</c> and <c>snapshot_max_shed_age</c> do
+    /// not give: each counts one deferral source, and an entity the schedule defers and the
+    /// budget then sheds waits for both — and the two are not even in the same unit
+    /// (<c>max_state_age</c> counts base ticks, <c>max_shed_age</c> snapshots). This is the
+    /// server's share of the client's 150ms interpolation cover, in milliseconds.
+    /// </remarks>
+    [JsonPropertyName("snapshot_max_update_gap_ms")]
+    public int SnapshotMaxUpdateGapMs { get; set; }
+
+    /// <summary>
     /// Bytes of snapshot frames written to client sockets since process start, envelope
     /// and length prefix included. With <see cref="UptimeSeconds"/> and
     /// <see cref="PlayersOnline"/> this is the per-client downlink rate ADR-7's

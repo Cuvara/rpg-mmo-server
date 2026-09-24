@@ -3984,6 +3984,38 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
     It survives a link far worse than the one tiering needs. The bound is the scheduler's
     budget arithmetic, not client robustness.
 
+12. **At a world rate that separates the bands, `tiered` holds the cover on the served link
+    and costs less than today; under byte pressure no schedule holds it, and the combined wait
+    is its own gauge.** Added 2026-09-24, closing the measurement asks of #420 and #421
+    (BENCHMARK.md Part XX).
+
+    - **20Hz and 30Hz both work at ±25ms.** Per-entity p99 136.5ms and 141.1ms against 150.
+      Both fail at ±60ms (12% of gaps past the cover), which decision 11 already said. What is
+      new is that `off` at 15Hz fails at ±60 too (5.9%), and `off` at 20Hz does not.
+    - **The bandwidth trade is priced.** `tiered` at 20Hz is 3.65 KB/s per client against
+      5.08 for the shipped 15Hz `off`, 28% less, because the deferred class goes at 10Hz. The
+      price is a 100ms median gap instead of 66.7ms for that class. That is walking players
+      only: anything scoring ≥ 8 is sent every world tick and pays the faster rate in full.
+    - **Nothing ships differently.** `SIM_WORLD_HZ` stays 15 and the schedule stays `off`
+      (decision 8). The startup refusal already recommends 20Hz, and these numbers are what an
+      operator taking that advice gets. Turning it on is still gated on #423 (the client
+      rendering a 100ms gap smoothly), which nothing on the wire can answer.
+    - **`MaxIntervalMs` does not reserve for shedding.** When the byte budget bites, it sets
+      the gap by itself — 200–400ms at 120 bytes whatever the schedule does — so no reserve
+      the schedule could hold back would restore the cover. The budget's protection is that
+      it is a tail cap sized not to bite at known loads. What changes is that the bite is now
+      visible.
+    - **`max_update_gap_ms` is the combined figure, and it is a gap in milliseconds.**
+      `max_state_age` counts base ticks, `max_shed_age` counts snapshots, and each is an age
+      that stops where the other source starts. Measured, their sum read 300ms against a 356ms
+      worst gap. The new gauge tracks, per entity, the wait from the later of its last send
+      and the previous snapshot to the send that delivered what it was owed, whichever source
+      withheld it. It is converted to ms in `TickLoop`, the one place that knows the base
+      rate, so it cannot be misread in the wrong tick unit. `UpdateGapTests` pins it to the gap
+      read off the encoded messages. Their encode stride is swept, because the first version
+      assumed one encode per base tick and under-read every live gap by two base ticks while
+      passing stride-1 tests.
+
 **Consequences.**
 
 - **The 47 % measured in Part XIV is entirely player demotion.** Swept in Part XIV §44:
@@ -4020,7 +4052,10 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
   ceiling its own bench establishes, unexplained and unexplainable.
 - **`snapshot_max_state_age` is a new and separate gauge from `snapshot_max_shed_age`.** A
   not-due entity is not a shed entity, so the budget's bookkeeping is blind to schedule
-  deferrals; reading one for the other reports a healthy zero while entities go stale.
+  deferrals; reading one for the other reports a healthy zero while entities go stale. The
+  two are not even in one unit — state age counts **base** ticks, shed age counts snapshots —
+  and neither is the wait a client experiences; that is `snapshot_max_update_gap_ms`
+  (decision 12).
 - **Weights and intervals are only meaningful together.** `tiered` without importance weights
   is refused, because every score would be zero, every entity would land in the slowest band,
   and the result would be a uniform staleness increase wearing the name of a policy.

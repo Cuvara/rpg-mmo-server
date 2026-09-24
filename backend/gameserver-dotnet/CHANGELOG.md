@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`snapshot_max_update_gap_ms` — the wait a client experiences, whatever withheld it**
+  (#421). New gauge (`gameserver_snapshots_max_update_gap_ms`, `/status`
+  `snapshot_max_update_gap_ms`). It records the longest wait, in milliseconds, between an
+  entity's last send and the send that delivered an update it was owed, whether the replication
+  schedule, the byte budget, or both in turn withheld it. The existing gauges each see one
+  source, in different units (`max_state_age` counts base ticks, `max_shed_age` snapshots), and
+  are ages rather than gaps. Measured at 20Hz `tiered` under byte pressure, their sum read 300ms
+  against a 356ms worst gap. `UpdateGapTests` pins the gauge to the gap read off the encoded
+  messages at encode strides 1–4. The first version assumed one encode per base tick and
+  under-read every live gap by two base ticks while passing stride-1 tests.
+- **`TieringRateMeasurement` bench — tiering at 20/30Hz, priced, with the byte budget on top**
+  (#420, #421). It runs `MEASURE_TIERING=1` over world rate × schedule × jitter × byte budget,
+  and reports per-entity arrival gaps, downlink KB/s, the three deferral gauges, and an
+  idle-entity guard on every arm. Results are in BENCHMARK.md Part XX and ADR-27 decision 12:
+  - `tiered` holds the 150ms cover at ±25ms at both 20Hz and 30Hz (p99 136.5 / 141.1ms).
+  - At 20Hz it costs 3.65 KB/s per client, 28% below the shipped 15Hz `off`.
+  - Under a biting budget no schedule holds the cover, so `MaxIntervalMs` does not reserve for
+    shedding.
+  - No default changes.
+
+- **`backend/docs/CORE-BASELINE-V1.md` — what gameplay may build on.**
+
+  `CORE-COMPLETION.md` answers *is the core done*. This answers the question after it: which
+  parts are stable enough to write gameplay against, and which are not. It pins the baseline
+  to two commits and two tags (`rpg-mmo-server develop c2c034e`, `IndieRPGMMOAdventure develop
+  0553af8`, netcode `v0.44.0`, `sgl-v0.6.0`, wire protocol 2, 60/15), lists the flows
+  demonstrated by **built players rather than probes**, the defaults content inherits and why
+  each matters, and what is explicitly not settled.
+
 ### Fixed
 
 - **Two wall-clock tests flaked on a loaded CI runner** (#426).
@@ -18,18 +49,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   load); it now sits in a new non-parallel `wall-clock` collection (`WallClockCollection`).
   Measured on 2 cores with 6 pinned busy-loops: the stalled-client test failed 5 of 20 before and passed 20 of 20 after.
 
-### Added
-
-- **`backend/docs/CORE-BASELINE-V1.md` — what gameplay may build on.**
-
-  `CORE-COMPLETION.md` answers *is the core done*. This answers the question after it: which
-  parts are stable enough to write gameplay against, and which are not. It pins the baseline
-  to two commits and two tags (`rpg-mmo-server develop c2c034e`, `IndieRPGMMOAdventure develop
-  0553af8`, netcode `v0.44.0`, `sgl-v0.6.0`, wire protocol 2, 60/15), lists the flows
-  demonstrated by **built players rather than probes**, the defaults content inherits and why
-  each matters, and what is explicitly not settled.
-
-### Fixed
+- **`max_state_age` was documented in world ticks; it counts base ticks.** The metric
+  description, `/status` doc and `METRICS.md` now say so. Reading it as world ticks overstates
+  it 4x at 60/15, the error BENCHMARK.md §48 caught once already in a write-up.
 
 - **`BENCHMARK.md`'s summary boxes told readers to size a fleet on a superseded figure.**
 

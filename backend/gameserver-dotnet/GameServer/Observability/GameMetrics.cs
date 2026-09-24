@@ -74,6 +74,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _snapshotDeferredByInterval;
 #pragma warning disable CS0414 // held so the gauge stays registered for the meter's lifetime
     private readonly ObservableGauge<int> _snapshotMaxStateAge;
+    private readonly ObservableGauge<int> _snapshotMaxUpdateGap;
 #pragma warning restore CS0414
     private readonly Counter<long> _snapshotRemovalsDeferred;
     private readonly Counter<long> _playerSaves;
@@ -195,13 +196,25 @@ public sealed class GameMetrics : IDisposable
         _snapshotMaxStateAge = _meter.CreateObservableGauge(
             "gameserver.snapshots.max_state_age",
             ObserveMaxStateAge,
-            description: "Longest gap, in WORLD TICKS, between an entity's state going stale " +
+            description: "Longest gap, in BASE TICKS (SIM_CRITICAL_HZ, 60 by default -- not world " +
+                         "ticks), between an entity's state going stale " +
                          "for some client and being re-sent. The cost side of the replication " +
                          "schedule. NOT the same number as max_shed_age: that counts budget " +
                          "deferrals and this counts schedule deferrals, and a schedule " +
                          "deferral never touches the budget's bookkeeping -- so reading one " +
                          "for the other reports a healthy zero while entities go seconds " +
                          "without an update.");
+
+        _snapshotMaxUpdateGap = _meter.CreateObservableGauge(
+            "gameserver.snapshots.max_update_gap_ms",
+            ObserveMaxUpdateGap,
+            description: "Longest wait, in MILLISECONDS, between an entity's last send and the " +
+                         "send that delivered an update it was owed, WHATEVER withheld it -- " +
+                         "the replication schedule, the byte budget, or both in turn. The " +
+                         "server's share of the client's interpolation cover: it must stay " +
+                         "under 150ms minus the link's spread. " +
+                         "max_state_age and max_shed_age each see one source only and neither " +
+                         "bounds this (#421).");
 
         _snapshotEntitiesGathered = _meter.CreateCounter<long>(
             "gameserver.snapshots.entities_gathered",
@@ -638,6 +651,7 @@ public sealed class GameMetrics : IDisposable
 
     private int _maxShedAge;
     private int _maxStateAge;
+    private int _maxUpdateGap;
     private long _snapshotDeferredByIntervalTotal;
     private long _snapshotBytesTotal;
     private long _snapshotEntitiesShedTotal;
@@ -674,14 +688,23 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Entity updates withheld by the replication schedule since process start.</summary>
     public long SnapshotDeferredByInterval => Interlocked.Read(ref _snapshotDeferredByIntervalTotal);
 
-    /// <summary>Longest schedule deferral, in world ticks, observed on this server.</summary>
+    /// <summary>Longest schedule deferral, in BASE ticks (not world ticks), observed on this server.</summary>
     public int MaxStateAge => Volatile.Read(ref _maxStateAge);
 
     private Measurement<int> ObserveMaxStateAge() => new(Volatile.Read(ref _maxStateAge), _mapTags);
 
+    /// <summary>
+    /// Longest owed-update wait, in milliseconds, from any deferral source combined
+    /// (see <c>SnapshotDeltaState.MaxUpdateGap</c>, which counts base ticks).
+    /// </summary>
+    public int MaxUpdateGapMs => Volatile.Read(ref _maxUpdateGap);
+
+    private Measurement<int> ObserveMaxUpdateGap() => new(Volatile.Read(ref _maxUpdateGap), _mapTags);
+
     /// <summary>Record one tick's worth of replication-schedule deferrals.</summary>
-    public void RecordSnapshotSchedule(long deferredByInterval, int maxStateAge)
+    public void RecordSnapshotSchedule(long deferredByInterval, int maxStateAge, int maxUpdateGapMs = 0)
     {
+        if (maxUpdateGapMs > Volatile.Read(ref _maxUpdateGap)) Volatile.Write(ref _maxUpdateGap, maxUpdateGapMs);
         if (deferredByInterval > 0)
         {
             _snapshotDeferredByInterval.Add(deferredByInterval, _mapTags);
