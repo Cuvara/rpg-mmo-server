@@ -9,17 +9,31 @@ the reasoning that gameplay written before the flows are proven has to be rewrit
 flow changes. That gate is **open on both sides** as of 2026-09-13. This file exists so that
 what was proven can be relied on without re-deriving it.
 
-**Baselined:** 2026-09-24.
+**Baselined:** 2026-09-25 as **v1.1** (v1: 2026-09-24).
 
 | | |
 |---|---|
-| `rpg-mmo-server` | `develop` @ **`ac1eec2`** — CI green, **CD green** (see §0) |
-| `IndieRPGMMOAdventure` | `develop` @ **`285a5a2`** — CI green |
-| `com.cuvara.netcode` | **v0.44.0** (manifest **and** lock, hash `2ed3df16`) |
-| `com.rpgmmo.shared-gamelogic` | **sgl-v0.6.0** (manifest **and** lock, hash `c33bfd10`) |
-| Released as | tag **`core-baseline-v1`** in both repositories |
+| `rpg-mmo-server` | `develop` @ **`3e427ce`** — CI green, **CD green** (deployed and verified on dev) |
+| `IndieRPGMMOAdventure` | `develop` @ **`17b7737`** — CI green |
+| `com.cuvara.netcode` | **v0.45.0** (manifest **and** lock, hash `2eb6ddbc`) |
+| `com.rpgmmo.shared-gamelogic` | **sgl-v0.6.0** (manifest **and** lock, hash `c33bfd10`) — unchanged |
+| Released as | tag **`core-baseline-v1.1`** in both repositories (`core-baseline-v1` kept) |
 | Wire protocol | **version 2** (Protobuf default; legacy JSON still accepted, distinguished by the first body byte) |
 | Simulation rates | `SIM_CRITICAL_HZ=60`, `SIM_WORLD_HZ=15` (ADR-13) |
+
+**What moved from v1 to v1.1.** The netcode pin moved, and the rule in §6 says a moved pin
+means a new baseline. Nothing a gameplay author calls into has changed: the wire protocol and
+`Shared.GameLogic` have **no diff** since `core-baseline-v1`.
+
+What did change is operational or diagnostic:
+- Postgres and Redis backups run on k3d, and restore has been drilled.
+- An alert fires when develop CD goes red.
+- The gateway verify now pins the target cluster's own certificate.
+- Two wall-clock test flakes are fixed (#426).
+- A new gauge, `snapshot_max_update_gap_ms`, is added (#421).
+- Tiering is measured (#420, #423). It stays off.
+- On the client, the DOTS Sample sits at a tracked path that CI checks against the pin (#135).
+- netcode v0.45.0 changes the sample only (Netcode#174).
 
 **The rule this file inherits from `CORE-COMPLETION.md`: a row is only stable when it has
 been *demonstrated*, not when the code exists.** Everything below names its evidence.
