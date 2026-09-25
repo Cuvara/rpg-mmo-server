@@ -408,9 +408,20 @@ reach — not the container port, and not a placeholder.
 
 ### Container images (GHCR)
 
-The `build-images` job pushes `ghcr.io/cuvara/rpg-mmo-gateway` and
-`ghcr.io/cuvara/rpg-mmo-gameserver` (tags: `<short-sha>` + `latest`) **only
-when** the resolved environment is `production` **or** `workflow_dispatch` set
+Two workflows push `ghcr.io/cuvara/rpg-mmo-gateway` and
+`ghcr.io/cuvara/rpg-mmo-gameserver-dotnet`:
+
+| Workflow | When | Tags |
+|---|---|---|
+| `publish-images.yml` | every develop push touching the images, every `core-baseline-*` tag, `workflow_dispatch` (`ref`, optional `tag`) | `<short-sha>` + `develop` / the tag name |
+| `cd.yml` `build-images` | production deploy (`release-*`) or `build_images=true` | `<short-sha>` + **`latest`** |
+
+`latest` therefore means "what production runs"; `develop` is the newest develop build.
+`publish-images.yml` exists because `cd.yml` alone left the registry exactly as old as the
+last production deploy — 5+ weeks and 565 develop commits behind on 2026-09-25, with
+nothing failing, because no environment pulls from GHCR. Both stamp
+`org.opencontainers.image.revision` via `GIT_REVISION`. In `cd.yml`, `build-images` runs
+**only when** the resolved environment is `production` **or** `workflow_dispatch` set
 `build_images=true`. Auth is `docker/login-action@v3` with the built-in
 `GITHUB_TOKEN` (`permissions: packages: write` on that job); layers are cached
 with `type=gha`. Dev/staging deploys skip this entirely and keep using the host
@@ -419,7 +430,8 @@ more — the prod fleets were deleted with the Go server (see `K3S.md`), and the
 only fleet, `agones/fleet-map-dotnet-dev.yaml`, uses the local tag
 `rpg-mmo/gameserver-dotnet:dev`.
 
-> **`cd.yml` should pass `--build-arg GIT_REVISION=$(git rev-parse HEAD)` to the
+> **Done 2026-09-25:** `cd.yml` and `publish-images.yml` pass `GIT_REVISION` to both image
+> builds. The original note follows. **`cd.yml` should pass `--build-arg GIT_REVISION=$(git rev-parse HEAD)` to the
 > gameserver image build.** `docker/Dockerfile.gameserver-dotnet` stamps it into
 > `org.opencontainers.image.revision`, which is what makes "was this image built
 > from the commit under test?" answerable — a question that has already been

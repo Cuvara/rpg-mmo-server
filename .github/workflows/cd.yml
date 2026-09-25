@@ -271,6 +271,7 @@ jobs:
           context: backend
           file: backend/deploy/docker/Dockerfile.gateway
           push: true
+          build-args: GIT_REVISION=${{ github.sha }}
           tags: |
             ghcr.io/cuvara/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}
             ghcr.io/cuvara/rpg-mmo-gateway:latest
@@ -283,6 +284,7 @@ jobs:
           context: backend
           file: backend/deploy/docker/Dockerfile.gameserver-dotnet
           push: true
+          build-args: GIT_REVISION=${{ github.sha }}
           tags: |
             ghcr.io/cuvara/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}
             ghcr.io/cuvara/rpg-mmo-gameserver-dotnet:latest

@@ -7,6 +7,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The GHCR packages were 5+ weeks old, and nothing said so.** `cd.yml` pushes images only
+  when it deploys production (a `release-*` branch). No environment pulls from GHCR, so on
+  2026-09-25 `rpg-mmo-gateway` and `rpg-mmo-gameserver-dotnet` still held the 2026-08-17
+  build, 565 develop commits behind, with every run green.
+  - New `.github/workflows/publish-images.yml` publishes without deploying:
+    - `:<sha>` + `:develop` on every develop push that touches the images;
+    - `:<sha>` + `:<tag>` on `core-baseline-*` tags;
+    - on `workflow_dispatch`, a chosen `ref` plus an optional `tag`.
+  - `:latest` stays production-only.
+  - A separate workflow and not a tag trigger on `cd.yml`, because `cd.yml` resolves any
+    other ref to the production environment.
+  - Both workflows now pass `GIT_REVISION`, so `org.opencontainers.image.revision` names the
+    commit instead of `unknown`.
+  - The docs also named the gameserver package `rpg-mmo-gameserver`; it is
+    `rpg-mmo-gameserver-dotnet`.
+
 - **Redis on dev and staging was backed up by nothing, and a Redis restore was verified by a
   check that could not see a bad one (#430).** Found and proved by a drill on k3d
   (`docs/DISASTER-RECOVERY.md`, "Failure drill: Redis on k3d"):
