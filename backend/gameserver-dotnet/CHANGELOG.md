@@ -48,6 +48,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **CORE-BASELINE-V1 re-baselined as v1.1.** The netcode pin moved v0.44.0 → v0.45.0, and
+  the file's own rule says a moved pin means a new baseline. The new pins are server `3e427ce`,
+  client `17b7737`, tag `core-baseline-v1.1`. The wire protocol and `Shared.GameLogic` are
+  unchanged since v1.
+
 - **CORE-BASELINE-V1 §4 still listed #420, #421 and #423 as unmeasured.** All three were
   closed on 2026-09-24 (BENCHMARK.md Parts XX–XXI). The two rows are now one row that states
   what was measured and what is still open (#422, ±60 ms, tick CPU).
