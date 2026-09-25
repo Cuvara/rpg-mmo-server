@@ -188,8 +188,11 @@ artifact bundle.
 
 | Image | Tags |
 |-------|------|
-| `ghcr.io/cuvara/rpg-mmo-gateway` | `<short-sha>`, `latest` |
-| `ghcr.io/cuvara/rpg-mmo-gameserver` | `<short-sha>`, `latest` |
+| `ghcr.io/cuvara/rpg-mmo-gateway` | `<short-sha>`, `develop`, `core-baseline-*`, `latest` (production) |
+| `ghcr.io/cuvara/rpg-mmo-gameserver-dotnet` | `<short-sha>`, `develop`, `core-baseline-*`, `latest` (production) |
+
+`develop` and `core-baseline-*` come from `.github/workflows/publish-images.yml`, which
+publishes without deploying; `latest` only from a production deploy in `cd.yml`.
 
 No Agones manifest references a GHCR image any more: the prod fleets were
 deleted with the Go game server, and `agones/fleet-map-dotnet-dev.yaml` uses the

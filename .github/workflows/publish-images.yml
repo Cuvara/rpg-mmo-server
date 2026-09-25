@@ -1,0 +1,141 @@
+# publish-images.yml — keep the GHCR packages current.
+#
+# cd.yml pushes images only when it deploys PRODUCTION (a release-* branch), so the
+# registry used to be exactly as old as the last production deploy: on 2026-09-25 both
+# packages were 5+ weeks and 565 develop commits behind. Dev and staging never pull from
+# GHCR (they build on the runner), so nothing failed and nothing said so.
+#
+# This workflow publishes without deploying anything:
+#   push to develop          -> :<short-sha>, :develop
+#   push of core-baseline-*  -> :<short-sha>, :<tag>
+#   workflow_dispatch        -> :<short-sha> of `ref`, plus `tag` if given
+#                               (use it to publish a ref whose tree predates this file,
+#                               e.g. ref=core-baseline-v1.1 tag=core-baseline-v1.1)
+#
+# `:latest` is deliberately NOT written here. It stays what cd.yml's production deploy
+# pushed, so `latest` keeps meaning "what production runs".
+#
+# It is a separate workflow rather than a trigger on cd.yml because cd.yml resolves any
+# ref that is not develop/staging to the PRODUCTION environment; a tag push there would
+# deploy.
+name: Publish images
+
+on:
+  push:
+    branches: [develop]
+    tags: ['core-baseline-*']
+    paths:
+      - 'backend/gateway/**'
+      - 'backend/shared/**'
+      - 'backend/gameserver-dotnet/**'
+      - 'backend/deploy/docker/**'
+      - '.github/workflows/publish-images.yml'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build (branch, tag or sha). Empty = the ref this runs on.
+        required: false
+        default: ''
+      tag:
+        description: Extra image tag to apply (e.g. core-baseline-v1.1). Optional.
+        required: false
+        default: ''
+
+concurrency:
+  group: publish-images-${{ github.event.inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Build & push gateway + gameserver-dotnet
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Resolve tags
+        id: meta
+        env:
+          EXTRA_TAG: ${{ github.event.inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          short=${sha::7}
+          extra=""
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            extra="$EXTRA_TAG"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            extra="$REF_NAME"
+          elif [ "$REF_NAME" = "develop" ]; then
+            extra="develop"
+          fi
+          # A docker tag allows [A-Za-z0-9_.-], max 128; refuse rather than mangle.
+          if [ -n "$extra" ] && ! printf '%s' "$extra" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+            echo "::error::'$extra' is not a valid image tag"; exit 1
+          fi
+          if [ "$extra" = "latest" ]; then
+            echo "::error:::latest belongs to the production deploy in cd.yml"; exit 1
+          fi
+          list() {
+            echo "ghcr.io/cuvara/$1:$short"
+            [ -n "$extra" ] && echo "ghcr.io/cuvara/$1:$extra"
+            return 0
+          }
+          {
+            echo "sha=$sha"
+            echo "short=$short"
+            echo "gateway<<EOF"; list rpg-mmo-gateway; echo "EOF"
+            echo "gameserver<<EOF"; list rpg-mmo-gameserver-dotnet; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Context is backend/ — the Go modules reach ../shared through replace directives.
+      - name: Build & push gateway image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/deploy/docker/Dockerfile.gateway
+          push: true
+          build-args: GIT_REVISION=${{ steps.meta.outputs.sha }}
+          tags: ${{ steps.meta.outputs.gateway }}
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,scope=gateway,mode=max
+
+      - name: Build & push gameserver-dotnet image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/deploy/docker/Dockerfile.gameserver-dotnet
+          push: true
+          build-args: GIT_REVISION=${{ steps.meta.outputs.sha }}
+          tags: ${{ steps.meta.outputs.gameserver }}
+          cache-from: type=gha,scope=gameserver-dotnet
+          cache-to: type=gha,scope=gameserver-dotnet,mode=max
+
+      - name: Image summary
+        run: |
+          {
+            echo "### Container images pushed (revision \`${{ steps.meta.outputs.sha }}\`)"
+            echo ""
+            echo '```'
+            echo "${{ steps.meta.outputs.gateway }}"
+            echo "${{ steps.meta.outputs.gameserver }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
