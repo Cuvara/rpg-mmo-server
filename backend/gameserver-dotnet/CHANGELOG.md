@@ -48,6 +48,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **CORE-BASELINE-V1 §4 still listed #420, #421 and #423 as unmeasured.** All three were
+  closed on 2026-09-24 (BENCHMARK.md Parts XX–XXI). The two rows are now one row that states
+  what was measured and what is still open (#422, ±60 ms, tick CPU).
+
 - **Two wall-clock tests flaked on a loaded CI runner** (#426).
   `SnapshotPipelineTests.StalledClient_CoalescesToNewest_AndLosesNoState` slept a fixed 500 ms
   for the send loop to drain and then asserted convergence; on a starved runner the drain took
