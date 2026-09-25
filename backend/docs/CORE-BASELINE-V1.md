@@ -173,8 +173,7 @@ because there is no PvP content to exercise it.
 |---|---|
 | **Per-server player ceiling (tick)** | **Unknown, and this is now the binding constraint.** The load generator shares this machine with the server under test and uses more CPU than it; tick p99 read 67–71 ms quiet and 225–241 ms contended — a **3.3×** swing. Every tick figure from this host is a lower bound of unknown tightness. Both the old **150-player** tick figure and the **~93-player** bandwidth figure are **stale** and must not be quoted (§2). Tracked: #205. |
 | **Anti-cheat enforcement thresholds** | Telemetry (A1–A4) runs and collects. **Thresholds are not set**, because every figure is from loopback where the latency that produces most false positives does not exist. |
-| **Client rendering through a deferral gap** | Never verified (#423). The 150 ms budget is arithmetic, not an observed smoothness result. |
-| **`tiered` replication at a faster world rate** | Asserted viable at 30 Hz, never measured over a link (#420), and it stacks with byte-pressure shedding in a way nothing measures (#421). |
+| **`tiered` replication** | **Measured 2026-09-24, still OFF by default.**<br>• At 20 and 30 Hz it holds the 150 ms cover at ±25 ms of jitter, with p99 136.5 / 141.1 ms (#420).<br>• At 20 Hz it costs 28% less downlink than the shipped 15 Hz `off`.<br>• A real client renders its 100 ms deferral with 0.00% frozen frames, the same as every-tick, while a past-the-cover control reads 9.02% (#423).<br>• Under a biting byte budget no schedule holds the cover; that is watched by `snapshot_max_update_gap_ms` (#421).<br>• Evidence: BENCHMARK.md Parts XX–XXI, ADR-27 decision 12.<br>• Not settled: behaviour at ±60 ms, where it fails; a per-connection link estimate (#422); tick CPU at 20 Hz (#205). |
 
 ---
 
