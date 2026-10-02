@@ -60,6 +60,14 @@ const (
 	// the gateway hop's own handshake once ADR-22 settles it.
 	MsgSealedClientHello MsgType = 16 // client -> gameserver
 	MsgSealedServerHello MsgType = 17 // gameserver -> client
+
+	// Generic gameplay channel, protocol version 3 (ADR-30). 18-31 stay clear for
+	// the gateway hop's handshake. The payload of each opcode is defined in
+	// Shared.GameLogic's gameplay.proto, not here: a new command never changes
+	// this package.
+	MsgCommand       MsgType = 32 // client -> gameserver (CommandRequest)
+	MsgCommandResult MsgType = 33 // gameserver -> client (CommandResult)
+	MsgServerPush    MsgType = 34 // gameserver -> client (ServerPush)
 )
 
 // SealedClientHello opens the sealed-session handshake on the gameplay hop.
@@ -231,7 +239,7 @@ func (e Envelope) UnmarshalPayload(v any) error {
 // GameServer/Net/WireProtocol.cs and the Unity client in
 // Runtime/Protocol/WireProtocolVersion.cs; no language can be authoritative for
 // the other two, so each pins the value and tests assert it here.
-const WireProtocolVersion uint32 = 2
+const WireProtocolVersion uint32 = 3
 
 // ProtocolVersionUnversioned is the wire value meaning "this peer does not
 // advertise a version" — a peer built before the field existed.
@@ -291,6 +299,12 @@ type AuthResponse struct {
 type EnterWorldRequest struct {
 	MapID   string `json:"map_id"`
 	PartyID string `json:"party_id,omitempty"`
+
+	// CharacterID selects the character to play (ADR-31, protocol version 3).
+	// The gateway does not trust it: it must equal the `cid` claim Nakama put in
+	// the gateway token, which is where ownership was checked. Empty means the
+	// account's default character, the behaviour of every older client.
+	CharacterID string `json:"character_id,omitempty"`
 }
 
 // EnterWorldResponse contains the game server address and join token.
@@ -352,6 +366,9 @@ type JoinTokenResponse struct {
 	// which version it failed against, or the refusal is as opaque as the parse
 	// error it replaces.
 	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
+	// CharacterID is the character this connection plays, from the join token's
+	// `cid` claim. Empty on a rejected join and from an older server.
+	CharacterID string `json:"character_id,omitempty"`
 }
 
 // InputMessage carries player input for one tick.
@@ -381,6 +398,21 @@ type InputMessage struct {
 	// mean "not aimed".
 	AimX float32 `json:"aim_x,omitempty"`
 	AimY float32 `json:"aim_y,omitempty"`
+
+	// --- Protocol version 3 (ADR-28, ADR-29) ---
+
+	// AimZ is the height of the aim point; x/y are the ground plane and z is up.
+	AimZ float32 `json:"aim_z,omitempty"`
+	// RenderTick/RenderAlpha are the instant the client was rendering remote
+	// entities at. Lag compensation rewinds hit targets there, clamped to the
+	// server's maximum rewind. RenderTick 0 means "not sent": no rewind.
+	RenderTick  uint64  `json:"render_tick,omitempty"`
+	RenderAlpha float32 `json:"render_alpha,omitempty"`
+	// Jump requests a jump this tick; ignored unless the character is grounded.
+	Jump bool `json:"jump,omitempty"`
+	// SpawnSeq numbers a projectile this input fires so the client can match its
+	// prediction to the server entity. 0 when the input fires nothing.
+	SpawnSeq uint32 `json:"spawn_seq,omitempty"`
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -436,6 +468,11 @@ const (
 	GameEventAbilityCast GameEventType = 4
 	GameEventXPGain      GameEventType = 5
 	GameEventLevelUp     GameEventType = 6
+
+	// Protocol version 3.
+	GameEventStatusApplied GameEventType = 7
+	GameEventStatusRemoved GameEventType = 8
+	GameEventProjectileHit GameEventType = 9
 )
 
 // GameEvent is one occurrence, addressed by the same interned handles the
@@ -464,6 +501,10 @@ type GameEvent struct {
 
 	// Flags: bit 0 critical, bit 1 immune/fully mitigated, bit 2 periodic.
 	Flags uint32 `json:"flags,omitempty"`
+
+	// EffectID is the status effect involved (applied, removed, or the periodic
+	// source of a tick), 0 for none. Protocol version 3.
+	EffectID uint32 `json:"effect_id,omitempty"`
 }
 
 // EntitySnapshot is a single entity's visible state.
@@ -526,6 +567,75 @@ type EntitySnapshot struct {
 	// at 2^32 and resets on restart or respawn, so a greater-than test stops
 	// retriggering for four billion actions after a single wrap.
 	ActionSeq uint32 `json:"action_seq,omitempty"`
+
+	// ChangedFields is the field-level delta mask (protocol version 2); 0 means
+	// every field is present. See wire.proto for the bit assignments.
+	ChangedFields uint32 `json:"changed_fields,omitempty"`
+
+	// --- Protocol version 3 (ADR-28..30), sent only to version 3 peers ---
+
+	// Z is height above the ground plane; X/Y keep their version 2 meaning.
+	Z float32 `json:"z,omitempty"`
+	// VelX/VelY/VelZ are velocity in units per second, for extrapolating
+	// projectiles and airborne characters between snapshots.
+	VelX float32 `json:"vel_x,omitempty"`
+	VelY float32 `json:"vel_y,omitempty"`
+	VelZ float32 `json:"vel_z,omitempty"`
+	// Owner is the interned handle of the owning entity (a projectile's caster).
+	Owner uint32 `json:"owner,omitempty"`
+	// OwnerID is Owner's full id for the non-interning JSON encoding.
+	OwnerID string `json:"owner_id,omitempty"`
+	// SpawnSeq echoes InputMessage.SpawnSeq to the owner's connection only.
+	SpawnSeq uint32 `json:"spawn_seq,omitempty"`
+	// Stats is the extensible stat block: complete on a keyframe or first
+	// introduction, changed entries only on a delta (StatsRemoved lists ids that
+	// no longer exist).
+	Stats        []StatValue `json:"stats,omitempty"`
+	StatsRemoved []uint32    `json:"stats_removed,omitempty"`
+	// Statuses are active status effects with the same complete/delta rule.
+	Statuses        []StatusEffect `json:"statuses,omitempty"`
+	StatusesRemoved []uint32       `json:"statuses_removed,omitempty"`
+}
+
+// StatValue is one entry of the stat block. StatID is a content id, from 1.
+type StatValue struct {
+	StatID uint32 `json:"stat_id"`
+	Value  int32  `json:"value"`
+}
+
+// StatusEffect is one active effect on an entity. EffectID is a content id;
+// ExpiresTick 0 means "until removed"; Source is an interned handle, 0 for none.
+type StatusEffect struct {
+	EffectID    uint32 `json:"effect_id"`
+	Stacks      uint32 `json:"stacks,omitempty"`
+	ExpiresTick uint64 `json:"expires_tick,omitempty"`
+	Source      uint32 `json:"source,omitempty"`
+}
+
+// CommandRequest is a discrete gameplay request on the generic channel
+// (MsgCommand, protocol version 3). Seq is client-chosen from 1 and echoed in
+// the CommandResult; Opcode names a payload schema in Shared.GameLogic's
+// gameplay.proto, from 1.
+type CommandRequest struct {
+	Seq     uint32 `json:"seq"`
+	Opcode  uint32 `json:"opcode"`
+	Payload []byte `json:"payload,omitempty"`
+}
+
+// CommandResult answers exactly one CommandRequest. Error is a machine-readable
+// reason when OK is false.
+type CommandResult struct {
+	Seq     uint32 `json:"seq"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	Payload []byte `json:"payload,omitempty"`
+}
+
+// ServerPush is an unsolicited server -> client gameplay message, addressed by
+// opcode in the CommandRequest space.
+type ServerPush struct {
+	Opcode  uint32 `json:"opcode"`
+	Payload []byte `json:"payload,omitempty"`
 }
 
 // DisconnectMessage ends a session politely. Both encodings accept an empty

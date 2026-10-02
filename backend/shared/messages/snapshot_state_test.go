@@ -2,6 +2,7 @@ package messages
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -112,7 +113,7 @@ func TestSnapshotState_DeltaReconstructsFullState(t *testing.T) {
 		if !ok {
 			t.Fatalf("delta stream lost entity %q", id)
 		}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Errorf("entity %q: delta=%+v want %+v", id, got, want)
 		}
 	}

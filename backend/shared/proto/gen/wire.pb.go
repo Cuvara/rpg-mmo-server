@@ -73,6 +73,19 @@ const (
 	// than reused.
 	MsgType_MSG_TYPE_SEALED_CLIENT_HELLO MsgType = 16 // client -> gameserver
 	MsgType_MSG_TYPE_SEALED_SERVER_HELLO MsgType = 17 // gameserver -> client
+	// Generic gameplay channel (protocol version 3, ADR-30). 32-34 rather than 18:
+	// 18-31 stay reserved for the gateway hop's handshake (see above), and 32-34
+	// are still one-byte varints.
+	//
+	// These three carry an OPCODE plus OPAQUE BYTES. The payload schema of each
+	// opcode is NOT defined in this file: it lives in Shared.GameLogic's
+	// gameplay.proto, shared by the game server and the Unity client. That is the
+	// point of the channel -- a new gameplay command (loot, equip, interact) is a
+	// new opcode there, and needs no change here, no protocol bump and no Netcode
+	// release.
+	MsgType_MSG_TYPE_COMMAND        MsgType = 32 // client -> gameserver (CommandRequest)
+	MsgType_MSG_TYPE_COMMAND_RESULT MsgType = 33 // gameserver -> client (CommandResult)
+	MsgType_MSG_TYPE_SERVER_PUSH    MsgType = 34 // gameserver -> client (ServerPush)
 )
 
 // Enum value maps for MsgType.
@@ -96,6 +109,9 @@ var (
 		15: "MSG_TYPE_KICK",
 		16: "MSG_TYPE_SEALED_CLIENT_HELLO",
 		17: "MSG_TYPE_SEALED_SERVER_HELLO",
+		32: "MSG_TYPE_COMMAND",
+		33: "MSG_TYPE_COMMAND_RESULT",
+		34: "MSG_TYPE_SERVER_PUSH",
 	}
 	MsgType_value = map[string]int32{
 		"MSG_TYPE_UNSPECIFIED":         0,
@@ -116,6 +132,9 @@ var (
 		"MSG_TYPE_KICK":                15,
 		"MSG_TYPE_SEALED_CLIENT_HELLO": 16,
 		"MSG_TYPE_SEALED_SERVER_HELLO": 17,
+		"MSG_TYPE_COMMAND":             32,
+		"MSG_TYPE_COMMAND_RESULT":      33,
+		"MSG_TYPE_SERVER_PUSH":         34,
 	}
 )
 
@@ -334,6 +353,16 @@ const (
 	GameEventType_GAME_EVENT_TYPE_XP_GAIN GameEventType = 5
 	// `target` reached level `amount`.
 	GameEventType_GAME_EVENT_TYPE_LEVEL_UP GameEventType = 6
+	// `source` applied status `effect_id` to `target`; `amount` is the stack count
+	// after applying. Protocol version 3.
+	GameEventType_GAME_EVENT_TYPE_STATUS_APPLIED GameEventType = 7
+	// Status `effect_id` ended on `target` (expired, cleansed or replaced).
+	// Protocol version 3.
+	GameEventType_GAME_EVENT_TYPE_STATUS_REMOVED GameEventType = 8
+	// A projectile owned by `source` hit `target`. Damage it dealt, if any, is a
+	// separate DAMAGE event; this one exists so a client can play the impact even
+	// when the hit dealt nothing. Protocol version 3.
+	GameEventType_GAME_EVENT_TYPE_PROJECTILE_HIT GameEventType = 9
 )
 
 // Enum value maps for GameEventType.
@@ -346,15 +375,21 @@ var (
 		4: "GAME_EVENT_TYPE_ABILITY_CAST",
 		5: "GAME_EVENT_TYPE_XP_GAIN",
 		6: "GAME_EVENT_TYPE_LEVEL_UP",
+		7: "GAME_EVENT_TYPE_STATUS_APPLIED",
+		8: "GAME_EVENT_TYPE_STATUS_REMOVED",
+		9: "GAME_EVENT_TYPE_PROJECTILE_HIT",
 	}
 	GameEventType_value = map[string]int32{
-		"GAME_EVENT_TYPE_UNSPECIFIED":  0,
-		"GAME_EVENT_TYPE_DAMAGE":       1,
-		"GAME_EVENT_TYPE_HEAL":         2,
-		"GAME_EVENT_TYPE_DEATH":        3,
-		"GAME_EVENT_TYPE_ABILITY_CAST": 4,
-		"GAME_EVENT_TYPE_XP_GAIN":      5,
-		"GAME_EVENT_TYPE_LEVEL_UP":     6,
+		"GAME_EVENT_TYPE_UNSPECIFIED":    0,
+		"GAME_EVENT_TYPE_DAMAGE":         1,
+		"GAME_EVENT_TYPE_HEAL":           2,
+		"GAME_EVENT_TYPE_DEATH":          3,
+		"GAME_EVENT_TYPE_ABILITY_CAST":   4,
+		"GAME_EVENT_TYPE_XP_GAIN":        5,
+		"GAME_EVENT_TYPE_LEVEL_UP":       6,
+		"GAME_EVENT_TYPE_STATUS_APPLIED": 7,
+		"GAME_EVENT_TYPE_STATUS_REMOVED": 8,
+		"GAME_EVENT_TYPE_PROJECTILE_HIT": 9,
 	}
 )
 
@@ -600,9 +635,15 @@ func (x *AuthResponse) GetProtocolVersion() uint32 {
 // Nakama, once per entry (ADR-26 decision 3). A client that names a party it is
 // not in is refused; it is not quietly given a map.
 type EnterWorldRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	MapId         string                 `protobuf:"bytes,1,opt,name=map_id,json=mapId,proto3" json:"map_id,omitempty"`
-	PartyId       string                 `protobuf:"bytes,2,opt,name=party_id,json=partyId,proto3" json:"party_id,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	MapId   string                 `protobuf:"bytes,1,opt,name=map_id,json=mapId,proto3" json:"map_id,omitempty"`
+	PartyId string                 `protobuf:"bytes,2,opt,name=party_id,json=partyId,proto3" json:"party_id,omitempty"`
+	// Character to play, from the account's roster (ADR-31). The gateway does not
+	// trust this field: it must equal the `cid` claim of the gateway token Nakama
+	// minted for this session, which is where ownership was checked. Empty means
+	// the account's default character (slot 0) -- the behaviour of every client
+	// that predates character slots. Introduced in protocol version 3.
+	CharacterId   string `protobuf:"bytes,3,opt,name=character_id,json=characterId,proto3" json:"character_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -647,6 +688,13 @@ func (x *EnterWorldRequest) GetMapId() string {
 func (x *EnterWorldRequest) GetPartyId() string {
 	if x != nil {
 		return x.PartyId
+	}
+	return ""
+}
+
+func (x *EnterWorldRequest) GetCharacterId() string {
+	if x != nil {
+		return x.CharacterId
 	}
 	return ""
 }
@@ -846,8 +894,13 @@ type JoinTokenResponse struct {
 	// has to be told which version it failed against, or the refusal is as opaque
 	// as the parse error it replaces and the operator learns nothing from it.
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The character this connection plays, taken from the join token's `cid`
+	// claim (ADR-31). Echoed so the client binds its local view to the right
+	// character without trusting its own request. Empty on a rejected join and
+	// from a server predating character slots. Introduced in protocol version 3.
+	CharacterId   string `protobuf:"bytes,6,opt,name=character_id,json=characterId,proto3" json:"character_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *JoinTokenResponse) Reset() {
@@ -915,6 +968,13 @@ func (x *JoinTokenResponse) GetProtocolVersion() uint32 {
 	return 0
 }
 
+func (x *JoinTokenResponse) GetCharacterId() string {
+	if x != nil {
+		return x.CharacterId
+	}
+	return ""
+}
+
 // InputMessage carries player input for one tick.
 type InputMessage struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -961,8 +1021,29 @@ type InputMessage struct {
 	// Zero is a legitimate aim point (world origin), so a receiver must not read
 	// (0,0) as "not aimed". `ability_id` is what says whether any of this is
 	// meaningful: aim fields are only read when it is non-zero.
-	AimX          float32 `protobuf:"fixed32,7,opt,name=aim_x,json=aimX,proto3" json:"aim_x,omitempty"`
-	AimY          float32 `protobuf:"fixed32,8,opt,name=aim_y,json=aimY,proto3" json:"aim_y,omitempty"`
+	AimX float32 `protobuf:"fixed32,7,opt,name=aim_x,json=aimX,proto3" json:"aim_x,omitempty"`
+	AimY float32 `protobuf:"fixed32,8,opt,name=aim_y,json=aimY,proto3" json:"aim_y,omitempty"`
+	// Height of the aim point (ADR-28: x/y are the ground plane, z is up). With
+	// aim_x/aim_y this is the full 3D point a skillshot is fired AT; the server
+	// derives the direction from the caster's own authoritative position, never
+	// from a client-supplied origin.
+	AimZ float32 `protobuf:"fixed32,9,opt,name=aim_z,json=aimZ,proto3" json:"aim_z,omitempty"`
+	// The server tick the client was RENDERING remote entities at when it
+	// produced this input -- its interpolation time, not its prediction tick.
+	// Lag compensation (ADR-29) rewinds hit targets to this instant, clamped to at
+	// most `max_rewind` (200 ms) behind the server's current tick. Zero means "not
+	// sent": no rewind, targets are tested where they are now.
+	RenderTick uint64 `protobuf:"varint,10,opt,name=render_tick,json=renderTick,proto3" json:"render_tick,omitempty"`
+	// Jump request. Level-triggered for the tick it is sent on; the motor ignores
+	// it unless the character is grounded, so a held button does not fly.
+	Jump bool `protobuf:"varint,11,opt,name=jump,proto3" json:"jump,omitempty"`
+	// Client-chosen sequence number for a projectile this input fires, so the
+	// client can match its predicted projectile to the server's entity
+	// (EntitySnapshot.spawn_seq). Zero when the input fires nothing.
+	SpawnSeq uint32 `protobuf:"varint,12,opt,name=spawn_seq,json=spawnSeq,proto3" json:"spawn_seq,omitempty"`
+	// Fraction [0, 1) of the way from render_tick to render_tick + 1 that the
+	// client was rendering at. Rewind interpolates hitboxes to the same instant.
+	RenderAlpha   float32 `protobuf:"fixed32,13,opt,name=render_alpha,json=renderAlpha,proto3" json:"render_alpha,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1049,6 +1130,41 @@ func (x *InputMessage) GetAimX() float32 {
 func (x *InputMessage) GetAimY() float32 {
 	if x != nil {
 		return x.AimY
+	}
+	return 0
+}
+
+func (x *InputMessage) GetAimZ() float32 {
+	if x != nil {
+		return x.AimZ
+	}
+	return 0
+}
+
+func (x *InputMessage) GetRenderTick() uint64 {
+	if x != nil {
+		return x.RenderTick
+	}
+	return 0
+}
+
+func (x *InputMessage) GetJump() bool {
+	if x != nil {
+		return x.Jump
+	}
+	return false
+}
+
+func (x *InputMessage) GetSpawnSeq() uint32 {
+	if x != nil {
+		return x.SpawnSeq
+	}
+	return 0
+}
+
+func (x *InputMessage) GetRenderAlpha() float32 {
+	if x != nil {
+		return x.RenderAlpha
 	}
 	return 0
 }
@@ -1223,6 +1339,11 @@ type EntitySnapshot struct {
 	//	0x0040 → facing_brad (field 10)
 	//	0x0080 → action     (field 11)
 	//	0x0100 → action_seq (field 12)
+	//	0x0200 → z          (field 14)                  protocol version 3
+	//	0x0400 → velocity   (fields 15-17)              protocol version 3
+	//	0x0800 → owner / spawn_seq (fields 18 / 19)     protocol version 3
+	//	0x1000 → stats      (fields 20 / 21)            protocol version 3
+	//	0x2000 → statuses   (fields 22 / 23)            protocol version 3
 	//
 	// ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
 	// delta never sets this field; a receiver that sees 0 MUST apply the same rule
@@ -1246,6 +1367,44 @@ type EntitySnapshot struct {
 	//
 	// Introduced in protocol version 2.
 	ChangedFields uint32 `protobuf:"varint,13,opt,name=changed_fields,json=changedFields,proto3" json:"changed_fields,omitempty"`
+	// Height above the ground plane (ADR-28). x/y keep their version 2 meaning as
+	// the ground plane, which is what makes this field additive: a renderer maps
+	// (x, y, z) to Unity's (x, z, y).
+	Z float32 `protobuf:"fixed32,14,opt,name=z,proto3" json:"z,omitempty"`
+	// Velocity in units per second, all three axes. Sent for entities whose
+	// motion is ballistic or extrapolated -- projectiles always, characters while
+	// airborne -- so a receiver can advance them between snapshots. Zero on all
+	// three axes means "stationary or not sent"; the bit in changed_fields says
+	// which on a delta.
+	VelX float32 `protobuf:"fixed32,15,opt,name=vel_x,json=velX,proto3" json:"vel_x,omitempty"`
+	VelY float32 `protobuf:"fixed32,16,opt,name=vel_y,json=velY,proto3" json:"vel_y,omitempty"`
+	VelZ float32 `protobuf:"fixed32,17,opt,name=vel_z,json=velZ,proto3" json:"vel_z,omitempty"`
+	// Interned handle of the entity that owns this one: the caster of a
+	// projectile. 0 for none.
+	Owner uint32 `protobuf:"varint,18,opt,name=owner,proto3" json:"owner,omitempty"`
+	// InputMessage.spawn_seq of the input that created this projectile, sent only
+	// to the OWNER's connection so it can replace its predicted projectile with
+	// this entity. 0 for every other receiver and every non-projectile.
+	SpawnSeq uint32 `protobuf:"varint,19,opt,name=spawn_seq,json=spawnSeq,proto3" json:"spawn_seq,omitempty"`
+	// Extensible stat block (ADR-30): (stat_id, value) pairs whose ids are content
+	// (ADR-19), not schema. A new visible stat -- mana, level, a cast bar -- is a
+	// content entry and needs no change to this file.
+	//
+	// On a keyframe or a first introduction `stats` is the COMPLETE set. On a delta
+	// with bit 0x1000 set it lists only the stats that changed, and
+	// `stats_removed` names the ids that no longer exist; every stat in neither
+	// list keeps its last-known value.
+	Stats        []*StatValue `protobuf:"bytes,20,rep,name=stats,proto3" json:"stats,omitempty"`
+	StatsRemoved []uint32     `protobuf:"varint,21,rep,packed,name=stats_removed,json=statsRemoved,proto3" json:"stats_removed,omitempty"`
+	// Active status effects (DoT/HoT, buffs, debuffs, crowd control), keyed by
+	// StatusEffect.effect_id with the same complete-set / delta rule as `stats`
+	// under bit 0x2000.
+	Statuses        []*StatusEffect `protobuf:"bytes,22,rep,name=statuses,proto3" json:"statuses,omitempty"`
+	StatusesRemoved []uint32        `protobuf:"varint,23,rep,packed,name=statuses_removed,json=statusesRemoved,proto3" json:"statuses_removed,omitempty"`
+	// Full id of `owner`, used ONLY by the non-interning legacy JSON encoding, for
+	// which `owner` is always 0 -- the same id/handle duality as GameEvent's
+	// source/source_id. Empty on every Protobuf connection.
+	OwnerId       string `protobuf:"bytes,24,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1371,6 +1530,211 @@ func (x *EntitySnapshot) GetChangedFields() uint32 {
 	return 0
 }
 
+func (x *EntitySnapshot) GetZ() float32 {
+	if x != nil {
+		return x.Z
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetVelX() float32 {
+	if x != nil {
+		return x.VelX
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetVelY() float32 {
+	if x != nil {
+		return x.VelY
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetVelZ() float32 {
+	if x != nil {
+		return x.VelZ
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetOwner() uint32 {
+	if x != nil {
+		return x.Owner
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetSpawnSeq() uint32 {
+	if x != nil {
+		return x.SpawnSeq
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetStats() []*StatValue {
+	if x != nil {
+		return x.Stats
+	}
+	return nil
+}
+
+func (x *EntitySnapshot) GetStatsRemoved() []uint32 {
+	if x != nil {
+		return x.StatsRemoved
+	}
+	return nil
+}
+
+func (x *EntitySnapshot) GetStatuses() []*StatusEffect {
+	if x != nil {
+		return x.Statuses
+	}
+	return nil
+}
+
+func (x *EntitySnapshot) GetStatusesRemoved() []uint32 {
+	if x != nil {
+		return x.StatusesRemoved
+	}
+	return nil
+}
+
+func (x *EntitySnapshot) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+// StatValue is one entry of EntitySnapshot.stats. `stat_id` is allocated from 1
+// by the content validator, for the same reason ability ids are: a proto3 zero
+// is elided and would read as "no stat".
+type StatValue struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StatId        uint32                 `protobuf:"varint,1,opt,name=stat_id,json=statId,proto3" json:"stat_id,omitempty"`
+	Value         int32                  `protobuf:"zigzag32,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatValue) Reset() {
+	*x = StatValue{}
+	mi := &file_wire_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatValue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatValue) ProtoMessage() {}
+
+func (x *StatValue) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatValue.ProtoReflect.Descriptor instead.
+func (*StatValue) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *StatValue) GetStatId() uint32 {
+	if x != nil {
+		return x.StatId
+	}
+	return 0
+}
+
+func (x *StatValue) GetValue() int32 {
+	if x != nil {
+		return x.Value
+	}
+	return 0
+}
+
+// StatusEffect is one active effect on an entity. `effect_id` is the content id
+// of the status definition (ADR-19), which says whether it is periodic, a stat
+// modifier or crowd control -- the client looks that up rather than being told.
+type StatusEffect struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	EffectId uint32                 `protobuf:"varint,1,opt,name=effect_id,json=effectId,proto3" json:"effect_id,omitempty"`
+	Stacks   uint32                 `protobuf:"varint,2,opt,name=stacks,proto3" json:"stacks,omitempty"`
+	// Server tick the effect ends on; 0 means "until removed".
+	ExpiresTick uint64 `protobuf:"varint,3,opt,name=expires_tick,json=expiresTick,proto3" json:"expires_tick,omitempty"`
+	// Interned handle of the entity that applied it, 0 for none.
+	Source        uint32 `protobuf:"varint,4,opt,name=source,proto3" json:"source,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatusEffect) Reset() {
+	*x = StatusEffect{}
+	mi := &file_wire_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatusEffect) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatusEffect) ProtoMessage() {}
+
+func (x *StatusEffect) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatusEffect.ProtoReflect.Descriptor instead.
+func (*StatusEffect) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *StatusEffect) GetEffectId() uint32 {
+	if x != nil {
+		return x.EffectId
+	}
+	return 0
+}
+
+func (x *StatusEffect) GetStacks() uint32 {
+	if x != nil {
+		return x.Stacks
+	}
+	return 0
+}
+
+func (x *StatusEffect) GetExpiresTick() uint64 {
+	if x != nil {
+		return x.ExpiresTick
+	}
+	return 0
+}
+
+func (x *StatusEffect) GetSource() uint32 {
+	if x != nil {
+		return x.Source
+	}
+	return 0
+}
+
 // GameEvent is one edge-triggered occurrence, addressed to entities by the SAME
 // interned handles the surrounding snapshot uses.
 //
@@ -1458,15 +1822,19 @@ type GameEvent struct {
 	// A receiver prefers the handle when it is non-zero and falls back to these
 	// otherwise, which is the same precedence rule EntitySnapshot documents for
 	// `type`/`type_name`.
-	SourceId      string `protobuf:"bytes,7,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
-	TargetId      string `protobuf:"bytes,8,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"`
+	SourceId string `protobuf:"bytes,7,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
+	TargetId string `protobuf:"bytes,8,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"`
+	// Content id of the status effect for STATUS_APPLIED / STATUS_REMOVED, and of
+	// the status that ticked for a periodic DAMAGE / HEAL (flags bit 2). 0 when
+	// none. Protocol version 3.
+	EffectId      uint32 `protobuf:"varint,9,opt,name=effect_id,json=effectId,proto3" json:"effect_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GameEvent) Reset() {
 	*x = GameEvent{}
-	mi := &file_wire_proto_msgTypes[9]
+	mi := &file_wire_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1478,7 +1846,7 @@ func (x *GameEvent) String() string {
 func (*GameEvent) ProtoMessage() {}
 
 func (x *GameEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[9]
+	mi := &file_wire_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1491,7 +1859,7 @@ func (x *GameEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GameEvent.ProtoReflect.Descriptor instead.
 func (*GameEvent) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{9}
+	return file_wire_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GameEvent) GetType() GameEventType {
@@ -1550,6 +1918,13 @@ func (x *GameEvent) GetTargetId() string {
 	return ""
 }
 
+func (x *GameEvent) GetEffectId() uint32 {
+	if x != nil {
+		return x.EffectId
+	}
+	return 0
+}
+
 // SnapshotMessage is a world state update sent to the client.
 //
 // Either a KEYFRAME (full = true, `entities` is the complete AOI set and the
@@ -1584,7 +1959,7 @@ type SnapshotMessage struct {
 
 func (x *SnapshotMessage) Reset() {
 	*x = SnapshotMessage{}
-	mi := &file_wire_proto_msgTypes[10]
+	mi := &file_wire_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1596,7 +1971,7 @@ func (x *SnapshotMessage) String() string {
 func (*SnapshotMessage) ProtoMessage() {}
 
 func (x *SnapshotMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[10]
+	mi := &file_wire_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1609,7 +1984,7 @@ func (x *SnapshotMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotMessage.ProtoReflect.Descriptor instead.
 func (*SnapshotMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{10}
+	return file_wire_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SnapshotMessage) GetTick() uint64 {
@@ -1666,7 +2041,7 @@ type DisconnectMessage struct {
 
 func (x *DisconnectMessage) Reset() {
 	*x = DisconnectMessage{}
-	mi := &file_wire_proto_msgTypes[11]
+	mi := &file_wire_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1678,7 +2053,7 @@ func (x *DisconnectMessage) String() string {
 func (*DisconnectMessage) ProtoMessage() {}
 
 func (x *DisconnectMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[11]
+	mi := &file_wire_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1691,7 +2066,7 @@ func (x *DisconnectMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisconnectMessage.ProtoReflect.Descriptor instead.
 func (*DisconnectMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{11}
+	return file_wire_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DisconnectMessage) GetReason() string {
@@ -1711,7 +2086,7 @@ type ResyncRequest struct {
 
 func (x *ResyncRequest) Reset() {
 	*x = ResyncRequest{}
-	mi := &file_wire_proto_msgTypes[12]
+	mi := &file_wire_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1723,7 +2098,7 @@ func (x *ResyncRequest) String() string {
 func (*ResyncRequest) ProtoMessage() {}
 
 func (x *ResyncRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[12]
+	mi := &file_wire_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1736,7 +2111,197 @@ func (x *ResyncRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResyncRequest.ProtoReflect.Descriptor instead.
 func (*ResyncRequest) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{12}
+	return file_wire_proto_rawDescGZIP(), []int{14}
+}
+
+// CommandRequest is a client's discrete gameplay request.
+type CommandRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Client-chosen, unique per connection, echoed in the CommandResult. Starts
+	// at 1 so a zero can never be mistaken for a real request.
+	Seq           uint32 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Opcode        uint32 `protobuf:"varint,2,opt,name=opcode,proto3" json:"opcode,omitempty"`
+	Payload       []byte `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommandRequest) Reset() {
+	*x = CommandRequest{}
+	mi := &file_wire_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommandRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommandRequest) ProtoMessage() {}
+
+func (x *CommandRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommandRequest.ProtoReflect.Descriptor instead.
+func (*CommandRequest) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *CommandRequest) GetSeq() uint32 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *CommandRequest) GetOpcode() uint32 {
+	if x != nil {
+		return x.Opcode
+	}
+	return 0
+}
+
+func (x *CommandRequest) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+// CommandResult is the server's answer to exactly one CommandRequest.
+type CommandResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Seq   uint32                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Ok    bool                   `protobuf:"varint,2,opt,name=ok,proto3" json:"ok,omitempty"`
+	// Machine-readable reason when ok = false (`unknown_opcode`, `rate_limited`,
+	// `invalid_payload`, or an opcode-specific code). Empty on success.
+	Error string `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	// Opcode-specific response payload, possibly empty.
+	Payload       []byte `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommandResult) Reset() {
+	*x = CommandResult{}
+	mi := &file_wire_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommandResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommandResult) ProtoMessage() {}
+
+func (x *CommandResult) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
+func (*CommandResult) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *CommandResult) GetSeq() uint32 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *CommandResult) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *CommandResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *CommandResult) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+// ServerPush is an unsolicited server -> client gameplay message (inventory
+// changed, quest progress, chat line), addressed by opcode in the same space as
+// CommandRequest.
+type ServerPush struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Opcode        uint32                 `protobuf:"varint,1,opt,name=opcode,proto3" json:"opcode,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ServerPush) Reset() {
+	*x = ServerPush{}
+	mi := &file_wire_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ServerPush) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ServerPush) ProtoMessage() {}
+
+func (x *ServerPush) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ServerPush.ProtoReflect.Descriptor instead.
+func (*ServerPush) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ServerPush) GetOpcode() uint32 {
+	if x != nil {
+		return x.Opcode
+	}
+	return 0
+}
+
+func (x *ServerPush) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
 }
 
 // TransferMapRequest is sent by the client to request a map transfer.
@@ -1752,7 +2317,7 @@ type TransferMapRequest struct {
 
 func (x *TransferMapRequest) Reset() {
 	*x = TransferMapRequest{}
-	mi := &file_wire_proto_msgTypes[13]
+	mi := &file_wire_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1764,7 +2329,7 @@ func (x *TransferMapRequest) String() string {
 func (*TransferMapRequest) ProtoMessage() {}
 
 func (x *TransferMapRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[13]
+	mi := &file_wire_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1777,7 +2342,7 @@ func (x *TransferMapRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferMapRequest.ProtoReflect.Descriptor instead.
 func (*TransferMapRequest) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{13}
+	return file_wire_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *TransferMapRequest) GetMapId() string {
@@ -1798,7 +2363,7 @@ type TransferMapResponse struct {
 
 func (x *TransferMapResponse) Reset() {
 	*x = TransferMapResponse{}
-	mi := &file_wire_proto_msgTypes[14]
+	mi := &file_wire_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1810,7 +2375,7 @@ func (x *TransferMapResponse) String() string {
 func (*TransferMapResponse) ProtoMessage() {}
 
 func (x *TransferMapResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[14]
+	mi := &file_wire_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1823,7 +2388,7 @@ func (x *TransferMapResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferMapResponse.ProtoReflect.Descriptor instead.
 func (*TransferMapResponse) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{14}
+	return file_wire_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *TransferMapResponse) GetOk() bool {
@@ -1852,7 +2417,7 @@ type PingMessage struct {
 
 func (x *PingMessage) Reset() {
 	*x = PingMessage{}
-	mi := &file_wire_proto_msgTypes[15]
+	mi := &file_wire_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1864,7 +2429,7 @@ func (x *PingMessage) String() string {
 func (*PingMessage) ProtoMessage() {}
 
 func (x *PingMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[15]
+	mi := &file_wire_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1877,7 +2442,7 @@ func (x *PingMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingMessage.ProtoReflect.Descriptor instead.
 func (*PingMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{15}
+	return file_wire_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *PingMessage) GetTimestamp() int64 {
@@ -1900,7 +2465,7 @@ type PongMessage struct {
 
 func (x *PongMessage) Reset() {
 	*x = PongMessage{}
-	mi := &file_wire_proto_msgTypes[16]
+	mi := &file_wire_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1912,7 +2477,7 @@ func (x *PongMessage) String() string {
 func (*PongMessage) ProtoMessage() {}
 
 func (x *PongMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[16]
+	mi := &file_wire_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1925,7 +2490,7 @@ func (x *PongMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PongMessage.ProtoReflect.Descriptor instead.
 func (*PongMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{16}
+	return file_wire_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *PongMessage) GetTimestamp() int64 {
@@ -1954,7 +2519,7 @@ type KickMessage struct {
 
 func (x *KickMessage) Reset() {
 	*x = KickMessage{}
-	mi := &file_wire_proto_msgTypes[17]
+	mi := &file_wire_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1966,7 +2531,7 @@ func (x *KickMessage) String() string {
 func (*KickMessage) ProtoMessage() {}
 
 func (x *KickMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[17]
+	mi := &file_wire_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1979,7 +2544,7 @@ func (x *KickMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KickMessage.ProtoReflect.Descriptor instead.
 func (*KickMessage) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{17}
+	return file_wire_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *KickMessage) GetReason() string {
@@ -2005,7 +2570,7 @@ type SealedClientHello struct {
 
 func (x *SealedClientHello) Reset() {
 	*x = SealedClientHello{}
-	mi := &file_wire_proto_msgTypes[18]
+	mi := &file_wire_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2017,7 +2582,7 @@ func (x *SealedClientHello) String() string {
 func (*SealedClientHello) ProtoMessage() {}
 
 func (x *SealedClientHello) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[18]
+	mi := &file_wire_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2030,7 +2595,7 @@ func (x *SealedClientHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SealedClientHello.ProtoReflect.Descriptor instead.
 func (*SealedClientHello) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{18}
+	return file_wire_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SealedClientHello) GetPublicKey() []byte {
@@ -2110,7 +2675,7 @@ type SealedServerHello struct {
 
 func (x *SealedServerHello) Reset() {
 	*x = SealedServerHello{}
-	mi := &file_wire_proto_msgTypes[19]
+	mi := &file_wire_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2122,7 +2687,7 @@ func (x *SealedServerHello) String() string {
 func (*SealedServerHello) ProtoMessage() {}
 
 func (x *SealedServerHello) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[19]
+	mi := &file_wire_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2135,7 +2700,7 @@ func (x *SealedServerHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SealedServerHello.ProtoReflect.Descriptor instead.
 func (*SealedServerHello) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{19}
+	return file_wire_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SealedServerHello) GetPublicKey() []byte {
@@ -2182,10 +2747,11 @@ const file_wire_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12)\n" +
-	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"E\n" +
+	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"h\n" +
 	"\x11EnterWorldRequest\x12\x15\n" +
 	"\x06map_id\x18\x01 \x01(\tR\x05mapId\x12\x19\n" +
-	"\bparty_id\x18\x02 \x01(\tR\apartyId\"\xc7\x01\n" +
+	"\bparty_id\x18\x02 \x01(\tR\apartyId\x12!\n" +
+	"\fcharacter_id\x18\x03 \x01(\tR\vcharacterId\"\xc7\x01\n" +
 	"\x12EnterWorldResponse\x12\x1f\n" +
 	"\vserver_addr\x18\x01 \x01(\tR\n" +
 	"serverAddr\x12\x1d\n" +
@@ -2196,13 +2762,14 @@ const file_wire_proto_rawDesc = "" +
 	"\x11server_public_key\x18\x06 \x01(\fR\x0fserverPublicKeyJ\x04\b\x05\x10\x06R\vsession_key\"S\n" +
 	"\x10JoinTokenRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12)\n" +
-	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\x9a\x01\n" +
+	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\xbd\x01\n" +
 	"\x11JoinTokenResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x1b\n" +
 	"\ttick_rate\x18\x04 \x01(\rR\btickRate\x12)\n" +
-	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\"\xef\x01\n" +
+	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\x12!\n" +
+	"\fcharacter_id\x18\x06 \x01(\tR\vcharacterId\"\xf9\x02\n" +
 	"\fInputMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
@@ -2212,7 +2779,14 @@ const file_wire_proto_rawDesc = "" +
 	"ability_id\x18\x05 \x01(\rR\tabilityId\x12*\n" +
 	"\x11ability_target_id\x18\x06 \x01(\tR\x0fabilityTargetId\x12\x13\n" +
 	"\x05aim_x\x18\a \x01(\x02R\x04aimX\x12\x13\n" +
-	"\x05aim_y\x18\b \x01(\x02R\x04aimY\"\xfb\x02\n" +
+	"\x05aim_y\x18\b \x01(\x02R\x04aimY\x12\x13\n" +
+	"\x05aim_z\x18\t \x01(\x02R\x04aimZ\x12\x1f\n" +
+	"\vrender_tick\x18\n" +
+	" \x01(\x04R\n" +
+	"renderTick\x12\x12\n" +
+	"\x04jump\x18\v \x01(\bR\x04jump\x12\x1b\n" +
+	"\tspawn_seq\x18\f \x01(\rR\bspawnSeq\x12!\n" +
+	"\frender_alpha\x18\r \x01(\x02R\vrenderAlpha\"\xd1\x05\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -2229,7 +2803,26 @@ const file_wire_proto_rawDesc = "" +
 	"\x06action\x18\v \x01(\x0e2\x1c.rpgmmo.wire.v1.EntityActionR\x06action\x12\x1d\n" +
 	"\n" +
 	"action_seq\x18\f \x01(\rR\tactionSeq\x12%\n" +
-	"\x0echanged_fields\x18\r \x01(\rR\rchangedFields\"\xf5\x01\n" +
+	"\x0echanged_fields\x18\r \x01(\rR\rchangedFields\x12\f\n" +
+	"\x01z\x18\x0e \x01(\x02R\x01z\x12\x13\n" +
+	"\x05vel_x\x18\x0f \x01(\x02R\x04velX\x12\x13\n" +
+	"\x05vel_y\x18\x10 \x01(\x02R\x04velY\x12\x13\n" +
+	"\x05vel_z\x18\x11 \x01(\x02R\x04velZ\x12\x14\n" +
+	"\x05owner\x18\x12 \x01(\rR\x05owner\x12\x1b\n" +
+	"\tspawn_seq\x18\x13 \x01(\rR\bspawnSeq\x12/\n" +
+	"\x05stats\x18\x14 \x03(\v2\x19.rpgmmo.wire.v1.StatValueR\x05stats\x12#\n" +
+	"\rstats_removed\x18\x15 \x03(\rR\fstatsRemoved\x128\n" +
+	"\bstatuses\x18\x16 \x03(\v2\x1c.rpgmmo.wire.v1.StatusEffectR\bstatuses\x12)\n" +
+	"\x10statuses_removed\x18\x17 \x03(\rR\x0fstatusesRemoved\x12\x19\n" +
+	"\bowner_id\x18\x18 \x01(\tR\aownerId\":\n" +
+	"\tStatValue\x12\x17\n" +
+	"\astat_id\x18\x01 \x01(\rR\x06statId\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x11R\x05value\"~\n" +
+	"\fStatusEffect\x12\x1b\n" +
+	"\teffect_id\x18\x01 \x01(\rR\beffectId\x12\x16\n" +
+	"\x06stacks\x18\x02 \x01(\rR\x06stacks\x12!\n" +
+	"\fexpires_tick\x18\x03 \x01(\x04R\vexpiresTick\x12\x16\n" +
+	"\x06source\x18\x04 \x01(\rR\x06source\"\x92\x02\n" +
 	"\tGameEvent\x121\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x1d.rpgmmo.wire.v1.GameEventTypeR\x04type\x12\x16\n" +
 	"\x06source\x18\x02 \x01(\rR\x06source\x12\x16\n" +
@@ -2239,7 +2832,8 @@ const file_wire_proto_rawDesc = "" +
 	"ability_id\x18\x05 \x01(\rR\tabilityId\x12\x14\n" +
 	"\x05flags\x18\x06 \x01(\rR\x05flags\x12\x1b\n" +
 	"\tsource_id\x18\a \x01(\tR\bsourceId\x12\x1b\n" +
-	"\ttarget_id\x18\b \x01(\tR\btargetId\"\xdd\x01\n" +
+	"\ttarget_id\x18\b \x01(\tR\btargetId\x12\x1b\n" +
+	"\teffect_id\x18\t \x01(\rR\beffectId\"\xdd\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +
@@ -2249,7 +2843,20 @@ const file_wire_proto_rawDesc = "" +
 	"\x06events\x18\x06 \x03(\v2\x19.rpgmmo.wire.v1.GameEventR\x06events\"+\n" +
 	"\x11DisconnectMessage\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x0f\n" +
-	"\rResyncRequest\"+\n" +
+	"\rResyncRequest\"T\n" +
+	"\x0eCommandRequest\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\rR\x03seq\x12\x16\n" +
+	"\x06opcode\x18\x02 \x01(\rR\x06opcode\x12\x18\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\"a\n" +
+	"\rCommandResult\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\rR\x03seq\x12\x0e\n" +
+	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12\x18\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload\">\n" +
+	"\n" +
+	"ServerPush\x12\x16\n" +
+	"\x06opcode\x18\x01 \x01(\rR\x06opcode\x12\x18\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\"+\n" +
 	"\x12TransferMapRequest\x12\x15\n" +
 	"\x06map_id\x18\x01 \x01(\tR\x05mapId\";\n" +
 	"\x13TransferMapResponse\x12\x0e\n" +
@@ -2271,7 +2878,7 @@ const file_wire_proto_rawDesc = "" +
 	"public_key\x18\x01 \x01(\fR\tpublicKey\x12\x18\n" +
 	"\abinding\x18\x02 \x01(\fR\abinding\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12)\n" +
-	"\x10server_signature\x18\x04 \x01(\fR\x0fserverSignature*\xcf\x03\n" +
+	"\x10server_signature\x18\x04 \x01(\fR\x0fserverSignature*\x9c\x04\n" +
 	"\aMsgType\x12\x18\n" +
 	"\x14MSG_TYPE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rMSG_TYPE_AUTH\x10\x01\x12\x16\n" +
@@ -2291,7 +2898,10 @@ const file_wire_proto_rawDesc = "" +
 	"\rMSG_TYPE_PONG\x10\f\x12\x11\n" +
 	"\rMSG_TYPE_KICK\x10\x0f\x12 \n" +
 	"\x1cMSG_TYPE_SEALED_CLIENT_HELLO\x10\x10\x12 \n" +
-	"\x1cMSG_TYPE_SEALED_SERVER_HELLO\x10\x11*\x9d\x01\n" +
+	"\x1cMSG_TYPE_SEALED_SERVER_HELLO\x10\x11\x12\x14\n" +
+	"\x10MSG_TYPE_COMMAND\x10 \x12\x1b\n" +
+	"\x17MSG_TYPE_COMMAND_RESULT\x10!\x12\x18\n" +
+	"\x14MSG_TYPE_SERVER_PUSH\x10\"*\x9d\x01\n" +
 	"\n" +
 	"EntityType\x12\x1b\n" +
 	"\x17ENTITY_TYPE_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -2305,7 +2915,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x12ENTITY_ACTION_IDLE\x10\x01\x12\x18\n" +
 	"\x14ENTITY_ACTION_MOVING\x10\x02\x12\x1b\n" +
 	"\x17ENTITY_ACTION_ATTACKING\x10\x03\x12\x16\n" +
-	"\x12ENTITY_ACTION_DEAD\x10\x04*\xde\x01\n" +
+	"\x12ENTITY_ACTION_DEAD\x10\x04*\xca\x02\n" +
 	"\rGameEventType\x12\x1f\n" +
 	"\x1bGAME_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16GAME_EVENT_TYPE_DAMAGE\x10\x01\x12\x18\n" +
@@ -2313,7 +2923,10 @@ const file_wire_proto_rawDesc = "" +
 	"\x15GAME_EVENT_TYPE_DEATH\x10\x03\x12 \n" +
 	"\x1cGAME_EVENT_TYPE_ABILITY_CAST\x10\x04\x12\x1b\n" +
 	"\x17GAME_EVENT_TYPE_XP_GAIN\x10\x05\x12\x1c\n" +
-	"\x18GAME_EVENT_TYPE_LEVEL_UP\x10\x06BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
+	"\x18GAME_EVENT_TYPE_LEVEL_UP\x10\x06\x12\"\n" +
+	"\x1eGAME_EVENT_TYPE_STATUS_APPLIED\x10\a\x12\"\n" +
+	"\x1eGAME_EVENT_TYPE_STATUS_REMOVED\x10\b\x12\"\n" +
+	"\x1eGAME_EVENT_TYPE_PROJECTILE_HIT\x10\tBFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
 
 var (
 	file_wire_proto_rawDescOnce sync.Once
@@ -2328,7 +2941,7 @@ func file_wire_proto_rawDescGZIP() []byte {
 }
 
 var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_wire_proto_goTypes = []any{
 	(MsgType)(0),                // 0: rpgmmo.wire.v1.MsgType
 	(EntityType)(0),             // 1: rpgmmo.wire.v1.EntityType
@@ -2343,29 +2956,36 @@ var file_wire_proto_goTypes = []any{
 	(*JoinTokenResponse)(nil),   // 10: rpgmmo.wire.v1.JoinTokenResponse
 	(*InputMessage)(nil),        // 11: rpgmmo.wire.v1.InputMessage
 	(*EntitySnapshot)(nil),      // 12: rpgmmo.wire.v1.EntitySnapshot
-	(*GameEvent)(nil),           // 13: rpgmmo.wire.v1.GameEvent
-	(*SnapshotMessage)(nil),     // 14: rpgmmo.wire.v1.SnapshotMessage
-	(*DisconnectMessage)(nil),   // 15: rpgmmo.wire.v1.DisconnectMessage
-	(*ResyncRequest)(nil),       // 16: rpgmmo.wire.v1.ResyncRequest
-	(*TransferMapRequest)(nil),  // 17: rpgmmo.wire.v1.TransferMapRequest
-	(*TransferMapResponse)(nil), // 18: rpgmmo.wire.v1.TransferMapResponse
-	(*PingMessage)(nil),         // 19: rpgmmo.wire.v1.PingMessage
-	(*PongMessage)(nil),         // 20: rpgmmo.wire.v1.PongMessage
-	(*KickMessage)(nil),         // 21: rpgmmo.wire.v1.KickMessage
-	(*SealedClientHello)(nil),   // 22: rpgmmo.wire.v1.SealedClientHello
-	(*SealedServerHello)(nil),   // 23: rpgmmo.wire.v1.SealedServerHello
+	(*StatValue)(nil),           // 13: rpgmmo.wire.v1.StatValue
+	(*StatusEffect)(nil),        // 14: rpgmmo.wire.v1.StatusEffect
+	(*GameEvent)(nil),           // 15: rpgmmo.wire.v1.GameEvent
+	(*SnapshotMessage)(nil),     // 16: rpgmmo.wire.v1.SnapshotMessage
+	(*DisconnectMessage)(nil),   // 17: rpgmmo.wire.v1.DisconnectMessage
+	(*ResyncRequest)(nil),       // 18: rpgmmo.wire.v1.ResyncRequest
+	(*CommandRequest)(nil),      // 19: rpgmmo.wire.v1.CommandRequest
+	(*CommandResult)(nil),       // 20: rpgmmo.wire.v1.CommandResult
+	(*ServerPush)(nil),          // 21: rpgmmo.wire.v1.ServerPush
+	(*TransferMapRequest)(nil),  // 22: rpgmmo.wire.v1.TransferMapRequest
+	(*TransferMapResponse)(nil), // 23: rpgmmo.wire.v1.TransferMapResponse
+	(*PingMessage)(nil),         // 24: rpgmmo.wire.v1.PingMessage
+	(*PongMessage)(nil),         // 25: rpgmmo.wire.v1.PongMessage
+	(*KickMessage)(nil),         // 26: rpgmmo.wire.v1.KickMessage
+	(*SealedClientHello)(nil),   // 27: rpgmmo.wire.v1.SealedClientHello
+	(*SealedServerHello)(nil),   // 28: rpgmmo.wire.v1.SealedServerHello
 }
 var file_wire_proto_depIdxs = []int32{
 	1,  // 0: rpgmmo.wire.v1.EntitySnapshot.type:type_name -> rpgmmo.wire.v1.EntityType
 	2,  // 1: rpgmmo.wire.v1.EntitySnapshot.action:type_name -> rpgmmo.wire.v1.EntityAction
-	3,  // 2: rpgmmo.wire.v1.GameEvent.type:type_name -> rpgmmo.wire.v1.GameEventType
-	12, // 3: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
-	13, // 4: rpgmmo.wire.v1.SnapshotMessage.events:type_name -> rpgmmo.wire.v1.GameEvent
-	5,  // [5:5] is the sub-list for method output_type
-	5,  // [5:5] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	13, // 2: rpgmmo.wire.v1.EntitySnapshot.stats:type_name -> rpgmmo.wire.v1.StatValue
+	14, // 3: rpgmmo.wire.v1.EntitySnapshot.statuses:type_name -> rpgmmo.wire.v1.StatusEffect
+	3,  // 4: rpgmmo.wire.v1.GameEvent.type:type_name -> rpgmmo.wire.v1.GameEventType
+	12, // 5: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
+	15, // 6: rpgmmo.wire.v1.SnapshotMessage.events:type_name -> rpgmmo.wire.v1.GameEvent
+	7,  // [7:7] is the sub-list for method output_type
+	7,  // [7:7] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_wire_proto_init() }
@@ -2379,7 +2999,7 @@ func file_wire_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   20,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

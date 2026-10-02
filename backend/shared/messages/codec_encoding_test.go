@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"reflect"
 	"testing"
 )
 
@@ -356,7 +357,7 @@ func assertSnapshotEqual(t *testing.T, got, want SnapshotMessage) {
 		t.Fatalf("entities: got %d, want %d", len(got.Entities), len(want.Entities))
 	}
 	for i := range want.Entities {
-		if got.Entities[i] != want.Entities[i] {
+		if !reflect.DeepEqual(got.Entities[i], want.Entities[i]) {
 			t.Errorf("entity %d: got %+v, want %+v", i, got.Entities[i], want.Entities[i])
 		}
 	}

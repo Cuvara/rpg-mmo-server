@@ -6,6 +6,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Wire protocol version 3 (ADR-28..31).** `wire.proto` adds 3D (`EntitySnapshot.z`,
+  velocity, `InputMessage.aim_z`), jump, lag-compensation timing (`render_tick`,
+  `render_alpha`), projectile ownership (`owner`, `owner_id`, `spawn_seq`), the extensible stat
+  block and status effects (`StatValue`, `StatusEffect`, mask bits `0x0200`-`0x2000`), status
+  and projectile game events with `GameEvent.effect_id`, `EnterWorldRequest.character_id` /
+  `JoinTokenResponse.character_id`, and the generic gameplay channel `MSG_TYPE_COMMAND`,
+  `MSG_TYPE_COMMAND_RESULT`, `MSG_TYPE_SERVER_PUSH` (32-34). Every addition is a new field
+  number; no number is reused. `shared/messages` mirrors all of it in both encodings
+  (`MsgCommand`, `CommandRequest`, `CommandResult`, `ServerPush`, `StatValue`, `StatusEffect`)
+  and `EntitySnapshot` now also carries `ChangedFields`.
+
+### Changed
+- **`WireProtocolVersion` is 3.** Bumped under rule 4 of the version contract: a receiver that
+  ignores a projectile entity or a `CommandResult` diverges silently. Servers keep serving
+  protocol 2 peers the protocol 2 shape.
+- Bindings regenerated with the CI pins (protoc 29.3, protoc-gen-go v1.36.6 built with Go 1.26).
+  Building protoc-gen-go with Go 1.27 reformats doc comments and makes the CI drift check fail.
+
+### Added
 - **Gameplay v2 in `shared/messages`.** `InputMessage` gains `AbilityID`, `AbilityTargetID`,
   `AimX`/`AimY`; `EntitySnapshot` gains `ActionSeq`; `SnapshotMessage` gains `Events`, with a
   new `GameEvent` / `GameEventType`. Both directions of the Protobuf conversion in `proto.go`

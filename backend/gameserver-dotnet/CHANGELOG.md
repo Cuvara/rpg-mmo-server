@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Wire protocol version 3** (`WireProtocol.ProtocolVersion = 3`) and regenerated
+  `Generated/RpgMmo/Wire/V1/Wire.cs` for ADR-28..31 (3D, projectiles, stat block, status
+  effects, command channel, character slots). Server behaviour for the new fields lands in the
+  following entries on this branch.
+
 ### Added
 
 - **BENCHMARK.md Part XXI — a real client renders a 100ms deferral as smoothly as none**
