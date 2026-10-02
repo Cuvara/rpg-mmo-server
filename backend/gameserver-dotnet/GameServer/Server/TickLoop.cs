@@ -474,6 +474,11 @@ public sealed class TickLoop
     /// </summary>
     private void ProcessInputBatch(GameServer.World.WorldWriter writer)
     {
+        // Core v3: roster and lag-compensation history first, so every hit test this tick
+        // (instant casts, area casts, first projectile steps) can rewind to the ticks before
+        // it. See GameplaySystems for why history is recorded here, labelled T-1.
+        _handler.BeginTick(writer, _currentTick);
+
         var inputs = _inputs;
         for (int i = 0; i < inputs.Count; i++)
         {
@@ -488,6 +493,17 @@ public sealed class TickLoop
         // held direction. Inside the input scope rather than in one of its own so
         // the whole critical group is one write lock per base tick.
         _handler.ApplyHeldMovement(writer, _currentTick);
+
+        // Projectiles, statuses and item despawn (ADR-29/30), still the same scope.
+        _handler.StepGameplay(writer, _currentTick);
+    }
+
+    /// <summary>The critical scope of a tick with no input: held movement and gameplay.</summary>
+    private void RunCriticalWithoutInput(GameServer.World.WorldWriter writer)
+    {
+        _handler.BeginTick(writer, _currentTick);
+        _handler.ApplyHeldMovement(writer, _currentTick);
+        _handler.StepGameplay(writer, _currentTick);
     }
 
     /// <summary>Execute a single tick. Exposed for testing.</summary>
@@ -567,7 +583,7 @@ public sealed class TickLoop
             // Static for the same reason as above: this is the common branch at a
             // 60Hz base, so a per-tick delegate here is the steady-state allocation.
             _world.UpdateComponents(this,
-                static (self, writer) => self._handler.ApplyHeldMovement(writer, self._currentTick));
+                static (self, writer) => self.RunCriticalWithoutInput(writer));
         }
 
         // Enemy AI: spawn, move, reap — three systems in EnemyAiPhase order, sharing one

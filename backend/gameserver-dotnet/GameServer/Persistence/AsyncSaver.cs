@@ -150,8 +150,12 @@ public sealed class AsyncSaver
         ILogger logger,
         GameMetrics? metrics = null,
         PlayerSaveScope scope = PlayerSaveScope.Full,
-        double degradedThreshold = 0.5)
+        double degradedThreshold = 0.5,
+        ICharacterStore? characters = null,
+        CharacterSessions? sessions = null)
     {
+        _characters = characters;
+        _sessions = sessions;
         _store = store;
         _world = world;
         _mapId = mapId;
@@ -180,11 +184,57 @@ public sealed class AsyncSaver
     /// <summary>
     /// Persist one player entity under the configured <see cref="Scope"/>.
     /// </summary>
-    private Task PersistAsync(EntityState p) => _scope == PlayerSaveScope.StatsOnly
+    private Task PersistLegacyAsync(EntityState p) => _scope == PlayerSaveScope.StatsOnly
         ? _store.SavePlayerStatsAsync(p.Id, p.Hp, p.MaxHp, CancellationToken.None)
         : _store.SavePlayerAsync(
             new PlayerState(p.Id, p.Position.X, p.Position.Y, p.Hp, p.MaxHp, _mapId),
             CancellationToken.None);
+
+    private readonly ICharacterStore? _characters;
+    private readonly CharacterSessions? _sessions;
+
+    /// <summary>
+    /// Persist one player: through the character store when this saver has one and the
+    /// player joined as a character (ADR-31), through the legacy player store otherwise.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Character path.</b> Writes <c>character_state</c> with position AND height
+    /// (ADR-28), facing as yaw, HP, the <c>level</c> stat, and the XP loaded at join. Under
+    /// <see cref="PlayerSaveScope.StatsOnly"/> (a dungeon) the map id and coordinates are the
+    /// ones LOADED — the origin — and only HP and level change, the character form of the
+    /// ADR-26 decision 5 rule.</para>
+    /// <para><b>Expand/contract.</b> The account's default character (no <c>cid</c>) is also
+    /// written to the legacy <c>player_states</c> row, which protocol 2 tooling (the CD smoke,
+    /// <c>map_id</c> reload checks) still reads. A failure of either write fails the save.</para>
+    /// </remarks>
+    private async Task PersistAsync(EcsWorld.PlayerPersistView v)
+    {
+        EntityState p = v.State;
+        if (_characters == null || _sessions == null || !_sessions.TryGet(p.Id, out CharacterBinding binding))
+        {
+            await PersistLegacyAsync(p);
+            return;
+        }
+
+        CharacterState loaded = binding.Loaded;
+        int level = v.Level ?? (loaded.Level > 0 ? loaded.Level : 1);
+        CharacterState state = _scope == PlayerSaveScope.StatsOnly
+            ? loaded with { Hp = p.Hp, MaxHp = p.MaxHp, Level = level }
+            : loaded with
+            {
+                MapId = _mapId,
+                X = p.Position.X,
+                Y = p.Position.Y,
+                Z = v.Z,
+                Yaw = Net.FacingCodec.TryToRadians(p.FacingBrad, out float yaw) ? yaw : loaded.Yaw,
+                Hp = p.Hp,
+                MaxHp = p.MaxHp,
+                Level = level,
+            };
+
+        await _characters.SaveCharacterAsync(state, CancellationToken.None);
+        if (binding.IsDefaultCharacter) await PersistLegacyAsync(p);
+    }
 
     /// <summary>Run the periodic save loop until cancellation.</summary>
     public async Task RunAsync(CancellationToken ct)
@@ -216,13 +266,12 @@ public sealed class AsyncSaver
     /// <returns>True when the entity existed and was persisted.</returns>
     public async Task<bool> SavePlayerAsync(string userId)
     {
-        var entity = _world.GetEntity(userId);
-        if (entity == null || entity.Value.Type != "player") return false;
+        if (!_world.TryGetPlayerPersistView(userId, out var view)) return false;
 
-        var p = entity.Value;
+        var p = view.State;
         try
         {
-            await PersistAsync(p);
+            await PersistAsync(view);
             _metrics?.RecordPlayerSaveOk();
             return true;
         }
@@ -240,7 +289,7 @@ public sealed class AsyncSaver
         // PersistablePlayerStates, not PlayerStates: a synthetic bot is a player in the
         // archetype on purpose, and persisting one would create a player row per bot per
         // restart, successfully and silently. See EntityTags.Bot.
-        var players = _world.PersistablePlayerStates();
+        var players = _world.PersistablePlayerViews();
 
         // No early return on an empty sweep. "Nobody was online" and "everybody failed" are
         // different facts and exactly one place decides what a sweep meant for the saver's
@@ -262,7 +311,7 @@ public sealed class AsyncSaver
                 failed++;
                 lastError = ex;
                 _metrics?.RecordPlayerSaveError();
-                _logger.LogWarning(ex, "Failed to save player {UserId}", p.Id);
+                _logger.LogWarning(ex, "Failed to save player {UserId}", p.State.Id);
             }
         }
 

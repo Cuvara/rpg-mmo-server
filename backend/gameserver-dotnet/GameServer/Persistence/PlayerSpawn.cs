@@ -24,6 +24,16 @@ public readonly record struct SpawnDecision(
     bool PositionRestored,
     string? DiscardedMapId);
 
+/// <summary>Outcome of the character spawn policy (ADR-31): <see cref="SpawnDecision"/> plus height, level and facing.</summary>
+public readonly record struct CharacterSpawnDecision(
+    Vec3 Position,
+    int Hp,
+    int MaxHp,
+    bool PositionRestored,
+    string? DiscardedMapId,
+    int? Level,
+    float? Yaw);
+
 /// <summary>
 /// Decides where a player entity starts when it is (re)created on join.
 ///
@@ -108,6 +118,58 @@ public static class PlayerSpawn
     /// identifiers matched byte for byte everywhere else (the registry keys and the
     /// join-token claim), and a culture-sensitive compare here could disagree with them.</para>
     /// </summary>
+    /// <summary>
+    /// <see cref="Resolve(PlayerState?, string, in MapBounds)"/> with the map's own default
+    /// spawn (ADR-28: the spawn point named <c>default</c> in the map file) used instead of
+    /// the origin wherever the policy would have spawned at the origin.
+    /// </summary>
+    public static SpawnDecision Resolve(PlayerState? saved, string mapId, in MapBounds bounds, Vec2? defaultSpawn)
+    {
+        SpawnDecision d = Resolve(saved, mapId, bounds);
+        if (defaultSpawn is { } spawn && !d.PositionRestored)
+        {
+            d = d with { Position = bounds.Clamp(spawn) };
+        }
+
+        return d;
+    }
+
+    /// <summary>
+    /// The character form of the spawn policy (ADR-31): the saved position — WITH height —
+    /// is reused only when the row belongs to this map; otherwise the player starts at
+    /// <paramref name="defaultSpawn"/>. HP, level and facing carry across maps unchanged. A
+    /// restored height below the ground (the map changed under the save) is lifted onto it
+    /// by the caller's ground lookup, not here.
+    /// </summary>
+    public static CharacterSpawnDecision Resolve(
+        CharacterState? saved, string mapId, in MapBounds bounds, Vec3 defaultSpawn)
+    {
+        Vec2 spawnXY = bounds.Clamp(new Vec2(defaultSpawn.X, defaultSpawn.Y));
+        var spawn = new Vec3(spawnXY.X, spawnXY.Y, defaultSpawn.Z);
+
+        if (saved is null)
+        {
+            return new CharacterSpawnDecision(
+                spawn, ServerDefaults.DefaultPlayerHp, ServerDefaults.DefaultPlayerHp,
+                PositionRestored: false, DiscardedMapId: null, Level: null, Yaw: null);
+        }
+
+        int maxHp = saved.MaxHp > 0 ? saved.MaxHp : ServerDefaults.DefaultPlayerHp;
+        int hp = saved.Hp > 0 ? Math.Min(saved.Hp, maxHp) : saved.Hp;
+        int? level = saved.Level > 0 ? saved.Level : null;
+
+        if (SameMap(saved.MapId, mapId) && float.IsFinite(saved.X) && float.IsFinite(saved.Y) && float.IsFinite(saved.Z))
+        {
+            Vec2 xy = bounds.Clamp(new Vec2(saved.X, saved.Y));
+            return new CharacterSpawnDecision(
+                new Vec3(xy.X, xy.Y, saved.Z), hp, maxHp,
+                PositionRestored: true, DiscardedMapId: null, Level: level, Yaw: saved.Yaw);
+        }
+
+        return new CharacterSpawnDecision(
+            spawn, hp, maxHp, PositionRestored: false, DiscardedMapId: saved.MapId, Level: level, Yaw: saved.Yaw);
+    }
+
     public static bool SameMap(string? savedMapId, string? joiningMapId) =>
         !string.IsNullOrEmpty(savedMapId) &&
         !string.IsNullOrEmpty(joiningMapId) &&

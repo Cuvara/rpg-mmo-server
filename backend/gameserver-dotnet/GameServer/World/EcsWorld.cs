@@ -36,15 +36,27 @@ public readonly struct PendingInput
 
     public readonly InputData Input;
 
+    /// <summary>
+    /// Protocol 3 input fields <see cref="InputData"/> does not carry (jump, aim height,
+    /// lag-compensation instant, spawn sequence). Default for a protocol 2 input.
+    /// </summary>
+    public readonly InputExtras Extras;
+
     public PendingInput(string userId, EntityHandle handle, InputData input)
+        : this(userId, handle, input, default)
+    {
+    }
+
+    public PendingInput(string userId, EntityHandle handle, InputData input, InputExtras extras)
     {
         UserId = userId;
         Handle = handle;
         Input = input;
+        Extras = extras;
     }
 
     /// <summary>Same input, rebound to a freshly resolved handle.</summary>
-    public PendingInput WithHandle(EntityHandle handle) => new(UserId, handle, Input);
+    public PendingInput WithHandle(EntityHandle handle) => new(UserId, handle, Input, Extras);
 }
 
 /// <summary>
@@ -174,6 +186,18 @@ public sealed class EcsWorld : IDisposable
 
     /// <summary>Next stable key. Starts at 1 so 0 stays "no key" in diagnostics.</summary>
     private int _nextStableId = 1;
+
+    /// <summary>
+    /// The gameplay side of the world (ADR-28..31): geometry, statuses, stats, projectiles,
+    /// items, hitbox history. Same lock discipline as component storage.
+    /// </summary>
+    private readonly GameplayState _gameplay = new();
+
+    /// <summary>
+    /// The gameplay side of the world. Configure it (<see cref="GameplayState.Configure"/>)
+    /// before the first tick; afterwards touch it only inside a scope of this world.
+    /// </summary>
+    public GameplayState Gameplay => _gameplay;
     private readonly List<PendingInput> _pendingInputs = new();
     private readonly ReaderWriterLockSlim _rwLock = new();
     private readonly object _inputLock = new();
@@ -844,20 +868,12 @@ public sealed class EcsWorld : IDisposable
 
                 if (matches < destination.Length)
                 {
-                    destination[matches] = new EntityView(
-                        ids[i].Stable,
-                        ids[i].Value,
-                        kinds[i].Value,
-                        positions[i].Value,
-                        healths[i].Hp,
-                        healths[i].MaxHp,
-                        locomotions[i].Speed,
-                        // Facing and action ride the Locomotion span that is already
-                        // fetched, which is exactly why they were put there rather than
-                        // in a component of their own — no extra GetSpan in this loop.
-                        locomotions[i].FacingBrad,
-                        locomotions[i].Action,
-                        locomotions[i].ActionSeq);
+                    // Facing and action ride the Locomotion span that is already fetched,
+                    // which is exactly why they were put there rather than in a component of
+                    // their own — no extra GetSpan in this loop. The v3 fields come from the
+                    // same spans plus one array index into the gameplay table.
+                    destination[matches] = ComposeView(
+                        in ids[i], in kinds[i], in positions[i], in healths[i], in locomotions[i]);
                 }
 
                 matches++;
@@ -865,6 +881,58 @@ public sealed class EcsWorld : IDisposable
         }
 
         return matches;
+    }
+
+    /// <summary>
+    /// The one place an <see cref="EntityView"/> is composed, shared by the scan arm and the
+    /// spatial index so the two cannot disagree. Reads the five fetched spans plus, for
+    /// entities with a gameplay record, one array index into <see cref="GameplayState"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="EntityView.MaxHp"/> is the EFFECTIVE max HP (status modifiers applied,
+    /// ADR-30): the number a health bar has to be drawn against. With no status active it is
+    /// <see cref="Health.MaxHp"/> exactly, so protocol 2 output is unchanged.
+    /// </remarks>
+    private EntityView ComposeView(
+        in EntityIdRef id, in EntityKind kind, in Position position, in Health health, in Locomotion locomotion)
+    {
+        SimRecord? rec = _gameplay.Get(id.Stable);
+        int maxHp = health.MaxHp;
+        string? ownerId = null;
+        int ownerKey = 0;
+        uint spawnSeq = 0;
+        uint statsVersion = 0;
+        uint statusesVersion = 0;
+        if (rec != null && rec.Kind != SimKind.None)
+        {
+            if (rec.Statuses is { Count: > 0 } statuses) maxHp = statuses.EffectiveMaxHp(maxHp);
+            ownerId = rec.OwnerId;
+            ownerKey = rec.OwnerKey;
+            spawnSeq = rec.SpawnSeq;
+            statsVersion = rec.StatsVersion;
+            statusesVersion = rec.StatusesVersion;
+        }
+
+        return new EntityView(
+            id.Stable,
+            id.Value,
+            kind.Value,
+            position.Value,
+            health.Hp,
+            maxHp,
+            locomotion.Speed,
+            locomotion.FacingBrad,
+            locomotion.Action,
+            locomotion.ActionSeq,
+            position.Z,
+            locomotion.VelocityX,
+            locomotion.VelocityY,
+            locomotion.VelocityZ,
+            ownerId,
+            ownerKey,
+            spawnSeq,
+            statsVersion,
+            statusesVersion);
     }
 
     /// <summary>
@@ -1003,24 +1071,14 @@ public sealed class EcsWorld : IDisposable
             int count = chunk.Count;
             for (int i = 0; i < count; i++)
             {
-                _grid.Add(new EntityView(
-                    ids[i].Stable,
-                    ids[i].Value,
-                    kinds[i].Value,
-                    positions[i].Value,
-                    healths[i].Hp,
-                    healths[i].MaxHp,
-                    locomotions[i].Speed,
-                    // Same Locomotion span the scan arm reads, and it MUST be read here
-                    // too: the index composes once per entity at rebuild and a query then
-                    // copies the finished struct, so anything omitted here is omitted for
-                    // every viewer that goes through the index — and only for those. The
-                    // scan arm would still be right, so the two arms would disagree while
-                    // both looked healthy, which the differential tests catch by comparing
-                    // whole views rather than positions.
-                    locomotions[i].FacingBrad,
-                    locomotions[i].Action,
-                    locomotions[i].ActionSeq));
+                // The SAME compose the scan arm uses, and it MUST be: the index composes
+                // once per entity at rebuild and a query then copies the finished struct, so
+                // anything omitted here is omitted for every viewer that goes through the
+                // index — and only for those. The scan arm would still be right, so the two
+                // arms would disagree while both looked healthy, which the differential tests
+                // catch by comparing whole views rather than positions.
+                _grid.Add(ComposeView(
+                    in ids[i], in kinds[i], in positions[i], in healths[i], in locomotions[i]));
             }
         }
 
@@ -1690,15 +1748,29 @@ public sealed class EcsWorld : IDisposable
     /// per-connection budget, no coalescing, only the world-wide bound — for callers that
     /// have no connection (tests, benches, scaffolding).</para>
     /// </remarks>
-    public InputIngestResult PushInput(string userId, InputData input, InputIngress? ingress)
+    public InputIngestResult PushInput(string userId, InputData input, InputIngress? ingress) =>
+        PushInput(userId, input, ingress, default);
+
+    /// <summary>
+    /// Queue a protocol 3 input: <paramref name="extras"/> carries the fields
+    /// <see cref="InputData"/> has no room for (jump, aim height, render tick/alpha, spawn
+    /// sequence). Same bounds and coalescing as the protocol 2 overload.
+    /// </summary>
+    public InputIngestResult PushInput(string userId, InputData input, InputIngress? ingress, in InputExtras extras)
     {
         EntityHandle handle;
         _rwLock.EnterReadLock();
         try { handle = ResolveLocked(userId); }
         finally { _rwLock.ExitReadLock(); }
 
-        var pending = new PendingInput(userId, handle, input);
-        bool movementOnly = string.IsNullOrEmpty(input.AttackTargetId);
+        var pending = new PendingInput(userId, handle, input, extras);
+
+        // Replaceable only when it carries nothing edge-triggered. An ability cast and a jump
+        // are edges exactly like an attack: replacing one with the next movement packet would
+        // drop it. (Ability casts used to be coalesced away here; they are not any more.)
+        bool movementOnly = string.IsNullOrEmpty(input.AttackTargetId)
+            && !input.HasAbility
+            && !extras.Jump;
 
         lock (_inputLock)
         {
@@ -1867,6 +1939,156 @@ public sealed class EcsWorld : IDisposable
     }
 
     /// <summary>
+    /// Take a dropped item out of the world on behalf of <paramref name="takerEntityId"/>:
+    /// the item entity must exist and be a dropped item, the taker must be a live entity, and
+    /// the two must be within <paramref name="maxRange"/> (3D distance, feet to item). On
+    /// success the item entity is removed (deferred if a scope is iterating) and its content
+    /// id and quantity are returned. Persisting the grant is the caller's job (ADR-31
+    /// decision 4: one transaction keyed by a grant id).
+    /// </summary>
+    /// <remarks>
+    /// Takes the write lock. From inside a scope use
+    /// <see cref="WorldWriter.TryTakeItemEntity"/>. Two takers racing for one item: exactly
+    /// one gets <see cref="ItemTakeStatus.Taken"/>, the other <see cref="ItemTakeStatus.NotFound"/>.
+    /// </remarks>
+    public ItemTakeResult TryTakeItemEntity(string itemEntityId, string takerEntityId, float maxRange)
+    {
+        _rwLock.EnterWriteLock();
+        try { return TryTakeItemEntityLocked(itemEntityId, takerEntityId, maxRange); }
+        finally
+        {
+            ApplyStructuralChangesLocked();
+            ExitWriteScope();
+        }
+    }
+
+    internal ItemTakeResult TryTakeItemEntityLocked(string itemEntityId, string takerEntityId, float maxRange)
+    {
+        EntityHandle item = ResolveLocked(itemEntityId);
+        if (!item.IsValid) return ItemTakeResult.Fail(ItemTakeStatus.NotFound);
+
+        SimRecord? rec = _gameplay.Get(_arch.Get<EntityIdRef>(item.Value).Stable);
+        if (rec is not { Kind: SimKind.Item }) return ItemTakeResult.Fail(ItemTakeStatus.NotAnItem);
+        // Taken earlier in this scope, removal still queued: gone as far as anyone is concerned.
+        if (rec.ItemId is not { } itemId) return ItemTakeResult.Fail(ItemTakeStatus.NotFound);
+
+        EntityHandle taker = ResolveLocked(takerEntityId);
+        if (!taker.IsValid) return ItemTakeResult.Fail(ItemTakeStatus.TakerNotFound);
+        if (_arch.Get<Health>(taker.Value).Dead) return ItemTakeResult.Fail(ItemTakeStatus.TakerDead);
+
+        ref Position ip = ref _arch.Get<Position>(item.Value);
+        ref Position tp = ref _arch.Get<Position>(taker.Value);
+        var a = new Vec3(ip.Value.X, ip.Value.Y, ip.Z);
+        var b = new Vec3(tp.Value.X, tp.Value.Y, tp.Z);
+        if (!(maxRange >= 0f) || Vec3.DistanceSq(a, b) > maxRange * maxRange)
+            return ItemTakeResult.Fail(ItemTakeStatus.OutOfRange);
+
+        int quantity = rec.ItemQuantity;
+        RemoveEntityLocked(itemEntityId);
+        // A deferred removal leaves the record live until the drain; mark it taken now so a
+        // second take in the same scope cannot hand the same item out twice. (The kind stays
+        // Item so the removal still returns the id to the pool.)
+        if (rec.Kind == SimKind.Item)
+        {
+            rec.ItemId = null;
+            rec.ItemQuantity = 0;
+        }
+
+        return new ItemTakeResult(ItemTakeStatus.Taken, itemId, quantity);
+    }
+
+    /// <summary>
+    /// What the persistence sweep writes for one player: the composed state plus the two
+    /// things <see cref="EntityState"/> does not carry: height (ADR-28) and the
+    /// <c>level</c> content stat (ADR-31 character_state.level), when content defines one.
+    /// </summary>
+    public readonly record struct PlayerPersistView(EntityState State, float Z, int? Level);
+
+    /// <summary>
+    /// <see cref="PersistablePlayerStates"/> with height and level: the form the character
+    /// store needs. Same bot exclusion.
+    /// </summary>
+    public List<PlayerPersistView> PersistablePlayerViews()
+    {
+        var result = new List<PlayerPersistView>();
+
+        _rwLock.EnterReadLock();
+        _iterationDepth++;
+        try
+        {
+            uint levelId = _gameplay.StatIdFor("level");
+            foreach (ref var chunk in _playersQuery.GetChunkIterator())
+            {
+                int count = chunk.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    Entity e = chunk.Entity(i);
+                    if (_arch.Has<GameServer.Scaffolding.BotTag>(e)) continue;
+                    result.Add(PersistViewOf(e, ComposeFromChunk(ref chunk, i), levelId));
+                }
+            }
+        }
+        finally
+        {
+            _iterationDepth--;
+            _rwLock.ExitReadLock();
+        }
+
+        return result;
+    }
+
+    /// <summary>One player's <see cref="PlayerPersistView"/>; false when it is not a live player.</summary>
+    public bool TryGetPlayerPersistView(string userId, out PlayerPersistView view)
+    {
+        view = default;
+        _rwLock.EnterReadLock();
+        try
+        {
+            EntityHandle h = ResolveLocked(userId);
+            if (!h.IsValid || !_arch.Has<PlayerTag>(h.Value)) return false;
+            view = PersistViewOf(h.Value, Compose(h.Value), _gameplay.StatIdFor("level"));
+            return true;
+        }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
+    private PlayerPersistView PersistViewOf(Entity e, EntityState state, uint levelId)
+    {
+        float z = _arch.Get<Position>(e).Z;
+        int? level = null;
+        if (levelId != 0)
+        {
+            SimRecord? rec = _gameplay.Get(_arch.Get<EntityIdRef>(e).Stable);
+            if (rec != null && GameplayState.TryGetBaseStat(_gameplay, rec, levelId, out int lv)) level = lv;
+        }
+
+        return new PlayerPersistView(state, z, level);
+    }
+
+    /// <summary>
+    /// Run <paramref name="action"/> on one entity's components and gameplay record under the
+    /// write lock: the join path's way to place a loaded character (height, level) right
+    /// after spawning it. No-op when the id does not resolve.
+    /// </summary>
+    public void WithEntity<TState>(string id, TState state, WithEntityAction<TState> action)
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            EntityHandle h = ResolveLocked(id);
+            if (h.IsValid) action(_writer, in h, state);
+        }
+        finally
+        {
+            ApplyStructuralChangesLocked();
+            ExitWriteScope();
+        }
+    }
+
+    /// <summary>Callback shape of <see cref="WithEntity{TState}"/>.</summary>
+    public delegate void WithEntityAction<TState>(WorldWriter writer, in EntityHandle handle, TState state);
+
+    /// <summary>
     /// Apply any structural changes (spawn, despawn, archetype move) that were
     /// requested while a query was being iterated.
     ///
@@ -1954,6 +2176,37 @@ public sealed class EcsWorld : IDisposable
     }
 
     /// <summary>
+    /// Collect handles for every live entity with the seven standard components, in the AOI
+    /// scan's chunk order. Caller holds the WRITE lock (the query is one of the pre-resolved
+    /// read queries, so iterating it is safe under either lock). Same count-don't-saturate
+    /// contract as <see cref="QueryWithLocked{TTag}"/>.
+    /// </summary>
+    internal int QueryAllLocked(Span<EntityHandle> destination)
+    {
+        int matches = 0;
+
+        _iterationDepth++;
+        try
+        {
+            foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
+            {
+                int count = chunk.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    if (matches < destination.Length)
+                    {
+                        destination[matches] = new EntityHandle(chunk.Entity(i));
+                    }
+                    matches++;
+                }
+            }
+        }
+        finally { _iterationDepth--; }
+
+        return matches;
+    }
+
+    /// <summary>
     /// Per-tag query description, built once per closed generic rather than per call.
     ///
     /// <para>A static generic field is the allocation-free way to memoise this. It is also
@@ -1989,7 +2242,8 @@ public sealed class EcsWorld : IDisposable
             {
                 var view = new SimChunk(
                     chunk.GetSpan<Position>(), chunk.GetSpan<Health>(),
-                    chunk.GetSpan<Locomotion>(), chunk.Count);
+                    chunk.GetSpan<Locomotion>(), chunk.GetSpan<EntityIdRef>(), chunk.Count,
+                    _gameplay);
                 visitor.Visit(in view);
             }
         }
@@ -2141,11 +2395,7 @@ public sealed class EcsWorld : IDisposable
         bool isBot = (tags & EntityTags.Bot) != 0;
 
         // Assigned once per distinct id string, for the life of the world — see _stableIds.
-        if (!_stableIds.TryGetValue(state.Id, out int stable))
-        {
-            stable = _nextStableId++;
-            _stableIds[state.Id] = stable;
-        }
+        int stable = StableKeyLocked(state.Id);
 
         Entity entity = isEnemy
             ? _arch.Create(
@@ -2189,6 +2439,13 @@ public sealed class EcsWorld : IDisposable
 
         Store(entity, in state);
         _index[state.Id] = entity;
+
+        // Height, grounded flag, and the gameplay record (statuses, stat block, projectile
+        // or item payload). Only on CREATION: an overwrite of an existing entity keeps its
+        // z, its statuses and its stats, because EntityState carries none of them.
+        _gameplay.OnEntityCreated(
+            stable, new EntityHandle(entity), state.Id, state.Type,
+            ref _arch.Get<Position>(entity), ref _arch.Get<Locomotion>(entity));
     }
 
     private void RemoveEntityLocked(string id)
@@ -2202,6 +2459,23 @@ public sealed class EcsWorld : IDisposable
 
         if (!_index.Remove(id, out var entity)) return;
         if (_arch.IsAlive(entity)) _arch.Destroy(entity);
+        if (_stableIds.TryGetValue(id, out int stable)) _gameplay.OnEntityRemoved(stable);
+    }
+
+    /// <summary>
+    /// The world-stable key for <paramref name="id"/>, assigning one if the id has never been
+    /// seen. Caller holds the write lock. Lets a spawner prepare an entity's gameplay record
+    /// before the (possibly deferred) creation that will find it.
+    /// </summary>
+    internal int StableKeyLocked(string id)
+    {
+        if (!_stableIds.TryGetValue(id, out int stable))
+        {
+            stable = _nextStableId++;
+            _stableIds[id] = stable;
+        }
+
+        return stable;
     }
 
     private EntityState? GetEntityLocked(string id)

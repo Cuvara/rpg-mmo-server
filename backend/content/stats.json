@@ -1,0 +1,16 @@
+{
+  "$comment": [
+    "PLACEHOLDER CONTENT. EVERY NUMBER IN THIS FILE IS A PLACEHOLDER PENDING GAME DESIGN.",
+    "Gameplay numbers are a human decision (design gate); these exist only so the Core v3",
+    "vertical slice can run end to end. Do not balance against them, do not quote them.",
+    "",
+    "Content stats (ADR-30): the replicated stat block. id is permanent and starts at 1",
+    "(a proto3 zero is elided on the wire). key is lowercase letters, digits, underscores.",
+    "default is the value every actor (player, mob, npc, boss) spawns with.",
+    "The stat keyed 'level' is persisted as character_state.level (ADR-31)."
+  ],
+  "stats": [
+    { "id": 1, "key": "level", "default": 1 },
+    { "id": 2, "key": "mana", "default": 100 }
+  ]
+}

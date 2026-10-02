@@ -128,6 +128,18 @@ public class AoiIndexDifferentialTests
             // action look unchanged and the client would stop retriggering animations --
             // with every position, hp and action value still agreeing.
             Assert.Equal(expected[i].ActionSeq, actual[i].ActionSeq);
+
+            // Protocol 3 fields (ADR-28..30). Both arms compose through EcsWorld.ComposeView,
+            // which is what this asserts stays true.
+            Assert.Equal(expected[i].Z, actual[i].Z);
+            Assert.Equal(expected[i].VelX, actual[i].VelX);
+            Assert.Equal(expected[i].VelY, actual[i].VelY);
+            Assert.Equal(expected[i].VelZ, actual[i].VelZ);
+            Assert.Equal(expected[i].OwnerId, actual[i].OwnerId);
+            Assert.Equal(expected[i].OwnerKey, actual[i].OwnerKey);
+            Assert.Equal(expected[i].SpawnSeq, actual[i].SpawnSeq);
+            Assert.Equal(expected[i].StatsVersion, actual[i].StatsVersion);
+            Assert.Equal(expected[i].StatusesVersion, actual[i].StatusesVersion);
         }
 
         // Third opinion: the shared rule the client predicts with. Only for finite radii —
@@ -797,6 +809,10 @@ public class AoiIndexDifferentialTests
             nameof(EntityView.Position), nameof(EntityView.Hp), nameof(EntityView.MaxHp),
             nameof(EntityView.Speed), nameof(EntityView.FacingBrad), nameof(EntityView.Action),
             nameof(EntityView.ActionSeq),
+            nameof(EntityView.Z), nameof(EntityView.VelX), nameof(EntityView.VelY),
+            nameof(EntityView.VelZ), nameof(EntityView.OwnerId), nameof(EntityView.OwnerKey),
+            nameof(EntityView.SpawnSeq), nameof(EntityView.StatsVersion),
+            nameof(EntityView.StatusesVersion),
         };
 
         var actual = typeof(EntityView)

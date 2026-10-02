@@ -66,9 +66,67 @@ public readonly struct EntityView
     /// </summary>
     public readonly uint ActionSeq;
 
+    // ── Protocol 3 (ADR-28..30). Composed by EcsWorld.ComposeView; zero for a protocol 2
+    // world, so an encoder that ignores them produces the protocol 2 bytes. ──
+
+    /// <summary>
+    /// Height (wire EntitySnapshot field 14). Feet for a character, sphere centre for a
+    /// projectile, ground for an item. See <see cref="Components.Position.Z"/>.
+    /// </summary>
+    public readonly float Z;
+
+    /// <summary>Ground-plane velocity X in units/s (wire field 15); see <see cref="Components.Locomotion.VelocityX"/>.</summary>
+    public readonly float VelX;
+
+    /// <summary>Ground-plane velocity Y in units/s (wire field 16).</summary>
+    public readonly float VelY;
+
+    /// <summary>Vertical velocity in units/s (wire field 17).</summary>
+    public readonly float VelZ;
+
+    /// <summary>
+    /// Owner of a projectile (the caster), or null. The wire carries it as the owner's
+    /// interned handle; <see cref="OwnerKey"/> is the stable key to intern by.
+    /// </summary>
+    public readonly string? OwnerId;
+
+    /// <summary>World-stable key of <see cref="OwnerId"/>; 0 when there is no owner.</summary>
+    public readonly int OwnerKey;
+
+    /// <summary>
+    /// <c>InputMessage.spawn_seq</c> of the input that fired this projectile; 0 for anything
+    /// else. ADR-29 decision 2: sent to the OWNER's connection only.
+    /// </summary>
+    public readonly uint SpawnSeq;
+
+    /// <summary>
+    /// Changes whenever this entity's replicated stat block may have changed (a base stat, or
+    /// a status modifying a content stat). Read the values with
+    /// <see cref="WorldReader.CopyStats"/>. Equal versions for the same <see cref="Key"/>
+    /// mean the block is unchanged; a respawn of the key never repeats a version.
+    /// </summary>
+    public readonly uint StatsVersion;
+
+    /// <summary>
+    /// Changes whenever this entity's active statuses changed (applied, stacked, refreshed,
+    /// expired, removed). Read them with <see cref="WorldReader.CopyStatuses"/>.
+    /// </summary>
+    public readonly uint StatusesVersion;
+
     public EntityView(
         int key, string id, string type, Vec2 position, int hp, int maxHp, float speed,
         uint facingBrad, EntityAction action, uint actionSeq = 0)
+        : this(key, id, type, position, hp, maxHp, speed, facingBrad, action, actionSeq,
+               0f, 0f, 0f, 0f, null, 0, 0u, 0u, 0u)
+    {
+    }
+
+    /// <summary>Full protocol 3 view.</summary>
+    public EntityView(
+        int key, string id, string type, Vec2 position, int hp, int maxHp, float speed,
+        uint facingBrad, EntityAction action, uint actionSeq,
+        float z, float velX, float velY, float velZ,
+        string? ownerId, int ownerKey, uint spawnSeq, uint statsVersion, uint statusesVersion)
     {
         Key = key;
         Id = id;
@@ -80,5 +138,14 @@ public readonly struct EntityView
         FacingBrad = facingBrad;
         Action = action;
         ActionSeq = actionSeq;
+        Z = z;
+        VelX = velX;
+        VelY = velY;
+        VelZ = velZ;
+        OwnerId = ownerId;
+        OwnerKey = ownerKey;
+        SpawnSeq = spawnSeq;
+        StatsVersion = statsVersion;
+        StatusesVersion = statusesVersion;
     }
 }

@@ -7,6 +7,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Core v3 simulation (ADR-28..31)** — see `docs/DESIGN.md`, "Core v3 simulation".
+  - **3D movement:** players move with `CharacterMotor` (gravity, grounded jump from
+    `InputExtras.Jump`, step-up, slope limit) against the map geometry; an airborne pass keeps
+    gravity running without input. On flat ground with no jump the motor is bit-identical to
+    `MovementSystem` (pinned by `CoreV3/MotorPlanarParityTests`). New component FIELDS (no new
+    component types, no new archetypes): `Position.Z`, `Locomotion.VelocityX/Y/Z`,
+    `Grounded`, `JumpQueued`, `MotorTick`. Enemies stay planar with `z` = ground height.
+  - **Map geometry:** `content/maps/<map_id>.json` loaded at boot by `Gameplay/MapLoader.cs`
+    (source-generated JSON) and validated with `MapGeometryValidation`; an invalid file refuses
+    the boot, an absent one is the flat protocol 2 world. New players and respawns use the
+    `default` spawn point when the map has one. Example map `content/maps/dev_arena.json`.
+  - **Content:** `ContentLoader` reads optional `abilities.json`, `stats.json`,
+    `statuses.json` and `loot.json` beside `items.json` (each key in one file only), parses
+    protocol 3 abilities (`delivery`, `effects`, `projectile`), stats and statuses, and
+    server-only loot tables (`LootTables`, validated against items). A multi-file set is served
+    as one composed document; loot is never served. Placeholder dev content added — every
+    number in it is a placeholder pending design.
+  - **Abilities by delivery** (`InputHandler.ProcessAbility`, `Gameplay/CombatResolver.cs`):
+    Self, Entity, Ground (now resolves: every hostile in the radius) and Projectile (spawns a
+    `projectile` entity with owner and `spawn_seq`). Entity/Ground and a projectile's first
+    step are lag-compensated through `HitboxHistory` (clamped to 200 ms), recorded each base
+    tick by `Gameplay/GameplaySystems.cs`.
+  - **Statuses and stats:** per-entity `StatusSet` and stat block in the world-owned
+    `GameplayState` side table; DoT/HoT/expiry stepped every base tick with
+    `Periodic`/`EffectId` events; stun/root block movement, stun/silence block casting, stun
+    blocks attacks, slows scale speed; effective attack/defense/max HP feed combat.
+  - **Loot and items:** a death rolls the victim type's loot table with a seeded,
+    wall-clock-free roll and drops `item` entities (item id, quantity, despawn tick).
+    `EcsWorld.TryTakeItemEntity` / `WorldWriter.TryTakeItemEntity` for the command layer.
+  - **Characters:** joins load the character named by `cid` through `ICharacterStore`
+    (ownership mismatch refuses the join), spawn at its saved x/y/z, and the 30 s sweep and
+    leave saves write `character_state` (x/y/z, yaw, HP, level, XP) through `AsyncSaver`; the
+    default character is also mirrored to `player_states`. `ServerOptions.CharacterStore`,
+    `Geometry`, `Loot`, `LootSeed`.
+  - **For the encoder:** `EntityView` gains `Z`, `VelX/Y/Z`, `OwnerId`, `OwnerKey`,
+    `SpawnSeq`, `StatsVersion`, `StatusesVersion`; `WorldReader` gains `CopyStats`,
+    `StatCount`, `CopyStatuses`, `StatusCount`, `TryGetItemDrop` and a 3D
+    `TryGetSnapshotAnchor`. `PendingInput.Extras` / `EcsWorld.PushInput(..., in InputExtras)`
+    carry InputMessage fields 9-13.
+  - Tests: `GameServer.Tests/CoreV3/` (motor parity, projectiles and rewind, statuses, loot and
+    items, map and content loading, characters through a live server, zero-allocation critical
+    scope, enemies on terrain).
 - **Join token `cid` claim (ADR-31).** `JwtValidator.JwtClaims.CharacterId` reads `cid`
   (empty when absent, i.e. the default character); the successful join echoes it in
   `JoinTokenResponse.CharacterId` (protobuf). Note: the legacy JSON writer (`Net/WireJson.cs`)
@@ -23,6 +65,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `backend/deploy/db/migrations/gamestate/`.
 - Tests: `Persistence/CharacterStoreTests.cs` (one contract suite run against both stores;
   Postgres variant `[SkippableFact]` on the shared container), `Server/JwtCharacterClaimTests.cs`.
+
+### Changed
+
+- **Ground abilities resolve.** They were accepted and inert; they now apply their effects to
+  every hostile entity in the area. `AbilityTelemetry.GroundCastsWithoutArea` keeps its
+  `/status` name and now counts casts into empty ground.
+- **`EntityView.MaxHp` is the effective max HP** (status modifiers applied); identical to
+  `Health.MaxHp` while no status is active, so protocol 2 output is unchanged.
+- **Attacks and abilities refuse non-targets:** a projectile, a dropped item or a held
+  (link-dead) player can no longer be attacked or targeted by id (closes the gap noted in
+  CORE-BASELINE-V1 §3).
+
+### Fixed
+
+- **Ability casts and jumps are no longer coalesced away at ingest.** `EcsWorld.PushInput`
+  treated every input without an attack target as replaceable movement, so a cast followed in
+  the same drain by a movement packet from the same connection was silently dropped.
 
 ### Changed
 

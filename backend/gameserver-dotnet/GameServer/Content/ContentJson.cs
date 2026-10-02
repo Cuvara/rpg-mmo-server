@@ -42,6 +42,160 @@ internal sealed class ItemFileDto
     /// </remarks>
     [JsonPropertyName("abilities")]
     public List<AbilityDto>? Abilities { get; set; }
+
+    /// <summary>Content stats (ADR-30), or null when this document has no <c>stats</c> key. Optional, like abilities.</summary>
+    [JsonPropertyName("stats")]
+    public List<StatDto>? Stats { get; set; }
+
+    /// <summary>Status effects (ADR-30), or null when absent. Optional.</summary>
+    [JsonPropertyName("statuses")]
+    public List<StatusDto>? Statuses { get; set; }
+
+    /// <summary>
+    /// Loot tables, or null when absent. Optional, and SERVER-ONLY: never part of the
+    /// document served at <c>/content</c> (loot is a server-side roll).
+    /// </summary>
+    [JsonPropertyName("loot")]
+    public List<LootTableDto>? Loot { get; set; }
+}
+
+/// <summary>On-disk shape of a content stat (<c>stats.json</c>).</summary>
+internal sealed class StatDto
+{
+    [JsonPropertyName("id")]
+    public uint? Id { get; set; }
+
+    [JsonPropertyName("key")]
+    public string? Key { get; set; }
+
+    /// <summary>Value an entity starts with. Required: there is no neutral default for "level" or "mana".</summary>
+    [JsonPropertyName("default")]
+    public int? Default { get; set; }
+}
+
+/// <summary>On-disk shape of a status effect (<c>statuses.json</c>).</summary>
+internal sealed class StatusDto
+{
+    [JsonPropertyName("id")]
+    public uint? Id { get; set; }
+
+    [JsonPropertyName("key")]
+    public string? Key { get; set; }
+
+    /// <summary>Lifetime in BASE simulation ticks; 0 = until removed. Required.</summary>
+    [JsonPropertyName("durationTicks")]
+    public int? DurationTicks { get; set; }
+
+    /// <summary>Stack cap; defaults to 1.</summary>
+    [JsonPropertyName("maxStacks")]
+    public int? MaxStacks { get; set; }
+
+    [JsonPropertyName("periodic")]
+    public PeriodicDto? Periodic { get; set; }
+
+    [JsonPropertyName("modifiers")]
+    public List<ModifierDto>? Modifiers { get; set; }
+
+    /// <summary>Any of <c>stun</c>, <c>root</c>, <c>silence</c>, <c>slow</c>.</summary>
+    [JsonPropertyName("crowdControl")]
+    public List<string>? CrowdControl { get; set; }
+
+    [JsonPropertyName("slowPermille")]
+    public int? SlowPermille { get; set; }
+}
+
+/// <summary>DoT/HoT block of a status.</summary>
+internal sealed class PeriodicDto
+{
+    /// <summary><c>damage</c> or <c>heal</c>.</summary>
+    [JsonPropertyName("kind")]
+    public string? Kind { get; set; }
+
+    [JsonPropertyName("intervalTicks")]
+    public int? IntervalTicks { get; set; }
+
+    [JsonPropertyName("amount")]
+    public int? Amount { get; set; }
+}
+
+/// <summary>One stat modifier of a status.</summary>
+internal sealed class ModifierDto
+{
+    /// <summary><c>attack</c>, <c>defense</c>, <c>speed</c>, <c>max_hp</c> or <c>stat</c>.</summary>
+    [JsonPropertyName("target")]
+    public string? Target { get; set; }
+
+    /// <summary>Content stat id; required for <c>stat</c>, refused otherwise.</summary>
+    [JsonPropertyName("statId")]
+    public uint? StatId { get; set; }
+
+    [JsonPropertyName("add")]
+    public int? Add { get; set; }
+
+    [JsonPropertyName("multiplierPermille")]
+    public int? MultiplierPermille { get; set; }
+}
+
+/// <summary>One effect of a protocol 3 ability.</summary>
+internal sealed class EffectDto
+{
+    /// <summary><c>damage</c>, <c>heal</c> or <c>apply_status</c>.</summary>
+    [JsonPropertyName("kind")]
+    public string? Kind { get; set; }
+
+    [JsonPropertyName("power")]
+    public int? Power { get; set; }
+
+    /// <summary>Status id for <c>apply_status</c>.</summary>
+    [JsonPropertyName("statusId")]
+    public uint? StatusId { get; set; }
+}
+
+/// <summary>Projectile block of a <c>projectile</c>-delivery ability.</summary>
+internal sealed class ProjectileDto
+{
+    [JsonPropertyName("speed")]
+    public float? Speed { get; set; }
+
+    [JsonPropertyName("radius")]
+    public float? Radius { get; set; }
+
+    [JsonPropertyName("range")]
+    public float? Range { get; set; }
+}
+
+/// <summary>On-disk shape of a loot table (<c>loot.json</c>).</summary>
+internal sealed class LootTableDto
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; set; }
+
+    /// <summary>Entity type the table applies to, e.g. <c>mob</c>.</summary>
+    [JsonPropertyName("entityType")]
+    public string? EntityType { get; set; }
+
+    /// <summary>Base ticks a drop lies in the world before despawning. Required.</summary>
+    [JsonPropertyName("despawnTicks")]
+    public int? DespawnTicks { get; set; }
+
+    [JsonPropertyName("entries")]
+    public List<LootEntryDto>? Entries { get; set; }
+}
+
+/// <summary>One possible drop.</summary>
+internal sealed class LootEntryDto
+{
+    [JsonPropertyName("itemId")]
+    public string? ItemId { get; set; }
+
+    [JsonPropertyName("chancePermille")]
+    public int? ChancePermille { get; set; }
+
+    [JsonPropertyName("min")]
+    public int? Min { get; set; }
+
+    [JsonPropertyName("max")]
+    public int? Max { get; set; }
 }
 
 /// <summary>
@@ -84,6 +238,22 @@ internal sealed class AbilityDto
     /// </summary>
     [JsonPropertyName("cooldownTicks")]
     public int? CooldownTicks { get; set; }
+
+    /// <summary>
+    /// Protocol 3 delivery: <c>self</c>, <c>entity</c>, <c>ground</c> or <c>projectile</c>.
+    /// Present means the ability is written in the effect-list form: <see cref="Effects"/>
+    /// is required and the legacy <c>targeting</c>/<c>effect</c>/<c>power</c> keys are refused.
+    /// </summary>
+    [JsonPropertyName("delivery")]
+    public string? Delivery { get; set; }
+
+    /// <summary>Ordered effects (protocol 3 form).</summary>
+    [JsonPropertyName("effects")]
+    public List<EffectDto>? Effects { get; set; }
+
+    /// <summary>Projectile block; required for <c>projectile</c> delivery, refused otherwise.</summary>
+    [JsonPropertyName("projectile")]
+    public ProjectileDto? Projectile { get; set; }
 }
 
 internal sealed class ItemDto

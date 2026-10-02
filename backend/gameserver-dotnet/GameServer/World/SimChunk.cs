@@ -31,16 +31,30 @@ public readonly ref struct SimChunk
     /// <summary>Movement capability, index-aligned with <see cref="Positions"/>.</summary>
     public readonly Span<Locomotion> Locomotions;
 
+    /// <summary>
+    /// Id references (with the world-stable key), index-aligned with <see cref="Positions"/>.
+    /// The key is what reaches the entity's gameplay record (statuses, ADR-30) through
+    /// <see cref="Gameplay"/>, so a linear system can honour crowd control and slows without
+    /// resolving handles.
+    /// </summary>
+    public readonly Span<EntityIdRef> Ids;
+
+    /// <summary>The world's gameplay side: geometry, motor tuning and per-entity records.</summary>
+    public readonly GameplayState Gameplay;
+
     /// <summary>Entities in this chunk. The spans may be longer; only this many are live.</summary>
     public readonly int Count;
 
     internal SimChunk(Span<Position> positions, Span<Health> healths,
-                      Span<Locomotion> locomotions, int count)
+                      Span<Locomotion> locomotions, Span<EntityIdRef> ids, int count,
+                      GameplayState gameplay)
     {
         Positions = positions;
         Healths = healths;
         Locomotions = locomotions;
+        Ids = ids;
         Count = count;
+        Gameplay = gameplay;
     }
 }
 

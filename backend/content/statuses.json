@@ -1,0 +1,41 @@
+{
+  "$comment": [
+    "PLACEHOLDER CONTENT. EVERY NUMBER IN THIS FILE IS A PLACEHOLDER PENDING GAME DESIGN.",
+    "Durations, intervals, amounts, stack caps and slow strengths are NOT design decisions;",
+    "they exist only so the Core v3 vertical slice can run. Design owns every value here.",
+    "",
+    "Status effects (ADR-30). Durations and intervals are BASE SIMULATION TICKS",
+    "(60 per second at the default critical rate), never milliseconds.",
+    "periodic.kind: damage | heal.  crowdControl: stun | root | silence | slow.",
+    "modifiers[].target: attack | defense | speed | max_hp | stat (with statId).",
+    "multiplierPermille is a DELTA in permille: +200 = x1.2, -500 = x0.5."
+  ],
+  "statuses": [
+    {
+      "id": 1,
+      "key": "burning",
+      "durationTicks": 180,
+      "maxStacks": 3,
+      "periodic": { "kind": "damage", "intervalTicks": 60, "amount": 4 }
+    },
+    {
+      "id": 2,
+      "key": "rooted",
+      "durationTicks": 90,
+      "crowdControl": [ "root" ]
+    },
+    {
+      "id": 3,
+      "key": "chilled",
+      "durationTicks": 180,
+      "crowdControl": [ "slow" ],
+      "slowPermille": 300
+    },
+    {
+      "id": 4,
+      "key": "regenerating",
+      "durationTicks": 300,
+      "periodic": { "kind": "heal", "intervalTicks": 60, "amount": 5 }
+    }
+  ]
+}

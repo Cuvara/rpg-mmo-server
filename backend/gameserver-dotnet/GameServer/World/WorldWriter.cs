@@ -199,4 +199,84 @@ public sealed class WorldWriter
     /// the individual components instead.</para>
     /// </summary>
     public EntityState Compose(in EntityHandle handle) => _world.ComposeLocked(handle.Value);
+
+    // ── Gameplay side (ADR-28..31) ───────────────────────────────────────────
+
+    /// <summary>The world's gameplay side: geometry, motor, content, records, history.</summary>
+    public GameplayState Gameplay => _world.Gameplay;
+
+    /// <summary>
+    /// World-stable key for an id string, assigning one if the id is new. Lets a spawner
+    /// prepare a gameplay record before the entity exists.
+    /// </summary>
+    public int StableKey(string id) => _world.StableKeyLocked(id);
+
+    /// <summary>Gameplay record of a live entity, or null when it has none.</summary>
+    public SimRecord? RecordOf(in EntityHandle handle)
+    {
+        SimRecord? rec = _world.Gameplay.Get(_world.ArchInternal.Get<EntityIdRef>(handle.Value).Stable);
+        return rec is { Kind: not SimKind.None } ? rec : null;
+    }
+
+    /// <summary>
+    /// Every live entity with the seven standard components, in AOI scan order.
+    /// Count-don't-saturate, like <see cref="QueryWith{TTag}"/>.
+    /// </summary>
+    public int QueryAll(Span<EntityHandle> destination) => _world.QueryAllLocked(destination);
+
+    /// <summary>
+    /// Pick up a dropped item from inside a scope: see
+    /// <see cref="EcsWorld.TryTakeItemEntity(string, string, float)"/>, which takes the lock
+    /// itself. Use this form from code already holding a writer (the tick thread).
+    /// </summary>
+    public ItemTakeResult TryTakeItemEntity(string itemEntityId, string takerEntityId, float maxRange) =>
+        _world.TryTakeItemEntityLocked(itemEntityId, takerEntityId, maxRange);
+}
+
+/// <summary>Why <see cref="EcsWorld.TryTakeItemEntity(string, string, float)"/> did or did not hand over an item.</summary>
+public enum ItemTakeStatus
+{
+    /// <summary>The item was removed from the world; <see cref="ItemTakeResult.ItemId"/> and quantity are set.</summary>
+    Taken = 0,
+
+    /// <summary>No live entity has that id.</summary>
+    NotFound = 1,
+
+    /// <summary>The entity exists but is not a dropped item.</summary>
+    NotAnItem = 2,
+
+    /// <summary>The taker id does not resolve to a live entity.</summary>
+    TakerNotFound = 3,
+
+    /// <summary>The taker is dead.</summary>
+    TakerDead = 4,
+
+    /// <summary>The item is farther from the taker than the allowed range.</summary>
+    OutOfRange = 5,
+}
+
+/// <summary>Outcome of taking a dropped item out of the world.</summary>
+public readonly struct ItemTakeResult
+{
+    /// <summary>Builds a result.</summary>
+    public ItemTakeResult(ItemTakeStatus status, string? itemId, int quantity)
+    {
+        Status = status;
+        ItemId = itemId;
+        Quantity = quantity;
+    }
+
+    /// <summary>What happened.</summary>
+    public ItemTakeStatus Status { get; }
+
+    /// <summary>True when the item was taken.</summary>
+    public bool Taken => Status == ItemTakeStatus.Taken;
+
+    /// <summary>Content item id; null unless taken.</summary>
+    public string? ItemId { get; }
+
+    /// <summary>Stack size; 0 unless taken.</summary>
+    public int Quantity { get; }
+
+    internal static ItemTakeResult Fail(ItemTakeStatus status) => new(status, null, 0);
 }

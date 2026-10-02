@@ -797,8 +797,10 @@ try
 {
     content = ContentLoader.Load(contentDir);
     logger.LogInformation(
-        "Content loaded from {Dir}: {Items} items, {Abilities} abilities, hash {Hash}",
-        contentDir, content.Database.ItemCount, content.Database.AbilityCount, content.Hash);
+        "Content loaded from {Dir}: {Items} items, {Abilities} abilities, {Stats} stats, {Statuses} statuses, " +
+        "{Loot} loot tables, hash {Hash}",
+        contentDir, content.Database.ItemCount, content.Database.AbilityCount, content.Database.StatCount,
+        content.Database.StatusCount, content.Loot.Count, content.Hash);
 }
 catch (ContentLoadException ex)
 {
@@ -809,12 +811,50 @@ catch (ContentLoadException ex)
     return 1;
 }
 
+// ── Map geometry (ADR-28) ──
+//
+// content/maps/<map_id>.json when it exists; the flat protocol 2 world inside the configured
+// size when it does not. A map file that exists but does not parse or validate refuses the
+// boot, exactly as content does: the client predicts against the same geometry.
+GameServer.Gameplay.MapLoadResult map;
+try
+{
+    map = GameServer.Gameplay.MapLoader.Load(
+        contentDir, mapId, Shared.GameLogic.Components.MapBounds.FromSize(mapWidth, mapHeight));
+}
+catch (GameServer.Gameplay.MapLoadException ex)
+{
+    logger.LogCritical("{Message}", ex.Message);
+    return 1;
+}
+
+if (map.FromFile)
+{
+    logger.LogInformation(
+        "Map geometry loaded from {Path}: bounds {Bounds}, {Boxes} boxes, {Spawns} spawns, {Portals} portals, heightfield {HasHeightfield}",
+        map.Path, map.Geometry.Bounds, map.Geometry.Boxes.Length, map.Geometry.Spawns.Length,
+        map.Geometry.Portals.Length, map.Geometry.HeightField != null);
+
+    // The map's bounds are the play area now; enemies and bots must be placed inside the
+    // same rectangle the motor clamps to, so their settings are rebuilt against it.
+    if (GameServer.Scaffolding.EnemyAiSettings.TryCreate(Env, map.Geometry.Bounds, out var mapEnemyAi, out _))
+        enemyAi = mapEnemyAi!;
+    if (GameServer.Scaffolding.BotSettings.TryCreate(Env, map.Geometry.Bounds, out var mapBots, out _))
+        bots = mapBots!;
+}
+else
+{
+    logger.LogInformation("No map file for {MapId}; flat world {Width}x{Height} (protocol 2 geometry)",
+        mapId, mapWidth, mapHeight);
+}
+
 // ── Player store (postgres when GAME_DB_URL is set, otherwise in-memory) ──
 
 IPlayerStore playerStore = new MemoryPlayerStore();
 PostgresPlayerStore? postgresStore = null;
-// Character store (ADR-31): chosen with the player store, sharing its pool. Not yet
-// consumed by GameServer; the integration that wires it into join/save/grant owns that.
+// Character store (ADR-31): chosen with the player store, sharing its pool. Joins load the
+// character named by the join token's cid through it, and the save sweep writes
+// character_state (plus the legacy player_states row for an account's default character).
 ICharacterStore characterStore = new MemoryCharacterStore(playerStore);
 
 if (!string.IsNullOrWhiteSpace(gameDbUrl))
@@ -941,7 +981,7 @@ var options = new ServerOptions
     SimulationRates = simulationRates,
     KeyframeInterval = keyframeInterval,
     GatherWorkers = gatherWorkers,
-    MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
+    MapBounds = map.Geometry.Bounds,
     Capacity = capacity,
     MaxPendingHandshakes = maxPendingHandshakes,
     MinProtocolVersion = minProtocolVersion,
@@ -949,6 +989,8 @@ var options = new ServerOptions
     // exactly the set the client downloaded, or a cast the client believes in is refused as
     // "unknown ability" — the hash on both sides is what makes that checkable.
     Content = content.Database,
+    Geometry = map.Geometry,
+    Loot = content.Loot,
     HandshakeTimeout = TimeSpan.FromMilliseconds(handshakeTimeoutMs),
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,
@@ -964,6 +1006,7 @@ var options = new ServerOptions
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
     SaveInterval = TimeSpan.FromSeconds(30),
     PlayerStore = playerStore,
+    CharacterStore = characterStore,
     AgonesSdk = agonesSdk,
     AdvertiseHost = advertiseHost,
     RegisterOnAllocated = registerOnAllocated,

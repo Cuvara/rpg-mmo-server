@@ -1,0 +1,28 @@
+{
+  "$comment": [
+    "Example map (ADR-28): a small walled arena used by tests and as the format reference.",
+    "Loaded only by a server started with --map-id=dev_arena. PLACEHOLDER geometry, not a",
+    "designed level. Format: backend/content/README.md, 'Map geometry'.",
+    "x/y are the ground plane, z is up. The heightfield is row-major (index = row * columns",
+    "+ column) with sample (0,0) at (originX, originY)."
+  ],
+  "bounds": { "minX": -20, "minY": -20, "maxX": 20, "maxY": 20 },
+  "heightfield": {
+    "originX": -20, "originY": -20, "cellSize": 20, "columns": 3, "rows": 3,
+    "heights": [ 0, 0, 0,
+                 0, 0, 0,
+                 0, 0, 2 ]
+  },
+  "boxes": [
+    { "minX": -20, "minY": 19, "minZ": 0, "maxX": 20, "maxY": 20, "maxZ": 4 },
+    { "minX": -4, "minY": 4, "minZ": 0, "maxX": -2, "maxY": 6, "maxZ": 0.3 }
+  ],
+  "spawns": [
+    { "name": "default", "x": 0, "y": -10, "z": 0 },
+    { "name": "north_gate", "x": 0, "y": 15, "z": 0 }
+  ],
+  "portals": [
+    { "name": "to_map_01", "x": 15, "y": -15, "z": 0, "radius": 1.5, "height": 3,
+      "targetMapId": "map_01", "targetSpawn": "default" }
+  ]
+}

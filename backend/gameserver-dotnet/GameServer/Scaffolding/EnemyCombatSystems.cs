@@ -365,7 +365,18 @@ internal sealed class PlayerRespawnSystem : IEcsSystem
 
             // The same point the join path uses, clamped by the same bounds — a respawn
             // that put a player somewhere a join could not is a second placement policy.
-            writer.PositionOf(in player).Value = _settings.Bounds.Clamp(PlayerSpawn.SpawnPoint);
+            // ADR-28: the map's "default" spawn point when it has one (and its height).
+            Vec3 spawn = writer.Gameplay.DefaultSpawn();
+            ref Position at = ref writer.PositionOf(in player);
+            at.Value = writer.Gameplay.TryGetDefaultSpawn(out _)
+                ? _settings.Bounds.Clamp(new Vec2(spawn.X, spawn.Y))
+                : _settings.Bounds.Clamp(PlayerSpawn.SpawnPoint);
+            at.Z = writer.Gameplay.GroundAt(at.Value.X, at.Value.Y) > spawn.Z
+                ? writer.Gameplay.GroundAt(at.Value.X, at.Value.Y)
+                : spawn.Z;
+            ref Locomotion respawnLoc = ref writer.LocomotionOf(in player);
+            respawnLoc.VelocityZ = 0f;
+            respawnLoc.Grounded = true;
 
             // Idle, not Unspecified: Dead is terminal for the action field
             // (ActionTransitions.IsTerminal), so something has to take the entity out of
