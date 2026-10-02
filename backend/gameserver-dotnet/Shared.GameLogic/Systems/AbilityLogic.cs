@@ -49,6 +49,15 @@ namespace Shared.GameLogic.Systems
         /// <summary>An entity-targeted damage ability aimed at something already dead.</summary>
         public const string TargetDeadRejection = "ability target is already dead";
 
+        /// <summary>The caster is stunned or silenced (<see cref="StatusSet.CanCast"/> is false).</summary>
+        public const string CannotCastRejection = "caster cannot cast";
+
+        /// <summary>
+        /// A ground or projectile ability arrived with an aim point on the caster, which gives
+        /// a projectile no direction to travel in.
+        /// </summary>
+        public const string MissingAimRejection = "ability needs an aim point";
+
         /// <summary>
         /// Decides whether a cast may resolve. Returns null when it may, or one of the
         /// interned rejection constants above.
@@ -92,14 +101,14 @@ namespace Shared.GameLogic.Systems
             if (currentTick < caster.AbilityCooldownUntilTick)
                 return CooldownRejection;
 
-            switch (ability.Targeting)
+            switch (ability.Delivery)
             {
-                case AbilityTargeting.Self:
+                case AbilityDelivery.Self:
                     // Nothing further to check: the caster is alive, off cooldown, and is
                     // its own target. Range and radius are not read for Self.
                     return null;
 
-                case AbilityTargeting.Entity:
+                case AbilityDelivery.Entity:
                     if (!hasTarget)
                         return MissingTargetRejection;
 
@@ -114,7 +123,7 @@ namespace Shared.GameLogic.Systems
 
                     return null;
 
-                case AbilityTargeting.Ground:
+                case AbilityDelivery.Ground:
                     // The AIM POINT is what must be in range, not whatever the area happens
                     // to cover. A caster with a 5-unit range and a 10-unit radius reaches 15
                     // units of effect, and that is the intended reading: radius is the size
@@ -124,12 +133,52 @@ namespace Shared.GameLogic.Systems
 
                     return null;
 
+                case AbilityDelivery.Projectile:
+                    // No range check on the aim point: it only gives the direction (ADR-29
+                    // decision 5 -- derived from the caster's authoritative position), and how
+                    // far the projectile flies is its own ProjectileSpec.Range. An aim point ON
+                    // the caster has no direction at all, so it is refused rather than
+                    // normalised into NaN.
+                    if (aim.X == caster.Position.X && aim.Y == caster.Position.Y)
+                        return MissingAimRejection;
+
+                    return null;
+
                 default:
                     // An unknown targeting mode means the content set and this build
                     // disagree. Refusing is the only safe answer: guessing a mode would
                     // apply an effect the author did not describe.
                     return UnknownAbilityRejection;
             }
+        }
+
+        /// <summary>
+        /// <see cref="ValidateCast(in EntityState, AbilityDefinition?, in EntityState, bool, in Vec2, ulong)"/>
+        /// plus the caster's crowd control (ADR-30): a stunned or silenced caster is refused
+        /// with <see cref="CannotCastRejection"/>.
+        /// </summary>
+        /// <param name="casterStatuses">The caster's statuses, or null when it has none tracked.</param>
+        /// <remarks>
+        /// Crowd control is checked after "dead" and before everything else, so a silenced
+        /// player pressing an unknown or cooling-down ability is told the reason that will
+        /// still be true once the cooldown expires.
+        /// </remarks>
+        public static string? ValidateCast(
+            in EntityState caster,
+            AbilityDefinition? ability,
+            in EntityState target,
+            bool hasTarget,
+            in Vec2 aim,
+            ulong currentTick,
+            StatusSet? casterStatuses)
+        {
+            if (caster.Dead)
+                return CasterDeadRejection;
+
+            if (casterStatuses != null && !casterStatuses.CanCast)
+                return CannotCastRejection;
+
+            return ValidateCast(in caster, ability, in target, hasTarget, in aim, currentTick);
         }
 
         /// <summary>
@@ -164,6 +213,42 @@ namespace Shared.GameLogic.Systems
             int missing = target.MaxHp - target.Hp;
             if (missing <= 0) return 0;
             return ability.Power < missing ? ability.Power : missing;
+        }
+
+        /// <summary>
+        /// Damage one <see cref="EffectKind.Damage"/> entry deals, after mitigation: the
+        /// effect-list form of <see cref="CalculateAbilityDamage"/>, with the same rule
+        /// (power added to attack before defense is subtracted, floored at
+        /// <see cref="GameConstants.MinDamage"/>).
+        /// </summary>
+        /// <remarks>
+        /// <paramref name="caster"/> and <paramref name="target"/> must carry EFFECTIVE stats
+        /// (after <see cref="StatusSet.EffectiveAttack"/> / <see cref="StatusSet.EffectiveDefense"/>)
+        /// when statuses are in play; this function does not look them up.
+        /// </remarks>
+        public static int CalculateEffectDamage(in EntityState caster, in EffectSpec effect, in EntityState target)
+        {
+            int dmg = caster.Attack + effect.Power - target.Defense;
+            return dmg < GameConstants.MinDamage ? GameConstants.MinDamage : dmg;
+        }
+
+        /// <summary>
+        /// Health one <see cref="EffectKind.Heal"/> entry restores, clamped to the health
+        /// actually missing — the effect-list form of <see cref="CalculateHeal"/>.
+        /// </summary>
+        public static int CalculateEffectHeal(in EffectSpec effect, in EntityState target) =>
+            ClampHeal(effect.Power, in target);
+
+        /// <summary>
+        /// <paramref name="amount"/> clamped to the health <paramref name="target"/> is missing,
+        /// and to 0 from below. Used for periodic heals, whose amount comes from a status rather
+        /// than an ability.
+        /// </summary>
+        public static int ClampHeal(int amount, in EntityState target)
+        {
+            int missing = target.MaxHp - target.Hp;
+            if (missing <= 0 || amount <= 0) return 0;
+            return amount < missing ? amount : missing;
         }
 
         /// <summary>

@@ -1,3 +1,5 @@
+using System;
+
 namespace Shared.GameLogic.Components
 {
     /// <summary>
@@ -112,6 +114,64 @@ namespace Shared.GameLogic.Components
         /// </remarks>
         public readonly uint ChangedFields;
 
+        // --- Protocol version 3 (ADR-28..30). Every constructor that predates these leaves
+        // them at their "not sent" values: 0 and null. ---
+
+        /// <summary>
+        /// Height above the ground plane (wire field 14, ADR-28). X/Y keep their protocol 2
+        /// meaning as the ground plane; a renderer maps (X, Y, Z) to Unity (x, z, y).
+        /// </summary>
+        public readonly float Z;
+
+        /// <summary>Velocity along X in world units per second (wire field 15). See <see cref="VelZ"/>.</summary>
+        public readonly float VelX;
+
+        /// <summary>Velocity along Y in world units per second (wire field 16). See <see cref="VelZ"/>.</summary>
+        public readonly float VelY;
+
+        /// <summary>
+        /// Velocity along Z in world units per second (wire field 17). Sent for projectiles
+        /// always and for characters while airborne, so a receiver can advance them between
+        /// snapshots. All three zero means "stationary or not sent".
+        /// </summary>
+        public readonly float VelZ;
+
+        /// <summary>
+        /// Id of the entity that owns this one (the caster of a projectile), or null for
+        /// none. A full id in SIMULATION terms, like <see cref="GameEventData.SourceId"/>: the
+        /// wire's interned <c>owner</c> handle is a per-connection concern of the encoder.
+        /// </summary>
+        public readonly string? OwnerId;
+
+        /// <summary>
+        /// <c>InputMessage.spawn_seq</c> of the input that created this projectile (wire field
+        /// 19), so the owner can swap its predicted projectile for this one. 0 for every other
+        /// receiver and every non-projectile.
+        /// </summary>
+        public readonly uint SpawnSeq;
+
+        /// <summary>
+        /// Content stat values (wire field 20, ADR-30). On a full entity this is the COMPLETE
+        /// set (null reads as empty); on a delta with <see cref="Systems.SnapshotFieldBits.Stats"/>
+        /// it lists only the stats that changed.
+        /// </summary>
+        public readonly StatValueData[]? Stats;
+
+        /// <summary>
+        /// Stat ids that no longer exist (wire field 21). Only read on a delta with
+        /// <see cref="Systems.SnapshotFieldBits.Stats"/>.
+        /// </summary>
+        public readonly uint[]? StatsRemoved;
+
+        /// <summary>
+        /// Active status effects (wire field 22), under the same complete-set / delta rule as
+        /// <see cref="Stats"/> with <see cref="Systems.SnapshotFieldBits.Statuses"/>.
+        /// </summary>
+        public readonly StatusEffectData[]? Statuses;
+
+        /// <summary>Status ids that ended (wire field 23). Only read on a delta.</summary>
+        public readonly uint[]? StatusesRemoved;
+
         /// <summary>
         /// Constructs entity state without a speed, leaving <see cref="Speed"/> zero —
         /// which consumers read as "not sent".
@@ -196,7 +256,104 @@ namespace Shared.GameLogic.Components
             Action = action;
             ActionSeq = actionSeq;
             ChangedFields = changedFields;
+            Z = 0f;
+            VelX = 0f;
+            VelY = 0f;
+            VelZ = 0f;
+            OwnerId = null;
+            SpawnSeq = 0u;
+            Stats = null;
+            StatsRemoved = null;
+            Statuses = null;
+            StatusesRemoved = null;
         }
+
+        /// <summary>
+        /// Protocol 3 constructor: the protocol 2 state in <paramref name="core"/> plus every
+        /// version 3 field.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why the first parameter is a whole <see cref="EntitySnapshotData"/>.</b> The
+        /// alternative was a 21-argument positional constructor, and this type has already
+        /// shipped one positional-argument trap (the "REMOVED in 0.6.0" note above): a call
+        /// written against one overload silently binding to another with its numbers in the
+        /// wrong fields. No other overload starts with an <see cref="EntitySnapshotData"/>, so
+        /// no call written for an older overload can bind here, and the protocol 2 fields keep
+        /// being set through the constructors that already name them. Every version 3 field
+        /// of <paramref name="core"/> is ignored and replaced by these arguments;
+        /// <see cref="ChangedFields"/> is taken from <paramref name="core"/>.
+        /// </para>
+        /// <para>
+        /// For one or two fields the <c>With*</c> methods read better; this constructor is for
+        /// code that sets them all at once (the merger, a decoder).
+        /// </para>
+        /// </remarks>
+        public EntitySnapshotData(
+            in EntitySnapshotData core,
+            float z,
+            float velX,
+            float velY,
+            float velZ,
+            string? ownerId,
+            uint spawnSeq,
+            StatValueData[]? stats,
+            uint[]? statsRemoved,
+            StatusEffectData[]? statuses,
+            uint[]? statusesRemoved)
+        {
+            Id = core.Id;
+            Type = core.Type;
+            X = core.X;
+            Y = core.Y;
+            Hp = core.Hp;
+            MaxHp = core.MaxHp;
+            Speed = core.Speed;
+            FacingBrad = core.FacingBrad;
+            Action = core.Action;
+            ActionSeq = core.ActionSeq;
+            ChangedFields = core.ChangedFields;
+            Z = z;
+            VelX = velX;
+            VelY = velY;
+            VelZ = velZ;
+            OwnerId = ownerId;
+            SpawnSeq = spawnSeq;
+            Stats = stats;
+            StatsRemoved = statsRemoved;
+            Statuses = statuses;
+            StatusesRemoved = statusesRemoved;
+        }
+
+        /// <summary>A copy with <see cref="Z"/> replaced.</summary>
+        public EntitySnapshotData WithZ(float z) =>
+            new EntitySnapshotData(in this, z, VelX, VelY, VelZ, OwnerId, SpawnSeq, Stats, StatsRemoved, Statuses, StatusesRemoved);
+
+        /// <summary>A copy with the three velocity components replaced.</summary>
+        public EntitySnapshotData WithVelocity(float velX, float velY, float velZ) =>
+            new EntitySnapshotData(in this, Z, velX, velY, velZ, OwnerId, SpawnSeq, Stats, StatsRemoved, Statuses, StatusesRemoved);
+
+        /// <summary>A copy with <see cref="OwnerId"/> and <see cref="SpawnSeq"/> replaced.</summary>
+        public EntitySnapshotData WithOwner(string? ownerId, uint spawnSeq) =>
+            new EntitySnapshotData(in this, Z, VelX, VelY, VelZ, ownerId, spawnSeq, Stats, StatsRemoved, Statuses, StatusesRemoved);
+
+        /// <summary>A copy with <see cref="Stats"/> and <see cref="StatsRemoved"/> replaced.</summary>
+        public EntitySnapshotData WithStats(StatValueData[]? stats, uint[]? statsRemoved = null) =>
+            new EntitySnapshotData(in this, Z, VelX, VelY, VelZ, OwnerId, SpawnSeq, stats, statsRemoved, Statuses, StatusesRemoved);
+
+        /// <summary>A copy with <see cref="Statuses"/> and <see cref="StatusesRemoved"/> replaced.</summary>
+        public EntitySnapshotData WithStatuses(StatusEffectData[]? statuses, uint[]? statusesRemoved = null) =>
+            new EntitySnapshotData(in this, Z, VelX, VelY, VelZ, OwnerId, SpawnSeq, Stats, StatsRemoved, statuses, statusesRemoved);
+
+        /// <summary>
+        /// A copy with <see cref="ChangedFields"/> replaced, keeping every other field
+        /// including the protocol 3 ones.
+        /// </summary>
+        public EntitySnapshotData WithChangedFields(uint changedFields) =>
+            new EntitySnapshotData(
+                new EntitySnapshotData(Id, Type, X, Y, Hp, MaxHp, Speed, FacingBrad, Action,
+                    actionSeq: ActionSeq, changedFields: changedFields),
+                Z, VelX, VelY, VelZ, OwnerId, SpawnSeq, Stats, StatsRemoved, Statuses, StatusesRemoved);
     }
 
     /// <summary>
@@ -244,5 +401,80 @@ namespace Shared.GameLogic.Components
             : this(tick, 0, true, entities, null)
         {
         }
+    }
+
+    /// <summary>
+    /// One content stat value on an entity (wire <c>StatValue</c>, ADR-30). A simulation type;
+    /// nothing serializes it.
+    /// </summary>
+    public readonly struct StatValueData : IEquatable<StatValueData>
+    {
+        /// <summary>Builds a stat value.</summary>
+        public StatValueData(uint statId, int value)
+        {
+            StatId = statId;
+            Value = value;
+        }
+
+        /// <summary>Content stat id (<see cref="Content.StatDefinition.Id"/>), 1 or greater.</summary>
+        public uint StatId { get; }
+
+        /// <summary>Current value.</summary>
+        public int Value { get; }
+
+        /// <inheritdoc />
+        public bool Equals(StatValueData other) => StatId == other.StatId && Value == other.Value;
+
+        /// <inheritdoc />
+        public override bool Equals(object? obj) => obj is StatValueData other && Equals(other);
+
+        /// <inheritdoc />
+        public override int GetHashCode() => ((int)StatId * 397) ^ Value;
+
+        /// <inheritdoc />
+        public override string ToString() => $"{StatId}={Value}";
+    }
+
+    /// <summary>
+    /// One active status effect on an entity (wire <c>StatusEffect</c>, ADR-30). A simulation
+    /// type: the applier is a full id, like <see cref="GameEventData.SourceId"/>, and the
+    /// wire's interned <c>source</c> handle is the encoder's concern.
+    /// </summary>
+    public readonly struct StatusEffectData : IEquatable<StatusEffectData>
+    {
+        /// <summary>Builds a status entry.</summary>
+        public StatusEffectData(uint effectId, uint stacks, ulong expiresTick, string? sourceId)
+        {
+            EffectId = effectId;
+            Stacks = stacks;
+            ExpiresTick = expiresTick;
+            SourceId = sourceId;
+        }
+
+        /// <summary>Content status id (<see cref="Content.StatusDefinition.Id"/>), 1 or greater.</summary>
+        public uint EffectId { get; }
+
+        /// <summary>Current stack count.</summary>
+        public uint Stacks { get; }
+
+        /// <summary>Server tick the effect ends on; 0 means "until removed".</summary>
+        public ulong ExpiresTick { get; }
+
+        /// <summary>Id of the entity that applied it, or null for none.</summary>
+        public string? SourceId { get; }
+
+        /// <inheritdoc />
+        public bool Equals(StatusEffectData other) =>
+            EffectId == other.EffectId && Stacks == other.Stacks && ExpiresTick == other.ExpiresTick &&
+            string.Equals(SourceId, other.SourceId, StringComparison.Ordinal);
+
+        /// <inheritdoc />
+        public override bool Equals(object? obj) => obj is StatusEffectData other && Equals(other);
+
+        /// <inheritdoc />
+        public override int GetHashCode() => ((int)EffectId * 397) ^ (int)Stacks ^ ExpiresTick.GetHashCode();
+
+        /// <inheritdoc />
+        public override string ToString() => $"{EffectId}x{Stacks}@{ExpiresTick}";
     }
 }

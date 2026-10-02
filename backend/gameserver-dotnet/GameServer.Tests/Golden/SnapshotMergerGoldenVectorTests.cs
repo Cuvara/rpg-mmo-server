@@ -25,14 +25,33 @@ public class SnapshotMergerGoldenVectorTests
     // fields present" — identical to omitting the field. Non-zero means a partial update:
     // only the bits that are set have valid data; the merger keeps its last-known value
     // for every unset bit. See Shared.GameLogic.Systems.SnapshotFieldBits.
+    //
+    // Protocol version 3 fields (z, velX/velY/velZ as hex, ownerId, spawnSeq, stats,
+    // statsRemoved, statuses, statusesRemoved) are optional on the same terms: every case
+    // written before them parses unchanged and asserts nothing about them.
     private record SnapEntity(
         string Id, string Type, string X, string Y, int Hp, int MaxHp,
         string? Speed = null, uint FacingBrad = 0, int Action = 0,
-        uint ChangedFields = 0);
+        uint ChangedFields = 0,
+        string? Z = null, string? VelX = null, string? VelY = null, string? VelZ = null,
+        string? OwnerId = null, uint SpawnSeq = 0,
+        StatJson[]? Stats = null, uint[]? StatsRemoved = null,
+        StatusJson[]? Statuses = null, uint[]? StatusesRemoved = null);
 
+    // An expectation that is null is "not stated" and is not asserted. ownerId "" means
+    // "expected absent (null)"; stats/statuses [] mean "expected empty (null)".
     private record ExpectedEntity(
         string Id, int Hp, string X, string Y,
-        string? Speed = null, uint? FacingBrad = null, int? Action = null);
+        string? Speed = null, uint? FacingBrad = null, int? Action = null,
+        string? Z = null, string? VelX = null, string? VelY = null, string? VelZ = null,
+        string? OwnerId = null, uint? SpawnSeq = null,
+        StatJson[]? Stats = null, StatusJson[]? Statuses = null);
+
+    private record StatJson(uint StatId, int Value);
+
+    private record StatusJson(uint EffectId, uint Stacks, ulong ExpiresTick, string? SourceId = null);
+
+    private static float Hex(string? hex) => hex == null ? 0f : GoldenVectors.Float(hex);
 
     private sealed class SnapStep
     {
@@ -103,6 +122,17 @@ public class SnapshotMergerGoldenVectorTests
                     // value under test.
                     actionSeq: 0u,
                     changedFields: e.ChangedFields);
+
+                // Protocol version 3 fields, through the constructor that cannot be confused
+                // with the positional protocol 2 overloads.
+                entities[i] = new EntitySnapshotData(
+                    in entities[i],
+                    Hex(e.Z), Hex(e.VelX), Hex(e.VelY), Hex(e.VelZ),
+                    e.OwnerId, e.SpawnSeq,
+                    e.Stats?.Select(s => new StatValueData(s.StatId, s.Value)).ToArray(),
+                    e.StatsRemoved,
+                    e.Statuses?.Select(s => new StatusEffectData(s.EffectId, s.Stacks, s.ExpiresTick, s.SourceId)).ToArray(),
+                    e.StatusesRemoved);
             }
 
             var snapshot = new SnapshotData(
@@ -155,6 +185,44 @@ public class SnapshotMergerGoldenVectorTests
             {
                 Assert.Equal((EntityAction)c.expectedEntityState.Action.Value, entity.Action);
             }
+
+            AssertVersion3(name, c.expectedEntityState, entity);
+        }
+    }
+
+    private static void AssertVersion3(string name, ExpectedEntity expected, EntitySnapshotData entity)
+    {
+        string at = name + "." + expected.Id;
+        if (expected.Z != null) GoldenVectors.AssertBitEqual(expected.Z, entity.Z, at + ".z");
+        if (expected.VelX != null) GoldenVectors.AssertBitEqual(expected.VelX, entity.VelX, at + ".velX");
+        if (expected.VelY != null) GoldenVectors.AssertBitEqual(expected.VelY, entity.VelY, at + ".velY");
+        if (expected.VelZ != null) GoldenVectors.AssertBitEqual(expected.VelZ, entity.VelZ, at + ".velZ");
+
+        if (expected.OwnerId != null)
+        {
+            Assert.Equal(expected.OwnerId.Length == 0 ? null : expected.OwnerId, entity.OwnerId);
+        }
+
+        if (expected.SpawnSeq != null) Assert.Equal(expected.SpawnSeq.Value, entity.SpawnSeq);
+
+        // Order is part of the contract (SnapshotMerger.MergeStats), so it is asserted.
+        if (expected.Stats != null)
+        {
+            var want = expected.Stats.Select(s => new StatValueData(s.StatId, s.Value)).ToArray();
+            Assert.Equal(want, entity.Stats ?? Array.Empty<StatValueData>());
+        }
+
+        if (expected.Statuses != null)
+        {
+            var want = expected.Statuses.Select(s => new StatusEffectData(s.EffectId, s.Stacks, s.ExpiresTick, s.SourceId)).ToArray();
+            Assert.Equal(want, entity.Statuses ?? Array.Empty<StatusEffectData>());
+        }
+
+        // The merged state is complete; removal lists are consumed by the merge.
+        if (expected.Stats != null || expected.Statuses != null)
+        {
+            Assert.Null(entity.StatsRemoved);
+            Assert.Null(entity.StatusesRemoved);
         }
     }
 }

@@ -43,5 +43,44 @@ namespace Shared.GameLogic.Systems
 
         /// <summary>EntitySnapshot.action_seq (field 12)</summary>
         public const uint ActionSeq  = 0x0100;
+
+        // --- Protocol version 3. Sent only to peers that advertised version >= 3; a version 2
+        // peer never sees these bits because it never receives the fields they describe. ---
+
+        /// <summary>EntitySnapshot.z (field 14, protocol version 3). Height above the ground plane.</summary>
+        public const uint Z          = 0x0200;
+
+        /// <summary>
+        /// EntitySnapshot.vel_x / vel_y / vel_z (fields 15-17, protocol version 3). One bit for
+        /// all three axes: velocity is one vector and a receiver extrapolating with two fresh
+        /// components and one stale one would curve a straight projectile.
+        /// </summary>
+        public const uint Velocity   = 0x0400;
+
+        /// <summary>
+        /// EntitySnapshot.owner / owner_id / spawn_seq (fields 18 / 24 / 19, protocol version 3),
+        /// treated as one logical field: who owns the entity and which predicted spawn it
+        /// replaces.
+        /// </summary>
+        public const uint Owner      = 0x0800;
+
+        /// <summary>
+        /// EntitySnapshot.stats / stats_removed (fields 20 / 21, protocol version 3). When set
+        /// on a delta, <c>stats</c> lists only the changed entries (upserted by stat id) and
+        /// <c>stats_removed</c> the ids to drop; every other stat keeps its last-known value.
+        /// </summary>
+        public const uint Stats      = 0x1000;
+
+        /// <summary>
+        /// EntitySnapshot.statuses / statuses_removed (fields 22 / 23, protocol version 3),
+        /// merged by <c>effect_id</c> under the same rule as <see cref="Stats"/>.
+        /// </summary>
+        public const uint Statuses   = 0x2000;
+
+        /// <summary>Every bit protocol version 2 defines.</summary>
+        public const uint AllVersion2 = X | Y | Hp | MaxHp | Type | Speed | FacingBrad | Action | ActionSeq;
+
+        /// <summary>Every bit protocol version 3 defines (a superset of <see cref="AllVersion2"/>).</summary>
+        public const uint AllVersion3 = AllVersion2 | Z | Velocity | Owner | Stats | Statuses;
     }
 }

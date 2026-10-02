@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+// Payload schemas for the generic gameplay command channel (ADR-30.4).
+//
+// wire.proto carries every discrete gameplay command as an opcode plus opaque
+// bytes: CommandRequest { seq, opcode, payload } from the client, exactly one
+// CommandResult { seq, ok, error, payload } back, and unsolicited
+// ServerPush { opcode, payload } messages. THIS file defines what those payload
+// bytes mean for each opcode. Adding a command is an opcode and a message here,
+// a server handler and a client caller -- no change to wire.proto, no Netcode
+// release and no protocol bump.
+//
+// THE CODEC IS NOT GENERATED. Shared.GameLogic encodes and decodes these
+// messages with its own dependency-free Protobuf-compatible codec
+// (Gameplay/ProtoWriter.cs, ProtoReader.cs, GameplayMessages.cs) because the
+// Unity client compiles this package as source and must not depend on
+// Google.Protobuf. GameServer.Tests/Gameplay generates C# from this file with
+// protoc (generate.sh there) and proves the hand-written codec byte-identical
+// to it in both directions. Change this file and that codec together.
+//
+// Opcode numbers and field numbers are FROZEN once shipped. Append only.
+//
+// OPCODES (constants in Gameplay/GameplayOpcodes.cs):
+//
+//   opcode   direction        request payload    result payload (ok = true)
+//   ------   --------------   ----------------   --------------------------
+//   1        client->server   InventoryRequest   InventoryView
+//   2        client->server   PickupRequest      InventoryView
+//   3        client->server   EquipRequest       empty; the change arrives as push 100
+//   4        client->server   UnequipRequest     empty; the change arrives as push 100
+//   5        client->server   UseItemRequest     empty; the change arrives as push 100
+//   100      server->client   (ServerPush) InventoryChanged
+//
+// Opcode 0 is "not sent" and is refused. Opcodes 1-99 are requests, 100 and
+// up are pushes, so one number never names both a request and a push.
+//
+// ERROR CODES (CommandResult.error when ok = false; Gameplay/GameplayErrors):
+//
+//   unknown_opcode   the server does not know this opcode
+//   invalid_payload  the payload did not decode as the opcode's message
+//   rate_limited     too many requests for this opcode
+//   not_found        a named entity, item instance or slot does not exist
+//   out_of_range     the target is too far away (pickup)
+//   slot_mismatch    the item cannot be worn in the named slot
+//   inventory_full   no bag space for the result
+//   not_owner        the item instance belongs to someone else
+
+package rpgmmo.gameplay.v1;
+
+option csharp_namespace = "RpgMmo.Gameplay.V1";
+
+// Opcode 1. Asks for the caller's whole inventory. No fields; encodes to zero
+// bytes.
+message InventoryRequest {}
+
+// Opcode 2. Pick up the world item entity `entity_id`.
+message PickupRequest {
+  string entity_id = 1;
+}
+
+// Opcode 3. Wear bag item `instance_id` in equipment slot `slot`
+// (lowercase ItemSlot name: "weapon", "head", "chest", "legs", "trinket").
+message EquipRequest {
+  string instance_id = 1;
+  string slot = 2;
+}
+
+// Opcode 4. Move whatever is worn in `slot` back to the bag.
+message UnequipRequest {
+  string slot = 1;
+}
+
+// Opcode 5. Use (consume) bag item `instance_id`.
+message UseItemRequest {
+  string instance_id = 1;
+}
+
+// One stack of items the character holds.
+message ItemStack {
+  // Server-assigned id of this stack, unique per character. What every other
+  // request names.
+  string instance_id = 1;
+  // Content item id (ItemDefinition.Id).
+  string item_id = 2;
+  uint32 quantity = 3;
+  // "bag" or "equipped".
+  string container = 4;
+  // Equipment slot when container = "equipped"; empty in the bag.
+  string slot = 5;
+  // Bag position when container = "bag"; 0 when equipped.
+  uint32 bag_index = 6;
+}
+
+// The complete inventory: bag and equipment. Always complete, never a delta --
+// inventories are small and a client that misses a push must not drift.
+message InventoryView {
+  repeated ItemStack items = 1;
+}
+
+// Push opcode 100: the caller's inventory changed (pickup, equip, use, loot,
+// grant). Carries the complete new view.
+message InventoryChanged {
+  InventoryView view = 1;
+}
