@@ -79,12 +79,19 @@ func AssignMap(ctx context.Context, userID, mapID string, reg *registry.Registry
 // token on an address that is not answering. Every field below therefore comes
 // from the entry FindServer returned, never from an allocation response.
 func AssignMapKeyring(ctx context.Context, userID, mapID string, reg *registry.RegistryService, joinKeys jwt.Keyring) (AssignResult, error) {
+	return AssignMapCharacter(ctx, userID, "", mapID, reg, joinKeys)
+}
+
+// AssignMapCharacter is AssignMapKeyring for a selected character: the minted
+// join token carries characterID as its `cid` claim (ADR-31). Empty means the
+// account's default character and omits the claim.
+func AssignMapCharacter(ctx context.Context, userID, characterID, mapID string, reg *registry.RegistryService, joinKeys jwt.Keyring) (AssignResult, error) {
 	srv, err := reg.FindServer(ctx, mapID)
 	if err != nil {
 		return AssignResult{}, fmt.Errorf("assign map: %w", err)
 	}
 
-	token, err := GenerateJoinTokenKeyring(userID, srv.ServerID, joinKeys)
+	token, err := GenerateJoinTokenCharacter(userID, srv.ServerID, characterID, joinKeys)
 	if err != nil {
 		return AssignResult{}, fmt.Errorf("assign map: %w", err)
 	}

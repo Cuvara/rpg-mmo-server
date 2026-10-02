@@ -30,3 +30,15 @@ func VerifyClientJWTKeyring(token string, keys jwt.Keyring) (string, error) {
 	}
 	return claims.UserID, nil
 }
+
+// VerifyClientClaimsKeyring is VerifyClientJWTKeyring returning every claim,
+// not only the user id. The gateway needs the `cid` claim (ADR-31) to carry the
+// selected character into the join token; an absent claim yields an empty
+// CharacterID, meaning the account's default character.
+func VerifyClientClaimsKeyring(token string, keys jwt.Keyring) (jwt.Claims, error) {
+	claims, err := keys.Verify(token)
+	if err != nil {
+		return jwt.Claims{}, fmt.Errorf("verify client jwt: %w", err)
+	}
+	return claims, nil
+}

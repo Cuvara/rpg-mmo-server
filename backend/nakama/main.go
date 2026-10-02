@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/nakama/auth"
+	"github.com/duycuong/rpg-mmo/nakama/character"
 	"github.com/duycuong/rpg-mmo/nakama/economy"
 	"github.com/duycuong/rpg-mmo/nakama/social"
 	"github.com/heroiclabs/nakama-common/runtime"
@@ -65,6 +66,23 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 		{social.RPCPartyGet, social.PartyGetRPC},
 	}
 	for _, r := range partyRPCs {
+		if err := initializer.RegisterRpc(r.name, r.handler); err != nil {
+			return fmt.Errorf("register rpc %s: %w", r.name, err)
+		}
+	}
+
+	// Character roster RPCs (ADR-31). All three require a client session and
+	// act on the caller's own roster; gateway_token checks a character_id
+	// against the same roster before minting a `cid` claim.
+	characterRPCs := []struct {
+		name    string
+		handler func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule, string) (string, error)
+	}{
+		{character.RPCCharacterList, character.ListRPC},
+		{character.RPCCharacterCreate, character.CreateRPC},
+		{character.RPCCharacterDelete, character.DeleteRPC},
+	}
+	for _, r := range characterRPCs {
 		if err := initializer.RegisterRpc(r.name, r.handler); err != nil {
 			return fmt.Errorf("register rpc %s: %w", r.name, err)
 		}

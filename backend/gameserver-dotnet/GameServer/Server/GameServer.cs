@@ -1750,6 +1750,7 @@ public sealed class GameServerHost : IAsyncDisposable
                 UserId = userId,
                 TickRate = (uint)_rates.MovementHz,
                 ProtocolVersion = WireProtocol.ProtocolVersion,
+                CharacterId = claims.CharacterId, // ADR-31: the join token's cid, "" = default
             },
                 conn.Encoding);
             await conn.WriteOneAsync(resp);

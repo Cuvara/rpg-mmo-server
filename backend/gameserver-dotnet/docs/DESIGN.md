@@ -2256,3 +2256,43 @@ players and uptime for the ADR-7 comparison), `snapshot_entities_shed`,
 observed deferral high-water mark, the number that says whether the bound above is
 holding) and `max_snapshot_bytes` (the cap that produced them — the others say nothing
 without it).
+
+## Characters: state, bag and equipment in the game DB (2026-10-02, ADR-31)
+
+ADR-31 moves the game-state key from the account to the character. Nakama owns the roster
+(`character_*` RPCs); the game server owns everything a character carries, in three tables
+added by migration `002_characters` (see `backend/deploy/docs/DATABASE.md`).
+
+**Store.** `ICharacterStore` (`Persistence/CharacterStore.cs`) with `PostgresCharacterStore`
+(same pool as the player store, `PostgresCharacterStore.Over(players)`) and
+`MemoryCharacterStore` (dev/tests). `Program.cs` selects it next to the player store; it is
+not yet consumed by the join/save/grant paths — that integration is separate work.
+
+**Which character a connection plays.** The join token's `cid` claim (`JwtValidator.JwtClaims.CharacterId`),
+echoed in `JoinTokenResponse.character_id`. Absent = the default character; the store's
+convention for its key is `CharacterIds.Resolve(cid, userId)` = the user id.
+
+**First load (expand/contract).** `LoadCharacterAsync` reads `character_state`; with no row
+it copies the account's `player_states` row (map, x, y, hp, max_hp; level 1, xp 0, z 0, yaw 0)
+into `character_state` in the same transaction and flags the result `FromLegacyPlayerState`.
+Every character of an account without its own row inherits the same legacy row once; that is
+accepted until protocol 2 is retired and `player_states` is contracted away.
+
+**Two write cadences (ADR-6).** `SaveCharacterAsync` carries position, yaw, HP, level and XP
+and is meant for the 30 s sweep and the leave-world save. Item operations
+(`GrantItemAsync`, `ConsumeItemAsync`, `EquipItemAsync`, `UnequipItemAsync`,
+`MoveItemAsync`) are each ONE transaction written at the moment they happen. Grant and
+consume are idempotent by grant id: the `item_grants` row and the item change commit
+together, a replayed id is a no-op (`Applied = false`), and a refused operation rolls its
+ledger row back so the id stays usable. Equip into an occupied slot swaps the occupant to the
+end of the bag in the same transaction; the partial unique index guarantees one item per slot.
+
+**Ownership.** Load and save refuse a character row whose `user_id` differs
+(`CharacterStoreError.OwnershipMismatch`); the save does it inside the upsert
+(`DO UPDATE ... WHERE character_state.user_id = EXCLUDED.user_id`). Item operations require
+the character's row to exist (FK; `CharacterNotFound` otherwise) — save a brand-new
+character before granting to it.
+
+**Not decided here (placeholders / open).** No stacking, bag capacity or slot-name rules:
+those are content. Deleting a roster character in Nakama leaves its rows; cleanup belongs to
+a later contract step.

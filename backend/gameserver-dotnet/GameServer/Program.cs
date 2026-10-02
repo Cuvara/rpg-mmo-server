@@ -813,6 +813,9 @@ catch (ContentLoadException ex)
 
 IPlayerStore playerStore = new MemoryPlayerStore();
 PostgresPlayerStore? postgresStore = null;
+// Character store (ADR-31): chosen with the player store, sharing its pool. Not yet
+// consumed by GameServer; the integration that wires it into join/save/grant owns that.
+ICharacterStore characterStore = new MemoryCharacterStore(playerStore);
 
 if (!string.IsNullOrWhiteSpace(gameDbUrl))
 {
@@ -823,6 +826,7 @@ if (!string.IsNullOrWhiteSpace(gameDbUrl))
         postgresStore = await PostgresPlayerStore.ConnectAsync(gameDbUrl, CancellationToken.None);
         await postgresStore.MigrateAsync(CancellationToken.None);
         playerStore = postgresStore;
+        characterStore = PostgresCharacterStore.Over(postgresStore);
         logger.LogInformation("using postgres player store ({Dsn})", PostgresPlayerStore.MaskDsn(gameDbUrl));
     }
     catch (Exception ex)

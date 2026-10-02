@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Join token `cid` claim (ADR-31).** `JwtValidator.JwtClaims.CharacterId` reads `cid`
+  (empty when absent, i.e. the default character); the successful join echoes it in
+  `JoinTokenResponse.CharacterId` (protobuf). Note: the legacy JSON writer (`Net/WireJson.cs`)
+  does not emit `character_id` yet.
+- **Character store (ADR-31).** `ICharacterStore` with `PostgresCharacterStore` and
+  `MemoryCharacterStore` (`Persistence/CharacterStore.cs`, `PostgresCharacterStore.cs`):
+  `LoadCharacterAsync` (falls back to and materialises the account's `player_states` row on
+  first load), `SaveCharacterAsync` (sweep fields, ownership-checked upsert), and one-transaction
+  item operations — `GrantItemAsync` / `ConsumeItemAsync` idempotent by grant id,
+  `EquipItemAsync` (swap), `UnequipItemAsync`, `MoveItemAsync`, `ListItemsAsync`. Selected in
+  `Program.cs` beside the player store (shared pool); not yet wired into join/save/grant.
+- **Migration `002_characters`**: `character_state`, `character_items`, `item_grants`
+  (expand only; `player_states` untouched). Deploy copy in
+  `backend/deploy/db/migrations/gamestate/`.
+- Tests: `Persistence/CharacterStoreTests.cs` (one contract suite run against both stores;
+  Postgres variant `[SkippableFact]` on the shared container), `Server/JwtCharacterClaimTests.cs`.
+
 ### Changed
 
 - **Wire protocol version 3** (`WireProtocol.ProtocolVersion = 3`) and regenerated

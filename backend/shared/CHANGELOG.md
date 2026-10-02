@@ -6,6 +6,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`cid` JWT claim (ADR-31, contract `join-token`).** `jwt.Claims.CharacterID`
+  (`json:"cid,omitempty"`), `jwt.SignWithCharacter` and `Keyring.SignWithCharacter`. Empty omits
+  the claim (= the account's default character), so every existing token and reader is
+  unaffected; `SignWithServer` now delegates with an empty character. `Claims.IsZero` accounts
+  for the new field. Table-driven tests in `jwt/cid_test.go`.
 - **Wire protocol version 3 (ADR-28..31).** `wire.proto` adds 3D (`EntitySnapshot.z`,
   velocity, `InputMessage.aim_z`), jump, lag-compensation timing (`render_tick`,
   `render_alpha`), projectile ownership (`owner`, `owner_id`, `spawn_seq`), the extensible stat

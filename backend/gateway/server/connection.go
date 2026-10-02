@@ -43,6 +43,10 @@ type ClientConn struct {
 	mu     sync.RWMutex
 	userID string
 	state  ConnState
+	// characterID is the gateway token's `cid` claim (ADR-31), latched at auth
+	// with userID and cleared with it. Empty means the account's default
+	// character. Guarded by mu like userID.
+	characterID string
 
 	sendCh chan messages.Envelope
 	done   chan struct{}
@@ -244,12 +248,29 @@ func (c *ClientConn) Identity() (string, ConnState) {
 	return c.userID, c.state
 }
 
-// SetAuthenticated binds a verified user to the connection.
+// SetAuthenticated binds a verified user to the connection, playing the
+// account's default character.
 func (c *ClientConn) SetAuthenticated(userID string) {
+	c.SetAuthenticatedCharacter(userID, "")
+}
+
+// SetAuthenticatedCharacter binds a verified user and the character their
+// gateway token names (its `cid` claim, ADR-31; empty = default character).
+// Both are set under one lock so a reader never sees one without the other.
+func (c *ClientConn) SetAuthenticatedCharacter(userID, characterID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.userID = userID
+	c.characterID = characterID
 	c.state = StateAuthenticated
+}
+
+// CharacterID returns the character the authenticated gateway token named, or
+// "" for the default character (or no identity). Safe from any goroutine.
+func (c *ClientConn) CharacterID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.characterID
 }
 
 // SetInWorld marks the connection as assigned to a game server. It is a no-op
@@ -276,6 +297,7 @@ func (c *ClientConn) ClearIdentity() string {
 	defer c.mu.Unlock()
 	userID := c.userID
 	c.userID = ""
+	c.characterID = ""
 	c.state = StateConnected
 	return userID
 }

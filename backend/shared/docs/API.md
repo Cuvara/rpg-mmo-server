@@ -7,13 +7,16 @@ Public symbols other modules code against. Signatures here are authoritative.
 ```go
 func Sign(userID, secret string, expiry time.Duration) (string, error)
 func SignWithServer(userID, serverID, secret string, expiry time.Duration) (string, error)
+func SignWithCharacter(userID, serverID, characterID, secret string, expiry time.Duration) (string, error)
 func Verify(token, secret string) (Claims, error)
 
 type Claims struct {
-    UserID   string `json:"sub"`
-    ServerID string `json:"sid,omitempty"`
-    IssuedAt int64  `json:"iat"`
-    ExpireAt int64  `json:"exp"`
+    UserID      string `json:"sub"`
+    ServerID    string `json:"sid,omitempty"`
+    Jti         string `json:"jti,omitempty"`
+    CharacterID string `json:"cid,omitempty"` // ADR-31
+    IssuedAt    int64  `json:"iat"`
+    ExpireAt    int64  `json:"exp"`
 }
 func (c Claims) IsExpired() bool
 ```
@@ -22,6 +25,12 @@ func (c Claims) IsExpired() bool
 `typ == "JWT"`) → HMAC signature → `exp`. Tokens carrying `alg: "none"`, `HS512`, `RS256`,
 a missing/odd `typ`, or a non-base64 header are rejected before any signature work.
 The API is unchanged — callers need no edits.
+
+`cid` (ADR-31, contract `join-token`): the roster character the token plays. Nakama's
+`gateway_token` sets it after an ownership check; the gateway copies it into the join token;
+the C# `JwtValidator` reads it. Empty = claim omitted = the account's default character, so
+readers MUST tolerate absence (every pre-protocol-3 token). `Keyring.SignWithCharacter` is
+the keyring variant. The `jti` rule is unchanged: a jti is added iff `serverID` is non-empty.
 
 ### `Keyring` — secret rotation
 

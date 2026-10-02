@@ -29,14 +29,14 @@ import (
 // Gateway is the main TCP server that handles client authentication
 // and map assignment before redirecting to game servers.
 type Gateway struct {
-	sessions  *session.SessionManager
-	registry  *registry.RegistryService
+	sessions *session.SessionManager
+	registry *registry.RegistryService
 	// dungeonIndex and partyMembers are nil on a deployment without dungeons.
 	// Nil is a supported state, not an oversight: see assignDungeon.
 	dungeonIndex storage.DungeonIndex
 	partyMembers transfer.PartyMembership
-	jwtSecret string
-	logger    *slog.Logger
+	jwtSecret    string
+	logger       *slog.Logger
 
 	// authKeys verifies client auth tokens (JWT_SECRET, possibly a rotation
 	// list). joinKeys signs join tokens (JOIN_TOKEN_SECRET, defaulting to
@@ -884,13 +884,18 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
-	userID, err := session.VerifyClientJWTKeyring(req.Token, g.authKeys)
+	claims, err := session.VerifyClientClaimsKeyring(req.Token, g.authKeys)
 	if err != nil {
 		g.metrics.AuthResult(false)
 		g.logAuthFailure(cc, slog.LevelWarn, "", "invalid_token", err)
 		g.sendAuthError(cc, "invalid token")
 		return
 	}
+	userID := claims.UserID
+	// The character this login plays (ADR-31). Nakama checked ownership when it
+	// minted the token; the gateway only carries the claim forward into the join
+	// token. Empty = the account's default character (every pre-protocol-3 token).
+	characterID := claims.CharacterID
 
 	ctx := context.Background()
 
@@ -944,7 +949,7 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	}
 	g.metrics.AuthResult(true)
 
-	cc.SetAuthenticated(userID)
+	cc.SetAuthenticatedCharacter(userID, characterID)
 	g.trackUser(userID, cc)
 
 	// Once per session: MsgAuth is sent once per connection, and a client that
@@ -1118,6 +1123,23 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
+	// ADR-31: the character comes from the gateway token's `cid` claim, where
+	// Nakama checked ownership — never from this request. A request that names
+	// a character is only a consistency check against the token: a client that
+	// selected one character and authenticated with a token for another (a
+	// stale token after switching characters) is refused rather than silently
+	// placed as the wrong character. Empty in the request means "whatever the
+	// token says", which is every protocol 2 client.
+	characterID := cc.CharacterID()
+	if req.CharacterID != "" && req.CharacterID != characterID {
+		g.metrics.EnterWorldResult(false)
+		g.logger.Warn("enter world failed",
+			"conn", cc.ID(), "user", userID, "reason", msgCharacterMismatch,
+			"requested_character", req.CharacterID, "token_character", characterID)
+		g.sendEnterWorldError(cc, msgCharacterMismatch)
+		return
+	}
+
 	// One deadline over the WHOLE assignment path. Each leg beneath it —
 	// registry lookup retries, the Agones allocation call, the wait for the
 	// allocated pod to self-register — carries its own timeout, and stacked
@@ -1138,9 +1160,9 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	var result transfer.AssignResult
 	var err error
 	if req.PartyID != "" {
-		result, err = g.assignDungeon(ctx, userID, req.PartyID, req.MapID)
+		result, err = g.assignDungeon(ctx, userID, characterID, req.PartyID, req.MapID)
 	} else {
-		result, err = transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
+		result, err = transfer.AssignMapCharacter(ctx, userID, characterID, req.MapID, g.registry, g.joinKeys)
 	}
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
@@ -1263,9 +1285,16 @@ const (
 	// self-register at startup before any allocation (ADR-18), so once the
 	// replacement is Ready the next EnterWorld resolves it straight from the
 	// registry with no allocator call at all. It names no fleet or namespace.
-	msgFleetBusy      = "all servers busy, retry shortly"
-	msgNotImplemented = "not implemented"
-	msgInternalError  = "internal error"
+	msgFleetBusy = "all servers busy, retry shortly"
+	// msgCharacterMismatch is terminal: EnterWorldRequest.character_id names a
+	// character other than the one the gateway token's `cid` claim carries
+	// (ADR-31). The client must fetch a new gateway token for the character it
+	// selected (gateway_token with character_id) and re-authenticate; retrying
+	// on this connection cannot change the answer. A machine-readable token
+	// rather than a sentence, so a client can branch on it.
+	msgCharacterMismatch = "character_mismatch"
+	msgNotImplemented    = "not implemented"
+	msgInternalError     = "internal error"
 )
 
 func clientSafeAssignError(err error) string {
@@ -1312,7 +1341,7 @@ func clientSafeAssignError(err error) string {
 // dungeon fleet and no Nakama URL is a valid deployment today, and it must fail
 // a dungeon request legibly rather than panic on a nil field. That is the same
 // posture the allocator already takes for an unconfigured dungeon fleet.
-func (g *Gateway) assignDungeon(ctx context.Context, userID, partyID, contentID string) (transfer.AssignResult, error) {
+func (g *Gateway) assignDungeon(ctx context.Context, userID, characterID, partyID, contentID string) (transfer.AssignResult, error) {
 	if g.dungeonIndex == nil || g.partyMembers == nil {
 		return transfer.AssignResult{}, fmt.Errorf("assign dungeon: %w",
 			gameerrors.New(gameerrors.ErrNotImplemented,
@@ -1320,10 +1349,11 @@ func (g *Gateway) assignDungeon(ctx context.Context, userID, partyID, contentID 
 	}
 
 	return transfer.AssignDungeon(ctx, userID, partyID, contentID, transfer.DungeonDeps{
-		Registry: g.registry,
-		Index:    g.dungeonIndex,
-		Party:    g.partyMembers,
-		JoinKeys: g.joinKeys,
+		Registry:    g.registry,
+		Index:       g.dungeonIndex,
+		Party:       g.partyMembers,
+		JoinKeys:    g.joinKeys,
+		CharacterID: characterID,
 	})
 }
 

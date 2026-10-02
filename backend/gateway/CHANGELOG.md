@@ -5,6 +5,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Character selection carried into the join token (ADR-31).** `handleAuth` keeps the gateway
+  token's `cid` claim on the connection (`ClientConn.SetAuthenticatedCharacter` /
+  `CharacterID`, cleared with the identity); `handleEnterWorld` mints the join token with it
+  (`transfer.AssignMapCharacter`, `GenerateJoinTokenCharacter`, `DungeonDeps.CharacterID`). The
+  gateway never takes the character from the request: a non-empty
+  `EnterWorldRequest.character_id` that differs from the token's `cid` is refused with the
+  terminal error `character_mismatch` and no join token. Protocol 2 clients (no `cid`, no
+  `character_id`) are unchanged. New `session.VerifyClientClaimsKeyring`. Tests:
+  `server/character_test.go`, `transfer/join_token_character_test.go`.
+
 ### Fixed
 - **The gateway failed EVERY dungeon entry the moment the meta hop's TLS went on, and the
   client saw only "internal error".** It reads `NAKAMA_URL` from the same ConfigMap key the

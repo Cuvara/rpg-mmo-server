@@ -88,7 +88,17 @@ func (k Keyring) SignWithServer(userID, serverID string, expiry time.Duration) (
 	if !k.Valid() {
 		return "", fmt.Errorf("sign: empty keyring")
 	}
-	return SignWithServer(userID, serverID, k.Signing(), expiry)
+	return k.SignWithCharacter(userID, serverID, "", expiry)
+}
+
+// SignWithCharacter issues a HS256 token with optional server ID and character
+// ID (`cid`, ADR-31) claims, using the signing secret. An empty characterID
+// omits the claim.
+func (k Keyring) SignWithCharacter(userID, serverID, characterID string, expiry time.Duration) (string, error) {
+	if !k.Valid() {
+		return "", fmt.Errorf("sign: empty keyring")
+	}
+	return SignWithCharacter(userID, serverID, characterID, k.Signing(), expiry)
 }
 
 // Verify validates a token against every secret in the keyring, in order, and
@@ -120,5 +130,5 @@ func (k Keyring) Verify(token string) (Claims, error) {
 // IsZero reports whether the claims are empty, i.e. Verify failed before it
 // could decode a payload.
 func (c Claims) IsZero() bool {
-	return c.UserID == "" && c.ServerID == "" && c.IssuedAt == 0 && c.ExpireAt == 0
+	return c.UserID == "" && c.ServerID == "" && c.CharacterID == "" && c.IssuedAt == 0 && c.ExpireAt == 0
 }

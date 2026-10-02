@@ -6,7 +6,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-
+- **Character roster RPCs (ADR-31): `character_list`, `character_create`, `character_delete`**
+  (`character/`), registered in `InitModule`. One version-checked storage object per user
+  (collection `characters`, key `roster`, owner-read / server-write), so concurrent creates
+  cannot exceed the slot cap or share a slot. Character ids are UUID v4. Slot cap (4) and name
+  rule (3..16 of `[A-Za-z0-9_]`) are **placeholders pending design**, named as such in code and
+  `docs/API.md`. Rate limited per user (shared create/delete bucket 0.2/s burst 5; list 1/s
+  burst 10). No outbound calls; deleting a character does not touch game-state rows.
+- **`gateway_token` accepts `character_id`.** Checked against the caller's roster ("not yours"
+  and "unknown" both answer code 5 `character not found`) and minted as the `cid` claim, echoed
+  as `character_id` in the response. Absent = no claim = default character (unchanged
+  behaviour). New `auth.IssueGatewayTokenForCharacter`.
+- Client follow-up (`client-integration`): character-select UI over these RPCs, and the plugin
+  must be rebuilt (`make plugin`) before the RPCs exist in a running Nakama.
 - **Party, as four Nakama RPCs over the storage engine** (`social/`, roadmap item C2). `party_create`,
   `party_join`, `party_leave`, `party_get`, registered from `main.go`. Capped at **4 members**
   (`social.MaxPartyMembers`, the number the root `CLAUDE.md` states under Social); the 5th join is
