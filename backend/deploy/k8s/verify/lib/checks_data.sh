@@ -56,8 +56,8 @@ check_pg_game() {
     fail "game Postgres served the wrong database" "$VERIFY_PG_GAME_DB" "$db" "the GAME_DB_URL the game server is given"
     return
   fi
-  if [ "$ver" != "${VERIFY_GAME_MIGRATION:-1}" ]; then
-    fail "game schema is at the wrong migration version" "schema_migrations max version = ${VERIFY_GAME_MIGRATION:-1}" \
+  if [ "$ver" != "${VERIFY_GAME_MIGRATION:-2}" ]; then
+    fail "game schema is at the wrong migration version" "schema_migrations max version = ${VERIFY_GAME_MIGRATION:-2}" \
       "$ver" "backend/gameserver-dotnet migrations; smoketest --expect-migration-version"
     return
   fi

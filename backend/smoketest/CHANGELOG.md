@@ -5,6 +5,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Expected game-state schema version is now 2 (`002_characters`, ADR-31): smoketest
+  `DefaultExpectMigration` and the k8s verify `VERIFY_GAME_MIGRATION` defaults and targets.
+
 ### Added
 - **`dungeonprobe` takes both pins too (`-gateway-tls-cert`, `-nakama-tls-cert`).** It is the
   tool that proves C1 (dungeon instancing), and it could not run at all against a dev cluster

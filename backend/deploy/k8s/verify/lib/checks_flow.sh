@@ -44,7 +44,7 @@ check_flow_smoke() {
     --gateway-addr "$VERIFY_GATEWAY_ADDR"
     --map-id "$VERIFY_MAP_ID"
     --strict-addr
-    --expect-migration-version "${VERIFY_GAME_MIGRATION:-1}"
+    --expect-migration-version "${VERIFY_GAME_MIGRATION:-2}"
   )
   # The meta hop's pin (ADR-24). The smoketest refuses an https URL without it
   # rather than failing inside an x509 message several steps from the cause.
