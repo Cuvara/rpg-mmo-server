@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Successful handshakes echo the negotiated protocol version** (the client's own inside
+  the supported window [2, 3], otherwise the server's). Clients built at protocol 2 accept
+  only an exact echo, so echoing 3 made them refuse a server that had just admitted them.
+  Refusals still echo the server's own version.
+
 ### Added
 - **Core v3 network (ADR-28..31, wire protocol 3)** — see `docs/API.md` (normative) and
   `docs/DESIGN.md`, "Core v3 network".

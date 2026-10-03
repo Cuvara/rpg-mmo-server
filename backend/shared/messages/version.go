@@ -94,3 +94,23 @@ func ProtocolVersionMismatchError(peerVersion, minVersion uint32) error {
 	return fmt.Errorf("peer speaks protocol version %d, this build serves %d-%d (configured minimum %d)",
 		peerVersion, MinSupportedProtocolVersion, WireProtocolVersion, minVersion)
 }
+
+// NegotiatedProtocolVersion is the version a server ECHOES on a SUCCESSFUL
+// handshake reply: the peer's own version when it lies inside this build's
+// window [MinSupportedProtocolVersion, WireProtocolVersion], otherwise this
+// build's version.
+//
+// Echoing the peer's version rather than our own is what lets a server that
+// admits protocol 2 actually serve a protocol 2 client: clients built before
+// protocol 3 accept only an exact echo, so a server echoing 3 to them would be
+// refused by the client it just admitted. It also states the truth: the server
+// serves that peer the shape of the version it echoes. A NEW client still
+// detects an OLD server, because an old server echoes its own lower version
+// (or 0), never the client's. Refusals keep echoing WireProtocolVersion so a
+// refused client learns which version to be.
+func NegotiatedProtocolVersion(peerVersion uint32) uint32 {
+	if peerVersion >= MinSupportedProtocolVersion && peerVersion <= WireProtocolVersion {
+		return peerVersion
+	}
+	return WireProtocolVersion
+}

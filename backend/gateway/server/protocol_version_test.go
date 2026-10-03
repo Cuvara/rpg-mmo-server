@@ -236,9 +236,16 @@ func TestSupportedProtocolWindowOverTheSocket(t *testing.T) {
 			if !tt.admit && resp.Error != messages.ReasonProtocolVersionMismatch {
 				t.Fatalf("refusal reason = %q, want %q", resp.Error, messages.ReasonProtocolVersionMismatch)
 			}
-			if resp.ProtocolVersion != messages.WireProtocolVersion {
-				t.Errorf("gateway must echo its own version %d, got %d",
-					messages.WireProtocolVersion, resp.ProtocolVersion)
+			// An admitted peer is echoed the negotiated version (its own, inside the
+			// window), because a protocol 2 client accepts only an exact echo. A
+			// refused peer is echoed this build's version so it learns what to be.
+			want := messages.WireProtocolVersion
+			if tt.admit {
+				want = messages.NegotiatedProtocolVersion(tt.version)
+			}
+			if resp.ProtocolVersion != want {
+				t.Errorf("gateway echo = %d, want %d",
+					resp.ProtocolVersion, want)
 			}
 		})
 	}

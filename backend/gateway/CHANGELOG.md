@@ -5,6 +5,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Successful handshakes echo the negotiated protocol version** (the client's own inside
+  the supported window [2, 3], otherwise the server's). Clients built at protocol 2 accept
+  only an exact echo, so echoing 3 made them refuse a server that had just admitted them.
+  Refusals still echo the server's own version.
+
 ### Added
 - **Protocol 2 and 3 clients are both admitted (wire protocol window).** No gateway code
   change: `handleAuth` uses `shared/messages.CheckProtocolVersion`, which now admits

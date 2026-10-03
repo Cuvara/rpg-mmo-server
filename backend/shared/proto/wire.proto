@@ -171,10 +171,19 @@ message Envelope {
 // snapshot, and a client can hold a valid join token while disagreeing with the
 // game server about the schema the join token gives it access to.
 //
-// The responses ECHO the server's own version. That is the only way a NEW client
-// detects an OLD server: an old server does not know the field, ignores it, and
-// replies without one, so a client that sees 0 coming back knows it is talking
-// to a peer that never checked. Nothing else on the wire reveals that.
+// The responses ECHO a version. That is the only way a NEW client detects an OLD
+// server: an old server does not know the field, ignores it, and replies without
+// one, so a client that sees 0 coming back knows it is talking to a peer that
+// never checked. Nothing else on the wire reveals that.
+//
+// WHICH VERSION IS ECHOED (protocol 3). A server that admits a window of
+// versions echoes the NEGOTIATED one on a successful handshake: the client's own
+// version when it lies inside the window, the server's otherwise. That is the
+// version whose shape the server then serves, and it is what lets a protocol 2
+// client -- which accepts only an exact echo -- keep working against a protocol
+// 3 server. Refusals echo the server's own (highest) version, so a refused client
+// learns which version to be. An old server still echoes its own lower version
+// or 0, never a newer client's, so detection of an old server is unchanged.
 
 // --- Gateway handshake ---
 

@@ -395,7 +395,11 @@ game server records each connection's advertised version (`Connection.PeerProtoc
 and serves it that version's shape — a protocol 2 peer gets no `z`, no stats, no statuses,
 no projectile or item entities, no v3 event types, no v3 mask bits and no command channel,
 exactly the bytes a protocol 2 server sent. The gateway never carries gameplay, so it has
-nothing version-specific to serve. Both echo their **own** version (`3`) in the response.
+nothing version-specific to serve. On a **successful** handshake both echo the
+**negotiated** version: the client's own when it lies inside the window, otherwise their own
+(`3`). A protocol 2 client accepts only an exact echo, so echoing `3` would make it refuse a
+server that had just admitted it. Refusals echo the server's own version (`3`).
+(`WireProtocol.NegotiatedProtocolVersion` / `messages.NegotiatedProtocolVersion`.)
 
 A peer one version **ahead** of the window is still refused just as firmly as one behind
 it: this build cannot know what a later version changed. Retiring protocol 2 is a

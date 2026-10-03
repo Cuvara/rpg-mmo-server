@@ -37,7 +37,7 @@ public class V3HandshakeAndSnapshotTests
         string user = $"u-v{version}-{encoding}";
         using var c = await h.JoinAsync(user, version, encoding);
 
-        Assert.Equal(WireProtocol.ProtocolVersion, c.Join.ProtocolVersion); // the server echoes ITS version
+        Assert.Equal(version, c.Join.ProtocolVersion); // admitted: the server echoes the NEGOTIATED version (the peer's own)
         Connection conn = h.Server.ConnectionOf(user)!;
         Assert.Equal(version, conn.PeerProtocolVersion);
         Assert.Equal(version, conn.DeltaState.PeerProtocolVersion);

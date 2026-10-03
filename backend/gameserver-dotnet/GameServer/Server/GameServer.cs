@@ -1902,7 +1902,8 @@ public sealed class GameServerHost : IAsyncDisposable
                 Ok = true,
                 UserId = userId,
                 TickRate = (uint)_rates.MovementHz,
-                ProtocolVersion = WireProtocol.ProtocolVersion,
+                // Negotiated, not ours: a protocol 2 client accepts only an exact echo.
+                ProtocolVersion = WireProtocol.NegotiatedProtocolVersion(joinReq.ProtocolVersion),
                 CharacterId = claims.CharacterId, // ADR-31: the join token's cid, "" = default
             },
                 conn.Encoding);

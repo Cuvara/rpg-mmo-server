@@ -966,9 +966,11 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	}
 
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
-		OK:              true,
-		UserID:          userID,
-		ProtocolVersion: messages.WireProtocolVersion,
+		OK:     true,
+		UserID: userID,
+		// The negotiated version, not ours: a protocol 2 client accepts only an
+		// exact echo. See messages.NegotiatedProtocolVersion.
+		ProtocolVersion: messages.NegotiatedProtocolVersion(req.ProtocolVersion),
 	})
 	if err != nil {
 		g.logger.Error("marshal auth response", "err", err)

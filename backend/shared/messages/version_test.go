@@ -285,3 +285,24 @@ func roundTrip(t *testing.T, enc Encoding, msgType MsgType, payload any, out any
 		t.Fatalf("UnmarshalPayload: %v", err)
 	}
 }
+
+func TestNegotiatedProtocolVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		peer uint32
+		want uint32
+	}{
+		{"unversioned peer gets this build's version", ProtocolVersionUnversioned, WireProtocolVersion},
+		{"below window gets this build's version", MinSupportedProtocolVersion - 1, WireProtocolVersion},
+		{"protocol 2 peer is echoed 2", MinSupportedProtocolVersion, MinSupportedProtocolVersion},
+		{"current peer is echoed current", WireProtocolVersion, WireProtocolVersion},
+		{"newer peer gets this build's version", WireProtocolVersion + 1, WireProtocolVersion},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NegotiatedProtocolVersion(tt.peer); got != tt.want {
+				t.Errorf("NegotiatedProtocolVersion(%d) = %d, want %d", tt.peer, got, tt.want)
+			}
+		})
+	}
+}

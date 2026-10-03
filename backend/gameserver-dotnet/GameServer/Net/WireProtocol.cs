@@ -197,6 +197,24 @@ public static class WireProtocol
         return VersionVerdict.Refused;
     }
 
+    /// <summary>
+    /// The version a server ECHOES on a successful join: the peer's own version when
+    /// it lies inside [<see cref="MinSupportedProtocolVersion"/>,
+    /// <see cref="ProtocolVersion"/>], otherwise <see cref="ProtocolVersion"/>.
+    /// </summary>
+    /// <remarks>
+    /// Clients built before protocol 3 accept only an exact echo, so a server that
+    /// admits them and echoes 3 would be refused by the client it just admitted.
+    /// Echoing the negotiated version also states what the server serves that peer.
+    /// A new client still detects an old server, which echoes its own lower version
+    /// or 0. Refusals keep echoing <see cref="ProtocolVersion"/>. Mirrors
+    /// <c>shared/messages.NegotiatedProtocolVersion</c> in Go.
+    /// </remarks>
+    public static uint NegotiatedProtocolVersion(uint peerVersion) =>
+        peerVersion >= MinSupportedProtocolVersion && peerVersion <= ProtocolVersion
+            ? peerVersion
+            : ProtocolVersion;
+
     /// <summary>First byte of a JSON body.</summary>
     private const byte JsonPrefix = (byte)'{';
 

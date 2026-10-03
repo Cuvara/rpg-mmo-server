@@ -51,8 +51,10 @@ func joinVersioned(t *testing.T, gsAddr, playerID string, protocolVersion uint32
 	if !resp.OK {
 		t.Fatalf("join rejected for %s (protocol %d): %s", playerID, protocolVersion, resp.Error)
 	}
-	if resp.ProtocolVersion != messages.WireProtocolVersion {
-		t.Fatalf("join resp protocol_version = %d, want the server's %d", resp.ProtocolVersion, messages.WireProtocolVersion)
+	// The server echoes the NEGOTIATED version: the client's own inside the
+	// window, because a protocol 2 client accepts only an exact echo.
+	if want := messages.NegotiatedProtocolVersion(protocolVersion); resp.ProtocolVersion != want {
+		t.Fatalf("join resp protocol_version = %d, want negotiated %d", resp.ProtocolVersion, want)
 	}
 	return client, resp
 }
