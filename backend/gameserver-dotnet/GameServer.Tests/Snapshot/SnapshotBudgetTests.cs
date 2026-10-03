@@ -533,6 +533,18 @@ public class SnapshotBudgetTests
             // to the computed mask in the partial path and to 0 in the full-replace path;
             // both are explicit writes so budget sizing (which also calls Fill) stays exact.
             nameof(EntitySnapshot.ChangedFields),
+            // Protocol version 3 (ADR-28..30). Fill writes every one of these for a v3
+            // connection (FillV3Full / FillV3Delta) and ResetV3 clears them on every fill, so a
+            // v2 connection pays zero bytes for them. The repeated fields (stats, stats_removed,
+            // statuses, statuses_removed) are get-only and so not listed here; they are filled
+            // and cleared in the same two places.
+            nameof(EntitySnapshot.Z),
+            nameof(EntitySnapshot.VelX),
+            nameof(EntitySnapshot.VelY),
+            nameof(EntitySnapshot.VelZ),
+            nameof(EntitySnapshot.Owner),
+            nameof(EntitySnapshot.SpawnSeq),
+            nameof(EntitySnapshot.OwnerId),
         };
 
         string[] actual = typeof(EntitySnapshot)

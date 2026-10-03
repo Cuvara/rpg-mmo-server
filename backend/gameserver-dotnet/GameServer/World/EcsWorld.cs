@@ -1984,6 +1984,7 @@ public sealed class EcsWorld : IDisposable
             return ItemTakeResult.Fail(ItemTakeStatus.OutOfRange);
 
         int quantity = rec.ItemQuantity;
+        ulong despawnTick = rec.DespawnTick;
         RemoveEntityLocked(itemEntityId);
         // A deferred removal leaves the record live until the drain; mark it taken now so a
         // second take in the same scope cannot hand the same item out twice. (The kind stays
@@ -1994,7 +1995,7 @@ public sealed class EcsWorld : IDisposable
             rec.ItemQuantity = 0;
         }
 
-        return new ItemTakeResult(ItemTakeStatus.Taken, itemId, quantity);
+        return new ItemTakeResult(ItemTakeStatus.Taken, itemId, quantity, despawnTick);
     }
 
     /// <summary>

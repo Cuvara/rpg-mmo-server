@@ -6,6 +6,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`core_v3_e2e_test.go`** — wire protocol 3 against the real C# game server, both encodings:
+  `TestCoreV3_CommandInventory` (a protocol 3 client's InventoryRequest gets exactly one
+  CommandResult; unknown opcode and a pick-up of nothing are named refusals; a protocol 2
+  client's command is answered `unknown_opcode`), `TestCoreV3_ProtocolTwoPeerGetsTheProtocolTwoShape`
+  (a protocol 3 jumper receives `z` and stat blocks while a protocol 2 watcher of the same player
+  receives no v3 field, mask bit, entity kind or event), and
+  `TestCoreV3_CharacterIDEchoedThroughTheGateway` (a gateway token's `cid` comes back as
+  `JoinTokenResponse.character_id`; none comes back empty).
 - **`gameplay_v2_e2e_test.go`** — the event channel, ability input and `action_seq` over a
   real socket against the real C# game server, in both encodings.
 

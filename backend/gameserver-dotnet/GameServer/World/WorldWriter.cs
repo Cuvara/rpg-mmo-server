@@ -259,12 +259,19 @@ public enum ItemTakeStatus
 public readonly struct ItemTakeResult
 {
     /// <summary>Builds a result.</summary>
-    public ItemTakeResult(ItemTakeStatus status, string? itemId, int quantity)
+    public ItemTakeResult(ItemTakeStatus status, string? itemId, int quantity, ulong despawnTick = 0)
     {
         Status = status;
         ItemId = itemId;
         Quantity = quantity;
+        DespawnTick = despawnTick;
     }
+
+    /// <summary>
+    /// Tick the taken item was due to despawn on; 0 unless taken. Together with the entity id it
+    /// names one drop (ids are recycled), which is what the command layer's grant id is built from.
+    /// </summary>
+    public ulong DespawnTick { get; }
 
     /// <summary>What happened.</summary>
     public ItemTakeStatus Status { get; }

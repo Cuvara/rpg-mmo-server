@@ -500,6 +500,12 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly AsyncSaver _saver;
     private readonly InputHandler _inputHandler;
 
+    /// <summary>The gameplay command channel (ADR-30); see <see cref="Commands.CommandRouter"/>.</summary>
+    private readonly Commands.CommandRouter _commands;
+
+    /// <summary>The command router, for tests.</summary>
+    internal Commands.CommandRouter CommandRouter => _commands;
+
     /// <summary>
     /// Events produced by the current tick. Cleared by the tick loop before input runs and
     /// read by every connection's gather in the same tick — see
@@ -648,6 +654,9 @@ public sealed class GameServerHost : IAsyncDisposable
 
     /// <summary>The server's world. Tests and diagnostics only.</summary>
     internal EcsWorld World => _world;
+
+    /// <summary>The live connection of <paramref name="userId"/>, if any. Tests.</summary>
+    internal Connection? ConnectionOf(string userId) => _connections.Get(userId);
 
     /// <summary>Run the on-removal save for one player now. Tests only.</summary>
     internal Task<bool> SavePlayerNowAsync(string userId) => _saver.SavePlayerAsync(userId);
@@ -965,6 +974,19 @@ public sealed class GameServerHost : IAsyncDisposable
             _isDungeon ? PlayerSaveScope.StatsOnly : PlayerSaveScope.Full,
             characters: _characterStore,
             sessions: _characterSessions);
+
+        _commands = new Commands.CommandRouter(
+            _world,
+            _characterStore,
+            _characterSessions,
+            options.Content,
+            options.ServerId,
+            // Process start in ms, hex: grant ids of this run cannot collide with a previous
+            // run of the same server id (see CommandRouter's constructor).
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x"),
+            _metrics,
+            _loggerFactory.CreateLogger<Commands.CommandRouter>(),
+            _saver.SavePlayerAsync);
 
         if (options.ServerRegistry != null)
         {
@@ -1757,6 +1779,10 @@ public sealed class GameServerHost : IAsyncDisposable
             conn = new Connection(userId, accepted, connLogger, tempConn.Encoding)
             {
                 JoinJti = claims.Jti,
+                // Recorded per connection (it also sets DeltaState.PeerProtocolVersion): it
+                // decides the snapshot shape and whether the command channel is open. 0 for an
+                // unversioned peer, which gets the version 2 shape.
+                PeerProtocolVersion = joinReq.ProtocolVersion,
                 // Derived, not received. The gateway computed the same value from the same
                 // secret and jti and gave it to the client; nothing carrying it crosses
                 // this hop. See GameServer.Net.Security.SessionKey.
@@ -1774,11 +1800,13 @@ public sealed class GameServerHost : IAsyncDisposable
         // though snapshots are only built on world ticks. See SnapshotDeltaState.TickHz.
         conn.DeltaState.TickHz = _tickLoop.Rates.BaseHz;
         conn.DeltaState.WorldEvery = _tickLoop.Rates.WorldEvery;
-        // Field-level delta requires the client to have proved it speaks protocol version 2
-        // (exact match, not AcceptedUnversioned) AND to be using Protobuf, which the encoder
-        // re-checks via intern. An unversioned client cannot merge partial entities safely.
+        // Field-level delta requires the client to have proved it speaks protocol version 2 or
+        // later (an advertised version, not AcceptedUnversioned) AND to be using Protobuf, which
+        // the encoder re-checks via intern. An unversioned client cannot merge partial entities
+        // safely. Version 2 and 3 peers both merge partial entities; version 3 adds mask bits
+        // 0x0200-0x2000, which the encoder only writes for a version 3 peer.
         conn.DeltaState.FieldDelta =
-            _options.FieldDelta && joinReq.ProtocolVersion == WireProtocol.ProtocolVersion;
+            _options.FieldDelta && joinReq.ProtocolVersion >= WireProtocol.MinSupportedProtocolVersion;
 
             // Register connection, retiring the reservation under the same lock it was
             // taken under. The one way this fails: the reservation was a replacement of a
@@ -2053,7 +2081,11 @@ public sealed class GameServerHost : IAsyncDisposable
                     // aim is meaningless without an ability and the simulation says so, and
                     // a branch here would be a second place that has to agree about which
                     // field gates which. Two float copies cost less than that agreement.
-                    new Vec2(input.AimX, input.AimY)), conn.Ingress);
+                    new Vec2(input.AimX, input.AimY)), conn.Ingress,
+                    // Protocol 3 fields 9-13 (ADR-28/29). Read for every peer: a version 2
+                    // client cannot send them, so they decode as the zero "not sent" values
+                    // and the input is exactly a protocol 2 input.
+                    new InputExtras(input.Jump, input.AimZ, input.RenderTick, input.RenderAlpha, input.SpawnSeq));
                 switch (ingest)
                 {
                     case InputIngestResult.Coalesced:
@@ -2081,7 +2113,9 @@ public sealed class GameServerHost : IAsyncDisposable
                 if (!conn.TryBeginTransfer())
                 {
                     _metrics?.RecordTransferRejected();
-                    conn.Send(WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+                    // Control lane: a reply the client is waiting for must not be the item the
+                    // snapshot queue drops when it is full.
+                    conn.SendControl(WireProtocol.NewEnvelope(MsgType.TransferMapResp,
                         new TransferMapResponse { Ok = false, Error = "transfer already in progress" },
                         conn.Encoding));
                     break;
@@ -2089,6 +2123,13 @@ public sealed class GameServerHost : IAsyncDisposable
                 // Fire-and-forget: the transfer handler is async (save + respond),
                 // but the read loop must not block on it.
                 _ = HandleTransferMapAsync(conn, env);
+                break;
+
+            case MsgType.Command:
+                // ADR-30 command channel. Non-blocking here: decode, version gate, rate limit,
+                // then the connection's worker runs the handler (store I/O) off this loop and
+                // off the tick thread, and answers on the control lane.
+                _commands.OnRequest(conn, env);
                 break;
 
             case MsgType.Ping:

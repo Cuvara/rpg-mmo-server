@@ -28,20 +28,61 @@ namespace GameServer.Net;
 /// </summary>
 internal readonly struct SendItem
 {
-    /// <summary>Non-null for a pre-built envelope; null for a snapshot marker.</summary>
+    /// <summary>Non-null for a pre-built envelope; null for a snapshot marker or a wake.</summary>
     public readonly Envelope? Envelope;
 
-    private SendItem(Envelope? envelope) => Envelope = envelope;
+    /// <summary>
+    /// True for a wake-up: "the control lane has something", carrying nothing itself. See
+    /// <see cref="Connection.SendControl"/>.
+    /// </summary>
+    public readonly bool IsWake;
 
-    public static SendItem Snapshot => new(null);
+    private SendItem(Envelope? envelope, bool wake)
+    {
+        Envelope = envelope;
+        IsWake = wake;
+    }
 
-    public static SendItem For(Envelope envelope) => new(envelope);
+    public static SendItem Snapshot => new(null, false);
+
+    public static SendItem Wake => new(null, true);
+
+    public static SendItem For(Envelope envelope) => new(envelope, false);
 }
 
 public sealed class Connection : IDisposable
 {
     /// <summary>User ID associated with this connection (set after JWT validation).</summary>
     public string UserId { get; }
+
+    /// <summary>
+    /// Wire protocol version the peer advertised in its join (0 = unversioned), recorded per
+    /// connection at the handshake. Decides the snapshot shape (see
+    /// <see cref="GameServer.Snapshot.SnapshotDeltaState.PeerProtocolVersion"/>, which is set
+    /// from it) and whether the command channel is open (protocol 3, ADR-30).
+    /// </summary>
+    public uint PeerProtocolVersion
+    {
+        get => _peerProtocolVersion;
+        init
+        {
+            _peerProtocolVersion = value;
+            DeltaState.PeerProtocolVersion = value;
+        }
+    }
+
+    private readonly uint _peerProtocolVersion;
+
+    /// <summary>
+    /// Per-connection command-channel state (rate limit bucket, ordered work queue). Created
+    /// with the connection; untouched unless the peer sends a command.
+    /// </summary>
+    internal GameServer.Commands.CommandSession Commands { get; } = new();
+
+    /// <summary>Cancelled when the connection closes. For work owned by this connection.</summary>
+    internal CancellationToken Closing => _closingToken;
+
+    private readonly CancellationToken _closingToken;
 
     /// <summary>
     /// Per-connection snapshot delta encoder state. Lives and dies with the connection,
@@ -208,6 +249,16 @@ public sealed class Connection : IDisposable
     };
 
     private readonly object _snapshotLock = new();
+
+    /// <summary>
+    /// Protocol 3 stat/status copies, double-buffered in step with <see cref="_aoiBuffers"/>
+    /// (same index, same ownership rules). Filled only when the peer speaks protocol 3.
+    /// </summary>
+    private readonly GameServer.Snapshot.SnapshotV3Gather[] _v3Gathers =
+    {
+        new GameServer.Snapshot.SnapshotV3Gather(),
+        new GameServer.Snapshot.SnapshotV3Gather(),
+    };
 
     /// <summary>
     /// Buffer the tick thread gathers into. Flipped by the <b>tick thread</b> and only
@@ -391,6 +442,15 @@ public sealed class Connection : IDisposable
             count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         }
 
+        // Protocol 3: copy the variable-length state (stat blocks, statuses) while the read
+        // lock is still held; the write task encodes later, outside it. A protocol 2 peer
+        // never pays for this.
+        if (PeerProtocolVersion >= 3)
+        {
+            int captured = Math.Min(count, _aoiBuffers[index].Length);
+            _v3Gathers[index].Capture(reader, _aoiBuffers[index].AsSpan(0, captured));
+        }
+
         // Latched every gather rather than once at join: an entity that despawned and
         // respawned keeps its stable key (EntityIdRef.Stable is never reassigned), but a
         // connection that joined before its entity existed would otherwise hold NoKey
@@ -462,9 +522,23 @@ public sealed class Connection : IDisposable
         out ulong tick, out ulong ackTick, out int keyframeInterval,
         out Shared.GameLogic.Components.Vec2 anchor,
         out GameServer.Snapshot.PendingGameEvent[] events, out int eventCount, out int observerKey)
+        => TakePendingSnapshot(out buffer, out count, out tick, out ackTick, out keyframeInterval,
+                               out anchor, out events, out eventCount, out observerKey, out _);
+
+    /// <summary>
+    /// Claim the staged snapshot with its events and, for a protocol 3 peer, the stat/status
+    /// copies taken with it (<paramref name="v3"/> is null below protocol 3).
+    /// </summary>
+    internal bool TakePendingSnapshot(
+        out GameServer.World.EntityView[] buffer, out int count,
+        out ulong tick, out ulong ackTick, out int keyframeInterval,
+        out Shared.GameLogic.Components.Vec2 anchor,
+        out GameServer.Snapshot.PendingGameEvent[] events, out int eventCount, out int observerKey,
+        out GameServer.Snapshot.SnapshotV3Gather? v3)
     {
         lock (_snapshotLock)
         {
+            v3 = null;
             if (!_snapshotPending)
             {
                 buffer = Array.Empty<GameServer.World.EntityView>();
@@ -477,6 +551,7 @@ public sealed class Connection : IDisposable
 
             buffer = _aoiBuffers[_pendingBuffer];
             count = _pendingCount;
+            if (PeerProtocolVersion >= 3) v3 = _v3Gathers[_pendingBuffer];
             tick = _pendingTick;
             ackTick = _pendingAckTick;
             keyframeInterval = _pendingKeyframeInterval;
@@ -652,6 +727,29 @@ public sealed class Connection : IDisposable
     }
 
     private readonly Channel<SendItem> _sendChannel;
+
+    /// <summary>
+    /// The control lane: replies and notices a client must not lose (command results, server
+    /// pushes, transfer replies, kicks). Bounded but NEVER drop-oldest: a full control lane
+    /// closes the connection instead (<see cref="SendControl"/>). Drained by the write task
+    /// before every item of <see cref="_sendChannel"/>.
+    /// </summary>
+    /// <remarks>
+    /// Why a second queue rather than a priority flag: <see cref="_sendChannel"/> drops the
+    /// OLDEST item when its 64 slots are full, which is the right policy for snapshot markers
+    /// and heartbeats (the next one supersedes) and the wrong one for a CommandResult (the
+    /// client awaits exactly one per request, ADR-30) or a TransferMapResp.
+    /// </remarks>
+    private readonly Channel<Envelope> _controlChannel;
+
+    /// <summary>Capacity of the control lane. Overflow closes the connection.</summary>
+    public const int ControlLaneCapacity = 256;
+
+    private long _controlOverflows;
+
+    /// <summary>Times this connection was closed because its control lane was full.</summary>
+    public long ControlOverflows => Interlocked.Read(ref _controlOverflows);
+
     private readonly CancellationTokenSource _cts;
     /// <summary>
     /// 0 until the first unresolved snapshot anchor is logged for this connection. The
@@ -757,9 +855,19 @@ public sealed class Connection : IDisposable
 
         _lastPongMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+        _closingToken = _cts.Token;
+
         _sendChannel = Channel.CreateBounded<SendItem>(new BoundedChannelOptions(64)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false
+        });
+
+        // FullMode.Wait makes TryWrite report "full" instead of discarding anything.
+        _controlChannel = Channel.CreateBounded<Envelope>(new BoundedChannelOptions(ControlLaneCapacity)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false
         });
@@ -776,10 +884,67 @@ public sealed class Connection : IDisposable
     }
 
     /// <summary>Enqueue an envelope for sending. Non-blocking; drops oldest if full.</summary>
+    /// <remarks>
+    /// For traffic that a newer item supersedes (heartbeats). Anything a client must receive
+    /// exactly once goes through <see cref="SendControl"/>.
+    /// </remarks>
     public void Send(Envelope env)
     {
         if (_cts.IsCancellationRequested) return;
         _sendChannel.Writer.TryWrite(SendItem.For(env));
+    }
+
+    /// <summary>
+    /// Enqueue a control message (CommandResult, ServerPush, TransferMapResp, Kick,
+    /// Disconnect) on the control lane: never dropped to make room, written before any queued
+    /// snapshot or heartbeat. Non-blocking.
+    /// </summary>
+    /// <returns>
+    /// False when the connection is closing, or when the lane is full - in which case the
+    /// connection is CLOSED: a peer that lets <see cref="ControlLaneCapacity"/> control
+    /// messages pile up is not reading, and silently dropping one would break the
+    /// one-result-per-request contract it relies on.
+    /// </returns>
+    /// <remarks>
+    /// A message that must precede an immediate close (a kick, then Close) should use
+    /// <see cref="WriteOneAsync"/>, which completes the write first; closing completes this lane
+    /// and whatever is still queued in it is not written.
+    /// </remarks>
+    public bool SendControl(Envelope env)
+    {
+        if (_cts.IsCancellationRequested) return false;
+        if (!_controlChannel.Writer.TryWrite(env))
+        {
+            if (_cts.IsCancellationRequested) return false;
+            Interlocked.Increment(ref _controlOverflows);
+            _logger.LogWarning(
+                "Control lane full ({Capacity}) for user {UserId}; closing the connection rather than drop a control message",
+                ControlLaneCapacity, UserId);
+            Close();
+            return false;
+        }
+
+        // Wake the write task. The data lane drops its OLDEST item when full, so this wake
+        // always gets in; and when the lane is full the write task is busy with it anyway and
+        // drains the control lane before each item it takes.
+        _sendChannel.Writer.TryWrite(SendItem.Wake);
+        return true;
+    }
+
+    /// <summary>Write every queued control message. Write task only.</summary>
+    private async Task DrainControlAsync()
+    {
+        while (_controlChannel.Reader.TryRead(out Envelope? env))
+        {
+            byte[] frame = EncodeFrame(env);
+            await _streamWriteMutex.WaitAsync(_cts.Token);
+            try
+            {
+                await _stream.WriteAsync(frame, _cts.Token);
+                await _stream.FlushAsync(_cts.Token);
+            }
+            finally { _streamWriteMutex.Release(); }
+        }
     }
 
     /// <summary>
@@ -844,6 +1009,11 @@ public sealed class Connection : IDisposable
         {
             await foreach (var item in _sendChannel.Reader.ReadAllAsync(_cts.Token))
             {
+                // Control first, every time: nothing on the data lane may delay a command
+                // result or a transfer reply behind it.
+                await DrainControlAsync();
+                if (item.IsWake) continue;
+
                 Envelope? env = item.Envelope;
                 var isSnapshot = false;
 
@@ -856,7 +1026,8 @@ public sealed class Connection : IDisposable
                     if (!TakePendingSnapshot(out var buffer, out int count, out ulong tick,
                                              out ulong ackTick, out int keyframeInterval,
                                              out var anchor, out var stagedEvents,
-                                             out int stagedEventCount, out int observerKey))
+                                             out int stagedEventCount, out int observerKey,
+                                             out var v3Gather))
                     {
                         continue;
                     }
@@ -864,7 +1035,8 @@ public sealed class Connection : IDisposable
                     SnapshotMessage snapshot = DeltaState.Encode(
                         tick, ackTick, buffer.AsSpan(0, count), keyframeInterval,
                         intern: Encoding == WireEncoding.Proto, observer: anchor,
-                        events: stagedEvents.AsSpan(0, stagedEventCount), observerKey: observerKey);
+                        events: stagedEvents.AsSpan(0, stagedEventCount), observerKey: observerKey,
+                        v3: v3Gather);
 
                     if (Encoding == WireEncoding.Proto && !IsSealed)
                     {
@@ -1055,6 +1227,7 @@ public sealed class Connection : IDisposable
         {
             _cts.Cancel();
             _sendChannel.Writer.TryComplete();
+            _controlChannel.Writer.TryComplete();
             try { _transport.Close(); } catch { /* ignore */ }
         }
         finally

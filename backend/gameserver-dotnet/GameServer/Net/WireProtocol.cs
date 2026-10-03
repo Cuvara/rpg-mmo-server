@@ -106,6 +106,21 @@ public static class WireProtocol
     public const uint ProtocolVersion = 3;
 
     /// <summary>
+    /// Oldest protocol version this build still serves. Mirrors
+    /// <c>shared/messages.MinSupportedProtocolVersion</c> (Go).
+    /// </summary>
+    /// <remarks>
+    /// Version 3 (ADR-28..31) is a superset a server can withhold: a version 2 peer is served the
+    /// version 2 shape (no z, no stats, no statuses, no projectile or item entities, no command
+    /// channel), byte for byte what a version 2 server sent. So the admitted window is
+    /// [<see cref="MinSupportedProtocolVersion"/>, <see cref="ProtocolVersion"/>], and the
+    /// version each connection advertised is recorded on it to choose the shape. Raising this
+    /// to 3 retires version 2; that is a production decision, made with
+    /// <c>GAMESERVER_MIN_PROTOCOL_VERSION</c> first.
+    /// </remarks>
+    public const uint MinSupportedProtocolVersion = 2;
+
+    /// <summary>
     /// Wire value meaning "this peer does not advertise a version" — a peer built
     /// before the field existed.
     /// </summary>
@@ -132,7 +147,11 @@ public static class WireProtocol
     /// <summary>Outcome of checking a peer's advertised protocol version.</summary>
     public enum VersionVerdict
     {
-        /// <summary>The peer advertised exactly this build's version.</summary>
+        /// <summary>
+        /// The peer advertised a version inside the supported window
+        /// [<see cref="MinSupportedProtocolVersion"/>, <see cref="ProtocolVersion"/>] and at or
+        /// above the configured minimum.
+        /// </summary>
         Accepted,
 
         /// <summary>
@@ -154,12 +173,14 @@ public static class WireProtocol
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The rule is EXACT MATCH against <see cref="ProtocolVersion"/>, with one
-    /// configured exemption for the unversioned case. Exact match, rather than
-    /// "peer >= min", is the honest rule for a single integer carrying no
-    /// compatibility range: a peer one version AHEAD is refused just as firmly as
-    /// one behind, because this build cannot know what a later version changed
-    /// and admitting it would be the guess the mechanism exists to prevent.
+    /// The rule is a WINDOW this build knows how to serve,
+    /// [<see cref="MinSupportedProtocolVersion"/>, <see cref="ProtocolVersion"/>], narrowed
+    /// from below by the configured <paramref name="minVersion"/>, with one configured
+    /// exemption for the unversioned case. A peer AHEAD of this build is still refused just
+    /// as firmly as one below the window: this build cannot know what a later version
+    /// changed. Inside the window every version is one this build implements in full and
+    /// serves its own shape (see <see cref="MinSupportedProtocolVersion"/>), so admitting it
+    /// is not a guess.
     /// </para>
     /// <para>
     /// Mirrors <c>shared/messages.CheckProtocolVersion</c> in Go; the two are
@@ -168,7 +189,9 @@ public static class WireProtocol
     /// </remarks>
     public static VersionVerdict CheckProtocolVersion(uint peerVersion, uint minVersion)
     {
-        if (peerVersion == ProtocolVersion) return VersionVerdict.Accepted;
+        if (peerVersion >= MinSupportedProtocolVersion && peerVersion <= ProtocolVersion
+            && peerVersion >= minVersion)
+            return VersionVerdict.Accepted;
         if (peerVersion == ProtocolVersionUnversioned && minVersion == ProtocolVersionUnversioned)
             return VersionVerdict.AcceptedUnversioned;
         return VersionVerdict.Refused;
@@ -438,6 +461,33 @@ public static class WireProtocol
         };
     }
 
+    /// <summary>Gameplay command request (MsgType 32, protocol 3). Servers only build these in tests.</summary>
+    public static Envelope NewEnvelope(MsgType type, CommandRequest payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
+    /// <summary>Gameplay command result (MsgType 33, protocol 3).</summary>
+    public static Envelope NewEnvelope(MsgType type, CommandResult payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
+    /// <summary>Gameplay server push (MsgType 34, protocol 3).</summary>
+    public static Envelope NewEnvelope(MsgType type, ServerPush payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
     public static Envelope NewEnvelope(MsgType type, JoinTokenResponse payload, WireEncoding encoding) =>
         new()
         {
@@ -587,6 +637,15 @@ public static class WireProtocol
             var t when t == typeof(KickMessage) => proto
                 ? KickMessage.Parser.ParseFrom(span)
                 : JsonReader.ReadKickMessage(envelope.Payload),
+            var t when t == typeof(CommandRequest) => proto
+                ? CommandRequest.Parser.ParseFrom(span)
+                : JsonReader.ReadCommandRequest(envelope.Payload),
+            var t when t == typeof(CommandResult) => proto
+                ? CommandResult.Parser.ParseFrom(span)
+                : JsonReader.ReadCommandResult(envelope.Payload),
+            var t when t == typeof(ServerPush) => proto
+                ? ServerPush.Parser.ParseFrom(span)
+                : JsonReader.ReadServerPush(envelope.Payload),
             _ => throw new NotSupportedException($"Unsupported payload type: {typeof(T).Name}")
         };
         return (T)(result ?? throw new InvalidOperationException($"Failed to deserialize payload as {typeof(T).Name}"));

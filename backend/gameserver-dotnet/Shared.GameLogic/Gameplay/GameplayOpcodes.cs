@@ -72,6 +72,12 @@ namespace Shared.GameLogic.Gameplay
 
         /// <summary>The item instance belongs to someone else.</summary>
         public const string NotOwner = "not_owner";
+
+        /// <summary>
+        /// The server cannot act on the request right now: no character is bound to the
+        /// connection, the character is dead, or the store failed. Retryable.
+        /// </summary>
+        public const string Unavailable = "unavailable";
     }
 
     /// <summary>Values of <see cref="ItemStack.Container"/>.</summary>

@@ -7,6 +7,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added (0.7.0, wire protocol 3: ADR-28..30)
+- `GameplayErrors.Unavailable` (`unavailable`): the server cannot act on a command right now (no
+  character bound, character dead, or the store failed); retryable. Listed in `gameplay.proto`.
 - **3D world.** `Vec3`; `World/` (`MapGeometry` with heightfield, static boxes, spawn points,
   portals, `Flat` protocol-2 world, `MapGeometryValidation`); `CharacterMotor` (kinematic
   capsule: gravity, grounded jump, step-up, slope limit, wall slide). Golden vectors

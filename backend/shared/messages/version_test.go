@@ -57,6 +57,43 @@ func TestCheckProtocolVersion(t *testing.T) {
 			minVersion:  0,
 			want:        VersionRefused,
 		},
+		{
+			// Protocol 3 serves protocol 2 peers the protocol 2 shape.
+			name:        "oldest supported version is admitted",
+			peerVersion: MinSupportedProtocolVersion,
+			minVersion:  0,
+			want:        VersionAccepted,
+		},
+		{
+			name:        "oldest supported version is admitted when advertisement is required",
+			peerVersion: MinSupportedProtocolVersion,
+			minVersion:  1,
+			want:        VersionAccepted,
+		},
+		{
+			name:        "a raised minimum retires an older supported version",
+			peerVersion: MinSupportedProtocolVersion,
+			minVersion:  WireProtocolVersion,
+			want:        VersionRefused,
+		},
+		{
+			name:        "the current version survives a minimum raised to it",
+			peerVersion: WireProtocolVersion,
+			minVersion:  WireProtocolVersion,
+			want:        VersionAccepted,
+		},
+		{
+			name:        "below the supported window is refused",
+			peerVersion: MinSupportedProtocolVersion - 1,
+			minVersion:  0,
+			want:        VersionRefused,
+		},
+		{
+			name:        "unversioned is refused under any advertised minimum",
+			peerVersion: ProtocolVersionUnversioned,
+			minVersion:  MinSupportedProtocolVersion,
+			want:        VersionRefused,
+		},
 	}
 
 	for _, tt := range tests {
@@ -70,16 +107,33 @@ func TestCheckProtocolVersion(t *testing.T) {
 	}
 }
 
-// A version older than this build must be refused. Spelled out separately from
-// the table because it is the case the field was added for, and it only exists
-// once WireProtocolVersion has moved past 1 — before that there is no older
-// non-zero version to construct.
+// A version older than the supported window must be refused. Spelled out
+// separately from the table because it is the case the field was added for: a
+// peer that disagrees about what the schema means. Every version inside the
+// window, by contrast, is admitted - the window exists because protocol 3
+// serves protocol 2 peers their own shape.
 func TestOlderPeerIsRefused(t *testing.T) {
-	if WireProtocolVersion < 2 {
-		t.Skip("no older non-zero version exists while WireProtocolVersion is 1")
+	if MinSupportedProtocolVersion < 2 {
+		t.Skip("no older non-zero version exists below a window starting at 1")
 	}
-	if got := CheckProtocolVersion(WireProtocolVersion-1, 0); got != VersionRefused {
-		t.Fatalf("older peer: got %v, want VersionRefused", got)
+	if got := CheckProtocolVersion(MinSupportedProtocolVersion-1, 0); got != VersionRefused {
+		t.Fatalf("peer below the window: got %v, want VersionRefused", got)
+	}
+	for v := MinSupportedProtocolVersion; v <= WireProtocolVersion; v++ {
+		if got := CheckProtocolVersion(v, 0); got != VersionAccepted {
+			t.Fatalf("peer %d inside the window: got %v, want VersionAccepted", v, got)
+		}
+	}
+}
+
+// The window must be a real window of this build: its floor at or below the
+// current version, and never 0 (which means "did not advertise").
+func TestSupportedWindowIsWellFormed(t *testing.T) {
+	if MinSupportedProtocolVersion == ProtocolVersionUnversioned {
+		t.Fatal("the window floor must not be the unversioned sentinel")
+	}
+	if MinSupportedProtocolVersion > WireProtocolVersion {
+		t.Fatalf("window floor %d above the current version %d", MinSupportedProtocolVersion, WireProtocolVersion)
 	}
 }
 

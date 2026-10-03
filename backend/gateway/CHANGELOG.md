@@ -6,6 +6,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Protocol 2 and 3 clients are both admitted (wire protocol window).** No gateway code
+  change: `handleAuth` uses `shared/messages.CheckProtocolVersion`, which now admits
+  `[MinSupportedProtocolVersion = 2, WireProtocolVersion = 3]`, narrowed by
+  `--min-protocol-version` (set it to 3 to retire protocol 2). The gateway still echoes its own
+  version (3). Table-driven socket test `TestSupportedProtocolWindowOverTheSocket` (2 and 3
+  admitted, 1 and 4 refused, a minimum of 3 retires 2).
 - **Character selection carried into the join token (ADR-31).** `handleAuth` keeps the gateway
   token's `cid` claim on the connection (`ClientConn.SetAuthenticatedCharacter` /
   `CharacterID`, cleared with the identity); `handleEnterWorld` mints the join token with it

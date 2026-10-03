@@ -45,7 +45,7 @@ internal static class TestHelpers
     /// Create a valid HS256 JWT for testing, including a unique JTI claim.
     /// </summary>
     public static string CreateTestJwt(string userId, string serverId, string secret, long? exp = null,
-        string? jti = null)
+        string? jti = null, string? characterId = null)
     {
         var header = new { alg = "HS256", typ = "JWT" };
         var payload = new Dictionary<string, object>
@@ -57,6 +57,8 @@ internal static class TestHelpers
             ["jti"] = jti ?? Guid.NewGuid().ToString("N"),
             ["iat"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
+        // ADR-31: the character this join plays; absent = the account's default character.
+        if (!string.IsNullOrEmpty(characterId)) payload["cid"] = characterId;
 
         if (exp.HasValue)
         {

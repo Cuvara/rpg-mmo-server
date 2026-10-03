@@ -1250,6 +1250,9 @@ metricsEndpoint?.SetStatusProvider(() =>
         SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,
         SnapshotMaxShedAge = metrics.MaxShedAge,
         TransfersRejected = metrics.TransfersRejected,
+        CommandsReceived = metrics.CommandsReceived,
+        CommandsAccepted = metrics.CommandsAccepted,
+        CommandsRejected = metrics.CommandsRejected,
         Postgres = postgresStore != null ? "connected" : "disconnected",
         UptimeSeconds = (long)uptime.Elapsed.TotalSeconds
     };

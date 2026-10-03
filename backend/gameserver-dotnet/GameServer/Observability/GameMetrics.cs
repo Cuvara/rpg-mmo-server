@@ -35,6 +35,9 @@ namespace GameServer.Observability;
 /// gameserver.inputs.dropped           -> gameserver_inputs_dropped_total{reason}
 /// gameserver.inputs.coalesced         -> gameserver_inputs_coalesced_total
 /// gameserver.transfers.rejected       -> gameserver_transfers_rejected_total
+/// gameserver.commands.received        -> gameserver_commands_received_total
+/// gameserver.commands.accepted        -> gameserver_commands_accepted_total
+/// gameserver.commands.rejected        -> gameserver_commands_rejected_total{reason}
 /// </code>
 ///
 /// All record paths are allocation-free: tag sets are pre-built once in the
@@ -94,6 +97,11 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _inputsDropped;
     private readonly Counter<long> _inputsCoalesced;
     private readonly Counter<long> _transfersRejected;
+    private readonly Counter<long> _commandsReceived;
+    private readonly Counter<long> _commandsAccepted;
+    private readonly Counter<long> _commandsRejected;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TagList> _commandRejectTags = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, long[]> _commandRejectCounts = new();
 
     // Pre-built tag sets — never allocate per record call.
     private readonly TagList _mapTags;
@@ -403,6 +411,18 @@ public sealed class GameMetrics : IDisposable
             "gameserver.transfers.rejected",
             description: "MsgTransferMap requests refused because a transfer was already " +
                          "running on that connection.");
+
+        _commandsReceived = _meter.CreateCounter<long>(
+            "gameserver.commands.received",
+            description: "CommandRequests (MsgType 32, ADR-30) received, every opcode and outcome. " +
+                         "Equals accepted + rejected once in-flight commands finish.");
+        _commandsAccepted = _meter.CreateCounter<long>(
+            "gameserver.commands.accepted",
+            description: "CommandRequests answered ok = true.");
+        _commandsRejected = _meter.CreateCounter<long>(
+            "gameserver.commands.rejected",
+            description: "CommandRequests answered ok = false, labelled by reason (the CommandResult " +
+                         "error code, or protocol_version for a peer below protocol 3).");
 
         _meter.CreateObservableGauge(
             "gameserver.handshakes.pending",
@@ -1154,6 +1174,51 @@ public sealed class GameMetrics : IDisposable
 
     /// <summary>Transfer requests refused as concurrent, since start.</summary>
     public long TransfersRejected => Interlocked.Read(ref _transfersRejectedCount);
+
+    private long _commandsReceivedCount;
+    private long _commandsAcceptedCount;
+    private long _commandsRejectedCount;
+
+    /// <summary>Record a received <c>CommandRequest</c>.</summary>
+    public void RecordCommandReceived()
+    {
+        Interlocked.Increment(ref _commandsReceivedCount);
+        _commandsReceived.Add(1, _mapTags);
+    }
+
+    /// <summary>Record a command answered <c>ok = true</c>.</summary>
+    public void RecordCommandAccepted()
+    {
+        Interlocked.Increment(ref _commandsAcceptedCount);
+        _commandsAccepted.Add(1, _mapTags);
+    }
+
+    /// <summary>
+    /// Record a command answered <c>ok = false</c>. <paramref name="reason"/> is a small fixed
+    /// vocabulary (the GameplayErrors codes plus <c>protocol_version</c>), so the per-reason tag
+    /// sets are built once each and reused.
+    /// </summary>
+    public void RecordCommandRejected(string reason)
+    {
+        Interlocked.Increment(ref _commandsRejectedCount);
+        Interlocked.Increment(ref _commandRejectCounts.GetOrAdd(reason, static _ => new long[1])[0]);
+        TagList tags = _commandRejectTags.GetOrAdd(reason,
+            static (r, map) => new TagList { { "map_id", map }, { "reason", r } }, _mapId);
+        _commandsRejected.Add(1, tags);
+    }
+
+    /// <summary>Commands received since start.</summary>
+    public long CommandsReceived => Interlocked.Read(ref _commandsReceivedCount);
+
+    /// <summary>Commands answered ok since start.</summary>
+    public long CommandsAccepted => Interlocked.Read(ref _commandsAcceptedCount);
+
+    /// <summary>Commands refused since start, every reason.</summary>
+    public long CommandsRejected => Interlocked.Read(ref _commandsRejectedCount);
+
+    /// <summary>Commands refused for one reason since start.</summary>
+    public long CommandsRejectedFor(string reason) =>
+        _commandRejectCounts.TryGetValue(reason, out long[]? c) ? Interlocked.Read(ref c[0]) : 0;
 
     /// <summary>Increment the connected-player gauge.</summary>
     public void PlayerJoined() => Interlocked.Increment(ref _playersOnline);

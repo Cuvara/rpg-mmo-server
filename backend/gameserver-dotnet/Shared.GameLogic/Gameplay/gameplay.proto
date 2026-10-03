@@ -44,6 +44,7 @@ syntax = "proto3";
 //   slot_mismatch    the item cannot be worn in the named slot
 //   inventory_full   no bag space for the result
 //   not_owner        the item instance belongs to someone else
+//   unavailable      no character bound, character dead, or the store failed (retryable)
 
 package rpgmmo.gameplay.v1;
 

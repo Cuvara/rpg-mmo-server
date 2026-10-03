@@ -5,6 +5,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`CheckProtocolVersion` admits a window, not an exact match.** New
+  `MinSupportedProtocolVersion = 2`; a peer is accepted when
+  `MinSupportedProtocolVersion <= v <= WireProtocolVersion` and `v >= minVersion` (the
+  unversioned exemption is unchanged). A protocol 3 game server serves protocol 2 peers the
+  protocol 2 shape byte for byte, so refusing them was refusing clients the fleet can serve.
+  Mirrors `WireProtocol.MinSupportedProtocolVersion` (C#). `ProtocolVersionMismatchError` names
+  the window. Tests: `TestCheckProtocolVersion` (new window rows), `TestOlderPeerIsRefused`
+  (below the window), `TestSupportedWindowIsWellFormed`.
+
 ### Added
 - **`cid` JWT claim (ADR-31, contract `join-token`).** `jwt.Claims.CharacterID`
   (`json:"cid,omitempty"`), `jwt.SignWithCharacter` and `Keyring.SignWithCharacter`. Empty omits

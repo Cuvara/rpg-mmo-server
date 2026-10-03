@@ -76,8 +76,8 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 3 | `enter_world` | client → gateway | `{ map_id }` |
 | 4 | `enter_world_resp` | gateway → client | `{ server_addr?, join_token?, transport?, error?, server_public_key? }` — `server_public_key` is the target game server's 32-byte Ed25519 identity key (ADR-25), field **6**; field 5 is reserved forever |
 | 5 | `join_token` | client → gameserver | `{ token, protocol_version? }` |
-| 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error?, tick_rate?, protocol_version? }` — see below |
-| 7 | `input` | client → gameserver | `{ tick, move_x, move_y, attack_target_id? }` |
+| 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error?, tick_rate?, protocol_version?, character_id? }` — see below; `character_id` (field 6, protocol 3) echoes the join token's `cid` claim (ADR-31), empty = the account's default character |
+| 7 | `input` | client → gameserver | `{ tick, move_x, move_y, attack_target_id?, ability_id?, ability_target_id?, aim_x?, aim_y?, aim_z?, render_tick?, render_alpha?, jump?, spawn_seq? }` |
 | 8 | `snapshot` | gameserver → client | see below |
 | 9 | `disconnect` | either | `{}` |
 | 10 | `resync` | client → gameserver | `{}` (ignored) — request a full keyframe |
@@ -86,6 +86,9 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 13 | `transfer_map` | client → gameserver | `{ map_id }` — request a move to another map, see below |
 | 14 | `transfer_map_resp` | gameserver → client | `{ ok, error }` |
 | 15 | `kick` | gameserver → client | `{ reason }` — forced disconnect; `reason` is a machine-readable string, not user-facing text. Emitted today with `reason=duplicate_login` (a newer login superseded this one — ADR-20), always followed by a `disconnect` frame carrying the **same** reason, mirroring the gateway's eviction contract |
+| 32 | `command` | client → gameserver | `{ seq, opcode, payload? }` — protocol 3 gameplay command, see [Command channel](#command-channel-32--33--34--protocol-3-adr-30) |
+| 33 | `command_result` | gameserver → client | `{ seq, ok, error?, payload? }` — exactly one per `command` |
+| 34 | `server_push` | gameserver → client | `{ opcode, payload? }` — unsolicited gameplay update (opcode 100 = inventory changed) |
 
 ### Server-internal: the `events:kick` stream (`session_superseded`)
 
@@ -243,11 +246,12 @@ then disagree about what a field *means*. That is the failure this number exists
 to make loud: it compiles, it connects, and the numbers are consistent about the
 wrong thing. Before this field, client and server agreed by convention alone.
 
-**Current version: `2`.**
+**Current version: `3`. Served window: `2`–`3`** (see [The supported window](#the-supported-window)).
 
 | Version | Introduced | What it covers |
 |---|---|---|
 | `1` | 2026-09-09 | The schema as of `wire.proto` at the introduction of this field, including `facing_brad` and `action` on `EntitySnapshot`. |
+| `3` | 2026-10-03 | ADR-28..31: 3D (`z`, velocity), projectile and item entities, owner + owner-only `spawn_seq`, stat block and status effects (mask bits `0x0200`–`0x2000`), status / projectile game events and `GameEvent.effect_id`, input `aim_z`/`render_tick`/`render_alpha`/`jump`/`spawn_seq`, `JoinTokenResponse.character_id`, and the command channel (MsgType 32–34). Bumped under rule 4: a receiver that ignores a projectile entity or a `command_result` diverges. **A protocol 3 server keeps serving protocol 2 peers the protocol 2 shape, byte for byte** (`V2WireIdentityTests`). |
 | `2` | 2026-09-19 | Field-level delta encoding. `EntitySnapshot.changed_fields` (field 13, `uint32`) carries a bitmask of fields that are present in a delta entity; zero means "all fields present" (protocol v1 behaviour). The snapshot merge algorithm changes: a partial update (`changed_fields != 0`) on an entity already in world state keeps the receiver's last-known value for every unset bit. A client that cannot implement this must send `--min-protocol-version=0` and accept keyframe-only mode, or remain on v1. |
 
 #### Where it rides, and why on both hops
@@ -378,13 +382,25 @@ is about the connection being unusable, not about who is on the far end. Reporti
 the operator to the wrong layer, which is precisely the wasted chase this field
 exists to prevent.
 
-#### The matching rule is exact
+#### The supported window
 
-A peer one version **ahead** is refused just as firmly as one behind. This build
-cannot know what a later version changed, so admitting it would be a guess made at
-exactly the moment the protocol said not to guess. A real compatibility window
-would have to be a min/max pair negotiated on the wire — a deliberate schema
-change, not an accident of a `>=`.
+**Since protocol 3 the rule is a window, not an exact match.** A receiver admits a peer
+whose version `v` satisfies `MinSupportedProtocolVersion <= v <= ProtocolVersion` and
+`v >= ` the configured minimum (`--min-protocol-version` / `GAMESERVER_MIN_PROTOCOL_VERSION`),
+plus the unversioned exemption above. Today that is `[2, 3]` on both hops.
+
+The window is not a negotiation and not a guess: every version inside it is one this
+build implements **in full**. Protocol 3 is a superset the server can withhold, so the
+game server records each connection's advertised version (`Connection.PeerProtocolVersion`)
+and serves it that version's shape — a protocol 2 peer gets no `z`, no stats, no statuses,
+no projectile or item entities, no v3 event types, no v3 mask bits and no command channel,
+exactly the bytes a protocol 2 server sent. The gateway never carries gameplay, so it has
+nothing version-specific to serve. Both echo their **own** version (`3`) in the response.
+
+A peer one version **ahead** of the window is still refused just as firmly as one behind
+it: this build cannot know what a later version changed. Retiring protocol 2 is a
+production decision: set the configured minimum to `3` once nothing speaks 2 — a protocol 2
+peer is then refused through the same named path.
 
 #### Where the constant lives
 
@@ -393,8 +409,8 @@ authoritative for the other two:
 
 | Side | Constant |
 |---|---|
-| Go | `shared/messages.WireProtocolVersion` |
-| C# server | `GameServer/Net/WireProtocol.ProtocolVersion` |
+| Go | `shared/messages.WireProtocolVersion` (window floor: `MinSupportedProtocolVersion`) |
+| C# server | `GameServer/Net/WireProtocol.ProtocolVersion` (window floor: `MinSupportedProtocolVersion`) |
 | Unity client | `Runtime/Protocol/WireProtocolVersion.Current` |
 
 Each side asserts its own value by test. A bump is a three-file edit plus a new
@@ -449,6 +465,21 @@ message handler.
 - `aim_x` / `aim_y` — aim **point** in world coordinates for a ground-targeted ability,
   unlike `move_x`/`move_y` which are a direction. Read only when `ability_id` is non-zero;
   the world origin is a legitimate aim point, so `(0,0)` does not mean "not aimed".
+
+Protocol 3 adds (fields 9–13; each omitted when zero in JSON, elided in Protobuf; a protocol 2
+client cannot send them, so its input is exactly a protocol 2 input):
+
+- `aim_z` — height of the aim point (ADR-28: `x`/`y` are the ground plane, `z` is up).
+- `render_tick` / `render_alpha` — the server tick (and fraction toward the next) the client
+  was **rendering remote entities at**. Lag compensation rewinds hit targets to that instant,
+  clamped to 200 ms (ADR-29). `render_tick = 0` = no rewind.
+- `jump` — level-triggered for the tick it is sent on; honoured only when grounded.
+- `spawn_seq` — client-chosen id of the projectile this input fires; echoed on that
+  projectile's `spawn_seq` to the firing client only.
+
+The server decodes them from both encodings into `InputExtras` and queues them with the input
+(`EcsWorld.PushInput(userId, input, ingress, in extras)`); an input carrying `jump` is an edge
+and is never coalesced away.
 
 ### Abilities — normative
 
@@ -578,6 +609,14 @@ bitmask of fields present in a given entity update:
 | 6 | `0x0040` | `facing_brad` |
 | 7 | `0x0080` | `action` |
 | 8 | `0x0100` | `action_seq` |
+| 9 | `0x0200` | `z` — protocol 3 |
+| 10 | `0x0400` | `vel_x`, `vel_y`, `vel_z` (one bit for the vector) — protocol 3 |
+| 11 | `0x0800` | `owner` / `owner_id` / `spawn_seq` (one logical field) — protocol 3 |
+| 12 | `0x1000` | `stats` + `stats_removed` — protocol 3 |
+| 13 | `0x2000` | `statuses` + `statuses_removed` — protocol 3 |
+
+Bits 9–13 are only ever set for a connection whose `join_token.protocol_version` was 3 or
+more. A protocol 2 connection never receives them, nor the fields they describe.
 
 **Zero means "all fields present"** — the protocol-v1 rule, kept for backwards
 compatibility and for proto3 zero-elision: a sender that omits this field is
@@ -609,6 +648,56 @@ error on either side (it presents as rubber-banding, which reads as a network fa
 never interned: a client that resolves a handle expects complete state, and sending it
 only alongside the id would leave it correct once per keyframe interval and stale in
 between.
+
+### Protocol 3 entity state — normative (ADR-28..30)
+
+Everything in this subsection is sent **only to a connection that advertised protocol 3**
+(`join_token.protocol_version >= 3`). The server decides per connection; a protocol 2 or
+unversioned connection on the same server, watching the same entities, receives the protocol 2
+shape unchanged. The JSON names are the `wire.proto` names, which are also the Go struct tags.
+
+| Field | Wire | Rule |
+|---|---|---|
+| `z` | 14, float | Height above the ground plane (feet for a character, sphere centre for a projectile, ground for an item). Every mention. |
+| `vel_x` `vel_y` `vel_z` | 15–17, float | **Replicated for projectiles always and for a character only while it moves vertically (airborne); zero otherwise.** Zero on all three = "stationary or not sent". A walking character is interpolated, not extrapolated, and its ground velocity changes on every start/stop/turn, so it is not sent. Units per second. |
+| `owner` | 18, uint32 | **Protobuf:** the interned handle of the owning entity (a projectile's caster). Resolve it against the same handle table as `handle`. `0` = no owner, **or an owner this connection has not been told about** (the AOI disclosure rule events follow). The server resolves it against handles bound *earlier* (earlier message, or earlier in the same message), so an owner introduced later in the same message is named on the next delta, under bit `0x0800`. A handle that stops resolving later (the owner despawned) means "owner no longer visible", never a resync. |
+| `owner_id` | 24, string | **JSON only**: the owner's id when this connection knows it, else empty. Always empty on Protobuf. |
+| `spawn_seq` | 19, uint32 | The `input.spawn_seq` that fired this projectile — sent **only to the firing player's own connection**, 0 for every other connection. Lets the client swap its predicted projectile for this entity. |
+| `stats` / `stats_removed` | 20 / 21 | `[{stat_id, value}]`, ids are content (`/content` stats). Values are **effective** (status modifiers applied). |
+| `statuses` / `statuses_removed` | 22 / 23 | `[{effect_id, stacks, expires_tick, source}]`, keyed by `effect_id` (content statuses). `expires_tick` 0 = until removed. `source` = interned handle of the applier, same resolution rule as `owner`; **always 0 on JSON** (`StatusEffect` has no id field). |
+
+**Stats and statuses — complete set vs. changed-only (merge rule):**
+
+- On a **keyframe**, on an entity's **first introduction**, and on any entity sent with
+  `changed_fields = 0` (every JSON entity, every entity to a connection without field delta),
+  `stats` and `statuses` are the **complete** sets and **replace** the receiver's copy; an id
+  absent from them no longer exists. `*_removed` is empty.
+- On a **delta** entity with bit `0x1000`, `stats` lists only the entries that changed
+  (upsert by `stat_id`) and `stats_removed` the ids that no longer exist; every stat in neither
+  list keeps its last-known value. Bit `0x2000` is the same for statuses by `effect_id` (an
+  entry is "changed" when its `stacks`, `expires_tick` or `source` changed). With the bit
+  unset, the receiver keeps the whole set.
+- Reference merger: `Shared.GameLogic.Systems.SnapshotMerger` (`MergeStats` / `MergeStatuses`);
+  surviving entries keep their order, new ones append in delta order.
+
+Change detection on the server is by the world's change counters (`EntityView.StatsVersion` /
+`StatusesVersion`) against per-connection copies of what was last sent; a counter that moved
+with no visible change sends nothing.
+
+**Entity kinds.** `ENTITY_TYPE_PROJECTILE` and `ENTITY_TYPE_ITEM` entities exist **only** for
+protocol 3 connections; a protocol 2 connection is never sent one, nor a despawn for one.
+A projectile is **due every world tick** regardless of the ADR-27 replication schedule (it
+still competes for the byte budget like any entity). A dropped item carries no item id on the
+wire yet — its identity is learned on pick-up (see Command channel).
+
+**Events.** Types `STATUS_APPLIED` (7), `STATUS_REMOVED` (8) and `PROJECTILE_HIT` (9), and
+`GameEvent.effect_id` (field 9: the status for 7/8 and for a periodic `DAMAGE`/`HEAL`), are sent
+only to protocol 3 connections. A protocol 2 connection receives the other types without
+`effect_id`, exactly as before.
+
+**Budget.** Every protocol 3 field is written by the same `Fill` the byte budget measures with,
+so the budget stays exact (`BudgetSizing_IsExact_WithStatsAndStatuses`); a stat block or
+status list makes an entity larger and so sheds earlier under a tight budget, nothing else.
 
 ### Game events — normative
 
@@ -1227,6 +1316,14 @@ def merge_field_delta(existing, delta, mask):
         facing_brad  = delta.facing_brad  if mask & 0x0040 else existing.facing_brad,
         action       = delta.action       if mask & 0x0080 else existing.action,
         action_seq   = delta.action_seq   if mask & 0x0100 else existing.action_seq,
+        # protocol 3 (never set for a protocol 2 connection)
+        z            = delta.z            if mask & 0x0200 else existing.z,
+        velocity     = delta.velocity     if mask & 0x0400 else existing.velocity,
+        owner        = delta.owner        if mask & 0x0800 else existing.owner,      # + spawn_seq
+        stats        = upsert(existing.stats, delta.stats, delta.stats_removed, key=stat_id)
+                                          if mask & 0x1000 else existing.stats,
+        statuses     = upsert(existing.statuses, delta.statuses, delta.statuses_removed, key=effect_id)
+                                          if mask & 0x2000 else existing.statuses,
         changed_fields = 0,   # the merged result is a full snapshot, not a delta
     )
 ```
@@ -1364,8 +1461,97 @@ v1 servers. A v2 server sends `changed_fields = 0` on every keyframe and on ever
 entity delta sent to a client that proved `protocol_version < 2`, so a v1 client
 on a v2 server also continues to work — it never receives a partial entity. Field-level
 delta is only activated per-connection when the client's `join_token.protocol_version`
-exactly matches the server's `WireProtocol.ProtocolVersion` **and** the connection
-is using Protobuf encoding (the JSON path never sets `changed_fields`).
+is **2 or more** (inside the supported window — an unversioned client never gets it) **and** the
+connection is using Protobuf encoding (the JSON path never sets `changed_fields`). A protocol 2
+client gets bits `0x0001`–`0x0100` only; bits `0x0200`–`0x2000` need protocol 3.
+
+## Command channel (32 / 33 / 34) — protocol 3, ADR-30
+
+Discrete gameplay requests that are not per-tick input: inventory, pick-up, equip, unequip,
+use. The realtime schema carries only `{seq, opcode, payload}`; each opcode's payload is a
+message of `Shared.GameLogic/Gameplay/gameplay.proto`, encoded by the dependency-free codec in
+the same library (the Unity client and the server share it). JSON connections carry `payload`
+as Go's padded standard **base64** (`"payload":"CgVpdGVtMQ=="`), omitted when empty.
+
+**Contract.**
+
+- **Exactly one `command_result` per `command`**, echoing `seq`, on every path — success,
+  refusal, malformed request, rate limit. A request that cannot even be decoded is answered
+  with `seq = 0` and `invalid_payload`. A client correlates by `seq` (start at 1, unique per
+  connection).
+- **Version gate.** A connection that did not advertise protocol 3 is answered
+  `unknown_opcode` for every opcode and nothing runs (counted as reason `protocol_version`).
+- **Ordering.** Commands of one connection run **one at a time in arrival order** on that
+  connection's worker; results and pushes go out on the control lane (below) in the order
+  they are produced. After a successful mutation the **`server_push` InventoryChanged (opcode
+  100, the complete new view) is sent BEFORE the `command_result`**, so a client that
+  refreshes when its command completes already holds the new inventory.
+- **Character binding.** Every handler acts on the character the connection joined as
+  (`cid` claim, or the account's default character), never on an id the client names.
+
+| Opcode | Request | Result payload (ok) | Push | Refusals |
+|---|---|---|---|---|
+| 1 | `InventoryRequest {}` | `InventoryView` (complete) | — | `unavailable` |
+| 2 | `PickupRequest {entity_id}` | `InventoryView` (complete) | 100 | `not_found` (no such item entity, already taken, not an item), `out_of_range`, `unavailable` |
+| 3 | `EquipRequest {instance_id, slot}` | empty | 100 | `not_found`, `slot_mismatch`, `unavailable` |
+| 4 | `UnequipRequest {slot}` | empty | 100 | `not_found` (nothing worn there), `unavailable` |
+| 5 | `UseItemRequest {instance_id}` | empty | 100 | `not_found` (not in the bag), `unavailable` |
+
+Every opcode can also answer `unknown_opcode`, `invalid_payload` and `rate_limited`. Error
+codes are `Shared.GameLogic.Gameplay.GameplayErrors`; `unavailable` (no character bound to the
+connection, character dead, or the store failed — retryable) was added with this channel.
+
+**Rules per opcode.**
+
+- **Pick-up (2).** The item entity must exist, be a dropped item, and be within
+  **`CommandLimits.PickupRange` = 3.0** world units (3D, feet to item) of the caller. It is
+  removed from the world in the same locked step that checks it, so **an item can be taken
+  once**: a second request — the same player's or anyone's — gets `not_found`. The grant is
+  written through immediately (ADR-6/ADR-31) with the deterministic grant id
+  `"{server_id}:{boot_nonce}:{item_entity_id}:{despawn_tick}"`: entity ids are recycled, the
+  despawn tick names the drop, and the boot nonce (process start) keeps a restarted server from
+  reusing an earlier run's id. A grant the store **refuses** (it wrote nothing) puts the item
+  back in the world; a grant whose outcome is **unknown** (I/O failure) is retried with the same
+  id up to 3 times (idempotent) and, if still unknown, is logged with its grant id and the item is
+  **not** restored — the side that cannot duplicate an item. A brand-new character has no
+  `character_state` row until its first save; its first grant saves it first.
+- **Equip (3).** `slot` is a lowercase slot name (`weapon`, `head`, `chest`, `legs`,
+  `trinket`). The item's slot comes from **content** (`ItemDefinition.Slot`): an item content
+  does not define, or defines for another slot, is `slot_mismatch`; so is an unknown slot name.
+  Level requirements are not enforced yet. Equipping into an occupied slot swaps the occupant
+  back to the bag (store rule).
+- **Use (4/5).** Consumes exactly one from a bag stack (grant id
+  `"{server_id}:{boot_nonce}:use:{join_jti}:{seq}"`, so a retransmitted request is a no-op).
+  **The effect of using an item is a placeholder no-op**: content defines no use effect yet,
+  so using an item only spends it.
+
+**Rate limit.** Per connection, a token bucket: **`CommandLimits.BurstCapacity` = 10**
+requests back to back, refilled at **`CommandLimits.RefillPerSecond` = 5/s**; at most
+**`CommandLimits.MaxQueued` = 8** admitted requests wait for the worker. Beyond either, the
+request is answered `rate_limited` at once and not run. All placeholders pending real client
+measurements.
+
+**Threads.** Decode, version gate, rate limit and opcode check run on the connection's read
+loop and never block. Handlers — and every character-store call — run on the connection's
+worker task, never on the tick thread; world access (the pick-up's take, the rollback's
+respawn) goes through the world's own locked API.
+
+**Metrics.** `gameserver_commands_received_total`, `gameserver_commands_accepted_total`,
+`gameserver_commands_rejected_total{reason}` (reason = the error code, or `protocol_version`);
+see `docs/METRICS.md`.
+
+## Control lane — what is never dropped
+
+A connection has two outbound queues. The **data lane** (64 slots, drops the **oldest** item
+when full) carries snapshot markers and heartbeats, for which a newer item supersedes an older
+one. The **control lane** carries `command_result`, `server_push` and the concurrent-transfer
+refusal `transfer_map_resp`, which a client is owed exactly once: it is bounded at **256** and
+**never drops** — the write task drains it **before every** data-lane item, so a control message
+also overtakes queued snapshots. A peer that lets 256 control messages pile up is not reading;
+its connection is **closed** rather than a control message being dropped
+(`Connection.ControlOverflows`). `kick` + `disconnect` and the other replies that immediately
+precede a close are written directly (`WriteOneAsync`), which completes the write before the
+close; they never enter either queue.
 
 ## `resync` (10) — client → gameserver
 

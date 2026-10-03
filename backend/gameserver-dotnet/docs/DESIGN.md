@@ -2456,3 +2456,109 @@ passes InputMessage fields 9-13 as `InputExtras` through
 - Mob loot identity is the entity TYPE ("mob"); there is no per-species mob id.
 - `PlayerRespawnSystem` and the join place players on the `default` spawn only; portals load
   and validate but nothing triggers them yet.
+
+## Core v3 network: version window, snapshot v3, command channel, control lane (2026-10-03, ADR-28..31)
+
+The network half of protocol 3. Normative wire text is `docs/API.md` ("The supported window",
+"Protocol 3 entity state", "Command channel", "Control lane"); this is how it is built and why.
+
+### One server, two shapes
+
+`WireProtocol.CheckProtocolVersion` admits `[MinSupportedProtocolVersion = 2, ProtocolVersion = 3]`
+(Go mirrors it in `shared/messages`, so the gateway admits the same window with no code change).
+The join records the advertised version on the connection (`Connection.PeerProtocolVersion`,
+which also sets `SnapshotDeltaState.PeerProtocolVersion`); everything version-specific keys off
+that one number. **A protocol 2 peer must get byte-identical output to the pre-v3 encoder**, and
+that is proved, not argued: `CoreV3/V2WireIdentityTests` drives a world full of v3-only state
+(stat blocks, statuses, DoTs, jumps) through the encoder with peer version 2 and compares SHA-256
+digests generated with the encoder at commit 3f87b56 (which ignored every v3 field) fed the same
+world with event types 7-9 filtered out. Three digests: Protobuf with the default budget,
+Protobuf with a 120-byte budget (shedding), JSON. How the v2 path stays identical:
+
+- `SentView` (the "what was sent" record) gained z / velocity / owner / spawn_seq, ALWAYS zero
+  below protocol 3, so they cannot make a v2 entity compare unequal.
+- `Fill` writes v3 fields only when `_v3`; `ResetV3` clears them on every fill, so a v2 entity
+  carries proto3 defaults (zero bytes).
+- Projectile and item entities are skipped before they enter `_seen`/`_lastSent` (they never
+  existed for a v2 connection, so there is no despawn either); v3 event types are skipped and
+  `effect_id` is not written.
+- The budget's measuring instance carried the previous candidate's unchanged fields into a
+  partial entity's measured size (over-measurement: conservative, never over budget). Fixed for
+  v3 only — fixing it for v2 moved the tight-budget digest, i.e. moved v2 bytes.
+
+### Stats and statuses across threads
+
+Encoding runs on the connection's write task, after the read lock is released; the scalar v3
+fields ride in `EntityView`, but stat blocks and statuses are variable-length side-table data.
+`Connection.GatherSnapshotView` therefore copies them for v3 peers (only) into a
+`SnapshotV3Gather`, double-buffered exactly like the AOI buffer and handed over with it by
+`TakePendingSnapshot`. Status sources are resolved to world-stable keys during that copy, so the
+write task interns them without touching the world.
+
+Change detection: per connection, `_v3Sent[key]` holds the last-sent stat block and statuses (in
+that connection's terms: source handles) plus the counters (`StatsVersion`, `StatusesVersion`)
+they correspond to. Equal counters = unchanged (fast path). Moved counters = compare content; a
+move with no visible change is absorbed (counters updated, nothing sent). The record is written
+only on the lines that write `_lastSent` and erased wherever `_lastSent` forgets a key (despawn
+commit, keyframe), which is the same invariant that makes budget shedding safe: a shed entity's
+stat change is deferred, never lost (`V3Client_UnderATightBudget_ConvergesExactly`). Records,
+`StatValue` / `StatusEffect` wire objects and the removal lists are pooled:
+`SteadyState_AllocatesNothing` encodes 1000 changing v3 snapshots with 0 bytes allocated.
+
+### Owner and status-source handles
+
+An owner is named by the handle this connection already holds for it — bound in an earlier
+message or earlier in this one. Resolving against handles bound LATER in the same message would
+need a second pass and would make the budget's sizing pass and emit pass disagree; instead an
+owner introduced after its projectile is named on the next delta (bit `0x0800`). The budget's
+all-fits sizing pass tracks the handles it would assign (`_prospective`), so it measures exactly
+what the emit pass writes (`BudgetSizing_IsExact_WithStatsAndStatuses`). JSON names the owner by
+id and has no status-source field (0).
+
+### Velocity
+
+`EntityView` carries the motor's ground velocity for every character, but it is replicated only
+for projectiles and airborne characters (`VelZ != 0`). Ground velocity changes on every
+start/stop/turn and a walking remote is interpolated anyway; sending it would add a field to most
+deltas for nothing a receiver uses. (It is also not reset when a held move stops, so it can be
+stale on the ground.)
+
+### Command channel
+
+`Commands/CommandRouter.cs`. The read loop does only non-blocking work (decode, version gate,
+token bucket, opcode check, enqueue into the connection's bounded queue). Each connection has one
+worker task (started on its first command) that runs requests one at a time in arrival order —
+so a character's inventory is never mutated concurrently — and does all `ICharacterStore` I/O.
+Nothing here touches the tick thread; the pick-up's world access is `EcsWorld.UpdateComponents`
+from the worker (the same locked API the join path uses from network threads). Replies go out on
+the control lane.
+
+Pick-up is take-then-grant: `TryTakeItemEntity` removes the entity in the same locked step that
+validates it, so concurrent requests for one item cannot both succeed
+(`Pickup_TwoPlayersRacingForOneItem_ExactlyOneGetsIt`). The grant id is deterministic per drop
+(`{server_id}:{boot_nonce}:{entity_id}:{despawn_tick}`; ids are recycled, the despawn tick names
+the drop, the boot nonce separates process runs). Failure handling picks "never duplicate" over
+"never lose": a definitive store refusal (nothing written) restores the item to the world; an
+I/O failure is retried 3 times with the same id (idempotent) and then logged with the grant id
+for reconciliation, item not restored. A brand-new character's first grant saves its
+`character_state` row first (`AsyncSaver.SavePlayerAsync`), because item rows need it.
+
+### Control lane
+
+`Connection` has a second queue for messages a client is owed exactly once (CommandResult,
+ServerPush, the concurrent-transfer refusal). Bounded 256, `FullMode.Wait` so a write reports
+full instead of dropping; overflow closes the connection. The write task drains it before every
+item of the 64-slot drop-oldest data lane; `SendControl` wakes the writer with a `Wake` item on
+the data lane — a wake that the data lane drops is harmless because a full data lane means the
+writer is busy and drains control before each item it takes. Kick/Disconnect keep
+`WriteOneAsync`, which completes before the connection closes; a queued message would be lost to
+the close.
+
+### Not done here / open
+
+- A dropped item's identity is not on the wire (`EntitySnapshot` has no item-id field); a client
+  learns it on pick-up. Needs a schema decision (a content stat? a field?).
+- Item use has no effect (content defines none); level requirements are not enforced on equip.
+- No inventory capacity rule (`inventory_full` is never produced); no `not_owner` path (an
+  instance of another character is `not_found`).
+- The v2 sizing over-measurement above stays until protocol 2 is retired.

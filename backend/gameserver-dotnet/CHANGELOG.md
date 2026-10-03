@@ -7,6 +7,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Core v3 network (ADR-28..31, wire protocol 3)** — see `docs/API.md` (normative) and
+  `docs/DESIGN.md`, "Core v3 network".
+  - **Protocol window 2-3.** `WireProtocol.CheckProtocolVersion` admits
+    `[MinSupportedProtocolVersion = 2, ProtocolVersion = 3]` (plus the unversioned exemption,
+    narrowed by `GAMESERVER_MIN_PROTOCOL_VERSION`); the peer's version is recorded per
+    connection (`Connection.PeerProtocolVersion`, `SnapshotDeltaState.PeerProtocolVersion`) and
+    the server echoes its own `3`. Field-level delta is on for any advertised version >= 2.
+  - **Snapshot v3 shape for protocol 3 peers:** `z`, replicated velocity (projectiles always,
+    characters only while airborne), `owner` (interned handle; `owner_id` on JSON), `spawn_seq`
+    to the owner's connection only, stat blocks and statuses (complete on keyframe /
+    introduction / full-replace; changed-only + `*_removed` under mask bits `0x1000`/`0x2000` on
+    a delta; status `source` handles), `GameEvent.effect_id` and event types 7-9, projectile and
+    item entities. Change detection via `StatsVersion`/`StatusesVersion` plus per-connection
+    last-sent copies (pooled; the steady state allocates nothing). Stats/statuses are copied at
+    gather time under the read lock (`Snapshot/SnapshotV3Gather.cs`, double-buffered with the
+    AOI buffer) and encoded on the write task. Projectiles are always due under the ADR-27
+    schedule (`ReplicationImportance.IsAlwaysDue`). The budget stays exact (one `Fill`).
+  - **Command channel (MsgType 32/33/34, ADR-30)** — `Commands/CommandRouter.cs`,
+    `Commands/CommandSession.cs`: version gate (below protocol 3 → `unknown_opcode`), per
+    connection token bucket (`CommandLimits`: burst 10, 5/s, 8 queued), ordered per-connection
+    worker off the tick thread, opcodes 1-5 (inventory, pick-up, equip, unequip, use) with
+    exactly one `CommandResult` each and an `InventoryChanged` push (opcode 100) before the
+    result of every successful mutation. Pick-up takes the item entity atomically (an item is
+    taken once) and grants with the deterministic id
+    `{server_id}:{boot_nonce}:{item_entity_id}:{despawn_tick}`; a refused grant restores the
+    item, an unknown outcome is retried idempotently and never duplicated. Equip validates the
+    slot against content. Using an item consumes one; its effect is a documented no-op.
+  - **Control lane** (`Connection.SendControl`): a second, never-dropping bounded queue (256)
+    drained before every data-lane item, for `CommandResult`, `ServerPush` and the concurrent
+    transfer refusal. Overflow closes the connection (`ControlOverflows`).
+  - **Input extras decoded** from Protobuf and legacy JSON (`aim_z`, `render_tick`,
+    `render_alpha`, `jump`, `spawn_seq`) and pushed with `EcsWorld.PushInput(..., in InputExtras)`.
+  - **Legacy JSON for every v3 field:** `JoinTokenResponse.character_id`, input extras, entity
+    `z`/`vel_*`/`owner`/`owner_id`/`spawn_seq`/`stats`/`stats_removed`/`statuses`/
+    `statuses_removed`/`changed_fields`, `GameEvent.effect_id`, and `command`/`command_result`/
+    `server_push` with base64 payloads — names and omitempty rules as the Go struct tags.
+  - **Metrics:** `gameserver_commands_{received,accepted}_total`,
+    `gameserver_commands_rejected_total{reason}`; `/status` `commands_received/accepted/rejected`.
+  - `ItemTakeResult.DespawnTick`; `GameplayErrors.Unavailable` (`unavailable`) in
+    Shared.GameLogic.
+  - Tests: `CoreV3/V2WireIdentityTests` (protocol 2 bytes pinned against the pre-v3 encoder on a
+    v3 world: three digests), `CoreV3/SnapshotV3EncoderTests` (exact reconstruction every
+    snapshot in both encodings, tight-budget convergence, v2 never sees v3 data, projectile
+    always due, owner/spawn_seq, exact sizing, zero steady-state allocation),
+    `Commands/CommandChannelTests`, `Commands/V3HandshakeAndSnapshotTests`,
+    `Net/ControlLaneTests`, `Net/WireJsonV3Tests`.
+
+### Fixed
+- `SnapshotBudgetTests.EntitySnapshot_HasNoFieldFillDoesNotKnowAbout` passes again: `Fill`
+  writes every protocol 3 field (and clears them on every fill).
+- The budget's measuring instance no longer carries the previous candidate's unchanged fields
+  into a partial entity's size — for protocol 3 connections. Left as is for protocol 2, where
+  fixing it would move protocol 2 bytes under a tight budget; the error there is conservative.
+
+### Added
 - **Core v3 simulation (ADR-28..31)** — see `docs/DESIGN.md`, "Core v3 simulation".
   - **3D movement:** players move with `CharacterMotor` (gravity, grounded jump from
     `InputExtras.Jump`, step-up, slope limit) against the map geometry; an airborne pass keeps
