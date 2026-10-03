@@ -10,19 +10,23 @@
     "projectile delivery needs a projectile block: speed (units/s), radius, range (units).",
     "cooldownTicks is BASE SIMULATION TICKS (60 per second at the default critical rate).",
     "Ground and projectile deliveries affect entities of a different type than the caster",
-    "(placeholder hostility rule pending a faction design)."
+    "(placeholder hostility rule pending a faction design).",
+    "Ability 1 is an entity-targeted damage ability because Netcode's live tests",
+    "(GameplayV2LiveTests.BoltAbility) cast id 1 at an entity; keep that id stable."
   ],
   "abilities": [
     {
       "id": 1,
-      "name": "Fire Bolt",
-      "delivery": "projectile",
+      "name": "Bolt",
+      "delivery": "entity",
+      "range": 8,
       "effects": [
-        { "kind": "damage", "power": 15 },
-        { "kind": "apply_status", "statusId": 1 }
+        {
+          "kind": "damage",
+          "power": 10
+        }
       ],
-      "projectile": { "speed": 20, "radius": 0.3, "range": 25 },
-      "cooldownTicks": 45
+      "cooldownTicks": 30
     },
     {
       "id": 2,
@@ -31,9 +35,18 @@
       "range": 12,
       "radius": 3,
       "effects": [
-        { "kind": "damage", "power": 5 },
-        { "kind": "apply_status", "statusId": 2 },
-        { "kind": "apply_status", "statusId": 3 }
+        {
+          "kind": "damage",
+          "power": 5
+        },
+        {
+          "kind": "apply_status",
+          "statusId": 2
+        },
+        {
+          "kind": "apply_status",
+          "statusId": 3
+        }
       ],
       "cooldownTicks": 300
     },
@@ -42,9 +55,33 @@
       "name": "Rejuvenate",
       "delivery": "self",
       "effects": [
-        { "kind": "apply_status", "statusId": 4 }
+        {
+          "kind": "apply_status",
+          "statusId": 4
+        }
       ],
       "cooldownTicks": 600
+    },
+    {
+      "id": 4,
+      "name": "Fire Bolt",
+      "delivery": "projectile",
+      "effects": [
+        {
+          "kind": "damage",
+          "power": 15
+        },
+        {
+          "kind": "apply_status",
+          "statusId": 1
+        }
+      ],
+      "projectile": {
+        "speed": 20,
+        "radius": 0.3,
+        "range": 25
+      },
+      "cooldownTicks": 45
     }
   ]
 }
