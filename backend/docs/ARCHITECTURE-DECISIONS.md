@@ -4067,3 +4067,137 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
 - The scoring path costs one struct-field compare per candidate when disabled, and the score
   is computed once per candidate and reused by the sort rather than recomputed.
 
+---
+
+## ADR-28 — The world is 3D: x/y stay the ground plane, z is height, and collision is static geometry shared by server and client
+
+**Status:** accepted 2026-10-02 (user decision: full 3D movement with jumping). Ships in wire
+protocol version 3 together with ADR-29..31. Constrained by ADR-10 (the shared simulation is
+pure, deterministic, allocation-free C#) and ADR-19 (content is data on disk).
+
+**Context.** Until protocol 2 the simulation was planar: `Vec2` positions, `MovementSystem`
+clamping to a rectangle, no world geometry. The game needs terrain, multi-level spaces, walls
+and jumping, and the client predicts movement with the same library the server runs, so any
+3D model has to be deterministic on NativeAOT x64 and IL2CPP ARM64 alike.
+
+**Decision.**
+
+1. **Axis convention.** Wire `x`/`y` keep their protocol 2 meaning as the ground plane and a new
+   `z` (EntitySnapshot field 14, InputMessage `aim_z`) is height. A renderer maps
+   `(x, y, z)` to Unity `(x, z, y)`. Keeping x/y makes the change additive: a version 2 peer
+   that ignores z still sees a correct top-down world.
+2. **Character motor.** `Shared.GameLogic` gets a kinematic capsule motor: planar input
+   direction times speed, gravity, a jump impulse honoured only when grounded, a step height
+   and a slope limit. It is integrated with the same explicit-cast discipline as
+   `MovementSystem` (no FMA contraction, no transcendental functions), so prediction and
+   authority agree to the bit wherever their inputs agree.
+3. **World geometry is static content.** Each map may have `content/maps/<map_id>.json`:
+   bounds, a heightfield (regular grid, bilinear height), static axis-aligned boxes, and named
+   spawn points and portals. The Unity client bakes it from the scene with an Editor exporter;
+   the server loads it at boot and refuses to start on a map file that fails validation, as it
+   does for items. Dynamic or rotated colliders are out of scope until content needs them.
+4. **AOI stays planar.** Interest is a ground-plane radius (a cylinder). Height differences
+   inside one map are small next to the AOI radius, and a planar grid keeps ADR-27 and the
+   BENCHMARK Part XI measurements valid.
+5. **Golden vectors are re-cut once.** The motor gets its own vector file; the planar
+   `movement.json` keeps describing the version 2 path.
+
+**Consequences.** Every position-bearing type gains a z. A map with no map file is a flat
+plane at z = 0, which is the protocol 2 world, so existing tests and the dev stack keep
+working before any map is authored. The map exporter is client-leg work.
+
+## ADR-29 — Skillshot combat: projectiles are server entities, the client predicts its own, and hits are lag-compensated by at most 200 ms
+
+**Status:** accepted 2026-10-02 (user decisions: action/skillshot combat, maximum rewind
+200 ms). Protocol version 3.
+
+**Context.** Aimed abilities and projectiles are judged against moving targets that each
+client sees in the past (interpolation delay plus half the round trip). Without compensation a
+shot that visibly hit misses on the server.
+
+**Decision.**
+
+1. **Projectiles are entities** (`ENTITY_TYPE_PROJECTILE`), simulated by `Shared.GameLogic`:
+   position, velocity, radius, remaining range, owner. They replicate with velocity
+   (EntitySnapshot fields 15-17) so receivers advance them between snapshots, and they are
+   always due every world tick regardless of the ADR-27 schedule.
+2. **The owner predicts its own projectile.** An input that fires carries `spawn_seq`; the
+   server echoes it on the projectile entity to the owner's connection only, and the client
+   swaps its predicted projectile for the authoritative one.
+3. **Hit detection** is a swept sphere (the projectile's path this tick) against target
+   capsules and against world geometry (ADR-28); geometry stops a projectile.
+4. **Lag compensation.** The server records every damageable entity's capsule per tick in a
+   ring buffer. An input carries `render_tick` + `render_alpha`, the instant the client was
+   rendering remote entities at. Hits caused by that input (the projectile's first tick,
+   instant-hit and ground-targeted abilities) are tested against targets rewound to that
+   instant, interpolated between the two bracketing ticks. The rewind is clamped to **200 ms**
+   behind the current tick; `render_tick = 0` means no rewind. Later projectile ticks test
+   present-time targets, which is what the shooter sees once the projectile is in flight.
+5. **The server never trusts a client origin.** Direction is derived from the caster's
+   authoritative position to the aim point.
+
+**Consequences.** The 200 ms cap bounds "shot around the corner" at the cost of high-latency
+players leading their shots. The history buffer is sized from the critical tick rate and the
+cap. PvP and PvE use the same path.
+
+## ADR-30 — Gameplay grows through content and opcodes, not through the realtime schema
+
+**Status:** accepted 2026-10-02. Protocol version 3.
+
+**Context.** Through protocol 2 every new visible stat was a new EntitySnapshot field and
+every new player action a new MsgType, each needing a coordinated server, Netcode and client
+release plus a protocol bump. That cost would recur for every gameplay feature.
+
+**Decision.**
+
+1. **Stat block.** EntitySnapshot carries `repeated StatValue stats` keyed by content stat ids,
+   complete on a keyframe or introduction and changed-only on a delta (bit `0x1000`), with
+   `stats_removed`. Mana, level, cast progress and resistances are content.
+2. **Status effects** replicate the same way (`statuses`, bit `0x2000`), keyed by content
+   status ids. A status definition says whether it is periodic (DoT/HoT), a stat modifier
+   (buff/debuff), crowd control (stun, root, silence, slow), or a combination.
+3. **Abilities become effect lists.** An ability has a delivery (self, entity, ground area,
+   projectile) and an ordered list of effects (damage, heal, apply status). New combinations
+   are content.
+4. **Command channel.** `MSG_TYPE_COMMAND` / `COMMAND_RESULT` / `SERVER_PUSH` (32-34) carry an
+   opcode and opaque bytes. Each opcode's payload is defined in `Shared.GameLogic`'s
+   `gameplay.proto` and encoded by a small dependency-free Protobuf-compatible codec in the
+   same library, so the server and the Unity client use one implementation. Server tests prove
+   the codec byte-compatible with `protoc` output. Netcode only moves bytes.
+5. **Version gating.** All of the above is sent only to peers that advertised protocol 3.
+
+**Consequences.** A new command is an opcode and payload in `gameplay.proto`, a server
+handler, a client caller and a `Shared.GameLogic` tag: no Netcode release and no protocol
+bump. The command router validates and rate-limits per opcode and answers unknown opcodes with
+`unknown_opcode`.
+
+## ADR-31 — Characters are a roster of slots per account; Nakama owns the roster and wallet, the game server owns character state, bag and equipment
+
+**Status:** accepted 2026-10-02 (user decision: multiple character slots). Extends ADR-1.
+
+**Context.** `player_states` is keyed by `user_id`, so an account can have one character, and
+nothing of value (items, equipment) is persisted at all.
+
+**Decision.**
+
+1. **Roster in Nakama.** `character_list`, `character_create` and `character_delete` RPCs keep
+   the roster (id, slot, name, created) in Nakama storage. The `gateway_token` RPC takes an
+   optional `character_id`, checks it belongs to the caller, and puts it in the gateway JWT as
+   `cid`; the gateway copies `cid` into the join token. A missing `cid` means the account's
+   default character, which keeps every protocol 2 client working.
+2. **Character state in the game DB.** Migration 002 adds `character_state` (keyed by
+   `character_id`; adds `z`, `yaw`, `level`, `xp`), `character_items` (bag and equipment by
+   instance id) and `item_grants` (idempotency). `player_states` stays readable until
+   protocol 2 is retired (expand/contract): a character's first load falls back to the
+   account's `player_states` row.
+3. **Single writer (ADR-1).** The game server hosting the character is the only writer of
+   `character_state` and `character_items`. Nakama is the only writer of wallet and stash.
+   Moving value between them is a two-step transfer with an idempotency key, never a
+   cross-database transaction.
+4. **Grant-time persistence (ADR-6).** Granting, consuming or moving an item writes through
+   immediately in one transaction keyed by a grant id; position and HP keep the 30 s sweep.
+
+**Consequences.** One account can hold several characters, and items survive a crash.
+Character creation rules (slot count, name rules) are content limits with placeholder values
+until design supplies them.
+

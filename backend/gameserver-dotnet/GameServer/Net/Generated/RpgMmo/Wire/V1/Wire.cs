@@ -28,82 +28,107 @@ namespace RpgMmo.Wire.V1 {
             "eXBlGAEgASgNEg8KB3BheWxvYWQYAiABKAwiNgoLQXV0aFJlcXVlc3QSDQoF",
             "dG9rZW4YASABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgCIAEoDSJUCgxBdXRo",
             "UmVzcG9uc2USCgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJv",
-            "chgDIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAQgASgNIjUKEUVudGVyV29y",
-            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCRIQCghwYXJ0eV9pZBgCIAEoCSKN",
-            "AQoSRW50ZXJXb3JsZFJlc3BvbnNlEhMKC3NlcnZlcl9hZGRyGAEgASgJEhIK",
-            "CmpvaW5fdG9rZW4YAiABKAkSEQoJdHJhbnNwb3J0GAMgASgJEg0KBWVycm9y",
-            "GAQgASgJEhkKEXNlcnZlcl9wdWJsaWNfa2V5GAYgASgMSgQIBRAGUgtzZXNz",
-            "aW9uX2tleSI7ChBKb2luVG9rZW5SZXF1ZXN0Eg0KBXRva2VuGAEgASgJEhgK",
-            "EHByb3RvY29sX3ZlcnNpb24YAiABKA0ibAoRSm9pblRva2VuUmVzcG9uc2US",
-            "CgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJvchgDIAEoCRIR",
-            "Cgl0aWNrX3JhdGUYBCABKA0SGAoQcHJvdG9jb2xfdmVyc2lvbhgFIAEoDSKj",
+            "chgDIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAQgASgNIksKEUVudGVyV29y",
+            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCRIQCghwYXJ0eV9pZBgCIAEoCRIU",
+            "CgxjaGFyYWN0ZXJfaWQYAyABKAkijQEKEkVudGVyV29ybGRSZXNwb25zZRIT",
+            "CgtzZXJ2ZXJfYWRkchgBIAEoCRISCgpqb2luX3Rva2VuGAIgASgJEhEKCXRy",
+            "YW5zcG9ydBgDIAEoCRINCgVlcnJvchgEIAEoCRIZChFzZXJ2ZXJfcHVibGlj",
+            "X2tleRgGIAEoDEoECAUQBlILc2Vzc2lvbl9rZXkiOwoQSm9pblRva2VuUmVx",
+            "dWVzdBINCgV0b2tlbhgBIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAIgASgN",
+            "IoIBChFKb2luVG9rZW5SZXNwb25zZRIKCgJvaxgBIAEoCBIPCgd1c2VyX2lk",
+            "GAIgASgJEg0KBWVycm9yGAMgASgJEhEKCXRpY2tfcmF0ZRgEIAEoDRIYChBw",
+            "cm90b2NvbF92ZXJzaW9uGAUgASgNEhQKDGNoYXJhY3Rlcl9pZBgGIAEoCSL+",
             "AQoMSW5wdXRNZXNzYWdlEgwKBHRpY2sYASABKAQSDgoGbW92ZV94GAIgASgC",
             "Eg4KBm1vdmVfeRgDIAEoAhIYChBhdHRhY2tfdGFyZ2V0X2lkGAQgASgJEhIK",
             "CmFiaWxpdHlfaWQYBSABKA0SGQoRYWJpbGl0eV90YXJnZXRfaWQYBiABKAkS",
-            "DQoFYWltX3gYByABKAISDQoFYWltX3kYCCABKAIimQIKDkVudGl0eVNuYXBz",
-            "aG90EgoKAmlkGAEgASgJEhEKCXR5cGVfbmFtZRgCIAEoCRIJCgF4GAMgASgC",
-            "EgkKAXkYBCABKAISCgoCaHAYBSABKAUSDgoGbWF4X2hwGAYgASgFEigKBHR5",
-            "cGUYByABKA4yGi5ycGdtbW8ud2lyZS52MS5FbnRpdHlUeXBlEg4KBmhhbmRs",
-            "ZRgIIAEoDRINCgVzcGVlZBgJIAEoAhITCgtmYWNpbmdfYnJhZBgKIAEoDRIs",
-            "CgZhY3Rpb24YCyABKA4yHC5ycGdtbW8ud2lyZS52MS5FbnRpdHlBY3Rpb24S",
-            "EgoKYWN0aW9uX3NlcRgMIAEoDRIWCg5jaGFuZ2VkX2ZpZWxkcxgNIAEoDSKx",
-            "AQoJR2FtZUV2ZW50EisKBHR5cGUYASABKA4yHS5ycGdtbW8ud2lyZS52MS5H",
-            "YW1lRXZlbnRUeXBlEg4KBnNvdXJjZRgCIAEoDRIOCgZ0YXJnZXQYAyABKA0S",
-            "DgoGYW1vdW50GAQgASgREhIKCmFiaWxpdHlfaWQYBSABKA0SDQoFZmxhZ3MY",
-            "BiABKA0SEQoJc291cmNlX2lkGAcgASgJEhEKCXRhcmdldF9pZBgIIAEoCSKt",
-            "AQoPU25hcHNob3RNZXNzYWdlEgwKBHRpY2sYASABKAQSEAoIYWNrX3RpY2sY",
-            "AiABKAQSDAoEZnVsbBgDIAEoCBIwCghlbnRpdGllcxgEIAMoCzIeLnJwZ21t",
-            "by53aXJlLnYxLkVudGl0eVNuYXBzaG90Eg8KB3JlbW92ZWQYBSADKAkSKQoG",
-            "ZXZlbnRzGAYgAygLMhkucnBnbW1vLndpcmUudjEuR2FtZUV2ZW50IiMKEURp",
-            "c2Nvbm5lY3RNZXNzYWdlEg4KBnJlYXNvbhgBIAEoCSIPCg1SZXN5bmNSZXF1",
-            "ZXN0IiQKElRyYW5zZmVyTWFwUmVxdWVzdBIOCgZtYXBfaWQYASABKAkiMAoT",
-            "VHJhbnNmZXJNYXBSZXNwb25zZRIKCgJvaxgBIAEoCBINCgVlcnJvchgCIAEo",
-            "CSIgCgtQaW5nTWVzc2FnZRIRCgl0aW1lc3RhbXAYASABKAMiNQoLUG9uZ01l",
-            "c3NhZ2USEQoJdGltZXN0YW1wGAEgASgDEhMKC3NlcnZlcl90aW1lGAIgASgD",
-            "Ih0KC0tpY2tNZXNzYWdlEg4KBnJlYXNvbhgBIAEoCSInChFTZWFsZWRDbGll",
-            "bnRIZWxsbxISCgpwdWJsaWNfa2V5GAEgASgMImEKEVNlYWxlZFNlcnZlckhl",
-            "bGxvEhIKCnB1YmxpY19rZXkYASABKAwSDwoHYmluZGluZxgCIAEoDBINCgVl",
-            "cnJvchgDIAEoCRIYChBzZXJ2ZXJfc2lnbmF0dXJlGAQgASgMKs8DCgdNc2dU",
-            "eXBlEhgKFE1TR19UWVBFX1VOU1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVU",
-            "SBABEhYKEk1TR19UWVBFX0FVVEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVS",
-            "X1dPUkxEEAMSHQoZTVNHX1RZUEVfRU5URVJfV09STERfUkVTUBAEEhcKE01T",
-            "R19UWVBFX0pPSU5fVE9LRU4QBRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JF",
-            "U1AQBhISCg5NU0dfVFlQRV9JTlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9U",
-            "EAgSFwoTTVNHX1RZUEVfRElTQ09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lO",
-            "QxAKEhkKFU1TR19UWVBFX1RSQU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RS",
-            "QU5TRkVSX01BUF9SRVNQEA4SEQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19U",
-            "WVBFX1BPTkcQDBIRCg1NU0dfVFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VB",
-            "TEVEX0NMSUVOVF9IRUxMTxAQEiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJf",
-            "SEVMTE8QESqdAQoKRW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJ",
-            "RklFRBAAEhYKEkVOVElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBF",
-            "X01PQhACEhMKD0VOVElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lU",
-            "RU0QBBIaChZFTlRJVFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFj",
-            "dGlvbhIdChlFTlRJVFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZ",
-            "X0FDVElPTl9JRExFEAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdF",
-            "TlRJVFlfQUNUSU9OX0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVB",
-            "RBAEKt4BCg1HYW1lRXZlbnRUeXBlEh8KG0dBTUVfRVZFTlRfVFlQRV9VTlNQ",
-            "RUNJRklFRBAAEhoKFkdBTUVfRVZFTlRfVFlQRV9EQU1BR0UQARIYChRHQU1F",
-            "X0VWRU5UX1RZUEVfSEVBTBACEhkKFUdBTUVfRVZFTlRfVFlQRV9ERUFUSBAD",
-            "EiAKHEdBTUVfRVZFTlRfVFlQRV9BQklMSVRZX0NBU1QQBBIbChdHQU1FX0VW",
-            "RU5UX1RZUEVfWFBfR0FJThAFEhwKGEdBTUVfRVZFTlRfVFlQRV9MRVZFTF9V",
-            "UBAGQkZaM2dpdGh1Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFyZWQvcHJv",
-            "dG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
+            "DQoFYWltX3gYByABKAISDQoFYWltX3kYCCABKAISDQoFYWltX3oYCSABKAIS",
+            "EwoLcmVuZGVyX3RpY2sYCiABKAQSDAoEanVtcBgLIAEoCBIRCglzcGF3bl9z",
+            "ZXEYDCABKA0SFAoMcmVuZGVyX2FscGhhGA0gASgCIpAECg5FbnRpdHlTbmFw",
+            "c2hvdBIKCgJpZBgBIAEoCRIRCgl0eXBlX25hbWUYAiABKAkSCQoBeBgDIAEo",
+            "AhIJCgF5GAQgASgCEgoKAmhwGAUgASgFEg4KBm1heF9ocBgGIAEoBRIoCgR0",
+            "eXBlGAcgASgOMhoucnBnbW1vLndpcmUudjEuRW50aXR5VHlwZRIOCgZoYW5k",
+            "bGUYCCABKA0SDQoFc3BlZWQYCSABKAISEwoLZmFjaW5nX2JyYWQYCiABKA0S",
+            "LAoGYWN0aW9uGAsgASgOMhwucnBnbW1vLndpcmUudjEuRW50aXR5QWN0aW9u",
+            "EhIKCmFjdGlvbl9zZXEYDCABKA0SFgoOY2hhbmdlZF9maWVsZHMYDSABKA0S",
+            "CQoBehgOIAEoAhINCgV2ZWxfeBgPIAEoAhINCgV2ZWxfeRgQIAEoAhINCgV2",
+            "ZWxfehgRIAEoAhINCgVvd25lchgSIAEoDRIRCglzcGF3bl9zZXEYEyABKA0S",
+            "KAoFc3RhdHMYFCADKAsyGS5ycGdtbW8ud2lyZS52MS5TdGF0VmFsdWUSFQoN",
+            "c3RhdHNfcmVtb3ZlZBgVIAMoDRIuCghzdGF0dXNlcxgWIAMoCzIcLnJwZ21t",
+            "by53aXJlLnYxLlN0YXR1c0VmZmVjdBIYChBzdGF0dXNlc19yZW1vdmVkGBcg",
+            "AygNEhAKCG93bmVyX2lkGBggASgJIisKCVN0YXRWYWx1ZRIPCgdzdGF0X2lk",
+            "GAEgASgNEg0KBXZhbHVlGAIgASgRIlcKDFN0YXR1c0VmZmVjdBIRCgllZmZl",
+            "Y3RfaWQYASABKA0SDgoGc3RhY2tzGAIgASgNEhQKDGV4cGlyZXNfdGljaxgD",
+            "IAEoBBIOCgZzb3VyY2UYBCABKA0ixAEKCUdhbWVFdmVudBIrCgR0eXBlGAEg",
+            "ASgOMh0ucnBnbW1vLndpcmUudjEuR2FtZUV2ZW50VHlwZRIOCgZzb3VyY2UY",
+            "AiABKA0SDgoGdGFyZ2V0GAMgASgNEg4KBmFtb3VudBgEIAEoERISCgphYmls",
+            "aXR5X2lkGAUgASgNEg0KBWZsYWdzGAYgASgNEhEKCXNvdXJjZV9pZBgHIAEo",
+            "CRIRCgl0YXJnZXRfaWQYCCABKAkSEQoJZWZmZWN0X2lkGAkgASgNIq0BCg9T",
+            "bmFwc2hvdE1lc3NhZ2USDAoEdGljaxgBIAEoBBIQCghhY2tfdGljaxgCIAEo",
+            "BBIMCgRmdWxsGAMgASgIEjAKCGVudGl0aWVzGAQgAygLMh4ucnBnbW1vLndp",
+            "cmUudjEuRW50aXR5U25hcHNob3QSDwoHcmVtb3ZlZBgFIAMoCRIpCgZldmVu",
+            "dHMYBiADKAsyGS5ycGdtbW8ud2lyZS52MS5HYW1lRXZlbnQiIwoRRGlzY29u",
+            "bmVjdE1lc3NhZ2USDgoGcmVhc29uGAEgASgJIg8KDVJlc3luY1JlcXVlc3Qi",
+            "PgoOQ29tbWFuZFJlcXVlc3QSCwoDc2VxGAEgASgNEg4KBm9wY29kZRgCIAEo",
+            "DRIPCgdwYXlsb2FkGAMgASgMIkgKDUNvbW1hbmRSZXN1bHQSCwoDc2VxGAEg",
+            "ASgNEgoKAm9rGAIgASgIEg0KBWVycm9yGAMgASgJEg8KB3BheWxvYWQYBCAB",
+            "KAwiLQoKU2VydmVyUHVzaBIOCgZvcGNvZGUYASABKA0SDwoHcGF5bG9hZBgC",
+            "IAEoDCIkChJUcmFuc2Zlck1hcFJlcXVlc3QSDgoGbWFwX2lkGAEgASgJIjAK",
+            "E1RyYW5zZmVyTWFwUmVzcG9uc2USCgoCb2sYASABKAgSDQoFZXJyb3IYAiAB",
+            "KAkiIAoLUGluZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDIjUKC1BvbmdN",
+            "ZXNzYWdlEhEKCXRpbWVzdGFtcBgBIAEoAxITCgtzZXJ2ZXJfdGltZRgCIAEo",
+            "AyIdCgtLaWNrTWVzc2FnZRIOCgZyZWFzb24YASABKAkiJwoRU2VhbGVkQ2xp",
+            "ZW50SGVsbG8SEgoKcHVibGljX2tleRgBIAEoDCJhChFTZWFsZWRTZXJ2ZXJI",
+            "ZWxsbxISCgpwdWJsaWNfa2V5GAEgASgMEg8KB2JpbmRpbmcYAiABKAwSDQoF",
+            "ZXJyb3IYAyABKAkSGAoQc2VydmVyX3NpZ25hdHVyZRgEIAEoDCqcBAoHTXNn",
+            "VHlwZRIYChRNU0dfVFlQRV9VTlNQRUNJRklFRBAAEhEKDU1TR19UWVBFX0FV",
+            "VEgQARIWChJNU0dfVFlQRV9BVVRIX1JFU1AQAhIYChRNU0dfVFlQRV9FTlRF",
+            "Ul9XT1JMRBADEh0KGU1TR19UWVBFX0VOVEVSX1dPUkxEX1JFU1AQBBIXChNN",
+            "U0dfVFlQRV9KT0lOX1RPS0VOEAUSHAoYTVNHX1RZUEVfSk9JTl9UT0tFTl9S",
+            "RVNQEAYSEgoOTVNHX1RZUEVfSU5QVVQQBxIVChFNU0dfVFlQRV9TTkFQU0hP",
+            "VBAIEhcKE01TR19UWVBFX0RJU0NPTk5FQ1QQCRITCg9NU0dfVFlQRV9SRVNZ",
+            "TkMQChIZChVNU0dfVFlQRV9UUkFOU0ZFUl9NQVAQDRIeChpNU0dfVFlQRV9U",
+            "UkFOU0ZFUl9NQVBfUkVTUBAOEhEKDU1TR19UWVBFX1BJTkcQCxIRCg1NU0df",
+            "VFlQRV9QT05HEAwSEQoNTVNHX1RZUEVfS0lDSxAPEiAKHE1TR19UWVBFX1NF",
+            "QUxFRF9DTElFTlRfSEVMTE8QEBIgChxNU0dfVFlQRV9TRUFMRURfU0VSVkVS",
+            "X0hFTExPEBESFAoQTVNHX1RZUEVfQ09NTUFORBAgEhsKF01TR19UWVBFX0NP",
+            "TU1BTkRfUkVTVUxUECESGAoUTVNHX1RZUEVfU0VSVkVSX1BVU0gQIiqdAQoK",
+            "RW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVO",
+            "VElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VO",
+            "VElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJ",
+            "VFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJ",
+            "VFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExF",
+            "EAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9O",
+            "X0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVBRBAEKsoCCg1HYW1l",
+            "RXZlbnRUeXBlEh8KG0dBTUVfRVZFTlRfVFlQRV9VTlNQRUNJRklFRBAAEhoK",
+            "FkdBTUVfRVZFTlRfVFlQRV9EQU1BR0UQARIYChRHQU1FX0VWRU5UX1RZUEVf",
+            "SEVBTBACEhkKFUdBTUVfRVZFTlRfVFlQRV9ERUFUSBADEiAKHEdBTUVfRVZF",
+            "TlRfVFlQRV9BQklMSVRZX0NBU1QQBBIbChdHQU1FX0VWRU5UX1RZUEVfWFBf",
+            "R0FJThAFEhwKGEdBTUVfRVZFTlRfVFlQRV9MRVZFTF9VUBAGEiIKHkdBTUVf",
+            "RVZFTlRfVFlQRV9TVEFUVVNfQVBQTElFRBAHEiIKHkdBTUVfRVZFTlRfVFlQ",
+            "RV9TVEFUVVNfUkVNT1ZFRBAIEiIKHkdBTUVfRVZFTlRfVFlQRV9QUk9KRUNU",
+            "SUxFX0hJVBAJQkZaM2dpdGh1Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFy",
+            "ZWQvcHJvdG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), typeof(global::RpgMmo.Wire.V1.GameEventType), }, null, new pbr::GeneratedClrTypeInfo[] {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.Envelope), global::RpgMmo.Wire.V1.Envelope.Parser, new[]{ "Type", "Payload" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthRequest), global::RpgMmo.Wire.V1.AuthRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthResponse), global::RpgMmo.Wire.V1.AuthResponse.Parser, new[]{ "Ok", "UserId", "Error", "ProtocolVersion" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId", "PartyId" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId", "PartyId", "CharacterId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error", "ServerPublicKey" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId", "AbilityId", "AbilityTargetId", "AimX", "AimY" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq", "ChangedFields" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.GameEvent), global::RpgMmo.Wire.V1.GameEvent.Parser, new[]{ "Type", "Source", "Target", "Amount", "AbilityId", "Flags", "SourceId", "TargetId" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion", "CharacterId" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId", "AbilityId", "AbilityTargetId", "AimX", "AimY", "AimZ", "RenderTick", "Jump", "SpawnSeq", "RenderAlpha" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq", "ChangedFields", "Z", "VelX", "VelY", "VelZ", "Owner", "SpawnSeq", "Stats", "StatsRemoved", "Statuses", "StatusesRemoved", "OwnerId" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.StatValue), global::RpgMmo.Wire.V1.StatValue.Parser, new[]{ "StatId", "Value" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.StatusEffect), global::RpgMmo.Wire.V1.StatusEffect.Parser, new[]{ "EffectId", "Stacks", "ExpiresTick", "Source" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.GameEvent), global::RpgMmo.Wire.V1.GameEvent.Parser, new[]{ "Type", "Source", "Target", "Amount", "AbilityId", "Flags", "SourceId", "TargetId", "EffectId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed", "Events" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.DisconnectMessage), global::RpgMmo.Wire.V1.DisconnectMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.ResyncRequest), global::RpgMmo.Wire.V1.ResyncRequest.Parser, null, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.CommandRequest), global::RpgMmo.Wire.V1.CommandRequest.Parser, new[]{ "Seq", "Opcode", "Payload" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.CommandResult), global::RpgMmo.Wire.V1.CommandResult.Parser, new[]{ "Seq", "Ok", "Error", "Payload" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.ServerPush), global::RpgMmo.Wire.V1.ServerPush.Parser, new[]{ "Opcode", "Payload" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.TransferMapRequest), global::RpgMmo.Wire.V1.TransferMapRequest.Parser, new[]{ "MapId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.TransferMapResponse), global::RpgMmo.Wire.V1.TransferMapResponse.Parser, new[]{ "Ok", "Error" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.PingMessage), global::RpgMmo.Wire.V1.PingMessage.Parser, new[]{ "Timestamp" }, null, null, null, null),
@@ -204,6 +229,27 @@ namespace RpgMmo.Wire.V1 {
     /// gameserver -> client
     /// </summary>
     [pbr::OriginalName("MSG_TYPE_SEALED_SERVER_HELLO")] SealedServerHello = 17,
+    /// <summary>
+    /// Generic gameplay channel (protocol version 3, ADR-30). 32-34 rather than 18:
+    /// 18-31 stay reserved for the gateway hop's handshake (see above), and 32-34
+    /// are still one-byte varints.
+    ///
+    /// These three carry an OPCODE plus OPAQUE BYTES. The payload schema of each
+    /// opcode is NOT defined in this file: it lives in Shared.GameLogic's
+    /// gameplay.proto, shared by the game server and the Unity client. That is the
+    /// point of the channel -- a new gameplay command (loot, equip, interact) is a
+    /// new opcode there, and needs no change here, no protocol bump and no Netcode
+    /// release.
+    /// </summary>
+    [pbr::OriginalName("MSG_TYPE_COMMAND")] Command = 32,
+    /// <summary>
+    /// gameserver -> client (CommandResult)
+    /// </summary>
+    [pbr::OriginalName("MSG_TYPE_COMMAND_RESULT")] CommandResult = 33,
+    /// <summary>
+    /// gameserver -> client (ServerPush)
+    /// </summary>
+    [pbr::OriginalName("MSG_TYPE_SERVER_PUSH")] ServerPush = 34,
   }
 
   /// <summary>
@@ -319,6 +365,22 @@ namespace RpgMmo.Wire.V1 {
     /// `target` reached level `amount`.
     /// </summary>
     [pbr::OriginalName("GAME_EVENT_TYPE_LEVEL_UP")] LevelUp = 6,
+    /// <summary>
+    /// `source` applied status `effect_id` to `target`; `amount` is the stack count
+    /// after applying. Protocol version 3.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_STATUS_APPLIED")] StatusApplied = 7,
+    /// <summary>
+    /// Status `effect_id` ended on `target` (expired, cleansed or replaced).
+    /// Protocol version 3.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_STATUS_REMOVED")] StatusRemoved = 8,
+    /// <summary>
+    /// A projectile owned by `source` hit `target`. Damage it dealt, if any, is a
+    /// separate DAMAGE event; this one exists so a client can play the impact even
+    /// when the hit dealt nothing. Protocol version 3.
+    /// </summary>
+    [pbr::OriginalName("GAME_EVENT_TYPE_PROJECTILE_HIT")] ProjectileHit = 9,
   }
 
   #endregion
@@ -1194,6 +1256,7 @@ namespace RpgMmo.Wire.V1 {
     public EnterWorldRequest(EnterWorldRequest other) : this() {
       mapId_ = other.mapId_;
       partyId_ = other.partyId_;
+      characterId_ = other.characterId_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1227,6 +1290,25 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "character_id" field.</summary>
+    public const int CharacterIdFieldNumber = 3;
+    private string characterId_ = "";
+    /// <summary>
+    /// Character to play, from the account's roster (ADR-31). The gateway does not
+    /// trust this field: it must equal the `cid` claim of the gateway token Nakama
+    /// minted for this session, which is where ownership was checked. Empty means
+    /// the account's default character (slot 0) -- the behaviour of every client
+    /// that predates character slots. Introduced in protocol version 3.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string CharacterId {
+      get { return characterId_; }
+      set {
+        characterId_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1244,6 +1326,7 @@ namespace RpgMmo.Wire.V1 {
       }
       if (MapId != other.MapId) return false;
       if (PartyId != other.PartyId) return false;
+      if (CharacterId != other.CharacterId) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1253,6 +1336,7 @@ namespace RpgMmo.Wire.V1 {
       int hash = 1;
       if (MapId.Length != 0) hash ^= MapId.GetHashCode();
       if (PartyId.Length != 0) hash ^= PartyId.GetHashCode();
+      if (CharacterId.Length != 0) hash ^= CharacterId.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1279,6 +1363,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(18);
         output.WriteString(PartyId);
       }
+      if (CharacterId.Length != 0) {
+        output.WriteRawTag(26);
+        output.WriteString(CharacterId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1297,6 +1385,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(18);
         output.WriteString(PartyId);
       }
+      if (CharacterId.Length != 0) {
+        output.WriteRawTag(26);
+        output.WriteString(CharacterId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1312,6 +1404,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (PartyId.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(PartyId);
+      }
+      if (CharacterId.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(CharacterId);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1330,6 +1425,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.PartyId.Length != 0) {
         PartyId = other.PartyId;
+      }
+      if (other.CharacterId.Length != 0) {
+        CharacterId = other.CharacterId;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1358,6 +1456,10 @@ namespace RpgMmo.Wire.V1 {
             PartyId = input.ReadString();
             break;
           }
+          case 26: {
+            CharacterId = input.ReadString();
+            break;
+          }
         }
       }
     #endif
@@ -1383,6 +1485,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 18: {
             PartyId = input.ReadString();
+            break;
+          }
+          case 26: {
+            CharacterId = input.ReadString();
             break;
           }
         }
@@ -2068,6 +2174,7 @@ namespace RpgMmo.Wire.V1 {
       error_ = other.error_;
       tickRate_ = other.tickRate_;
       protocolVersion_ = other.protocolVersion_;
+      characterId_ = other.characterId_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -2156,6 +2263,24 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "character_id" field.</summary>
+    public const int CharacterIdFieldNumber = 6;
+    private string characterId_ = "";
+    /// <summary>
+    /// The character this connection plays, taken from the join token's `cid`
+    /// claim (ADR-31). Echoed so the client binds its local view to the right
+    /// character without trusting its own request. Empty on a rejected join and
+    /// from a server predating character slots. Introduced in protocol version 3.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string CharacterId {
+      get { return characterId_; }
+      set {
+        characterId_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -2176,6 +2301,7 @@ namespace RpgMmo.Wire.V1 {
       if (Error != other.Error) return false;
       if (TickRate != other.TickRate) return false;
       if (ProtocolVersion != other.ProtocolVersion) return false;
+      if (CharacterId != other.CharacterId) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -2188,6 +2314,7 @@ namespace RpgMmo.Wire.V1 {
       if (Error.Length != 0) hash ^= Error.GetHashCode();
       if (TickRate != 0) hash ^= TickRate.GetHashCode();
       if (ProtocolVersion != 0) hash ^= ProtocolVersion.GetHashCode();
+      if (CharacterId.Length != 0) hash ^= CharacterId.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -2226,6 +2353,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(40);
         output.WriteUInt32(ProtocolVersion);
       }
+      if (CharacterId.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteString(CharacterId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -2256,6 +2387,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(40);
         output.WriteUInt32(ProtocolVersion);
       }
+      if (CharacterId.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteString(CharacterId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -2280,6 +2415,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (ProtocolVersion != 0) {
         size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ProtocolVersion);
+      }
+      if (CharacterId.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(CharacterId);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -2307,6 +2445,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.ProtocolVersion != 0) {
         ProtocolVersion = other.ProtocolVersion;
+      }
+      if (other.CharacterId.Length != 0) {
+        CharacterId = other.CharacterId;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -2347,6 +2488,10 @@ namespace RpgMmo.Wire.V1 {
             ProtocolVersion = input.ReadUInt32();
             break;
           }
+          case 50: {
+            CharacterId = input.ReadString();
+            break;
+          }
         }
       }
     #endif
@@ -2384,6 +2529,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 40: {
             ProtocolVersion = input.ReadUInt32();
+            break;
+          }
+          case 50: {
+            CharacterId = input.ReadString();
             break;
           }
         }
@@ -2439,6 +2588,11 @@ namespace RpgMmo.Wire.V1 {
       abilityTargetId_ = other.abilityTargetId_;
       aimX_ = other.aimX_;
       aimY_ = other.aimY_;
+      aimZ_ = other.aimZ_;
+      renderTick_ = other.renderTick_;
+      jump_ = other.jump_;
+      spawnSeq_ = other.spawnSeq_;
+      renderAlpha_ = other.renderAlpha_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -2587,6 +2741,92 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "aim_z" field.</summary>
+    public const int AimZFieldNumber = 9;
+    private float aimZ_;
+    /// <summary>
+    /// Height of the aim point (ADR-28: x/y are the ground plane, z is up). With
+    /// aim_x/aim_y this is the full 3D point a skillshot is fired AT; the server
+    /// derives the direction from the caster's own authoritative position, never
+    /// from a client-supplied origin.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float AimZ {
+      get { return aimZ_; }
+      set {
+        aimZ_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "render_tick" field.</summary>
+    public const int RenderTickFieldNumber = 10;
+    private ulong renderTick_;
+    /// <summary>
+    /// The server tick the client was RENDERING remote entities at when it
+    /// produced this input -- its interpolation time, not its prediction tick.
+    /// Lag compensation (ADR-29) rewinds hit targets to this instant, clamped to at
+    /// most `max_rewind` (200 ms) behind the server's current tick. Zero means "not
+    /// sent": no rewind, targets are tested where they are now.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public ulong RenderTick {
+      get { return renderTick_; }
+      set {
+        renderTick_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "jump" field.</summary>
+    public const int JumpFieldNumber = 11;
+    private bool jump_;
+    /// <summary>
+    /// Jump request. Level-triggered for the tick it is sent on; the motor ignores
+    /// it unless the character is grounded, so a held button does not fly.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Jump {
+      get { return jump_; }
+      set {
+        jump_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "spawn_seq" field.</summary>
+    public const int SpawnSeqFieldNumber = 12;
+    private uint spawnSeq_;
+    /// <summary>
+    /// Client-chosen sequence number for a projectile this input fires, so the
+    /// client can match its predicted projectile to the server's entity
+    /// (EntitySnapshot.spawn_seq). Zero when the input fires nothing.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint SpawnSeq {
+      get { return spawnSeq_; }
+      set {
+        spawnSeq_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "render_alpha" field.</summary>
+    public const int RenderAlphaFieldNumber = 13;
+    private float renderAlpha_;
+    /// <summary>
+    /// Fraction [0, 1) of the way from render_tick to render_tick + 1 that the
+    /// client was rendering at. Rewind interpolates hitboxes to the same instant.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float RenderAlpha {
+      get { return renderAlpha_; }
+      set {
+        renderAlpha_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -2610,6 +2850,11 @@ namespace RpgMmo.Wire.V1 {
       if (AbilityTargetId != other.AbilityTargetId) return false;
       if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(AimX, other.AimX)) return false;
       if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(AimY, other.AimY)) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(AimZ, other.AimZ)) return false;
+      if (RenderTick != other.RenderTick) return false;
+      if (Jump != other.Jump) return false;
+      if (SpawnSeq != other.SpawnSeq) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(RenderAlpha, other.RenderAlpha)) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -2625,6 +2870,11 @@ namespace RpgMmo.Wire.V1 {
       if (AbilityTargetId.Length != 0) hash ^= AbilityTargetId.GetHashCode();
       if (AimX != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(AimX);
       if (AimY != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(AimY);
+      if (AimZ != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(AimZ);
+      if (RenderTick != 0UL) hash ^= RenderTick.GetHashCode();
+      if (Jump != false) hash ^= Jump.GetHashCode();
+      if (SpawnSeq != 0) hash ^= SpawnSeq.GetHashCode();
+      if (RenderAlpha != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(RenderAlpha);
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -2675,6 +2925,26 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(69);
         output.WriteFloat(AimY);
       }
+      if (AimZ != 0F) {
+        output.WriteRawTag(77);
+        output.WriteFloat(AimZ);
+      }
+      if (RenderTick != 0UL) {
+        output.WriteRawTag(80);
+        output.WriteUInt64(RenderTick);
+      }
+      if (Jump != false) {
+        output.WriteRawTag(88);
+        output.WriteBool(Jump);
+      }
+      if (SpawnSeq != 0) {
+        output.WriteRawTag(96);
+        output.WriteUInt32(SpawnSeq);
+      }
+      if (RenderAlpha != 0F) {
+        output.WriteRawTag(109);
+        output.WriteFloat(RenderAlpha);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -2717,6 +2987,26 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(69);
         output.WriteFloat(AimY);
       }
+      if (AimZ != 0F) {
+        output.WriteRawTag(77);
+        output.WriteFloat(AimZ);
+      }
+      if (RenderTick != 0UL) {
+        output.WriteRawTag(80);
+        output.WriteUInt64(RenderTick);
+      }
+      if (Jump != false) {
+        output.WriteRawTag(88);
+        output.WriteBool(Jump);
+      }
+      if (SpawnSeq != 0) {
+        output.WriteRawTag(96);
+        output.WriteUInt32(SpawnSeq);
+      }
+      if (RenderAlpha != 0F) {
+        output.WriteRawTag(109);
+        output.WriteFloat(RenderAlpha);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -2749,6 +3039,21 @@ namespace RpgMmo.Wire.V1 {
         size += 1 + 4;
       }
       if (AimY != 0F) {
+        size += 1 + 4;
+      }
+      if (AimZ != 0F) {
+        size += 1 + 4;
+      }
+      if (RenderTick != 0UL) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt64Size(RenderTick);
+      }
+      if (Jump != false) {
+        size += 1 + 1;
+      }
+      if (SpawnSeq != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(SpawnSeq);
+      }
+      if (RenderAlpha != 0F) {
         size += 1 + 4;
       }
       if (_unknownFields != null) {
@@ -2786,6 +3091,21 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.AimY != 0F) {
         AimY = other.AimY;
+      }
+      if (other.AimZ != 0F) {
+        AimZ = other.AimZ;
+      }
+      if (other.RenderTick != 0UL) {
+        RenderTick = other.RenderTick;
+      }
+      if (other.Jump != false) {
+        Jump = other.Jump;
+      }
+      if (other.SpawnSeq != 0) {
+        SpawnSeq = other.SpawnSeq;
+      }
+      if (other.RenderAlpha != 0F) {
+        RenderAlpha = other.RenderAlpha;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -2838,6 +3158,26 @@ namespace RpgMmo.Wire.V1 {
             AimY = input.ReadFloat();
             break;
           }
+          case 77: {
+            AimZ = input.ReadFloat();
+            break;
+          }
+          case 80: {
+            RenderTick = input.ReadUInt64();
+            break;
+          }
+          case 88: {
+            Jump = input.ReadBool();
+            break;
+          }
+          case 96: {
+            SpawnSeq = input.ReadUInt32();
+            break;
+          }
+          case 109: {
+            RenderAlpha = input.ReadFloat();
+            break;
+          }
         }
       }
     #endif
@@ -2887,6 +3227,26 @@ namespace RpgMmo.Wire.V1 {
           }
           case 69: {
             AimY = input.ReadFloat();
+            break;
+          }
+          case 77: {
+            AimZ = input.ReadFloat();
+            break;
+          }
+          case 80: {
+            RenderTick = input.ReadUInt64();
+            break;
+          }
+          case 88: {
+            Jump = input.ReadBool();
+            break;
+          }
+          case 96: {
+            SpawnSeq = input.ReadUInt32();
+            break;
+          }
+          case 109: {
+            RenderAlpha = input.ReadFloat();
             break;
           }
         }
@@ -2961,6 +3321,17 @@ namespace RpgMmo.Wire.V1 {
       action_ = other.action_;
       actionSeq_ = other.actionSeq_;
       changedFields_ = other.changedFields_;
+      z_ = other.z_;
+      velX_ = other.velX_;
+      velY_ = other.velY_;
+      velZ_ = other.velZ_;
+      owner_ = other.owner_;
+      spawnSeq_ = other.spawnSeq_;
+      stats_ = other.stats_.Clone();
+      statsRemoved_ = other.statsRemoved_.Clone();
+      statuses_ = other.statuses_.Clone();
+      statusesRemoved_ = other.statusesRemoved_.Clone();
+      ownerId_ = other.ownerId_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -3274,6 +3645,11 @@ namespace RpgMmo.Wire.V1 {
     ///   0x0040 → facing_brad (field 10)
     ///   0x0080 → action     (field 11)
     ///   0x0100 → action_seq (field 12)
+    ///   0x0200 → z          (field 14)                  protocol version 3
+    ///   0x0400 → velocity   (fields 15-17)              protocol version 3
+    ///   0x0800 → owner / spawn_seq (fields 18 / 19)     protocol version 3
+    ///   0x1000 → stats      (fields 20 / 21)            protocol version 3
+    ///   0x2000 → statuses   (fields 22 / 23)            protocol version 3
     ///
     /// ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
     /// delta never sets this field; a receiver that sees 0 MUST apply the same rule
@@ -3306,6 +3682,175 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "z" field.</summary>
+    public const int ZFieldNumber = 14;
+    private float z_;
+    /// <summary>
+    /// Height above the ground plane (ADR-28). x/y keep their version 2 meaning as
+    /// the ground plane, which is what makes this field additive: a renderer maps
+    /// (x, y, z) to Unity's (x, z, y).
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float Z {
+      get { return z_; }
+      set {
+        z_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "vel_x" field.</summary>
+    public const int VelXFieldNumber = 15;
+    private float velX_;
+    /// <summary>
+    /// Velocity in units per second, all three axes. Sent for entities whose
+    /// motion is ballistic or extrapolated -- projectiles always, characters while
+    /// airborne -- so a receiver can advance them between snapshots. Zero on all
+    /// three axes means "stationary or not sent"; the bit in changed_fields says
+    /// which on a delta.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float VelX {
+      get { return velX_; }
+      set {
+        velX_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "vel_y" field.</summary>
+    public const int VelYFieldNumber = 16;
+    private float velY_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float VelY {
+      get { return velY_; }
+      set {
+        velY_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "vel_z" field.</summary>
+    public const int VelZFieldNumber = 17;
+    private float velZ_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float VelZ {
+      get { return velZ_; }
+      set {
+        velZ_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "owner" field.</summary>
+    public const int OwnerFieldNumber = 18;
+    private uint owner_;
+    /// <summary>
+    /// Interned handle of the entity that owns this one: the caster of a
+    /// projectile. 0 for none.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Owner {
+      get { return owner_; }
+      set {
+        owner_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "spawn_seq" field.</summary>
+    public const int SpawnSeqFieldNumber = 19;
+    private uint spawnSeq_;
+    /// <summary>
+    /// InputMessage.spawn_seq of the input that created this projectile, sent only
+    /// to the OWNER's connection so it can replace its predicted projectile with
+    /// this entity. 0 for every other receiver and every non-projectile.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint SpawnSeq {
+      get { return spawnSeq_; }
+      set {
+        spawnSeq_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "stats" field.</summary>
+    public const int StatsFieldNumber = 20;
+    private static readonly pb::FieldCodec<global::RpgMmo.Wire.V1.StatValue> _repeated_stats_codec
+        = pb::FieldCodec.ForMessage(162, global::RpgMmo.Wire.V1.StatValue.Parser);
+    private readonly pbc::RepeatedField<global::RpgMmo.Wire.V1.StatValue> stats_ = new pbc::RepeatedField<global::RpgMmo.Wire.V1.StatValue>();
+    /// <summary>
+    /// Extensible stat block (ADR-30): (stat_id, value) pairs whose ids are content
+    /// (ADR-19), not schema. A new visible stat -- mana, level, a cast bar -- is a
+    /// content entry and needs no change to this file.
+    ///
+    /// On a keyframe or a first introduction `stats` is the COMPLETE set. On a delta
+    /// with bit 0x1000 set it lists only the stats that changed, and
+    /// `stats_removed` names the ids that no longer exist; every stat in neither
+    /// list keeps its last-known value.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pbc::RepeatedField<global::RpgMmo.Wire.V1.StatValue> Stats {
+      get { return stats_; }
+    }
+
+    /// <summary>Field number for the "stats_removed" field.</summary>
+    public const int StatsRemovedFieldNumber = 21;
+    private static readonly pb::FieldCodec<uint> _repeated_statsRemoved_codec
+        = pb::FieldCodec.ForUInt32(170);
+    private readonly pbc::RepeatedField<uint> statsRemoved_ = new pbc::RepeatedField<uint>();
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pbc::RepeatedField<uint> StatsRemoved {
+      get { return statsRemoved_; }
+    }
+
+    /// <summary>Field number for the "statuses" field.</summary>
+    public const int StatusesFieldNumber = 22;
+    private static readonly pb::FieldCodec<global::RpgMmo.Wire.V1.StatusEffect> _repeated_statuses_codec
+        = pb::FieldCodec.ForMessage(178, global::RpgMmo.Wire.V1.StatusEffect.Parser);
+    private readonly pbc::RepeatedField<global::RpgMmo.Wire.V1.StatusEffect> statuses_ = new pbc::RepeatedField<global::RpgMmo.Wire.V1.StatusEffect>();
+    /// <summary>
+    /// Active status effects (DoT/HoT, buffs, debuffs, crowd control), keyed by
+    /// StatusEffect.effect_id with the same complete-set / delta rule as `stats`
+    /// under bit 0x2000.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pbc::RepeatedField<global::RpgMmo.Wire.V1.StatusEffect> Statuses {
+      get { return statuses_; }
+    }
+
+    /// <summary>Field number for the "statuses_removed" field.</summary>
+    public const int StatusesRemovedFieldNumber = 23;
+    private static readonly pb::FieldCodec<uint> _repeated_statusesRemoved_codec
+        = pb::FieldCodec.ForUInt32(186);
+    private readonly pbc::RepeatedField<uint> statusesRemoved_ = new pbc::RepeatedField<uint>();
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pbc::RepeatedField<uint> StatusesRemoved {
+      get { return statusesRemoved_; }
+    }
+
+    /// <summary>Field number for the "owner_id" field.</summary>
+    public const int OwnerIdFieldNumber = 24;
+    private string ownerId_ = "";
+    /// <summary>
+    /// Full id of `owner`, used ONLY by the non-interning legacy JSON encoding, for
+    /// which `owner` is always 0 -- the same id/handle duality as GameEvent's
+    /// source/source_id. Empty on every Protobuf connection.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string OwnerId {
+      get { return ownerId_; }
+      set {
+        ownerId_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -3334,6 +3879,17 @@ namespace RpgMmo.Wire.V1 {
       if (Action != other.Action) return false;
       if (ActionSeq != other.ActionSeq) return false;
       if (ChangedFields != other.ChangedFields) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(Z, other.Z)) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(VelX, other.VelX)) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(VelY, other.VelY)) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(VelZ, other.VelZ)) return false;
+      if (Owner != other.Owner) return false;
+      if (SpawnSeq != other.SpawnSeq) return false;
+      if(!stats_.Equals(other.stats_)) return false;
+      if(!statsRemoved_.Equals(other.statsRemoved_)) return false;
+      if(!statuses_.Equals(other.statuses_)) return false;
+      if(!statusesRemoved_.Equals(other.statusesRemoved_)) return false;
+      if (OwnerId != other.OwnerId) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -3354,6 +3910,17 @@ namespace RpgMmo.Wire.V1 {
       if (Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) hash ^= Action.GetHashCode();
       if (ActionSeq != 0) hash ^= ActionSeq.GetHashCode();
       if (ChangedFields != 0) hash ^= ChangedFields.GetHashCode();
+      if (Z != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(Z);
+      if (VelX != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(VelX);
+      if (VelY != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(VelY);
+      if (VelZ != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(VelZ);
+      if (Owner != 0) hash ^= Owner.GetHashCode();
+      if (SpawnSeq != 0) hash ^= SpawnSeq.GetHashCode();
+      hash ^= stats_.GetHashCode();
+      hash ^= statsRemoved_.GetHashCode();
+      hash ^= statuses_.GetHashCode();
+      hash ^= statusesRemoved_.GetHashCode();
+      if (OwnerId.Length != 0) hash ^= OwnerId.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -3424,6 +3991,38 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(104);
         output.WriteUInt32(ChangedFields);
       }
+      if (Z != 0F) {
+        output.WriteRawTag(117);
+        output.WriteFloat(Z);
+      }
+      if (VelX != 0F) {
+        output.WriteRawTag(125);
+        output.WriteFloat(VelX);
+      }
+      if (VelY != 0F) {
+        output.WriteRawTag(133, 1);
+        output.WriteFloat(VelY);
+      }
+      if (VelZ != 0F) {
+        output.WriteRawTag(141, 1);
+        output.WriteFloat(VelZ);
+      }
+      if (Owner != 0) {
+        output.WriteRawTag(144, 1);
+        output.WriteUInt32(Owner);
+      }
+      if (SpawnSeq != 0) {
+        output.WriteRawTag(152, 1);
+        output.WriteUInt32(SpawnSeq);
+      }
+      stats_.WriteTo(output, _repeated_stats_codec);
+      statsRemoved_.WriteTo(output, _repeated_statsRemoved_codec);
+      statuses_.WriteTo(output, _repeated_statuses_codec);
+      statusesRemoved_.WriteTo(output, _repeated_statusesRemoved_codec);
+      if (OwnerId.Length != 0) {
+        output.WriteRawTag(194, 1);
+        output.WriteString(OwnerId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -3486,6 +4085,38 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(104);
         output.WriteUInt32(ChangedFields);
       }
+      if (Z != 0F) {
+        output.WriteRawTag(117);
+        output.WriteFloat(Z);
+      }
+      if (VelX != 0F) {
+        output.WriteRawTag(125);
+        output.WriteFloat(VelX);
+      }
+      if (VelY != 0F) {
+        output.WriteRawTag(133, 1);
+        output.WriteFloat(VelY);
+      }
+      if (VelZ != 0F) {
+        output.WriteRawTag(141, 1);
+        output.WriteFloat(VelZ);
+      }
+      if (Owner != 0) {
+        output.WriteRawTag(144, 1);
+        output.WriteUInt32(Owner);
+      }
+      if (SpawnSeq != 0) {
+        output.WriteRawTag(152, 1);
+        output.WriteUInt32(SpawnSeq);
+      }
+      stats_.WriteTo(ref output, _repeated_stats_codec);
+      statsRemoved_.WriteTo(ref output, _repeated_statsRemoved_codec);
+      statuses_.WriteTo(ref output, _repeated_statuses_codec);
+      statusesRemoved_.WriteTo(ref output, _repeated_statusesRemoved_codec);
+      if (OwnerId.Length != 0) {
+        output.WriteRawTag(194, 1);
+        output.WriteString(OwnerId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -3534,6 +4165,31 @@ namespace RpgMmo.Wire.V1 {
       }
       if (ChangedFields != 0) {
         size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ChangedFields);
+      }
+      if (Z != 0F) {
+        size += 1 + 4;
+      }
+      if (VelX != 0F) {
+        size += 1 + 4;
+      }
+      if (VelY != 0F) {
+        size += 2 + 4;
+      }
+      if (VelZ != 0F) {
+        size += 2 + 4;
+      }
+      if (Owner != 0) {
+        size += 2 + pb::CodedOutputStream.ComputeUInt32Size(Owner);
+      }
+      if (SpawnSeq != 0) {
+        size += 2 + pb::CodedOutputStream.ComputeUInt32Size(SpawnSeq);
+      }
+      size += stats_.CalculateSize(_repeated_stats_codec);
+      size += statsRemoved_.CalculateSize(_repeated_statsRemoved_codec);
+      size += statuses_.CalculateSize(_repeated_statuses_codec);
+      size += statusesRemoved_.CalculateSize(_repeated_statusesRemoved_codec);
+      if (OwnerId.Length != 0) {
+        size += 2 + pb::CodedOutputStream.ComputeStringSize(OwnerId);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -3585,6 +4241,31 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.ChangedFields != 0) {
         ChangedFields = other.ChangedFields;
+      }
+      if (other.Z != 0F) {
+        Z = other.Z;
+      }
+      if (other.VelX != 0F) {
+        VelX = other.VelX;
+      }
+      if (other.VelY != 0F) {
+        VelY = other.VelY;
+      }
+      if (other.VelZ != 0F) {
+        VelZ = other.VelZ;
+      }
+      if (other.Owner != 0) {
+        Owner = other.Owner;
+      }
+      if (other.SpawnSeq != 0) {
+        SpawnSeq = other.SpawnSeq;
+      }
+      stats_.Add(other.stats_);
+      statsRemoved_.Add(other.statsRemoved_);
+      statuses_.Add(other.statuses_);
+      statusesRemoved_.Add(other.statusesRemoved_);
+      if (other.OwnerId.Length != 0) {
+        OwnerId = other.OwnerId;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -3655,6 +4336,52 @@ namespace RpgMmo.Wire.V1 {
           }
           case 104: {
             ChangedFields = input.ReadUInt32();
+            break;
+          }
+          case 117: {
+            Z = input.ReadFloat();
+            break;
+          }
+          case 125: {
+            VelX = input.ReadFloat();
+            break;
+          }
+          case 133: {
+            VelY = input.ReadFloat();
+            break;
+          }
+          case 141: {
+            VelZ = input.ReadFloat();
+            break;
+          }
+          case 144: {
+            Owner = input.ReadUInt32();
+            break;
+          }
+          case 152: {
+            SpawnSeq = input.ReadUInt32();
+            break;
+          }
+          case 162: {
+            stats_.AddEntriesFrom(input, _repeated_stats_codec);
+            break;
+          }
+          case 170:
+          case 168: {
+            statsRemoved_.AddEntriesFrom(input, _repeated_statsRemoved_codec);
+            break;
+          }
+          case 178: {
+            statuses_.AddEntriesFrom(input, _repeated_statuses_codec);
+            break;
+          }
+          case 186:
+          case 184: {
+            statusesRemoved_.AddEntriesFrom(input, _repeated_statusesRemoved_codec);
+            break;
+          }
+          case 194: {
+            OwnerId = input.ReadString();
             break;
           }
         }
@@ -3728,6 +4455,612 @@ namespace RpgMmo.Wire.V1 {
             ChangedFields = input.ReadUInt32();
             break;
           }
+          case 117: {
+            Z = input.ReadFloat();
+            break;
+          }
+          case 125: {
+            VelX = input.ReadFloat();
+            break;
+          }
+          case 133: {
+            VelY = input.ReadFloat();
+            break;
+          }
+          case 141: {
+            VelZ = input.ReadFloat();
+            break;
+          }
+          case 144: {
+            Owner = input.ReadUInt32();
+            break;
+          }
+          case 152: {
+            SpawnSeq = input.ReadUInt32();
+            break;
+          }
+          case 162: {
+            stats_.AddEntriesFrom(ref input, _repeated_stats_codec);
+            break;
+          }
+          case 170:
+          case 168: {
+            statsRemoved_.AddEntriesFrom(ref input, _repeated_statsRemoved_codec);
+            break;
+          }
+          case 178: {
+            statuses_.AddEntriesFrom(ref input, _repeated_statuses_codec);
+            break;
+          }
+          case 186:
+          case 184: {
+            statusesRemoved_.AddEntriesFrom(ref input, _repeated_statusesRemoved_codec);
+            break;
+          }
+          case 194: {
+            OwnerId = input.ReadString();
+            break;
+          }
+        }
+      }
+    }
+    #endif
+
+  }
+
+  /// <summary>
+  /// StatValue is one entry of EntitySnapshot.stats. `stat_id` is allocated from 1
+  /// by the content validator, for the same reason ability ids are: a proto3 zero
+  /// is elided and would read as "no stat".
+  /// </summary>
+  [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
+  public sealed partial class StatValue : pb::IMessage<StatValue>
+  #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      , pb::IBufferMessage
+  #endif
+  {
+    private static readonly pb::MessageParser<StatValue> _parser = new pb::MessageParser<StatValue>(() => new StatValue());
+    private pb::UnknownFieldSet _unknownFields;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pb::MessageParser<StatValue> Parser { get { return _parser; } }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pbr::MessageDescriptor Descriptor {
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[9]; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    pbr::MessageDescriptor pb::IMessage.Descriptor {
+      get { return Descriptor; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public StatValue() {
+      OnConstruction();
+    }
+
+    partial void OnConstruction();
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public StatValue(StatValue other) : this() {
+      statId_ = other.statId_;
+      value_ = other.value_;
+      _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public StatValue Clone() {
+      return new StatValue(this);
+    }
+
+    /// <summary>Field number for the "stat_id" field.</summary>
+    public const int StatIdFieldNumber = 1;
+    private uint statId_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint StatId {
+      get { return statId_; }
+      set {
+        statId_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "value" field.</summary>
+    public const int ValueFieldNumber = 2;
+    private int value_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int Value {
+      get { return value_; }
+      set {
+        value_ = value;
+      }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override bool Equals(object other) {
+      return Equals(other as StatValue);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Equals(StatValue other) {
+      if (ReferenceEquals(other, null)) {
+        return false;
+      }
+      if (ReferenceEquals(other, this)) {
+        return true;
+      }
+      if (StatId != other.StatId) return false;
+      if (Value != other.Value) return false;
+      return Equals(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override int GetHashCode() {
+      int hash = 1;
+      if (StatId != 0) hash ^= StatId.GetHashCode();
+      if (Value != 0) hash ^= Value.GetHashCode();
+      if (_unknownFields != null) {
+        hash ^= _unknownFields.GetHashCode();
+      }
+      return hash;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override string ToString() {
+      return pb::JsonFormatter.ToDiagnosticString(this);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void WriteTo(pb::CodedOutputStream output) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      output.WriteRawMessage(this);
+    #else
+      if (StatId != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(StatId);
+      }
+      if (Value != 0) {
+        output.WriteRawTag(16);
+        output.WriteSInt32(Value);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(output);
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalWriteTo(ref pb::WriteContext output) {
+      if (StatId != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(StatId);
+      }
+      if (Value != 0) {
+        output.WriteRawTag(16);
+        output.WriteSInt32(Value);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(ref output);
+      }
+    }
+    #endif
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int CalculateSize() {
+      int size = 0;
+      if (StatId != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(StatId);
+      }
+      if (Value != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeSInt32Size(Value);
+      }
+      if (_unknownFields != null) {
+        size += _unknownFields.CalculateSize();
+      }
+      return size;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(StatValue other) {
+      if (other == null) {
+        return;
+      }
+      if (other.StatId != 0) {
+        StatId = other.StatId;
+      }
+      if (other.Value != 0) {
+        Value = other.Value;
+      }
+      _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(pb::CodedInputStream input) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      input.ReadRawMessage(this);
+    #else
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, input);
+            break;
+          case 8: {
+            StatId = input.ReadUInt32();
+            break;
+          }
+          case 16: {
+            Value = input.ReadSInt32();
+            break;
+          }
+        }
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalMergeFrom(ref pb::ParseContext input) {
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, ref input);
+            break;
+          case 8: {
+            StatId = input.ReadUInt32();
+            break;
+          }
+          case 16: {
+            Value = input.ReadSInt32();
+            break;
+          }
+        }
+      }
+    }
+    #endif
+
+  }
+
+  /// <summary>
+  /// StatusEffect is one active effect on an entity. `effect_id` is the content id
+  /// of the status definition (ADR-19), which says whether it is periodic, a stat
+  /// modifier or crowd control -- the client looks that up rather than being told.
+  /// </summary>
+  [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
+  public sealed partial class StatusEffect : pb::IMessage<StatusEffect>
+  #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      , pb::IBufferMessage
+  #endif
+  {
+    private static readonly pb::MessageParser<StatusEffect> _parser = new pb::MessageParser<StatusEffect>(() => new StatusEffect());
+    private pb::UnknownFieldSet _unknownFields;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pb::MessageParser<StatusEffect> Parser { get { return _parser; } }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pbr::MessageDescriptor Descriptor {
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[10]; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    pbr::MessageDescriptor pb::IMessage.Descriptor {
+      get { return Descriptor; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public StatusEffect() {
+      OnConstruction();
+    }
+
+    partial void OnConstruction();
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public StatusEffect(StatusEffect other) : this() {
+      effectId_ = other.effectId_;
+      stacks_ = other.stacks_;
+      expiresTick_ = other.expiresTick_;
+      source_ = other.source_;
+      _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public StatusEffect Clone() {
+      return new StatusEffect(this);
+    }
+
+    /// <summary>Field number for the "effect_id" field.</summary>
+    public const int EffectIdFieldNumber = 1;
+    private uint effectId_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint EffectId {
+      get { return effectId_; }
+      set {
+        effectId_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "stacks" field.</summary>
+    public const int StacksFieldNumber = 2;
+    private uint stacks_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Stacks {
+      get { return stacks_; }
+      set {
+        stacks_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "expires_tick" field.</summary>
+    public const int ExpiresTickFieldNumber = 3;
+    private ulong expiresTick_;
+    /// <summary>
+    /// Server tick the effect ends on; 0 means "until removed".
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public ulong ExpiresTick {
+      get { return expiresTick_; }
+      set {
+        expiresTick_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "source" field.</summary>
+    public const int SourceFieldNumber = 4;
+    private uint source_;
+    /// <summary>
+    /// Interned handle of the entity that applied it, 0 for none.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Source {
+      get { return source_; }
+      set {
+        source_ = value;
+      }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override bool Equals(object other) {
+      return Equals(other as StatusEffect);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Equals(StatusEffect other) {
+      if (ReferenceEquals(other, null)) {
+        return false;
+      }
+      if (ReferenceEquals(other, this)) {
+        return true;
+      }
+      if (EffectId != other.EffectId) return false;
+      if (Stacks != other.Stacks) return false;
+      if (ExpiresTick != other.ExpiresTick) return false;
+      if (Source != other.Source) return false;
+      return Equals(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override int GetHashCode() {
+      int hash = 1;
+      if (EffectId != 0) hash ^= EffectId.GetHashCode();
+      if (Stacks != 0) hash ^= Stacks.GetHashCode();
+      if (ExpiresTick != 0UL) hash ^= ExpiresTick.GetHashCode();
+      if (Source != 0) hash ^= Source.GetHashCode();
+      if (_unknownFields != null) {
+        hash ^= _unknownFields.GetHashCode();
+      }
+      return hash;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override string ToString() {
+      return pb::JsonFormatter.ToDiagnosticString(this);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void WriteTo(pb::CodedOutputStream output) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      output.WriteRawMessage(this);
+    #else
+      if (EffectId != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(EffectId);
+      }
+      if (Stacks != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(Stacks);
+      }
+      if (ExpiresTick != 0UL) {
+        output.WriteRawTag(24);
+        output.WriteUInt64(ExpiresTick);
+      }
+      if (Source != 0) {
+        output.WriteRawTag(32);
+        output.WriteUInt32(Source);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(output);
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalWriteTo(ref pb::WriteContext output) {
+      if (EffectId != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(EffectId);
+      }
+      if (Stacks != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(Stacks);
+      }
+      if (ExpiresTick != 0UL) {
+        output.WriteRawTag(24);
+        output.WriteUInt64(ExpiresTick);
+      }
+      if (Source != 0) {
+        output.WriteRawTag(32);
+        output.WriteUInt32(Source);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(ref output);
+      }
+    }
+    #endif
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int CalculateSize() {
+      int size = 0;
+      if (EffectId != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(EffectId);
+      }
+      if (Stacks != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Stacks);
+      }
+      if (ExpiresTick != 0UL) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt64Size(ExpiresTick);
+      }
+      if (Source != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Source);
+      }
+      if (_unknownFields != null) {
+        size += _unknownFields.CalculateSize();
+      }
+      return size;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(StatusEffect other) {
+      if (other == null) {
+        return;
+      }
+      if (other.EffectId != 0) {
+        EffectId = other.EffectId;
+      }
+      if (other.Stacks != 0) {
+        Stacks = other.Stacks;
+      }
+      if (other.ExpiresTick != 0UL) {
+        ExpiresTick = other.ExpiresTick;
+      }
+      if (other.Source != 0) {
+        Source = other.Source;
+      }
+      _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(pb::CodedInputStream input) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      input.ReadRawMessage(this);
+    #else
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, input);
+            break;
+          case 8: {
+            EffectId = input.ReadUInt32();
+            break;
+          }
+          case 16: {
+            Stacks = input.ReadUInt32();
+            break;
+          }
+          case 24: {
+            ExpiresTick = input.ReadUInt64();
+            break;
+          }
+          case 32: {
+            Source = input.ReadUInt32();
+            break;
+          }
+        }
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalMergeFrom(ref pb::ParseContext input) {
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, ref input);
+            break;
+          case 8: {
+            EffectId = input.ReadUInt32();
+            break;
+          }
+          case 16: {
+            Stacks = input.ReadUInt32();
+            break;
+          }
+          case 24: {
+            ExpiresTick = input.ReadUInt64();
+            break;
+          }
+          case 32: {
+            Source = input.ReadUInt32();
+            break;
+          }
         }
       }
     }
@@ -3785,7 +5118,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[9]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[11]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -3813,6 +5146,7 @@ namespace RpgMmo.Wire.V1 {
       flags_ = other.flags_;
       sourceId_ = other.sourceId_;
       targetId_ = other.targetId_;
+      effectId_ = other.effectId_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -3976,6 +5310,23 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "effect_id" field.</summary>
+    public const int EffectIdFieldNumber = 9;
+    private uint effectId_;
+    /// <summary>
+    /// Content id of the status effect for STATUS_APPLIED / STATUS_REMOVED, and of
+    /// the status that ticked for a periodic DAMAGE / HEAL (flags bit 2). 0 when
+    /// none. Protocol version 3.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint EffectId {
+      get { return effectId_; }
+      set {
+        effectId_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -3999,6 +5350,7 @@ namespace RpgMmo.Wire.V1 {
       if (Flags != other.Flags) return false;
       if (SourceId != other.SourceId) return false;
       if (TargetId != other.TargetId) return false;
+      if (EffectId != other.EffectId) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -4014,6 +5366,7 @@ namespace RpgMmo.Wire.V1 {
       if (Flags != 0) hash ^= Flags.GetHashCode();
       if (SourceId.Length != 0) hash ^= SourceId.GetHashCode();
       if (TargetId.Length != 0) hash ^= TargetId.GetHashCode();
+      if (EffectId != 0) hash ^= EffectId.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -4064,6 +5417,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(66);
         output.WriteString(TargetId);
       }
+      if (EffectId != 0) {
+        output.WriteRawTag(72);
+        output.WriteUInt32(EffectId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -4106,6 +5463,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(66);
         output.WriteString(TargetId);
       }
+      if (EffectId != 0) {
+        output.WriteRawTag(72);
+        output.WriteUInt32(EffectId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -4139,6 +5500,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (TargetId.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(TargetId);
+      }
+      if (EffectId != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(EffectId);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -4175,6 +5539,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.TargetId.Length != 0) {
         TargetId = other.TargetId;
+      }
+      if (other.EffectId != 0) {
+        EffectId = other.EffectId;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -4225,6 +5592,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 66: {
             TargetId = input.ReadString();
+            break;
+          }
+          case 72: {
+            EffectId = input.ReadUInt32();
             break;
           }
         }
@@ -4278,6 +5649,10 @@ namespace RpgMmo.Wire.V1 {
             TargetId = input.ReadString();
             break;
           }
+          case 72: {
+            EffectId = input.ReadUInt32();
+            break;
+          }
         }
       }
     }
@@ -4309,7 +5684,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[10]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[12]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -4681,7 +6056,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[11]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[13]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -4883,7 +6258,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[12]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[14]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -5030,6 +6405,844 @@ namespace RpgMmo.Wire.V1 {
   }
 
   /// <summary>
+  /// CommandRequest is a client's discrete gameplay request.
+  /// </summary>
+  [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
+  public sealed partial class CommandRequest : pb::IMessage<CommandRequest>
+  #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      , pb::IBufferMessage
+  #endif
+  {
+    private static readonly pb::MessageParser<CommandRequest> _parser = new pb::MessageParser<CommandRequest>(() => new CommandRequest());
+    private pb::UnknownFieldSet _unknownFields;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pb::MessageParser<CommandRequest> Parser { get { return _parser; } }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pbr::MessageDescriptor Descriptor {
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[15]; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    pbr::MessageDescriptor pb::IMessage.Descriptor {
+      get { return Descriptor; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public CommandRequest() {
+      OnConstruction();
+    }
+
+    partial void OnConstruction();
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public CommandRequest(CommandRequest other) : this() {
+      seq_ = other.seq_;
+      opcode_ = other.opcode_;
+      payload_ = other.payload_;
+      _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public CommandRequest Clone() {
+      return new CommandRequest(this);
+    }
+
+    /// <summary>Field number for the "seq" field.</summary>
+    public const int SeqFieldNumber = 1;
+    private uint seq_;
+    /// <summary>
+    /// Client-chosen, unique per connection, echoed in the CommandResult. Starts
+    /// at 1 so a zero can never be mistaken for a real request.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Seq {
+      get { return seq_; }
+      set {
+        seq_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "opcode" field.</summary>
+    public const int OpcodeFieldNumber = 2;
+    private uint opcode_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Opcode {
+      get { return opcode_; }
+      set {
+        opcode_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "payload" field.</summary>
+    public const int PayloadFieldNumber = 3;
+    private pb::ByteString payload_ = pb::ByteString.Empty;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString Payload {
+      get { return payload_; }
+      set {
+        payload_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override bool Equals(object other) {
+      return Equals(other as CommandRequest);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Equals(CommandRequest other) {
+      if (ReferenceEquals(other, null)) {
+        return false;
+      }
+      if (ReferenceEquals(other, this)) {
+        return true;
+      }
+      if (Seq != other.Seq) return false;
+      if (Opcode != other.Opcode) return false;
+      if (Payload != other.Payload) return false;
+      return Equals(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override int GetHashCode() {
+      int hash = 1;
+      if (Seq != 0) hash ^= Seq.GetHashCode();
+      if (Opcode != 0) hash ^= Opcode.GetHashCode();
+      if (Payload.Length != 0) hash ^= Payload.GetHashCode();
+      if (_unknownFields != null) {
+        hash ^= _unknownFields.GetHashCode();
+      }
+      return hash;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override string ToString() {
+      return pb::JsonFormatter.ToDiagnosticString(this);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void WriteTo(pb::CodedOutputStream output) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      output.WriteRawMessage(this);
+    #else
+      if (Seq != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(Seq);
+      }
+      if (Opcode != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(Opcode);
+      }
+      if (Payload.Length != 0) {
+        output.WriteRawTag(26);
+        output.WriteBytes(Payload);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(output);
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalWriteTo(ref pb::WriteContext output) {
+      if (Seq != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(Seq);
+      }
+      if (Opcode != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(Opcode);
+      }
+      if (Payload.Length != 0) {
+        output.WriteRawTag(26);
+        output.WriteBytes(Payload);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(ref output);
+      }
+    }
+    #endif
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int CalculateSize() {
+      int size = 0;
+      if (Seq != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Seq);
+      }
+      if (Opcode != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Opcode);
+      }
+      if (Payload.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(Payload);
+      }
+      if (_unknownFields != null) {
+        size += _unknownFields.CalculateSize();
+      }
+      return size;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(CommandRequest other) {
+      if (other == null) {
+        return;
+      }
+      if (other.Seq != 0) {
+        Seq = other.Seq;
+      }
+      if (other.Opcode != 0) {
+        Opcode = other.Opcode;
+      }
+      if (other.Payload.Length != 0) {
+        Payload = other.Payload;
+      }
+      _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(pb::CodedInputStream input) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      input.ReadRawMessage(this);
+    #else
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, input);
+            break;
+          case 8: {
+            Seq = input.ReadUInt32();
+            break;
+          }
+          case 16: {
+            Opcode = input.ReadUInt32();
+            break;
+          }
+          case 26: {
+            Payload = input.ReadBytes();
+            break;
+          }
+        }
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalMergeFrom(ref pb::ParseContext input) {
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, ref input);
+            break;
+          case 8: {
+            Seq = input.ReadUInt32();
+            break;
+          }
+          case 16: {
+            Opcode = input.ReadUInt32();
+            break;
+          }
+          case 26: {
+            Payload = input.ReadBytes();
+            break;
+          }
+        }
+      }
+    }
+    #endif
+
+  }
+
+  /// <summary>
+  /// CommandResult is the server's answer to exactly one CommandRequest.
+  /// </summary>
+  [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
+  public sealed partial class CommandResult : pb::IMessage<CommandResult>
+  #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      , pb::IBufferMessage
+  #endif
+  {
+    private static readonly pb::MessageParser<CommandResult> _parser = new pb::MessageParser<CommandResult>(() => new CommandResult());
+    private pb::UnknownFieldSet _unknownFields;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pb::MessageParser<CommandResult> Parser { get { return _parser; } }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pbr::MessageDescriptor Descriptor {
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[16]; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    pbr::MessageDescriptor pb::IMessage.Descriptor {
+      get { return Descriptor; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public CommandResult() {
+      OnConstruction();
+    }
+
+    partial void OnConstruction();
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public CommandResult(CommandResult other) : this() {
+      seq_ = other.seq_;
+      ok_ = other.ok_;
+      error_ = other.error_;
+      payload_ = other.payload_;
+      _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public CommandResult Clone() {
+      return new CommandResult(this);
+    }
+
+    /// <summary>Field number for the "seq" field.</summary>
+    public const int SeqFieldNumber = 1;
+    private uint seq_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Seq {
+      get { return seq_; }
+      set {
+        seq_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "ok" field.</summary>
+    public const int OkFieldNumber = 2;
+    private bool ok_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Ok {
+      get { return ok_; }
+      set {
+        ok_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "error" field.</summary>
+    public const int ErrorFieldNumber = 3;
+    private string error_ = "";
+    /// <summary>
+    /// Machine-readable reason when ok = false (`unknown_opcode`, `rate_limited`,
+    /// `invalid_payload`, or an opcode-specific code). Empty on success.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string Error {
+      get { return error_; }
+      set {
+        error_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    /// <summary>Field number for the "payload" field.</summary>
+    public const int PayloadFieldNumber = 4;
+    private pb::ByteString payload_ = pb::ByteString.Empty;
+    /// <summary>
+    /// Opcode-specific response payload, possibly empty.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString Payload {
+      get { return payload_; }
+      set {
+        payload_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override bool Equals(object other) {
+      return Equals(other as CommandResult);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Equals(CommandResult other) {
+      if (ReferenceEquals(other, null)) {
+        return false;
+      }
+      if (ReferenceEquals(other, this)) {
+        return true;
+      }
+      if (Seq != other.Seq) return false;
+      if (Ok != other.Ok) return false;
+      if (Error != other.Error) return false;
+      if (Payload != other.Payload) return false;
+      return Equals(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override int GetHashCode() {
+      int hash = 1;
+      if (Seq != 0) hash ^= Seq.GetHashCode();
+      if (Ok != false) hash ^= Ok.GetHashCode();
+      if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (Payload.Length != 0) hash ^= Payload.GetHashCode();
+      if (_unknownFields != null) {
+        hash ^= _unknownFields.GetHashCode();
+      }
+      return hash;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override string ToString() {
+      return pb::JsonFormatter.ToDiagnosticString(this);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void WriteTo(pb::CodedOutputStream output) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      output.WriteRawMessage(this);
+    #else
+      if (Seq != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(Seq);
+      }
+      if (Ok != false) {
+        output.WriteRawTag(16);
+        output.WriteBool(Ok);
+      }
+      if (Error.Length != 0) {
+        output.WriteRawTag(26);
+        output.WriteString(Error);
+      }
+      if (Payload.Length != 0) {
+        output.WriteRawTag(34);
+        output.WriteBytes(Payload);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(output);
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalWriteTo(ref pb::WriteContext output) {
+      if (Seq != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(Seq);
+      }
+      if (Ok != false) {
+        output.WriteRawTag(16);
+        output.WriteBool(Ok);
+      }
+      if (Error.Length != 0) {
+        output.WriteRawTag(26);
+        output.WriteString(Error);
+      }
+      if (Payload.Length != 0) {
+        output.WriteRawTag(34);
+        output.WriteBytes(Payload);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(ref output);
+      }
+    }
+    #endif
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int CalculateSize() {
+      int size = 0;
+      if (Seq != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Seq);
+      }
+      if (Ok != false) {
+        size += 1 + 1;
+      }
+      if (Error.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (Payload.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(Payload);
+      }
+      if (_unknownFields != null) {
+        size += _unknownFields.CalculateSize();
+      }
+      return size;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(CommandResult other) {
+      if (other == null) {
+        return;
+      }
+      if (other.Seq != 0) {
+        Seq = other.Seq;
+      }
+      if (other.Ok != false) {
+        Ok = other.Ok;
+      }
+      if (other.Error.Length != 0) {
+        Error = other.Error;
+      }
+      if (other.Payload.Length != 0) {
+        Payload = other.Payload;
+      }
+      _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(pb::CodedInputStream input) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      input.ReadRawMessage(this);
+    #else
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, input);
+            break;
+          case 8: {
+            Seq = input.ReadUInt32();
+            break;
+          }
+          case 16: {
+            Ok = input.ReadBool();
+            break;
+          }
+          case 26: {
+            Error = input.ReadString();
+            break;
+          }
+          case 34: {
+            Payload = input.ReadBytes();
+            break;
+          }
+        }
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalMergeFrom(ref pb::ParseContext input) {
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, ref input);
+            break;
+          case 8: {
+            Seq = input.ReadUInt32();
+            break;
+          }
+          case 16: {
+            Ok = input.ReadBool();
+            break;
+          }
+          case 26: {
+            Error = input.ReadString();
+            break;
+          }
+          case 34: {
+            Payload = input.ReadBytes();
+            break;
+          }
+        }
+      }
+    }
+    #endif
+
+  }
+
+  /// <summary>
+  /// ServerPush is an unsolicited server -> client gameplay message (inventory
+  /// changed, quest progress, chat line), addressed by opcode in the same space as
+  /// CommandRequest.
+  /// </summary>
+  [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
+  public sealed partial class ServerPush : pb::IMessage<ServerPush>
+  #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      , pb::IBufferMessage
+  #endif
+  {
+    private static readonly pb::MessageParser<ServerPush> _parser = new pb::MessageParser<ServerPush>(() => new ServerPush());
+    private pb::UnknownFieldSet _unknownFields;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pb::MessageParser<ServerPush> Parser { get { return _parser; } }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pbr::MessageDescriptor Descriptor {
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[17]; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    pbr::MessageDescriptor pb::IMessage.Descriptor {
+      get { return Descriptor; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public ServerPush() {
+      OnConstruction();
+    }
+
+    partial void OnConstruction();
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public ServerPush(ServerPush other) : this() {
+      opcode_ = other.opcode_;
+      payload_ = other.payload_;
+      _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public ServerPush Clone() {
+      return new ServerPush(this);
+    }
+
+    /// <summary>Field number for the "opcode" field.</summary>
+    public const int OpcodeFieldNumber = 1;
+    private uint opcode_;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint Opcode {
+      get { return opcode_; }
+      set {
+        opcode_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "payload" field.</summary>
+    public const int PayloadFieldNumber = 2;
+    private pb::ByteString payload_ = pb::ByteString.Empty;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString Payload {
+      get { return payload_; }
+      set {
+        payload_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override bool Equals(object other) {
+      return Equals(other as ServerPush);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Equals(ServerPush other) {
+      if (ReferenceEquals(other, null)) {
+        return false;
+      }
+      if (ReferenceEquals(other, this)) {
+        return true;
+      }
+      if (Opcode != other.Opcode) return false;
+      if (Payload != other.Payload) return false;
+      return Equals(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override int GetHashCode() {
+      int hash = 1;
+      if (Opcode != 0) hash ^= Opcode.GetHashCode();
+      if (Payload.Length != 0) hash ^= Payload.GetHashCode();
+      if (_unknownFields != null) {
+        hash ^= _unknownFields.GetHashCode();
+      }
+      return hash;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override string ToString() {
+      return pb::JsonFormatter.ToDiagnosticString(this);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void WriteTo(pb::CodedOutputStream output) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      output.WriteRawMessage(this);
+    #else
+      if (Opcode != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(Opcode);
+      }
+      if (Payload.Length != 0) {
+        output.WriteRawTag(18);
+        output.WriteBytes(Payload);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(output);
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalWriteTo(ref pb::WriteContext output) {
+      if (Opcode != 0) {
+        output.WriteRawTag(8);
+        output.WriteUInt32(Opcode);
+      }
+      if (Payload.Length != 0) {
+        output.WriteRawTag(18);
+        output.WriteBytes(Payload);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(ref output);
+      }
+    }
+    #endif
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int CalculateSize() {
+      int size = 0;
+      if (Opcode != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Opcode);
+      }
+      if (Payload.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(Payload);
+      }
+      if (_unknownFields != null) {
+        size += _unknownFields.CalculateSize();
+      }
+      return size;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(ServerPush other) {
+      if (other == null) {
+        return;
+      }
+      if (other.Opcode != 0) {
+        Opcode = other.Opcode;
+      }
+      if (other.Payload.Length != 0) {
+        Payload = other.Payload;
+      }
+      _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(pb::CodedInputStream input) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      input.ReadRawMessage(this);
+    #else
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, input);
+            break;
+          case 8: {
+            Opcode = input.ReadUInt32();
+            break;
+          }
+          case 18: {
+            Payload = input.ReadBytes();
+            break;
+          }
+        }
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalMergeFrom(ref pb::ParseContext input) {
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, ref input);
+            break;
+          case 8: {
+            Opcode = input.ReadUInt32();
+            break;
+          }
+          case 18: {
+            Payload = input.ReadBytes();
+            break;
+          }
+        }
+      }
+    }
+    #endif
+
+  }
+
+  /// <summary>
   /// TransferMapRequest is sent by the client to request a map transfer.
   /// The game server saves state and disconnects; the client then reconnects
   /// through the gateway to the new map's server via the existing MsgEnterWorld
@@ -5050,7 +7263,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[13]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[18]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -5251,7 +7464,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[14]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[19]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -5491,7 +7704,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[15]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[20]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -5694,7 +7907,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[16]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[21]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -5934,7 +8147,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[17]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[22]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -6135,7 +8348,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[18]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[23]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
@@ -6345,7 +8558,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pbr::MessageDescriptor Descriptor {
-      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[19]; }
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[24]; }
     }
 
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]

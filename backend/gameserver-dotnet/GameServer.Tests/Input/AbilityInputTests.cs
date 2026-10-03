@@ -209,24 +209,39 @@ public class AbilityInputTests
     }
 
     /// <summary>
-    /// Ground abilities are accepted, animated and charged, and apply no damage — there is no
-    /// area query during input processing. This pins that as a STATED gap with a counter,
-    /// rather than leaving it to be rediscovered as "ground abilities are broken".
+    /// Ground abilities resolve (Core v3): every hostile entity inside the radius of the aim
+    /// point takes the effect list. Until v3 they were accepted and inert, pinned here as a
+    /// stated gap with a counter; the counter now means "cast into empty ground".
     /// </summary>
     [Fact]
-    public void AGroundCast_IsAcceptedAndCounted_ButAppliesNoEffectYet()
+    public void AGroundCast_DamagesHostilesInsideTheArea()
     {
         using var f = new Fixture();
 
-        int before = f.State("mob-1").Hp;
         f.Handler.ProcessInput("p1", Cast(1, Nova, aimX: 2f, aimY: 0f), currentTick: 1);
 
         Assert.Equal(1, f.Handler.Abilities.Accepted);
-        Assert.Equal(1, f.Handler.Abilities.GroundCastsWithoutArea);
-        Assert.Equal(before, f.State("mob-1").Hp);
+        Assert.Equal(0, f.Handler.Abilities.GroundCastsWithoutArea);
+        // 10 attack + 40 power - 5 defense.
+        Assert.Equal(55, f.State("mob-1").Hp);
+        // The caster stands inside its own area and is not hit.
+        Assert.Equal(100, f.State("p1").Hp);
 
-        // The cast itself is still reported, so a client shows it and the cooldown truthfully.
         Assert.Contains(f.Events.Events, e => e.Data.Type == GameEventType.AbilityCast);
+        var damage = Assert.Single(f.Events.Events, e => e.Data.Type == GameEventType.Damage);
+        Assert.Equal("mob-1", damage.Data.TargetId);
+    }
+
+    [Fact]
+    public void AGroundCastIntoEmptyGround_IsAcceptedAndCounted()
+    {
+        using var f = new Fixture();
+
+        f.Handler.ProcessInput("p1", Cast(1, Nova, aimX: -10f, aimY: 0f), currentTick: 1);
+
+        Assert.Equal(1, f.Handler.Abilities.Accepted);
+        Assert.Equal(1, f.Handler.Abilities.GroundCastsWithoutArea);
+        Assert.Equal(100, f.State("mob-1").Hp);
         Assert.DoesNotContain(f.Events.Events, e => e.Data.Type == GameEventType.Damage);
     }
 

@@ -48,6 +48,9 @@ internal static class JsonWriter
             // on a rejection, because a client refused for a version mismatch has
             // to be told which version it failed against.
             if (m.ProtocolVersion > 0) w.WriteNumber("protocol_version"u8, m.ProtocolVersion);
+            // ADR-31, protocol 3. `character_id,omitempty` in Go: absent = the default character,
+            // and the bytes a pre-slot server produced.
+            if (m.CharacterId.Length > 0) w.WriteString("character_id"u8, m.CharacterId);
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -99,6 +102,11 @@ internal static class JsonWriter
                 // here would leave one encoding able to retrigger and the other not, which
                 // is a difference discovered by a player on the wrong client.
                 if (e.ActionSeq != 0) w.WriteNumber("action_seq"u8, e.ActionSeq);
+                // JSON never interns and never sends a partial entity, but the field exists in
+                // both schemas (`changed_fields,omitempty`), so a non-zero mask is not silently
+                // dropped by this writer.
+                if (e.ChangedFields != 0) w.WriteNumber("changed_fields"u8, e.ChangedFields);
+                WriteV3Entity(w, e);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -128,11 +136,119 @@ internal static class JsonWriter
                     if (ev.Amount != 0) w.WriteNumber("amount"u8, ev.Amount);
                     if (ev.AbilityId != 0) w.WriteNumber("ability_id"u8, ev.AbilityId);
                     if (ev.Flags != 0) w.WriteNumber("flags"u8, ev.Flags);
+                    if (ev.EffectId != 0) w.WriteNumber("effect_id"u8, ev.EffectId);
                     w.WriteEndObject();
                 }
                 w.WriteEndArray();
             }
 
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    /// <summary>
+    /// Protocol 3 entity fields (ADR-28..30), names and omit-when-zero exactly as the Go struct
+    /// tags (`z,omitempty`, `stats,omitempty`, ...). The encoder leaves all of them at their
+    /// defaults for a protocol 2 peer, so nothing here is written for one and its bytes are the
+    /// protocol 2 bytes. `owner` is always 0 on JSON (no interning); `owner_id` names the owner.
+    /// </summary>
+    private static void WriteV3Entity(Utf8JsonWriter w, EntitySnapshot e)
+    {
+        if (e.Z != 0f) w.WriteNumber("z"u8, e.Z);
+        if (e.VelX != 0f) w.WriteNumber("vel_x"u8, e.VelX);
+        if (e.VelY != 0f) w.WriteNumber("vel_y"u8, e.VelY);
+        if (e.VelZ != 0f) w.WriteNumber("vel_z"u8, e.VelZ);
+        if (e.Owner != 0) w.WriteNumber("owner"u8, e.Owner);
+        if (e.OwnerId.Length > 0) w.WriteString("owner_id"u8, e.OwnerId);
+        if (e.SpawnSeq != 0) w.WriteNumber("spawn_seq"u8, e.SpawnSeq);
+
+        if (e.Stats.Count > 0)
+        {
+            w.WriteStartArray("stats"u8);
+            for (int i = 0; i < e.Stats.Count; i++)
+            {
+                // Go: `stat_id` and `value` without omitempty - both always written.
+                w.WriteStartObject();
+                w.WriteNumber("stat_id"u8, e.Stats[i].StatId);
+                w.WriteNumber("value"u8, e.Stats[i].Value);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+        }
+
+        if (e.StatsRemoved.Count > 0)
+        {
+            w.WriteStartArray("stats_removed"u8);
+            for (int i = 0; i < e.StatsRemoved.Count; i++) w.WriteNumberValue(e.StatsRemoved[i]);
+            w.WriteEndArray();
+        }
+
+        if (e.Statuses.Count > 0)
+        {
+            w.WriteStartArray("statuses"u8);
+            for (int i = 0; i < e.Statuses.Count; i++)
+            {
+                var st = e.Statuses[i];
+                // Go: `effect_id` always, the rest omitempty.
+                w.WriteStartObject();
+                w.WriteNumber("effect_id"u8, st.EffectId);
+                if (st.Stacks != 0) w.WriteNumber("stacks"u8, st.Stacks);
+                if (st.ExpiresTick != 0) w.WriteNumber("expires_tick"u8, st.ExpiresTick);
+                if (st.Source != 0) w.WriteNumber("source"u8, st.Source);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+        }
+
+        if (e.StatusesRemoved.Count > 0)
+        {
+            w.WriteStartArray("statuses_removed"u8);
+            for (int i = 0; i < e.StatusesRemoved.Count; i++) w.WriteNumberValue(e.StatusesRemoved[i]);
+            w.WriteEndArray();
+        }
+    }
+
+    // Command channel (MsgType 32-34, ADR-30). Go marshals []byte as padded standard base64
+    // and omits an empty one (`payload,omitempty`); `seq`, `opcode` and `ok` are always written.
+
+    internal static byte[] Write(CommandRequest m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64 + m.Payload.Length * 2);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteNumber("seq"u8, m.Seq);
+            w.WriteNumber("opcode"u8, m.Opcode);
+            if (m.Payload.Length > 0) w.WriteBase64String("payload"u8, m.Payload.Span);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(CommandResult m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64 + m.Payload.Length * 2);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteNumber("seq"u8, m.Seq);
+            w.WriteBoolean("ok"u8, m.Ok);
+            if (m.Error.Length > 0) w.WriteString("error"u8, m.Error);
+            if (m.Payload.Length > 0) w.WriteBase64String("payload"u8, m.Payload.Span);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(ServerPush m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64 + m.Payload.Length * 2);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteNumber("opcode"u8, m.Opcode);
+            if (m.Payload.Length > 0) w.WriteBase64String("payload"u8, m.Payload.Span);
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -157,6 +273,12 @@ internal static class JsonWriter
             if (m.AbilityTargetId.Length > 0) w.WriteString("ability_target_id"u8, m.AbilityTargetId);
             if (m.AimX != 0f) w.WriteNumber("aim_x"u8, m.AimX);
             if (m.AimY != 0f) w.WriteNumber("aim_y"u8, m.AimY);
+            // Protocol 3 (ADR-28/29), each omitted when zero like the Go tags.
+            if (m.AimZ != 0f) w.WriteNumber("aim_z"u8, m.AimZ);
+            if (m.RenderTick != 0) w.WriteNumber("render_tick"u8, m.RenderTick);
+            if (m.RenderAlpha != 0f) w.WriteNumber("render_alpha"u8, m.RenderAlpha);
+            if (m.Jump) w.WriteBoolean("jump"u8, true);
+            if (m.SpawnSeq != 0) w.WriteNumber("spawn_seq"u8, m.SpawnSeq);
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -292,12 +414,14 @@ internal static class JsonReader
             bool error = r.ValueTextEquals("error"u8);
             bool tickRate = r.ValueTextEquals("tick_rate"u8);
             bool protocolVersion = r.ValueTextEquals("protocol_version"u8);
+            bool characterId = r.ValueTextEquals("character_id"u8);
             if (!r.Read()) break;
             if (ok) m.Ok = r.TokenType == JsonTokenType.True;
             else if (userId) m.UserId = r.GetString() ?? "";
             else if (error) m.Error = r.GetString() ?? "";
             else if (tickRate) m.TickRate = r.GetUInt32();
             else if (protocolVersion) m.ProtocolVersion = r.GetUInt32();
+            else if (characterId) m.CharacterId = r.GetString() ?? "";
             else r.Skip();
         }
         return m;
@@ -318,6 +442,11 @@ internal static class JsonReader
             bool abilityTarget = r.ValueTextEquals("ability_target_id"u8);
             bool aimX = r.ValueTextEquals("aim_x"u8);
             bool aimY = r.ValueTextEquals("aim_y"u8);
+            bool aimZ = r.ValueTextEquals("aim_z"u8);
+            bool renderTick = r.ValueTextEquals("render_tick"u8);
+            bool renderAlpha = r.ValueTextEquals("render_alpha"u8);
+            bool jump = r.ValueTextEquals("jump"u8);
+            bool spawnSeq = r.ValueTextEquals("spawn_seq"u8);
             if (!r.Read()) break;
             if (tick) m.Tick = r.GetUInt64();
             else if (moveX) m.MoveX = r.GetSingle();
@@ -327,6 +456,12 @@ internal static class JsonReader
             else if (abilityTarget) m.AbilityTargetId = r.TokenType == JsonTokenType.Null ? "" : r.GetString() ?? "";
             else if (aimX) m.AimX = r.GetSingle();
             else if (aimY) m.AimY = r.GetSingle();
+            // Protocol 3. Absent leaves the zero "not sent" value, as in Protobuf.
+            else if (aimZ) m.AimZ = r.GetSingle();
+            else if (renderTick) m.RenderTick = r.GetUInt64();
+            else if (renderAlpha) m.RenderAlpha = r.GetSingle();
+            else if (jump) m.Jump = r.TokenType == JsonTokenType.True;
+            else if (spawnSeq) m.SpawnSeq = r.GetUInt32();
             else r.Skip();
         }
         return m;
@@ -377,6 +512,7 @@ internal static class JsonReader
                 bool amount = r.ValueTextEquals("amount"u8);
                 bool abilityId = r.ValueTextEquals("ability_id"u8);
                 bool flags = r.ValueTextEquals("flags"u8);
+                bool effectId = r.ValueTextEquals("effect_id"u8);
                 if (!r.Read()) break;
 
                 // Absent leaves the protobuf default, which every one of these fields
@@ -390,6 +526,7 @@ internal static class JsonReader
                 else if (amount) ev.Amount = r.GetInt32();
                 else if (abilityId) ev.AbilityId = r.GetUInt32();
                 else if (flags) ev.Flags = r.GetUInt32();
+                else if (effectId) ev.EffectId = r.GetUInt32();
                 else r.Skip();
             }
 
@@ -415,6 +552,19 @@ internal static class JsonReader
                 bool facingBrad = r.ValueTextEquals("facing_brad"u8);
                 bool action = r.ValueTextEquals("action"u8);
                 bool actionSeq = r.ValueTextEquals("action_seq"u8);
+                bool changedFields = r.ValueTextEquals("changed_fields"u8);
+                bool handle = r.ValueTextEquals("handle"u8);
+                bool z = r.ValueTextEquals("z"u8);
+                bool velX = r.ValueTextEquals("vel_x"u8);
+                bool velY = r.ValueTextEquals("vel_y"u8);
+                bool velZ = r.ValueTextEquals("vel_z"u8);
+                bool owner = r.ValueTextEquals("owner"u8);
+                bool ownerId = r.ValueTextEquals("owner_id"u8);
+                bool spawnSeq = r.ValueTextEquals("spawn_seq"u8);
+                bool stats = r.ValueTextEquals("stats"u8);
+                bool statsRemoved = r.ValueTextEquals("stats_removed"u8);
+                bool statuses = r.ValueTextEquals("statuses"u8);
+                bool statusesRemoved = r.ValueTextEquals("statuses_removed"u8);
                 if (!r.Read()) break;
                 if (id) e.Id = r.GetString() ?? "";
                 else if (type) EntityTypes.SetType(e, r.GetString());
@@ -428,9 +578,76 @@ internal static class JsonReader
                 else if (facingBrad) e.FacingBrad = r.GetUInt32();
                 else if (action) e.Action = (RpgMmo.Wire.V1.EntityAction)r.GetInt32();
                 else if (actionSeq) e.ActionSeq = r.GetUInt32();
+                else if (changedFields) e.ChangedFields = r.GetUInt32();
+                else if (handle) e.Handle = r.GetUInt32();
+                else if (z) e.Z = r.GetSingle();
+                else if (velX) e.VelX = r.GetSingle();
+                else if (velY) e.VelY = r.GetSingle();
+                else if (velZ) e.VelZ = r.GetSingle();
+                else if (owner) e.Owner = r.GetUInt32();
+                else if (ownerId) e.OwnerId = r.GetString() ?? "";
+                else if (spawnSeq) e.SpawnSeq = r.GetUInt32();
+                else if (stats) ReadStats(ref r, e);
+                else if (statsRemoved) ReadUInts(ref r, e.StatsRemoved);
+                else if (statuses) ReadStatuses(ref r, e);
+                else if (statusesRemoved) ReadUInts(ref r, e.StatusesRemoved);
                 else r.Skip();
             }
             m.Entities.Add(e);
+        }
+    }
+
+    private static void ReadStats(ref Utf8JsonReader r, EntitySnapshot e)
+    {
+        if (r.TokenType != JsonTokenType.StartArray) { r.Skip(); return; }
+        while (r.Read() && r.TokenType != JsonTokenType.EndArray)
+        {
+            if (r.TokenType != JsonTokenType.StartObject) { r.Skip(); continue; }
+            var v = new StatValue();
+            while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+            {
+                bool statId = r.ValueTextEquals("stat_id"u8);
+                bool value = r.ValueTextEquals("value"u8);
+                if (!r.Read()) break;
+                if (statId) v.StatId = r.GetUInt32();
+                else if (value) v.Value = r.GetInt32();
+                else r.Skip();
+            }
+            e.Stats.Add(v);
+        }
+    }
+
+    private static void ReadStatuses(ref Utf8JsonReader r, EntitySnapshot e)
+    {
+        if (r.TokenType != JsonTokenType.StartArray) { r.Skip(); return; }
+        while (r.Read() && r.TokenType != JsonTokenType.EndArray)
+        {
+            if (r.TokenType != JsonTokenType.StartObject) { r.Skip(); continue; }
+            var st = new StatusEffect();
+            while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+            {
+                bool effectId = r.ValueTextEquals("effect_id"u8);
+                bool stacks = r.ValueTextEquals("stacks"u8);
+                bool expiresTick = r.ValueTextEquals("expires_tick"u8);
+                bool source = r.ValueTextEquals("source"u8);
+                if (!r.Read()) break;
+                if (effectId) st.EffectId = r.GetUInt32();
+                else if (stacks) st.Stacks = r.GetUInt32();
+                else if (expiresTick) st.ExpiresTick = r.GetUInt64();
+                else if (source) st.Source = r.GetUInt32();
+                else r.Skip();
+            }
+            e.Statuses.Add(st);
+        }
+    }
+
+    private static void ReadUInts(ref Utf8JsonReader r, Google.Protobuf.Collections.RepeatedField<uint> into)
+    {
+        if (r.TokenType != JsonTokenType.StartArray) { r.Skip(); return; }
+        while (r.Read() && r.TokenType != JsonTokenType.EndArray)
+        {
+            if (r.TokenType == JsonTokenType.Number && r.TryGetUInt32(out uint v)) into.Add(v);
+            else r.Skip();
         }
     }
 
@@ -520,6 +737,73 @@ internal static class JsonReader
             else r.Skip();
         }
         return m;
+    }
+
+    internal static CommandRequest ReadCommandRequest(byte[] json)
+    {
+        var m = new CommandRequest();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool seq = r.ValueTextEquals("seq"u8);
+            bool opcode = r.ValueTextEquals("opcode"u8);
+            bool payload = r.ValueTextEquals("payload"u8);
+            if (!r.Read()) break;
+            if (seq) m.Seq = r.GetUInt32();
+            else if (opcode) m.Opcode = r.GetUInt32();
+            else if (payload) m.Payload = ReadBytes(ref r);
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static CommandResult ReadCommandResult(byte[] json)
+    {
+        var m = new CommandResult();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool seq = r.ValueTextEquals("seq"u8);
+            bool ok = r.ValueTextEquals("ok"u8);
+            bool error = r.ValueTextEquals("error"u8);
+            bool payload = r.ValueTextEquals("payload"u8);
+            if (!r.Read()) break;
+            if (seq) m.Seq = r.GetUInt32();
+            else if (ok) m.Ok = r.TokenType == JsonTokenType.True;
+            else if (error) m.Error = r.GetString() ?? "";
+            else if (payload) m.Payload = ReadBytes(ref r);
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static ServerPush ReadServerPush(byte[] json)
+    {
+        var m = new ServerPush();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool opcode = r.ValueTextEquals("opcode"u8);
+            bool payload = r.ValueTextEquals("payload"u8);
+            if (!r.Read()) break;
+            if (opcode) m.Opcode = r.GetUInt32();
+            else if (payload) m.Payload = ReadBytes(ref r);
+            else r.Skip();
+        }
+        return m;
+    }
+
+    /// <summary>
+    /// A Go <c>[]byte</c>: standard padded base64, or <c>null</c> for an empty slice. Anything
+    /// else is malformed and throws, which the caller answers as <c>invalid_payload</c>.
+    /// </summary>
+    private static Google.Protobuf.ByteString ReadBytes(ref Utf8JsonReader r)
+    {
+        if (r.TokenType == JsonTokenType.Null) return Google.Protobuf.ByteString.Empty;
+        return Google.Protobuf.UnsafeByteOperations.UnsafeWrap(r.GetBytesFromBase64());
     }
 
     private static void Expect(ref Utf8JsonReader r, JsonTokenType type)

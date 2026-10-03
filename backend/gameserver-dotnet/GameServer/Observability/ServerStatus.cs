@@ -652,6 +652,24 @@ public sealed class ServerStatus
     [JsonPropertyName("transfers_rejected")]
     public long TransfersRejected { get; set; }
 
+    /// <summary>
+    /// Gameplay commands (MsgType 32, ADR-30) received since start. Same value as
+    /// <c>gameserver_commands_received_total</c>.
+    /// </summary>
+    [JsonPropertyName("commands_received")]
+    public long CommandsReceived { get; set; }
+
+    /// <summary>Commands answered <c>ok = true</c>. Same value as <c>gameserver_commands_accepted_total</c>.</summary>
+    [JsonPropertyName("commands_accepted")]
+    public long CommandsAccepted { get; set; }
+
+    /// <summary>
+    /// Commands answered <c>ok = false</c>, every reason summed. Same value as
+    /// <c>sum(gameserver_commands_rejected_total)</c>; the per-reason split is on the counter.
+    /// </summary>
+    [JsonPropertyName("commands_rejected")]
+    public long CommandsRejected { get; set; }
+
     [JsonPropertyName("postgres")]
     public string Postgres { get; set; } = "disconnected";
 

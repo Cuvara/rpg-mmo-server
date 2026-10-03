@@ -124,7 +124,7 @@ const (
 	// DefaultExpectMigration is the highest version in
 	// backend/deploy/db/migrations/gamestate/. Bump it in the same commit that
 	// adds a migration — that is the point of the assertion.
-	DefaultExpectMigration = 1
+	DefaultExpectMigration = 2
 
 	// DefaultDBPollTimeout bounds the wait for the player_states row. The game
 	// server writes on the AsyncSaver sweep (30s) or when the reconnect hold

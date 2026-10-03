@@ -55,6 +55,11 @@ type DungeonDeps struct {
 	Party    PartyMembership
 	JoinKeys jwt.Keyring
 
+	// CharacterID is the `cid` claim copied into the minted join token
+	// (ADR-31): the character the requesting member plays, taken from their
+	// gateway token. Empty means the default character and omits the claim.
+	CharacterID string
+
 	// ClaimTTL and InstanceTTL default to the constants above when zero.
 	ClaimTTL    time.Duration
 	InstanceTTL time.Duration
@@ -115,7 +120,7 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 		case err == nil:
 			info, gerr := deps.Registry.GetServer(ctx, serverID)
 			if gerr == nil {
-				return mintForServer(info, userID, deps.JoinKeys)
+				return mintForServer(info, userID, deps.CharacterID, deps.JoinKeys)
 			}
 			// The mapping outlived the pod. Drop it and let this caller
 			// allocate a fresh instance rather than handing out a dead address.
@@ -146,7 +151,7 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 			if err := deps.Index.Publish(ctx, partyID, info.ServerID, instanceTTL); err != nil {
 				return AssignResult{}, fmt.Errorf("assign dungeon: publish instance for party %s: %w", partyID, err)
 			}
-			return mintForServer(info, userID, deps.JoinKeys)
+			return mintForServer(info, userID, deps.CharacterID, deps.JoinKeys)
 		}
 
 		// Lost the election: wait for the winner's answer, bounded by the
@@ -160,8 +165,8 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 	}
 }
 
-func mintForServer(info storage.ServerInfo, userID string, joinKeys jwt.Keyring) (AssignResult, error) {
-	token, err := GenerateJoinTokenKeyring(userID, info.ServerID, joinKeys)
+func mintForServer(info storage.ServerInfo, userID, characterID string, joinKeys jwt.Keyring) (AssignResult, error) {
+	token, err := GenerateJoinTokenCharacter(userID, info.ServerID, characterID, joinKeys)
 	if err != nil {
 		return AssignResult{}, fmt.Errorf("assign dungeon: mint join token: %w", err)
 	}

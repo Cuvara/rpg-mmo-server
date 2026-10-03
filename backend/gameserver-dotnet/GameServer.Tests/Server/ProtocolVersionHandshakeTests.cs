@@ -75,7 +75,11 @@ public class ProtocolVersionHandshakeTests
         Assert.Equal(0, metrics.PlayersOnline);
     }
 
-    /// <summary>A client BEHIND this build is refused just as firmly as one ahead.</summary>
+    /// <summary>
+    /// A client outside the supported window is refused. Since protocol 3 the window is
+    /// [MinSupportedProtocolVersion, ProtocolVersion] = [2, 3]; V3HandshakeAndSnapshotTests
+    /// covers both edges (1 and 4) and the admitted versions inside it.
+    /// </summary>
     [Fact]
     public async Task OlderVersion_IsRefused()
     {
@@ -83,8 +87,7 @@ public class ProtocolVersionHandshakeTests
         await using var h = await HardeningHarness.StartAsync(metrics);
 
         using var client = await h.ConnectAsync();
-        // 999_999 stands in for "some other version" in both directions; the rule is exact
-        // match, so the sign of the difference is irrelevant by design.
+        // 999_999 stands in for "some version this build does not serve".
         var resp = await HardeningHarness.SendJoinAsync(client, "user-old", protocolVersion: 999_999);
 
         Assert.False(resp.Ok);

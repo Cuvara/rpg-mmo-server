@@ -12,12 +12,13 @@ Issues a realtime session token (HS256 JWT) that the Gateway verifies locally.
 Request payload (optional, may be an empty string):
 
 ```json
-{ "server_id": "map_01-abc" }
+{ "server_id": "map_01-abc", "character_id": "5f0c…-uuid" }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `server_id` | string | no | Pins the token to a specific game server instance. Omitted → the `sid` claim is not emitted. |
+| `character_id` | string | no | ADR-31. Roster character this realtime session plays. Must be in the caller's own roster (`character_list`); otherwise code `5` `character not found` (same answer for "not yours" and "does not exist"). Emitted as the `cid` claim, which the gateway copies into the join token. Omitted → no `cid` claim → the account's default character (protocol 2 behaviour). |
 
 Response payload:
 
@@ -25,7 +26,8 @@ Response payload:
 {
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
   "user_id": "3f9c…",
-  "expires_in": 3600
+  "expires_in": 3600,
+  "character_id": "5f0c…-uuid"
 }
 ```
 
@@ -34,6 +36,7 @@ Response payload:
 | `token` | string | HS256 JWT, signed with the Gateway's shared secret |
 | `user_id` | string | Nakama user ID, equal to the token's `sub` claim |
 | `expires_in` | int | Token lifetime in seconds (`constants.SessionTTL`, 3600) |
+| `character_id` | string | Echo of the `cid` claim; omitted for the default character |
 
 Token claims (produced by `shared/jwt`, consumed by `gateway/session`):
 
@@ -41,6 +44,7 @@ Token claims (produced by `shared/jwt`, consumed by `gateway/session`):
 |-------|--------|-------------|
 | `sub` | Nakama user ID | Read by `session.VerifyClientJWT` |
 | `sid` | request `server_id` | Optional, omitted when empty |
+| `cid` | request `character_id` (ownership-checked) | Optional (ADR-31), omitted when empty = default character. The gateway copies it into the join token; the game server echoes it in `JoinTokenResponse.character_id` |
 | `iat` | now | Issued-at, Unix seconds |
 | `exp` | now + TTL | Expiry, Unix seconds; `jwt.Verify` rejects expired tokens |
 
@@ -50,7 +54,73 @@ Errors:
 |------|---------|-------|
 | 16 | `unauthenticated` | No user ID in the request context |
 | 3 | `invalid payload` | Payload is not valid JSON |
-| 13 | `internal error` | Signing or marshalling failure |
+| 5 | `character not found` | `character_id` is not in the caller's roster |
+| 13 | `internal error` | Signing, marshalling or roster-read failure |
+
+### `character_list`, `character_create`, `character_delete` (ADR-31)
+
+The character roster. Nakama owns the roster (id, slot, name, created); the game server owns
+each character's state, bag and equipment in the game-state DB, keyed by the id minted here
+(ADR-1, ADR-31). The plugin makes no outbound call: deleting a character does **not** touch
+its game-state rows.
+
+- **Auth**: client session required for all three (code `16` otherwise; a
+  `runtime.http_key` call has no subject).
+- **Registered in**: `main.go` → `character.ListRPC`, `character.CreateRPC`, `character.DeleteRPC`.
+- **Storage**: collection `characters`, key `roster`, owner = the user; one object holding the
+  whole roster, permission read `1` (owner), write `0` (only these RPCs). Every mutation is a
+  version-checked write retried up to 5 times, so two concurrent creates cannot exceed the
+  slot cap or share a slot.
+
+**Placeholder limits (pending design, ADR-31 "Consequences")** — `character/character.go`:
+
+| Constant | Placeholder value |
+|----------|-------------------|
+| `MaxCharacterSlots` | 4 |
+| `NameMinLength` / `NameMaxLength` | 3 / 16 (bytes; ASCII alphabet) |
+| `NamePatternPlaceholder` | `^[A-Za-z0-9_]+$` (no uniqueness, no localisation, no profanity filter) |
+
+`character_list` — no payload. Response:
+
+```json
+{ "characters": [ { "id": "5f0c…", "slot": 0, "name": "Arthas", "created_at": 1700000000 } ], "max_slots": 4 }
+```
+
+Characters are ordered by slot; `characters` is `[]` (never `null`) for an empty roster.
+
+`character_create` — payload `{ "name": "Arthas", "slot": 2 }`; `slot` optional (absent or
+negative = lowest free slot). Response `{ "character": { "id", "slot", "name", "created_at" } }`.
+`id` is a random UUID v4.
+
+`character_delete` — payload `{ "character_id": "5f0c…" }`. Response
+`{ "character_id": "5f0c…", "deleted": true }`.
+
+Errors:
+
+| Code | Message | Cause |
+|------|---------|-------|
+| 16 | `unauthenticated` | No client session |
+| 3 | `invalid payload` | Payload missing (create) or not valid JSON |
+| 3 | `invalid character name` | Name fails the placeholder rule |
+| 3 | `invalid character slot` | `slot >= max_slots` |
+| 3 | `character_id is required` | Delete without an id |
+| 9 | `character roster is full` | Already `max_slots` characters |
+| 9 | `character slot is taken` | Requested slot already used |
+| 5 | `character not found` | Delete of an id not in the caller's roster |
+| 10 | `roster is being modified concurrently, retry` | All 5 version-checked attempts lost (retryable) |
+| 8 | `rate limited` | See rate limits below |
+| 13 | `internal error` | Storage failure (detail logged, not returned) |
+
+Rate limits (per user, in-process — same multi-instance caveat as `gateway_token`):
+
+| Bucket | RPCs | Rate | Burst |
+|--------|------|------|-------|
+| roster write | `character_create` + `character_delete` (shared) | 0.2/s | 5 |
+| roster read | `character_list` | 1/s | 10 |
+
+Client end (follow-up, `client-integration`): a character-select screen calling these three,
+then `gateway_token` with `character_id`, then `EnterWorldRequest.character_id` (optional;
+if sent it must equal the token's `cid`, else the gateway answers `character_mismatch`).
 
 ### `reward_kills`
 
@@ -312,6 +382,7 @@ to `Player-<first 8 chars of user id>`.
 | `auth.RPCGatewayToken` | RPC id constant `"gateway_token"` |
 | `auth.GatewayTokenRPC` | RPC handler |
 | `auth.IssueGatewayToken(userID, serverID, cfg)` | Signs a Gateway-compatible JWT |
+| `auth.IssueGatewayTokenForCharacter(userID, serverID, characterID, cfg)` | Same, with the `cid` claim; does not check ownership (the RPC does) |
 | `auth.GatewayTokenRequest` / `GatewayTokenResponse` | RPC payload types |
 | `auth.EnsureProfile(ctx, nk, userID, displayName)` | Idempotent profile creation; reports whether it created one |
 | `auth.Profile` | Stored profile record |
@@ -334,6 +405,14 @@ to `Player-<first 8 chars of user id>`.
 | `social.ErrPartyFull`, `ErrAlreadyInParty`, `ErrNotInParty`, `ErrPartyNotFound`, `ErrPartyBusy`, `ErrPartyIDRequired`, `ErrUnauthenticated`, `ErrInvalidPayload`, `ErrRateLimited`, `ErrInternal` | Client-facing runtime errors |
 | `social.MaxPartyMembers`, `PartyCollection`, `MembershipCollection`, `MembershipKey` | Constants |
 | `social.PartyWriteRatePerSec`, `PartyWriteBurst`, `PartyWriteIdleTTL` | Party mutation rate-limit constants |
+| `character.RPCCharacterList`, `RPCCharacterCreate`, `RPCCharacterDelete` | RPC id constants (ADR-31) |
+| `character.ListRPC`, `CreateRPC`, `DeleteRPC` | RPC handlers |
+| `character.List` / `Create` / `Delete` / `Owns` / `ReadRoster` / `ValidateName` | Roster logic against `character.Store` (StorageRead + StorageWrite) |
+| `character.Character`, `Roster`, `CreateRequest`, `DeleteRequest`, `ListResponse`, `CreateResponse`, `DeleteResponse` | Stored record and payload types |
+| `character.MaxCharacterSlots`, `NameMinLength`, `NameMaxLength`, `NamePatternPlaceholder` | **Placeholder** creation limits |
+| `character.Collection`, `RosterKey` | Storage location |
+| `character.ErrCharacterNotFound`, `ErrRosterFull`, `ErrSlotTaken`, `ErrInvalidName`, `ErrInvalidSlot`, `ErrCharacterIDRequired`, `ErrRosterBusy`, `ErrUnauthenticated`, `ErrInvalidPayload`, `ErrRateLimited`, `ErrInternal` | Client-facing runtime errors |
+| `character.RosterWriteRatePerSec`, `RosterWriteBurst`, `RosterReadRatePerSec`, `RosterReadBurst`, `RosterIdleTTL` | Roster rate-limit constants |
 
 ### `gateway_token` rate limit
 

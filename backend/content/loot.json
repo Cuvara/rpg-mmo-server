@@ -1,0 +1,24 @@
+{
+  "$comment": [
+    "PLACEHOLDER CONTENT. EVERY NUMBER IN THIS FILE IS A PLACEHOLDER PENDING GAME DESIGN.",
+    "Drop chances, quantities and despawn times are NOT design decisions; they exist only",
+    "so the Core v3 vertical slice can run. Design owns every value here.",
+    "",
+    "Loot tables. SERVER-ONLY: never served at /content (loot is a server-side roll).",
+    "One table per entity type. Each entry is rolled independently: chancePermille in",
+    "1..1000, quantity uniform in [min, max] (max <= the item's stackMax).",
+    "despawnTicks is BASE SIMULATION TICKS a drop lies in the world (60 per second).",
+    "itemId must exist in items.json."
+  ],
+  "loot": [
+    {
+      "id": "mob_default",
+      "entityType": "mob",
+      "despawnTicks": 3600,
+      "entries": [
+        { "itemId": "wolf_pelt", "chancePermille": 600, "min": 1, "max": 2 },
+        { "itemId": "minor_health_potion", "chancePermille": 150, "min": 1, "max": 1 }
+      ]
+    }
+  ]
+}

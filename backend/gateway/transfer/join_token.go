@@ -26,10 +26,18 @@ func GenerateJoinToken(userID, serverID, secret string) (string, error) {
 // (first) secret. serverID is mandatory: a join token without a target server
 // could be replayed against any game-server pod.
 func GenerateJoinTokenKeyring(userID, serverID string, keys jwt.Keyring) (string, error) {
+	return GenerateJoinTokenCharacter(userID, serverID, "", keys)
+}
+
+// GenerateJoinTokenCharacter is GenerateJoinTokenKeyring with the character the
+// token plays (`cid`, ADR-31). characterID is copied from the gateway token
+// Nakama minted after checking ownership; the gateway never chooses it. Empty
+// omits the claim, which the game server reads as the default character.
+func GenerateJoinTokenCharacter(userID, serverID, characterID string, keys jwt.Keyring) (string, error) {
 	if serverID == "" {
 		return "", fmt.Errorf("generate join token: serverID is required")
 	}
-	token, err := keys.SignWithServer(userID, serverID, constants.JoinTokenTTL)
+	token, err := keys.SignWithCharacter(userID, serverID, characterID, constants.JoinTokenTTL)
 	if err != nil {
 		return "", fmt.Errorf("generate join token: %w", err)
 	}

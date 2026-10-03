@@ -12,7 +12,17 @@ namespace GameServer.Server;
 public static partial class JwtValidator
 {
     /// <summary>Decoded JWT claims relevant to the game server.</summary>
-    public record JwtClaims(string UserId, string ServerId, long Exp, string Jti = "");
+    /// <param name="UserId">The <c>sub</c> claim: the authenticated account.</param>
+    /// <param name="ServerId">The <c>sid</c> claim: the game server this join token names.</param>
+    /// <param name="Exp">The <c>exp</c> claim, Unix seconds.</param>
+    /// <param name="Jti">The <c>jti</c> claim: single-use join-token id (ADR-20).</param>
+    /// <param name="CharacterId">
+    /// The <c>cid</c> claim (ADR-31): the roster character this connection plays, put in
+    /// the gateway token by Nakama after an ownership check and copied into the join token
+    /// by the gateway. Empty when the claim is absent, which means the account's default
+    /// character — every token minted before protocol 3.
+    /// </param>
+    public record JwtClaims(string UserId, string ServerId, long Exp, string Jti = "", string CharacterId = "");
 
     /// <summary>Clock skew tolerance for expiration checks (seconds).</summary>
     public const int ClockSkewSeconds = 5;
@@ -28,6 +38,9 @@ public static partial class JwtValidator
 
         [JsonPropertyName("jti")]
         public string? Jti { get; set; }
+
+        [JsonPropertyName("cid")]
+        public string? CharacterId { get; set; }
 
         [JsonPropertyName("exp")]
         public long Exp { get; set; }
@@ -124,7 +137,8 @@ public static partial class JwtValidator
             }
 
             status = VerifyStatus.Ok;
-            return new JwtClaims(claims.UserId, claims.ServerId ?? "", claims.Exp, claims.Jti ?? "");
+            return new JwtClaims(claims.UserId, claims.ServerId ?? "", claims.Exp, claims.Jti ?? "",
+                claims.CharacterId ?? "");
         }
         catch
         {

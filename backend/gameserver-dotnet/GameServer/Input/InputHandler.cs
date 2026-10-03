@@ -6,6 +6,8 @@ using GameServer.World.Components;
 using GameServer.Net;
 using GameServer.Snapshot;
 using Shared.GameLogic.Content;
+using Shared.GameLogic.World;
+using GameServer.Gameplay;
 // Disambiguated from the generated wire enum of the same name: the two mirror each
 // other by design, and this file means the simulation one.
 using SimAction = Shared.GameLogic.Components.EntityAction;
@@ -104,15 +106,18 @@ public sealed class InputHandler
         public long Accepted;
 
         /// <summary>
-        /// Accepted Ground casts that applied no effect because the area query does not
-        /// exist yet.
+        /// Accepted Ground casts whose area contained no valid target, so no effect landed.
         /// </summary>
         /// <remarks>
-        /// Counted rather than left implicit: this is the one place where an accepted cast
-        /// does nothing, and a number that can be read off /status is what stops it being
-        /// rediscovered as "ground abilities are broken" by whoever authors the first one.
+        /// Until Core v3 this counted every Ground cast, because the area query did not exist
+        /// and Ground abilities were inert. They now resolve against the damageable roster
+        /// (with lag compensation); the counter keeps its /status name and now means
+        /// "cast into empty ground".
         /// </remarks>
         public long GroundCastsWithoutArea;
+
+        /// <summary>Projectiles spawned by accepted Projectile-delivery casts.</summary>
+        public long ProjectilesFired;
 
         /// <summary>
         /// Reason string of the most recent rejection, verbatim from
@@ -228,6 +233,128 @@ public sealed class InputHandler
         _maxBankedTicks = GameConstants.MaxBankedMovementTicks(
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
         _oneShotHoldTicks = oneShotHoldTicks;
+
+        // Core v3 (ADR-28..31). The geometry is the world's configured map when there is one,
+        // else the flat protocol 2 world inside this handler's bounds — which is what keeps
+        // every handler built with only a MapBounds moving exactly as before.
+        GameplayState gameplay = world.Gameplay;
+        _geometry = gameplay.HasConfiguredGeometry ? gameplay.Geometry : MapGeometry.Flat(_bounds);
+        _motor = gameplay.Motor;
+        _combat = new CombatResolver(events, onDeath, oneShotHoldTicks, _content);
+        _systems = new GameplaySystems(_combat, _deltaTime);
+    }
+
+    private readonly MapGeometry _geometry;
+    private readonly MotorParams _motor;
+    private readonly CombatResolver _combat;
+    private readonly GameplaySystems _systems;
+
+    /// <summary>Collision world the motor and projectiles run against.</summary>
+    public MapGeometry Geometry => _geometry;
+
+    /// <summary>Effect, damage, status and death resolution shared by every hit path.</summary>
+    public CombatResolver Combat => _combat;
+
+    /// <summary>Per-base-tick gameplay systems (roster/history, projectiles, statuses, items).</summary>
+    public GameplaySystems Systems => _systems;
+
+    /// <summary>
+    /// Start of a base tick, before inputs: roster and lag-compensation history. See
+    /// <see cref="GameplaySystems.BeginTick"/>.
+    /// </summary>
+    public void BeginTick(WorldWriter writer, ulong baseTick) => _systems.BeginTick(writer, baseTick);
+
+    /// <summary>
+    /// After inputs and held movement: projectiles, statuses, item despawn. See
+    /// <see cref="GameplaySystems.Step"/>.
+    /// </summary>
+    public void StepGameplay(WorldWriter writer, ulong baseTick)
+    {
+        EnsureRoster(writer, baseTick);
+        _systems.Step(writer, baseTick, _geometry);
+    }
+
+    /// <summary>
+    /// Build the roster if this tick's has not been built (a caller driving the handler
+    /// without the tick loop, as most tests do). Records no history.
+    /// </summary>
+    private void EnsureRoster(WorldWriter writer, ulong baseTick)
+    {
+        GameplayState g = writer.Gameplay;
+        if (g.RosterTick == baseTick && baseTick != 0) return;
+        ulong current = g.CurrentTick;
+        _systems.BuildRoster(writer, baseTick);
+        g.CurrentTick = current > baseTick ? current : baseTick;
+    }
+
+    /// <summary>
+    /// One character motor step (ADR-28) for a player: crowd control, slows and a queued jump
+    /// applied; position, height, vertical velocity, grounded flag and replicated velocity
+    /// written back.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Protocol 2 parity.</b> On flat ground, grounded, with no jump and no status,
+    /// <see cref="CharacterMotor.Step"/> produces x/y bit-identical to
+    /// <see cref="MovementSystem.TryMove"/> — the function protocol 2 clients still predict
+    /// with — because both resolve the direction with the same function and integrate with the
+    /// same explicitly rounded arithmetic. <c>MotorPlanarParityTests</c> pins it.</para>
+    /// <para>A rooted or stunned character still runs the vertical half (it keeps falling);
+    /// the input direction is then reported as <see cref="MoveResult.Blocked"/>, so the caller
+    /// neither holds it nor turns the character toward it.</para>
+    /// </remarks>
+    private MoveResult StepCharacter(
+        WorldWriter writer, in EntityHandle h, float moveX, float moveY, ulong baseTick, float dt)
+    {
+        ref Position position = ref writer.PositionOf(h);
+        ref Locomotion loc = ref writer.LocomotionOf(h);
+        StatusSet? statuses = CombatResolver.StatusesOf(writer, h);
+        bool canMove = statuses == null || statuses.CanMove;
+        float speed = statuses is { Count: > 0 } ? statuses.EffectiveSpeed(loc.Speed) : loc.Speed;
+        bool jump = loc.JumpQueued && canMove;
+        loc.JumpQueued = false;
+
+        var state = new MotorState(new Vec3(position.Value.X, position.Value.Y, position.Z), loc.VelocityZ, loc.Grounded);
+        MoveResult result = CharacterMotor.Step(
+            in state, canMove ? moveX : 0f, canMove ? moveY : 0f, jump, speed, dt, _geometry, in _motor,
+            out MotorState next);
+
+        float oldX = position.Value.X;
+        float oldY = position.Value.Y;
+        position.Value = new Vec2(next.Position.X, next.Position.Y);
+        position.Z = next.Position.Z;
+        loc.VelocityZ = next.VelocityZ;
+        loc.Grounded = next.Grounded;
+        loc.MotorTick = baseTick;
+        if (dt > 0f)
+        {
+            loc.VelocityX = (next.Position.X - oldX) / dt;
+            loc.VelocityY = (next.Position.Y - oldY) / dt;
+        }
+
+        if (!canMove)
+        {
+            MoveResult wanted = MovementSystem.ResolveDirection(moveX, moveY, out _);
+            return wanted is MoveResult.Accepted or MoveResult.Clamped ? MoveResult.Blocked : wanted;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Gravity for players no input moved this tick: a character in the air keeps falling
+    /// (and lands) whether or not its owner is sending anything.
+    /// </summary>
+    private void ApplyAirborne(WorldWriter writer, ReadOnlySpan<EntityHandle> players, ulong baseTick)
+    {
+        for (int i = 0; i < players.Length; i++)
+        {
+            ref readonly EntityHandle handle = ref players[i];
+            if (!writer.IsAlive(in handle)) continue;
+            ref Locomotion loc = ref writer.LocomotionOf(in handle);
+            if (loc.MotorTick == baseTick) continue;
+            if (loc.Grounded && !loc.JumpQueued) continue;
+            StepCharacter(writer, in handle, 0f, 0f, baseTick, _deltaTime);
+        }
     }
 
     /// <summary>
@@ -387,26 +514,13 @@ public sealed class InputHandler
             if (baseTick - cursor.HeldFromTick > (ulong)_maxBankedTicks) continue;
 
             if (writer.HealthOf(in handle).Dead) continue;
-
-            float speed = writer.LocomotionOf(in handle).Speed;
-            ref Position position = ref writer.PositionOf(in handle);
-            var probe = new EntityState
-            {
-                Position = position.Value,
-                Speed = speed,
-                Dead = false,
-            };
-
-            // The same TryMove the packet path calls, with the same dt — one movement
+            // The same motor step the packet path takes, with the same dt — one movement
             // model, one arithmetic, whichever path stepped the entity.
-            MoveResult result = MovementSystem.TryMove(
-                in probe, cursor.HeldMoveX, cursor.HeldMoveY,
-                StepDeltaTime(baseTick, cursor.LastMoveTick, cursor.HeldFromTick), in _bounds,
-                out Vec2 newPosition);
-
+            MoveResult result = StepCharacter(
+                writer, in handle, cursor.HeldMoveX, cursor.HeldMoveY, baseTick,
+                StepDeltaTime(baseTick, cursor.LastMoveTick, cursor.HeldFromTick));
             if (result is MoveResult.Accepted or MoveResult.Clamped)
             {
-                position.Value = newPosition;
                 cursor.LastMoveTick = baseTick;
 
                 // The coasting path moves the entity too, so it owns the same facing and
@@ -422,6 +536,8 @@ public sealed class InputHandler
                     ref locomotion, SimAction.Moving, baseTick, _oneShotHoldTicks);
             }
         }
+
+        ApplyAirborne(writer, new ReadOnlySpan<EntityHandle>(_playerHandles, 0, n), baseTick);
     }
 
     /// <summary>Process input for a user, taking the world write lock.</summary>
@@ -466,7 +582,7 @@ public sealed class InputHandler
         InputData input,
         ulong currentTick = 0,
         bool applyMovement = true)
-        => ProcessInput(writer, writer.Resolve(userId), userId, input, currentTick, applyMovement);
+        => ProcessInput(writer, writer.Resolve(userId), userId, input, default, currentTick, applyMovement);
 
     /// <summary>
     /// Process a queued input that already carries its entity handle, resolved on the
@@ -479,13 +595,33 @@ public sealed class InputHandler
         in PendingInput pending,
         ulong currentTick = 0,
         bool applyMovement = true)
-        => ProcessInput(writer, pending.Handle, pending.UserId, pending.Input, currentTick, applyMovement);
+        => ProcessInput(writer, pending.Handle, pending.UserId, pending.Input, in pending.Extras, currentTick, applyMovement);
+
+    /// <summary>
+    /// Process a protocol 3 input (jump, aim height, lag-compensation instant, spawn sequence)
+    /// inside a scope.
+    /// </summary>
+    public void ProcessInput(
+        WorldWriter writer,
+        string userId,
+        InputData input,
+        in InputExtras extras,
+        ulong currentTick,
+        bool applyMovement = true)
+        => ProcessInput(writer, writer.Resolve(userId), userId, input, in extras, currentTick, applyMovement);
+
+    /// <summary>Process a protocol 3 input under its own write scope (tests, tools).</summary>
+    public void ProcessInput(string userId, InputData input, InputExtras extras, ulong currentTick)
+    {
+        _world.UpdateComponents(writer => ProcessInput(writer, writer.Resolve(userId), userId, input, in extras, currentTick, true));
+    }
 
     private void ProcessInput(
         WorldWriter writer,
         EntityHandle self,
         string userId,
         InputData input,
+        in InputExtras extras,
         ulong currentTick,
         bool applyMovement)
     {
@@ -513,6 +649,10 @@ public sealed class InputHandler
             return;
         }
         cursor.LastInputTick = input.Tick;
+
+        // A jump is an edge: latch it for the next motor step, whichever path takes it, so
+        // a jump on an input that coalescing does not integrate is not lost.
+        if (extras.Jump) writer.LocomotionOf(self).JumpQueued = true;
 
         // --- Movement ---
         // move_x/move_y are a DIRECTION, not a displacement: the server integrates
@@ -545,27 +685,15 @@ public sealed class InputHandler
 
         if (applyMovement)
         {
-            // TryMove is called with the three fields it reads, not re-implemented from
-            // its parts: the golden vectors (ADR-10) pin this arithmetic bit-exactly and
-            // MovementParityTests pins this call site to TryMove's whole-EntityState
-            // form, so the two cannot drift.
-            float speed = writer.LocomotionOf(self).Speed;
-            ref Position position = ref writer.PositionOf(self);
-            var probe = new EntityState
-            {
-                Position = position.Value,
-                Speed = speed,
-                Dead = false, // already returned above if dead
-            };
-
-            MoveResult moveResult = MovementSystem.TryMove(
-                in probe, input.MoveX, input.MoveY,
-                StepDeltaTime(currentTick, cursor.LastMoveTick, cursor.HeldFromTick), in _bounds, out Vec2 newPosition);
-
+            // CharacterMotor (ADR-28), which on flat ground with no jump is MovementSystem's
+            // arithmetic bit for bit — see StepCharacter. The golden vectors (ADR-10) pin
+            // that arithmetic, MovementParityTests the planar contract, and
+            // CoreV3/MotorPlanarParityTests that this call site still honours it.
+            MoveResult moveResult = StepCharacter(
+                writer, in self, input.MoveX, input.MoveY, currentTick,
+                StepDeltaTime(currentTick, cursor.LastMoveTick, cursor.HeldFromTick));
             if (moveResult is MoveResult.Accepted or MoveResult.Clamped)
             {
-                position.Value = newPosition;
-
                 // Face the way we just moved, and say so on the wire.
                 //
                 // Derived from the RAW input direction rather than from the position
@@ -641,13 +769,28 @@ public sealed class InputHandler
                 Attacks.Unresolved++;
                 Reject(userId, InputRejectionReason.AttackTargetUnresolved);
             }
+            else if (!IsTargetable(writer, in target))
+            {
+                // A projectile, a dropped item, or a held player (PlayerTag.Linkdead — out of
+                // reach for the hold, CORE-BASELINE-V1 §3). Not a thing an attack can land on.
+                Attacks.Rejected++;
+                Attacks.LastRejection = NotTargetableRejection;
+                Reject(userId, InputRejectionReason.AttackOther);
+            }
+            else if (CombatResolver.StatusesOf(writer, self) is { CanAct: false })
+            {
+                Attacks.Rejected++;
+                Attacks.LastRejection = CannotActRejection;
+                Reject(userId, InputRejectionReason.AttackOther);
+            }
             else
             {
                 // Composed after movement, so the range check sees this tick's position —
                 // the same ordering the get/set form had.
-                EntityState attacker = writer.Compose(self);
-                EntityState t = writer.Compose(target);
-
+                // Effective stats (ADR-30): attack and defense read through statuses. With no
+                // status active these are the component values exactly.
+                EntityState attacker = CombatResolver.Effective(writer, self);
+                EntityState t = CombatResolver.Effective(writer, target);
                 // Cooldown is measured in simulation ticks, never wall-clock: the tick
                 // loop is the only clock the simulation has, so replaying the same input
                 // sequence always produces the same combat outcome.
@@ -747,6 +890,8 @@ public sealed class InputHandler
                             ActionTransitions.Enter(
                                 ref writer.LocomotionOf(target), SimAction.Dead,
                                 currentTick, _oneShotHoldTicks);
+                            // Statuses end and loot drops, as for every other kind of death.
+                            _combat.AfterDeath(writer, target, currentTick);
                         }
                     }
                 }
@@ -787,8 +932,26 @@ public sealed class InputHandler
         // killed the target on.
         if (input.HasAbility)
         {
-            ProcessAbility(userId, in input, self, writer, currentTick);
+            ProcessAbility(userId, in input, in extras, self, writer, currentTick);
         }
+    }
+
+    /// <summary>Attack rejection for a target that cannot be hit (projectile, item, held player).</summary>
+    public const string NotTargetableRejection = "target cannot be targeted";
+
+    /// <summary>Attack rejection while stunned.</summary>
+    public const string CannotActRejection = "attacker cannot act";
+
+    /// <summary>
+    /// Whether an entity can be the target of an attack or a targeted ability: not a
+    /// projectile or dropped item, and not a held (link-dead) player.
+    /// </summary>
+    public static bool IsTargetable(WorldWriter writer, in EntityHandle target)
+    {
+        SimRecord? rec = writer.RecordOf(target);
+        if (rec is { Kind: SimKind.Projectile or SimKind.Item }) return false;
+        if (rec is { Kind: SimKind.Actor, Type: "player" } && writer.PlayerTagOf(target).Linkdead) return false;
+        return true;
     }
 
     /// <summary>
@@ -797,32 +960,67 @@ public sealed class InputHandler
     /// put its locals in the frame of the method every input pays for.
     /// </summary>
     private void ProcessAbility(
-        string userId, in InputData input, in EntityHandle self, WorldWriter writer, ulong currentTick)
+        string userId, in InputData input, in InputExtras extras, in EntityHandle self, WorldWriter writer,
+        ulong currentTick)
     {
         Abilities.Received++;
 
         _content.TryGetAbility(input.AbilityId, out AbilityDefinition? ability);
+        // Effective state (ADR-30): attack, defense and max HP through the caster's statuses.
+        EntityState caster = CombatResolver.Effective(writer, self);
+        StatusSet? casterStatuses = CombatResolver.StatusesOf(writer, self);
+        GameplayState gameplay = writer.Gameplay;
 
-        EntityState caster = writer.Compose(self);
+        // The lag-compensation instant of this input (ADR-29 decision 4), clamped to
+        // MaxRewindMs. ClampRewind answers the current tick for "no rewind" (render_tick 0,
+        // a future tick, or a protocol 2 peer that sent nothing).
+        HitboxHistory.ClampRewind(
+            currentTick, extras.RenderTick, extras.RenderAlpha, gameplay.BaseHz, gameplay.MaxRewindMs,
+            out ulong rewindTick, out float rewindAlpha);
+        HitboxHistory? history = rewindTick < currentTick ? gameplay.History : null;
 
         // Resolved before validation so the validator sees a target or a definite absence,
-        // never an unresolved maybe. An unresolvable id is reported as a missing target,
-        // which is what it is from the caster's point of view.
+        // never an unresolved maybe. An unresolvable id — or one that is not a valid target
+        // (a projectile, an item, a held player) — is reported as a missing target, which is
+        // what it is from the caster's point of view.
         EntityHandle target = default;
         EntityState targetState = default;
         bool hasTarget = false;
         if (!string.IsNullOrEmpty(input.AbilityTargetId))
         {
             target = writer.Resolve(input.AbilityTargetId!);
-            if (target.IsValid)
+            if (target.IsValid && IsTargetable(writer, in target))
             {
-                targetState = writer.Compose(target);
+                targetState = CombatResolver.Effective(writer, target);
+                // Range is judged where the caster SAW the target (lag compensation).
+                if (history != null &&
+                    history.TryGetAt(writer.IdRefOf(target).Stable, rewindTick, rewindAlpha, out Vec3 past))
+                {
+                    targetState.Position = new Vec2(past.X, past.Y);
+                }
+
                 hasTarget = true;
             }
         }
 
         string? error = AbilityLogic.ValidateCast(
-            in caster, ability, in targetState, hasTarget, in input.Aim, currentTick);
+            in caster, ability, in targetState, hasTarget, in input.Aim, currentTick, casterStatuses);
+
+        // A projectile's spawn is part of validating it: an aim point with no direction from
+        // the caster's AUTHORITATIVE position (ADR-29 decision 5) is refused before anything
+        // is charged, rather than charged and then fizzled.
+        ProjectileState projectile = default;
+        if (error == null && ability != null && ability.Delivery == AbilityDelivery.Projectile)
+        {
+            float casterZ = writer.PositionOf(self).Z;
+            var origin = new Vec3(caster.Position.X, caster.Position.Y, casterZ + GameplayState.ProjectileLaunchHeight);
+            var aimPoint = new Vec3(input.Aim.X, input.Aim.Y, extras.AimZ + GameplayState.ProjectileLaunchHeight);
+            ProjectileSpec spec = ability.Projectile;
+            if (!ProjectileLogic.Spawn(in origin, in aimPoint, spec.Speed, spec.Radius, spec.Range, out projectile))
+            {
+                error = AbilityLogic.MissingAimRejection;
+            }
+        }
 
         if (error != null || ability == null)
         {
@@ -838,6 +1036,7 @@ public sealed class InputHandler
                 _logger.LogDebug(
                     "Ability {AbilityId} from {UserId} refused: {Error}", input.AbilityId, userId, error);
             }
+
             return;
         }
 
@@ -856,119 +1055,108 @@ public sealed class InputHandler
             ref casterLocomotion.Action, ref casterLocomotion.ActionSeq, SimAction.Attacking);
 
         int casterKey = writer.IdRefOf(self).Stable;
-
-        EmitEvent(
+        _combat.Emit(
             GameEventData.AbilityCast(caster.Id, hasTarget ? targetState.Id : null, ability.Id),
             casterKey,
             hasTarget ? writer.IdRefOf(target).Stable : PendingGameEvent.NoKey);
 
-        switch (ability.Targeting)
+        switch (ability.Delivery)
         {
-            case AbilityTargeting.Self:
-                ApplyAbilityEffect(ability, in caster, self, casterKey, self, casterKey, writer);
+            case AbilityDelivery.Self:
+                _combat.ApplyEffects(writer, ability, in caster, casterKey, self, currentTick);
                 break;
 
-            case AbilityTargeting.Entity:
-                ApplyAbilityEffect(
-                    ability, in caster, self, casterKey, target, writer.IdRefOf(target).Stable, writer);
+            case AbilityDelivery.Entity:
+                _combat.ApplyEffects(writer, ability, in caster, casterKey, target, currentTick);
                 break;
 
-            case AbilityTargeting.Ground:
-                // Deliberately NOT implemented as a world query here. A ground ability needs
-                // every entity within its radius, and the only index that answers that is the
-                // AOI spatial grid, which is rebuilt in the gather phase and is not valid
-                // during input processing. Running an O(all entities) scan instead would be
-                // correct and would also be the most expensive thing in the tick, per cast.
-                //
-                // The cast is accepted, the cooldown is charged and the cast event is sent —
-                // so a client shows the cast and the cooldown truthfully — and no damage is
-                // applied. That is a stated gap, not a silent one: Ground abilities are
-                // validated and animated but inert until the area query lands. The content
-                // validator permits them because the wire and the event channel already
-                // carry everything one needs.
-                Abilities.GroundCastsWithoutArea++;
+            case AbilityDelivery.Ground:
+                ApplyArea(writer, ability, in caster, casterKey, input.Aim, history, rewindTick, rewindAlpha, currentTick);
+                break;
+
+            case AbilityDelivery.Projectile:
+                SpawnProjectile(writer, ability, in caster, casterKey, in projectile, extras.SpawnSeq,
+                    rewindTick, rewindAlpha, currentTick);
                 break;
         }
     }
 
     /// <summary>
-    /// Applies one ability's effect to one entity and emits the matching event.
+    /// Ground delivery: every damageable entity whose feet were inside the radius of the aim
+    /// point — at the input's render instant when it carried one (ADR-29 decision 4), now
+    /// otherwise — and that is hostile to the caster (<see cref="CombatResolver.IsHostile"/>)
+    /// receives the effect list, in roster order. Never the caster, never a held player.
     /// </summary>
-    private void ApplyAbilityEffect(
-        AbilityDefinition ability,
-        in EntityState caster,
-        in EntityHandle casterHandle,
-        int casterKey,
-        in EntityHandle targetHandle,
-        int targetKey,
-        WorldWriter writer)
+    private void ApplyArea(
+        WorldWriter writer, AbilityDefinition ability, in EntityState caster, int casterKey, Vec2 aim,
+        HitboxHistory? history, ulong rewindTick, float rewindAlpha, ulong currentTick)
     {
-        // Recomposed rather than reusing the state ValidateCast saw: for a self-cast that
-        // state IS the caster, and the caster's own component may have been written since
-        // (the cooldown, the action). Composing again is a few field reads and removes a
-        // class of bug that only appears when the caster and the target are the same entity.
-        EntityState targetState = writer.Compose(targetHandle);
+        EnsureRoster(writer, currentTick);
+        ReadOnlySpan<RosterEntry> roster = writer.Gameplay.Roster;
+        float radiusSq = ability.Radius * ability.Radius;
+        int affected = 0;
 
-        ref Health health = ref writer.HealthOf(targetHandle);
-
-        switch (ability.Effect)
+        for (int i = 0; i < roster.Length; i++)
         {
-            case AbilityEffect.Damage:
-            {
-                int damage = AbilityLogic.CalculateAbilityDamage(in caster, ability, in targetState);
-                targetState.Hp -= damage;
-                health.Hp = targetState.Hp;
+            RosterEntry e = roster[i];
+            if (e.Linkdead || e.Key == casterKey) continue;
+            if (!CombatResolver.IsHostile(caster.Type, e.Type)) continue;
+            if (!writer.IsAlive(e.Handle) || writer.HealthOf(e.Handle).Dead) continue;
 
-                EmitEvent(
-                    GameEventData.Damage(caster.Id, targetState.Id, damage, ability.Id),
-                    casterKey, targetKey);
+            Vec3 feet = GameplaySystems.TargetFeet(writer, history, in e, rewindTick, rewindAlpha);
+            float dx = feet.X - aim.X;
+            float dy = feet.Y - aim.Y;
+            if ((dx * dx) + (dy * dy) > radiusSq) continue;
 
-                if (CombatLogic.HandleDeath(ref targetState))
-                {
-                    health.Hp = targetState.Hp;
-                    health.Dead = targetState.Dead;
-
-                    EmitEvent(GameEventData.Death(caster.Id, targetState.Id), casterKey, targetKey);
-
-                    ref Locomotion victimLocomotion = ref writer.LocomotionOf(targetHandle);
-                    ActionStateLogic.Advance(
-                        ref victimLocomotion.Action, ref victimLocomotion.ActionSeq, SimAction.Dead);
-
-                    _onDeath?.Invoke(targetState, caster);
-                }
-
-                break;
-            }
-
-            case AbilityEffect.Heal:
-            {
-                // Clamped inside CalculateHeal, and the clamped value is what both the HP
-                // write and the event carry. A full-health target healed for 500 that showed
-                // "500" beside an unmoved HP bar reads to a player as the heal being eaten
-                // by something; the number shown and the number applied have to be one
-                // number, which means one place computes it.
-                int healed = AbilityLogic.CalculateHeal(ability, in targetState);
-                if (healed <= 0)
-                {
-                    // Still an event: a heal that landed on a full-health target is a thing
-                    // that happened, and a client that shows nothing for it looks broken.
-                    // Immune carries "this did nothing", which is the honest report.
-                    EmitEvent(
-                        new GameEventData(
-                            GameEventType.Heal, caster.Id, targetState.Id, 0, ability.Id,
-                            GameEventFlags.Immune),
-                        casterKey, targetKey);
-                    break;
-                }
-
-                health.Hp = targetState.Hp + healed;
-
-                EmitEvent(
-                    GameEventData.Heal(caster.Id, targetState.Id, healed, ability.Id),
-                    casterKey, targetKey);
-                break;
-            }
+            _combat.ApplyEffects(writer, ability, in caster, casterKey, e.Handle, currentTick);
+            affected++;
         }
+
+        if (affected == 0) Abilities.GroundCastsWithoutArea++;
+    }
+
+    /// <summary>
+    /// Projectile delivery: spawn a <c>projectile</c> entity owned by the caster, carrying the
+    /// input's spawn sequence (ADR-29 decision 2) and its clamped lag-compensation instant,
+    /// which its FIRST step tests targets at. It is stepped later in this same tick by
+    /// <see cref="GameplaySystems.Step"/>.
+    /// </summary>
+    private void SpawnProjectile(
+        WorldWriter writer, AbilityDefinition ability, in EntityState caster, int casterKey,
+        in ProjectileState projectile, uint spawnSeq, ulong rewindTick, float rewindAlpha, ulong currentTick)
+    {
+        GameplayState g = writer.Gameplay;
+        string id = g.RentProjectileId();
+        int key = writer.StableKey(id);
+
+        SimRecord rec = g.GetOrCreate(key);
+        rec.ResetPayload();
+        rec.Kind = SimKind.Projectile;
+        rec.Projectile = projectile;
+        rec.Ability = ability;
+        rec.OwnerId = caster.Id;
+        rec.OwnerKey = casterKey;
+        rec.OwnerType = caster.Type;
+        rec.OwnerSnapshot = caster;
+        rec.SpawnSeq = spawnSeq;
+        rec.SpawnTick = currentTick;
+        rec.RewindTick = rewindTick;
+        rec.RewindAlpha = rewindAlpha;
+        rec.StepsTaken = 0;
+        g.ProjectileKeys.Add(key);
+        g.ProjectilesSpawned++;
+        Abilities.ProjectilesFired++;
+
+        writer.Spawn(new EntityState
+        {
+            Id = id,
+            Type = CombatResolver.ProjectileType,
+            Position = new Vec2(projectile.Position.X, projectile.Position.Y),
+            Hp = 0,
+            MaxHp = 0,
+            Speed = ability.Projectile.Speed,
+            FacingBrad = FacingCodec.FromDirection(projectile.Velocity.X, projectile.Velocity.Y),
+        }, EntityTags.None);
     }
 
     /// <summary>
@@ -994,6 +1182,8 @@ public sealed class InputHandler
         if (ReferenceEquals(reason, AbilityLogic.TargetDeadRejection)) return InputRejectionReason.AbilityTargetDead;
         if (ReferenceEquals(reason, AbilityLogic.CasterDeadRejection)) return InputRejectionReason.AbilityCasterDead;
         if (ReferenceEquals(reason, AbilityLogic.UnknownAbilityRejection)) return InputRejectionReason.AbilityUnknown;
+        // CannotCast (stun/silence) and MissingAim have no reason of their own yet and are
+        // counted under AbilityOther; LastRejection still names them.
         return InputRejectionReason.AbilityOther;
     }
 }

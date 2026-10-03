@@ -42,9 +42,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		m = authRespPB(*t)
 
 	case EnterWorldRequest:
-		m = &wirepb.EnterWorldRequest{MapId: t.MapID, PartyId: t.PartyID}
+		m = &wirepb.EnterWorldRequest{MapId: t.MapID, PartyId: t.PartyID, CharacterId: t.CharacterID}
 	case *EnterWorldRequest:
-		m = &wirepb.EnterWorldRequest{MapId: t.MapID, PartyId: t.PartyID}
+		m = &wirepb.EnterWorldRequest{MapId: t.MapID, PartyId: t.PartyID, CharacterId: t.CharacterID}
 
 	case EnterWorldResponse:
 		m = enterWorldRespPB(t)
@@ -110,6 +110,21 @@ func marshalProtoPayload(v any) ([]byte, error) {
 	case *KickMessage:
 		m = &wirepb.KickMessage{Reason: t.Reason}
 
+	case CommandRequest:
+		m = &wirepb.CommandRequest{Seq: t.Seq, Opcode: t.Opcode, Payload: t.Payload}
+	case *CommandRequest:
+		m = &wirepb.CommandRequest{Seq: t.Seq, Opcode: t.Opcode, Payload: t.Payload}
+
+	case CommandResult:
+		m = &wirepb.CommandResult{Seq: t.Seq, Ok: t.OK, Error: t.Error, Payload: t.Payload}
+	case *CommandResult:
+		m = &wirepb.CommandResult{Seq: t.Seq, Ok: t.OK, Error: t.Error, Payload: t.Payload}
+
+	case ServerPush:
+		m = &wirepb.ServerPush{Opcode: t.Opcode, Payload: t.Payload}
+	case *ServerPush:
+		m = &wirepb.ServerPush{Opcode: t.Opcode, Payload: t.Payload}
+
 	default:
 		return nil, fmt.Errorf("marshal proto payload: unsupported message type %T", v)
 	}
@@ -151,6 +166,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.MapID, t.PartyID = pb.MapId, pb.PartyId
+		t.CharacterID = pb.CharacterId
 
 	case *EnterWorldResponse:
 		var pb wirepb.EnterWorldResponse
@@ -192,6 +208,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		t.OK, t.UserID, t.Error = pb.Ok, pb.UserId, pb.Error
 		t.TickRate = pb.TickRate
 		t.ProtocolVersion = pb.ProtocolVersion
+		t.CharacterID = pb.CharacterId
 
 	case *InputMessage:
 		var pb wirepb.InputMessage
@@ -201,7 +218,9 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		t.Tick, t.MoveX, t.MoveY = pb.Tick, pb.MoveX, pb.MoveY
 		t.AttackTargetID = pb.AttackTargetId
 		t.AbilityID, t.AbilityTargetID = pb.AbilityId, pb.AbilityTargetId
-		t.AimX, t.AimY = pb.AimX, pb.AimY
+		t.AimX, t.AimY, t.AimZ = pb.AimX, pb.AimY, pb.AimZ
+		t.RenderTick, t.RenderAlpha = pb.RenderTick, pb.RenderAlpha
+		t.Jump, t.SpawnSeq = pb.Jump, pb.SpawnSeq
 
 	case *SnapshotMessage:
 		var pb wirepb.SnapshotMessage
@@ -228,6 +247,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					Amount:    e.Amount,
 					AbilityID: e.AbilityId,
 					Flags:     e.Flags,
+					EffectID:  e.EffectId,
 				}
 			}
 			t.Events = evs
@@ -258,6 +278,19 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					FacingBrad: e.FacingBrad,
 					Action:     EntityAction(e.Action),
 					ActionSeq:  e.ActionSeq,
+
+					ChangedFields:   e.ChangedFields,
+					Z:               e.Z,
+					VelX:            e.VelX,
+					VelY:            e.VelY,
+					VelZ:            e.VelZ,
+					Owner:           e.Owner,
+					OwnerID:         e.OwnerId,
+					SpawnSeq:        e.SpawnSeq,
+					Stats:           statsFromPB(e.Stats),
+					StatsRemoved:    e.StatsRemoved,
+					Statuses:        statusesFromPB(e.Statuses),
+					StatusesRemoved: e.StatusesRemoved,
 				}
 			}
 			t.Entities = ents
@@ -305,6 +338,27 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.Reason = pb.Reason
+
+	case *CommandRequest:
+		var pb wirepb.CommandRequest
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Seq, t.Opcode, t.Payload = pb.Seq, pb.Opcode, pb.Payload
+
+	case *CommandResult:
+		var pb wirepb.CommandResult
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Seq, t.OK, t.Error, t.Payload = pb.Seq, pb.Ok, pb.Error, pb.Payload
+
+	case *ServerPush:
+		var pb wirepb.ServerPush
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Opcode, t.Payload = pb.Opcode, pb.Payload
 
 	default:
 		return fmt.Errorf("unmarshal proto payload: unsupported message type %T", v)
@@ -359,6 +413,7 @@ func joinTokenRespPB(t JoinTokenResponse) *wirepb.JoinTokenResponse {
 		Error:           t.Error,
 		TickRate:        t.TickRate,
 		ProtocolVersion: t.ProtocolVersion,
+		CharacterId:     t.CharacterID,
 	}
 }
 
@@ -381,6 +436,12 @@ func inputPB(t InputMessage) *wirepb.InputMessage {
 		// proto3 elides a zero float anyway.
 		AimX: t.AimX,
 		AimY: t.AimY,
+		AimZ: t.AimZ,
+
+		RenderTick:  t.RenderTick,
+		RenderAlpha: t.RenderAlpha,
+		Jump:        t.Jump,
+		SpawnSeq:    t.SpawnSeq,
 	}
 }
 
@@ -437,6 +498,7 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 				Amount:    e.Amount,
 				AbilityId: e.AbilityID,
 				Flags:     e.Flags,
+				EffectId:  e.EffectID,
 			}
 		}
 	}
@@ -458,6 +520,19 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 				FacingBrad: e.FacingBrad,
 				Action:     wirepb.EntityAction(e.Action),
 				ActionSeq:  e.ActionSeq,
+
+				ChangedFields:   e.ChangedFields,
+				Z:               e.Z,
+				VelX:            e.VelX,
+				VelY:            e.VelY,
+				VelZ:            e.VelZ,
+				Owner:           e.Owner,
+				OwnerId:         e.OwnerID,
+				SpawnSeq:        e.SpawnSeq,
+				Stats:           statsPB(e.Stats),
+				StatsRemoved:    e.StatsRemoved,
+				Statuses:        statusesPB(e.Statuses),
+				StatusesRemoved: e.StatusesRemoved,
 			}
 			// Enum when we can (2 bytes), name when we cannot (2 + len). Never
 			// both: the reader prefers the enum, so setting both would make the
@@ -471,4 +546,48 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 		}
 	}
 	return pb
+}
+
+func statsPB(in []StatValue) []*wirepb.StatValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*wirepb.StatValue, len(in))
+	for i, v := range in {
+		out[i] = &wirepb.StatValue{StatId: v.StatID, Value: v.Value}
+	}
+	return out
+}
+
+func statsFromPB(in []*wirepb.StatValue) []StatValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]StatValue, len(in))
+	for i, v := range in {
+		out[i] = StatValue{StatID: v.StatId, Value: v.Value}
+	}
+	return out
+}
+
+func statusesPB(in []StatusEffect) []*wirepb.StatusEffect {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*wirepb.StatusEffect, len(in))
+	for i, v := range in {
+		out[i] = &wirepb.StatusEffect{EffectId: v.EffectID, Stacks: v.Stacks, ExpiresTick: v.ExpiresTick, Source: v.Source}
+	}
+	return out
+}
+
+func statusesFromPB(in []*wirepb.StatusEffect) []StatusEffect {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]StatusEffect, len(in))
+	for i, v := range in {
+		out[i] = StatusEffect{EffectID: v.EffectId, Stacks: v.Stacks, ExpiresTick: v.ExpiresTick, Source: v.Source}
+	}
+	return out
 }

@@ -285,11 +285,23 @@ internal sealed class EnemyMoveSystem : IEcsSystem
         {
             Span<Position> positions = chunk.Positions;
             Span<Health> healths = chunk.Healths;
+            Span<EntityIdRef> ids = chunk.Ids;
+            GameplayState gameplay = chunk.Gameplay;
 
             for (int i = 0; i < chunk.Count; i++)
             {
                 // A dead enemy does not move. It is still reaped, by the reap system.
                 if (healths[i].Dead) continue;
+
+                // Crowd control (ADR-30): a stunned or rooted enemy stays put; a slowed one
+                // walks at its effective speed. With no status the speed is the settings
+                // value bit for bit, which keeps the characterization pinned below intact.
+                float speed = _settings.Speed;
+                if (gameplay.Get(ids[i].Stable)?.Statuses is { Count: > 0 } statuses)
+                {
+                    if (!statuses.CanMove) continue;
+                    speed = statuses.EffectiveSpeed(speed);
+                }
 
                 // The target, and the whole behaviour change: the nearest live player when
                 // there is one, and otherwise the origin — which is the only target the AI
@@ -318,8 +330,12 @@ internal sealed class EnemyMoveSystem : IEcsSystem
 
                 float invDist = 1.0f / MathF.Sqrt(distSq);
                 positions[i].Value = new Vec2(
-                    positions[i].Value.X + dx * invDist * _settings.Speed * _dt,
-                    positions[i].Value.Y + dy * invDist * _settings.Speed * _dt);
+                    positions[i].Value.X + dx * invDist * speed * _dt,
+                    positions[i].Value.Y + dy * invDist * speed * _dt);
+
+                // Enemies stay planar movers (ADR-28 leaves them on the protocol 2 path) but
+                // stand on the ground: z follows the terrain and box tops under them.
+                positions[i].Z = gameplay.GroundAt(positions[i].Value.X, positions[i].Value.Y);
             }
         }
     }

@@ -6,6 +6,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (0.7.0, wire protocol 3: ADR-28..30)
+- `GameplayErrors.Unavailable` (`unavailable`): the server cannot act on a command right now (no
+  character bound, character dead, or the store failed); retryable. Listed in `gameplay.proto`.
+- **3D world.** `Vec3`; `World/` (`MapGeometry` with heightfield, static boxes, spawn points,
+  portals, `Flat` protocol-2 world, `MapGeometryValidation`); `CharacterMotor` (kinematic
+  capsule: gravity, grounded jump, step-up, slope limit, wall slide). Golden vectors
+  `motor3d.json`.
+- **Skillshot combat.** `ProjectileLogic` (spawn from the authoritative origin, swept sphere
+  against geometry, segment-capsule first contact) and `HitboxHistory` (per-tick capsule ring
+  buffer, rewind clamped to 200 ms, tick interpolation). Golden vectors `projectile.json`,
+  `hitbox_rewind.json`.
+- **Extensible state.** `StatDefinition`, `StatusDefinition` (periodic DoT/HoT, permille stat
+  modifiers, crowd control), `StatusSet`/`StatusLogic` (fixed-capacity, allocation-free),
+  abilities as a delivery (`Self`/`Entity`/`Ground`/`Projectile`) plus an ordered effect list,
+  `ContentDatabase` stats/statuses. Old ability constructors keep working.
+- **Snapshot v3.** Mask bits `Z`, `Velocity`, `Owner`, `Stats`, `Statuses`; `EntitySnapshotData`
+  carries z, velocity, owner, spawn seq, stats and statuses through a new constructor whose
+  first argument is a whole snapshot, so no old positional call can bind to it;
+  `SnapshotMerger` merges stat/status deltas. Nine new `snapshot_merger.json` cases; existing
+  cases unchanged.
+- **Gameplay command codec (ADR-30.4).** `Gameplay/gameplay.proto`, `GameplayOpcodes`,
+  dependency-free `ProtoWriter`/`ProtoReader`, and inventory messages (opcodes 1-5, push 100).
+  Byte parity with protoc output is tested server-side.
+- `GameEventData.EffectId` and event types `StatusApplied`, `StatusRemoved`, `ProjectileHit`.
+
 ### Removed
 - **BREAKING (0.6.0): the ten-argument `EntitySnapshotData` constructor taking
   `changedFields` positionally.** Pass `changedFields:` by name, or use the eleven-argument

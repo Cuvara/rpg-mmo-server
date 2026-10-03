@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Shared.GameLogic.Components;
 
@@ -121,7 +122,7 @@ namespace Shared.GameLogic.Systems
             in EntitySnapshotData existing, in EntitySnapshotData delta)
         {
             uint mask = delta.ChangedFields;
-            return new EntitySnapshotData(
+            var core = new EntitySnapshotData(
                 delta.Id,  // Id is always the entity key — it is how we found existing.
                 (mask & SnapshotFieldBits.Type)       != 0 ? delta.Type       : existing.Type,
                 (mask & SnapshotFieldBits.X)          != 0 ? delta.X          : existing.X,
@@ -134,6 +135,114 @@ namespace Shared.GameLogic.Systems
                 actionSeq:     (mask & SnapshotFieldBits.ActionSeq) != 0 ? delta.ActionSeq : existing.ActionSeq,
                 changedFields: 0  // merged result is complete state; mask is no longer meaningful
             );
+
+            // Protocol version 3 fields. A version 2 sender never sets these bits, so for it
+            // every v3 field is carried over from `existing` unchanged — which is the
+            // "keep last-known" rule, and for a v2 stream means "still not sent".
+            bool z = (mask & SnapshotFieldBits.Z) != 0;
+            bool vel = (mask & SnapshotFieldBits.Velocity) != 0;
+            bool owner = (mask & SnapshotFieldBits.Owner) != 0;
+
+            return new EntitySnapshotData(
+                in core,
+                z ? delta.Z : existing.Z,
+                vel ? delta.VelX : existing.VelX,
+                vel ? delta.VelY : existing.VelY,
+                vel ? delta.VelZ : existing.VelZ,
+                owner ? delta.OwnerId : existing.OwnerId,
+                owner ? delta.SpawnSeq : existing.SpawnSeq,
+                (mask & SnapshotFieldBits.Stats) != 0
+                    ? MergeStats(existing.Stats, delta.Stats, delta.StatsRemoved)
+                    : existing.Stats,
+                statsRemoved: null,  // removals are applied; the merged state carries none
+                (mask & SnapshotFieldBits.Statuses) != 0
+                    ? MergeStatuses(existing.Statuses, delta.Statuses, delta.StatusesRemoved)
+                    : existing.Statuses,
+                statusesRemoved: null);
+        }
+
+        /// <summary>
+        /// Delta merge of a stat block: start from <paramref name="existing"/>, replace or
+        /// append every entry in <paramref name="changed"/> (by stat id), then drop every id
+        /// in <paramref name="removed"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Order is deterministic</b>: surviving existing entries keep their order, an
+        /// updated entry keeps its position, new entries are appended in delta order. An id
+        /// that appears in both <paramref name="changed"/> and <paramref name="removed"/> — a
+        /// sender bug, the wire defines the two as disjoint — ends up removed.
+        /// </para>
+        /// <para>
+        /// Allocates the merged array. This runs only for an entity whose stats changed in
+        /// this delta, on the receiving side; the per-tick, per-entity path with no stat
+        /// change carries the existing array reference through untouched.
+        /// </para>
+        /// </remarks>
+        private static StatValueData[]? MergeStats(
+            StatValueData[]? existing, StatValueData[]? changed, uint[]? removed)
+        {
+            var merged = new List<StatValueData>((existing?.Length ?? 0) + (changed?.Length ?? 0));
+            if (existing != null) merged.AddRange(existing);
+
+            if (changed != null)
+            {
+                foreach (var c in changed)
+                {
+                    int at = -1;
+                    for (int i = 0; i < merged.Count; i++)
+                    {
+                        if (merged[i].StatId == c.StatId) { at = i; break; }
+                    }
+
+                    if (at >= 0) merged[at] = c; else merged.Add(c);
+                }
+            }
+
+            if (removed != null)
+            {
+                for (int i = merged.Count - 1; i >= 0; i--)
+                {
+                    if (Array.IndexOf(removed, merged[i].StatId) >= 0) merged.RemoveAt(i);
+                }
+            }
+
+            return merged.Count == 0 ? null : merged.ToArray();
+        }
+
+        /// <summary>
+        /// Delta merge of the status list by <see cref="StatusEffectData.EffectId"/>, under
+        /// exactly the rule <see cref="MergeStats"/> documents.
+        /// </summary>
+        private static StatusEffectData[]? MergeStatuses(
+            StatusEffectData[]? existing, StatusEffectData[]? changed, uint[]? removed)
+        {
+            var merged = new List<StatusEffectData>((existing?.Length ?? 0) + (changed?.Length ?? 0));
+            if (existing != null) merged.AddRange(existing);
+
+            if (changed != null)
+            {
+                foreach (var c in changed)
+                {
+                    int at = -1;
+                    for (int i = 0; i < merged.Count; i++)
+                    {
+                        if (merged[i].EffectId == c.EffectId) { at = i; break; }
+                    }
+
+                    if (at >= 0) merged[at] = c; else merged.Add(c);
+                }
+            }
+
+            if (removed != null)
+            {
+                for (int i = merged.Count - 1; i >= 0; i--)
+                {
+                    if (Array.IndexOf(removed, merged[i].EffectId) >= 0) merged.RemoveAt(i);
+                }
+            }
+
+            return merged.Count == 0 ? null : merged.ToArray();
         }
 
         /// <summary>Look up one reconstructed entity.</summary>

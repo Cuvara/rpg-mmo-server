@@ -19,8 +19,15 @@ ever backed up and restored, never migrated by us.
 
 ```
 backend/deploy/db/migrations/gamestate/001_init.sql              ops copy (psql, review)
-backend/gameserver-dotnet/GameServer/Persistence/Migrations/001_init.sql   canonical, embedded
+backend/deploy/db/migrations/gamestate/002_characters.sql        ops copy (psql, review)
+backend/gameserver-dotnet/GameServer/Persistence/Migrations/001_init.sql         canonical, embedded
+backend/gameserver-dotnet/GameServer/Persistence/Migrations/002_characters.sql   canonical, embedded
 ```
+
+| Version | Name | Adds |
+|---------|------|------|
+| 1 | `001_init` | `player_states` (keyed by `user_id`) + `player_states_map_id_idx` |
+| 2 | `002_characters` | ADR-31: `character_state` (keyed by `character_id`, adds `z`, `yaw`, `level`, `xp`; index on `user_id`), `character_items` (bag/equipment by `instance_id`, FK to `character_state` `ON DELETE CASCADE`, `quantity > 0`, `container IN ('bag','equipped')`, one item per equipped slot via a partial unique index), `item_grants` (idempotency ledger keyed by `grant_id`, no FK). Expand only: `player_states` untouched and still read as the first-load fallback. Locks: only on its own new tables (the FKs take SHARE ROW EXCLUSIVE on the new, empty `character_state`). |
 
 The gameserver embeds its migrations as assembly resources, so the binary is
 self-contained — nothing has to be shipped alongside it. The `deploy/` copies

@@ -82,8 +82,22 @@ public struct EntityKind
 [EcsComponent]
 public struct Position
 {
-    /// <summary>Position in world units.</summary>
+    /// <summary>Ground-plane position in world units (wire x/y, ADR-28 decision 1).</summary>
     public Vec2 Value;
+
+    /// <summary>
+    /// Height in world units (wire <c>z</c>, ADR-28). For a character it is the FEET (the
+    /// bottom of the capsule <c>CharacterMotor</c> moves); for a projectile it is the centre
+    /// of its sphere; for an item it is the ground under it.
+    /// </summary>
+    /// <remarks>
+    /// A field on the existing component rather than a component of its own so that adding
+    /// height is a write, not an archetype change: no new AOT hint, no archetype move, and
+    /// the AOI gather already fetches this span. <see cref="Value"/> stays a <c>Vec2</c>
+    /// because AOI is planar (ADR-28 decision 4) and every protocol 2 consumer reads it.
+    /// Writes of a whole <c>EntityState</c> (which has no z) leave this untouched.
+    /// </remarks>
+    public float Z;
 
     public Position(Vec2 value) => Value = value;
 }
@@ -222,6 +236,43 @@ public struct Locomotion
     /// </remarks>
     public ulong ActionHoldUntilTick;
 
+    /// <summary>
+    /// Vertical velocity in units per second, positive up — <c>MotorState.VelocityZ</c>
+    /// between motor steps (ADR-28). 0 while grounded. For a projectile, the z of its
+    /// constant velocity.
+    /// </summary>
+    public float VelocityZ;
+
+    /// <summary>
+    /// Ground-plane velocity in units per second, for replication (wire vel_x/vel_y) and
+    /// dead reckoning. For a character it is the displacement of its last motor step
+    /// divided by that step's dt; for a projectile its constant velocity. Presentation only:
+    /// nothing in the simulation integrates from it.
+    /// </summary>
+    public float VelocityX;
+
+    /// <inheritdoc cref="VelocityX"/>
+    public float VelocityY;
+
+    /// <summary>
+    /// True while the character stands on terrain or a box top (<c>MotorState.Grounded</c>).
+    /// Set at spawn; a jump clears it and landing sets it again.
+    /// </summary>
+    public bool Grounded;
+
+    /// <summary>
+    /// A jump requested by an input that has not been consumed by a motor step yet.
+    /// Latched because per-tick coalescing integrates only the newest input of a batch, and
+    /// a jump on an older one in the same batch would otherwise be lost.
+    /// </summary>
+    public bool JumpQueued;
+
+    /// <summary>
+    /// Base tick of this entity's last <c>CharacterMotor</c> step, by any path. Lets the
+    /// airborne pass keep gravity running for a character no input moved this tick, without
+    /// ever stepping one twice. Server-side only.
+    /// </summary>
+    public ulong MotorTick;
 
     public Locomotion(float speed) => Speed = speed;
 }

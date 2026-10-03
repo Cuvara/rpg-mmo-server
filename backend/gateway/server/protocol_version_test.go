@@ -198,3 +198,55 @@ func counterValue2(t *testing.T, c prometheus.Counter) float64 {
 	}
 	return m.GetCounter().GetValue()
 }
+
+// Protocol 3 (ADR-28..31) admits a WINDOW, [MinSupportedProtocolVersion,
+// WireProtocolVersion]: a protocol 2 client keeps working against a protocol 3
+// gateway (the game server serves it the protocol 2 shape), a client below the
+// window or ahead of this build is refused, and a raised minimum retires the
+// older version through the same named refusal.
+func TestSupportedProtocolWindowOverTheSocket(t *testing.T) {
+	tests := []struct {
+		name    string
+		version uint32
+		min     uint32
+		admit   bool
+	}{
+		{"protocol 2 is admitted", 2, 0, true},
+		{"protocol 3 is admitted", 3, 0, true},
+		{"protocol 2 is admitted when advertisement is required", 2, 1, true},
+		{"protocol 1 is below the window", 1, 0, false},
+		{"protocol 4 is ahead of this build", messages.WireProtocolVersion + 1, 0, false},
+		{"a minimum of 3 retires protocol 2", 2, 3, false},
+		{"a minimum of 3 keeps protocol 3", 3, 3, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gw, _ := startGatewayWithOptions(t, WithMinProtocolVersion(tt.min))
+			conn := dialGateway(t, gw)
+			defer conn.Close()
+
+			token, _ := jwt.Sign("user1", testSecret, 1*time.Hour)
+			resp := authExchange(t, conn, token, tt.version)
+
+			if resp.OK != tt.admit {
+				t.Fatalf("version %d with minimum %d: ok = %v (error %q), want %v",
+					tt.version, tt.min, resp.OK, resp.Error, tt.admit)
+			}
+			if !tt.admit && resp.Error != messages.ReasonProtocolVersionMismatch {
+				t.Fatalf("refusal reason = %q, want %q", resp.Error, messages.ReasonProtocolVersionMismatch)
+			}
+			// An admitted peer is echoed the negotiated version (its own, inside the
+			// window), because a protocol 2 client accepts only an exact echo. A
+			// refused peer is echoed this build's version so it learns what to be.
+			want := messages.WireProtocolVersion
+			if tt.admit {
+				want = messages.NegotiatedProtocolVersion(tt.version)
+			}
+			if resp.ProtocolVersion != want {
+				t.Errorf("gateway echo = %d, want %d",
+					resp.ProtocolVersion, want)
+			}
+		})
+	}
+}

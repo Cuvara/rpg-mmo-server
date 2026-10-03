@@ -1,6 +1,7 @@
 using System;
 using GameServer.World.Components;
 using Shared.GameLogic.Components;
+using Shared.GameLogic.Systems;
 
 namespace GameServer.World;
 
@@ -86,4 +87,105 @@ public sealed class WorldReader
     /// </summary>
     public int GetEntitiesInRange(Vec2 center, float radius, Span<EntityView> destination) =>
         _world.ScanRangeViewsLockedForReader(center, radius, destination);
+
+    // ── Protocol 3 data (ADR-28..30) ─────────────────────────────────────────
+    //
+    // Everything below is a pure read of the world's GameplayState under the read lock this
+    // scope already holds, and allocates nothing. Keys are EntityView.Key (the world-stable
+    // key). Scalar v3 fields (z, velocity, owner, spawn_seq, versions) are already on the
+    // EntityView; these are the variable-length parts.
+
+    /// <summary>
+    /// The viewer's own anchor in 3D: <see cref="TryGetSnapshotAnchor"/> plus the height.
+    /// </summary>
+    public bool TryGetSnapshotAnchor(string userId, out Vec2 position, out float z, out ulong lastInputTick)
+    {
+        z = 0f;
+        if (!TryGetSnapshotAnchor(userId, out position, out lastInputTick)) return false;
+
+        EntityHandle handle = _world.ResolveLocked(userId);
+        z = _world.ArchInternal.Get<Position>(handle.Value).Z;
+        return true;
+    }
+
+    /// <summary>
+    /// Number of stats in the entity's replicated stat block (0 for entities without one:
+    /// projectiles, items, unknown keys). Equal to <see cref="GameplayState.StatIds"/>' length
+    /// for every actor, so one buffer of that size always suffices.
+    /// </summary>
+    public int StatCount(int key)
+    {
+        SimRecord? rec = _world.Gameplay.Get(key);
+        return rec is { Kind: SimKind.Actor, StatValues: { } v } ? v.Length : 0;
+    }
+
+    /// <summary>
+    /// Write the entity's stat block — <c>(stat id, EFFECTIVE value)</c>, ordered by stat id —
+    /// into <paramref name="destination"/>. Returns the number of stats the entity has, which
+    /// may exceed the buffer (count-don't-saturate, as everywhere in this reader).
+    /// </summary>
+    /// <remarks>
+    /// Effective means status modifiers on content stats are applied (ADR-30); with no such
+    /// status the value is the base value. A changed result is always accompanied by a
+    /// changed <see cref="EntityView.StatsVersion"/>.
+    /// </remarks>
+    public int CopyStats(int key, Span<StatValueData> destination)
+    {
+        SimRecord? rec = _world.Gameplay.Get(key);
+        if (rec is not { Kind: SimKind.Actor, StatValues: { } values }) return 0;
+
+        uint[] ids = _world.Gameplay.StatIds;
+        int n = Math.Min(values.Length, ids.Length);
+        StatusSet? statuses = rec.Statuses;
+        bool modified = statuses is { Count: > 0 };
+        for (int i = 0; i < n && i < destination.Length; i++)
+        {
+            int v = modified ? statuses!.EffectiveStat(ids[i], values[i]) : values[i];
+            destination[i] = new StatValueData(ids[i], v);
+        }
+
+        return n;
+    }
+
+    /// <summary>Number of active statuses on the entity (0 when it has none or no record).</summary>
+    public int StatusCount(int key)
+    {
+        SimRecord? rec = _world.Gameplay.Get(key);
+        return rec is { Kind: SimKind.Actor, Statuses: { } s } ? s.Count : 0;
+    }
+
+    /// <summary>
+    /// Write the entity's active statuses as snapshot entries, in application order. Returns
+    /// the number of statuses, which may exceed the buffer. At most
+    /// <see cref="StatusSet.DefaultCapacity"/> per entity.
+    /// </summary>
+    public int CopyStatuses(int key, Span<StatusEffectData> destination)
+    {
+        SimRecord? rec = _world.Gameplay.Get(key);
+        if (rec is not { Kind: SimKind.Actor, Statuses: { } statuses }) return 0;
+
+        statuses.CopyTo(destination);
+        return statuses.Count;
+    }
+
+    /// <summary>
+    /// Item payload of a dropped-item entity (wire type <c>item</c>): content item id,
+    /// quantity and despawn tick. False for anything that is not a live dropped item.
+    /// </summary>
+    public bool TryGetItemDrop(int key, out string itemId, out int quantity, out ulong despawnTick)
+    {
+        SimRecord? rec = _world.Gameplay.Get(key);
+        if (rec is { Kind: SimKind.Item, ItemId: { } id })
+        {
+            itemId = id;
+            quantity = rec.ItemQuantity;
+            despawnTick = rec.DespawnTick;
+            return true;
+        }
+
+        itemId = string.Empty;
+        quantity = 0;
+        despawnTick = 0;
+        return false;
+    }
 }

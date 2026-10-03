@@ -2256,3 +2256,309 @@ players and uptime for the ADR-7 comparison), `snapshot_entities_shed`,
 observed deferral high-water mark, the number that says whether the bound above is
 holding) and `max_snapshot_bytes` (the cap that produced them — the others say nothing
 without it).
+
+## Characters: state, bag and equipment in the game DB (2026-10-02, ADR-31)
+
+ADR-31 moves the game-state key from the account to the character. Nakama owns the roster
+(`character_*` RPCs); the game server owns everything a character carries, in three tables
+added by migration `002_characters` (see `backend/deploy/docs/DATABASE.md`).
+
+**Store.** `ICharacterStore` (`Persistence/CharacterStore.cs`) with `PostgresCharacterStore`
+(same pool as the player store, `PostgresCharacterStore.Over(players)`) and
+`MemoryCharacterStore` (dev/tests). `Program.cs` selects it next to the player store and
+passes it to the server (`ServerOptions.CharacterStore`); join and save use it as described
+in "Core v3 simulation" below. Item grants are not wired yet (command layer).
+
+**Which character a connection plays.** The join token's `cid` claim (`JwtValidator.JwtClaims.CharacterId`),
+echoed in `JoinTokenResponse.character_id`. Absent = the default character; the store's
+convention for its key is `CharacterIds.Resolve(cid, userId)` = the user id.
+
+**First load (expand/contract).** `LoadCharacterAsync` reads `character_state`; with no row
+it copies the account's `player_states` row (map, x, y, hp, max_hp; level 1, xp 0, z 0, yaw 0)
+into `character_state` in the same transaction and flags the result `FromLegacyPlayerState`.
+Every character of an account without its own row inherits the same legacy row once; that is
+accepted until protocol 2 is retired and `player_states` is contracted away.
+
+**Two write cadences (ADR-6).** `SaveCharacterAsync` carries position, yaw, HP, level and XP
+and is meant for the 30 s sweep and the leave-world save. Item operations
+(`GrantItemAsync`, `ConsumeItemAsync`, `EquipItemAsync`, `UnequipItemAsync`,
+`MoveItemAsync`) are each ONE transaction written at the moment they happen. Grant and
+consume are idempotent by grant id: the `item_grants` row and the item change commit
+together, a replayed id is a no-op (`Applied = false`), and a refused operation rolls its
+ledger row back so the id stays usable. Equip into an occupied slot swaps the occupant to the
+end of the bag in the same transaction; the partial unique index guarantees one item per slot.
+
+**Ownership.** Load and save refuse a character row whose `user_id` differs
+(`CharacterStoreError.OwnershipMismatch`); the save does it inside the upsert
+(`DO UPDATE ... WHERE character_state.user_id = EXCLUDED.user_id`). Item operations require
+the character's row to exist (FK; `CharacterNotFound` otherwise) — save a brand-new
+character before granting to it.
+
+**Not decided here (placeholders / open).** No stacking, bag capacity or slot-name rules:
+those are content. Deleting a roster character in Nakama leaves its rows; cleanup belongs to
+a later contract step.
+
+## Core v3 simulation: 3D motor, skillshots, statuses, loot, characters (2026-10-03, ADR-28..31)
+
+The authoritative server runs ADR-28..31. The shared arithmetic is `Shared.GameLogic`
+(`CharacterMotor`, `ProjectileLogic`, `HitboxHistory`, `StatusSet`, `MapGeometry`); this
+section is how the server wires it. Every gameplay NUMBER in `backend/content/` is a
+placeholder pending design.
+
+### Where the state lives
+
+- **Height and vertical motion are component fields**, not new components: `Position.Z`,
+  `Locomotion.VelocityX/Y/Z`, `Locomotion.Grounded`, `Locomotion.JumpQueued`,
+  `Locomotion.MotorTick`. Writes, not archetype moves; no new AOT hint (ADR-11/12) and no new
+  archetype. `EntityState` has no z, so an `AddEntity` overwrite keeps the height.
+- **Everything else is a side table owned by the world**: `GameplayState`
+  (`World/GameplayState.cs`, `EcsWorld.Gameplay`), keyed by the world-stable key
+  (`EntityIdRef.Stable`). One `SimRecord` per key: `Kind` (Actor / Projectile / Item), the
+  actor's `StatusSet` and base stat values, the projectile's `ProjectileState` + ability +
+  owner + spawn_seq + rewind instant, the item's id/quantity/despawn tick, and two change
+  counters (`StatusesVersion`, `StatsVersion`). Created by `EcsWorld.AddEntityLocked` on
+  entity CREATION (`GameplayState.OnEntityCreated`) and reset on removal; same lock
+  discipline as component storage. A side table rather than components because projectile
+  and item payloads would each need a new archetype, a hint line and a payload-carrying
+  structural op; the archetype count is unchanged by this work.
+- **Projectile and item ids are recycled** (`proj-N`, `item-N`, `EntityIdPool`) after a
+  10-second quarantine. Stable keys are never released, so a fresh id per projectile would grow
+  `_stableIds` and every per-connection delta map without bound; the quarantine keeps a
+  recycled key from looking like the previous holder teleporting.
+
+### The critical scope, in order (one write lock per base tick)
+
+1. `InputHandler.BeginTick` → `GameplaySystems.BeginTick`: rebuild the damageable roster
+   (live actors; held players flagged) and record every non-held roster entry's feet into
+   `HitboxHistory` **labelled T-1**. Nothing moves between the end of tick T-1 and the start
+   of T except joins/leaves, and enemies (world group) move AFTER the critical scope, so this
+   is exactly what the T-1 snapshot showed — without a second write lock per tick.
+2. Inputs (`ProcessInput`): motor step, basic attack, ability cast.
+3. `ApplyHeldMovement`: held-direction motor steps, then the **airborne pass** — every player
+   not stepped this tick that is in the air (or has a queued jump) gets a zero-input motor step,
+   so gravity runs whether or not the owner is sending.
+4. `InputHandler.StepGameplay` → `GameplaySystems.Step`: projectiles, statuses, item despawn.
+
+Projectiles, statuses and history all run on the **critical** group (every base tick):
+`render_tick` is a base tick, status durations and intervals are counted in base ticks like
+cooldowns, and a 15 Hz projectile step is longer than a capsule is wide.
+
+### Movement (ADR-28)
+
+Players move with `CharacterMotor.Step` against the map geometry (`InputHandler.StepCharacter`).
+**Protocol 2 parity:** on flat ground, grounded, no jump, no status, the motor's x/y are
+bit-identical to `MovementSystem.TryMove`, which protocol 2 clients still predict with —
+`CoreV3/MotorPlanarParityTests` checks 200 000 random steps at four rates plus a 3000-tick
+session through the real input path. The one known divergence is a position of exactly `-0.0`
+with a zero step on that axis (`TryMove` yields `+0.0`); spawns and clamps never produce it.
+A jump on any input of a coalesced batch is latched (`JumpQueued`) and consumed by the next
+motor step. Root/stun: the motor still runs its vertical half with zero input and the input is
+reported `Blocked` (no hold, no facing change). Slow: `StatusSet.EffectiveSpeed`.
+Enemies stay planar movers; `EnemyMoveSystem` sets `Z = GroundAt(x, y)`, skips a rooted or
+stunned enemy and scales speed by its slows. Every new entity starts on the support under it.
+
+### Map geometry
+
+`content/maps/<map_id>.json` (format: `backend/content/README.md`), loaded by
+`Gameplay/MapLoader.cs` (source-generated `MapJsonContext`, NativeAOT-safe) and validated with
+`MapGeometryValidation`. **Absent → `MapGeometry.Flat(--map-width x --map-height)`**, the
+protocol 2 world. **Present and invalid → `Program.cs` logs every problem and exits 1.** A map
+file's bounds replace the configured size everywhere (motor, enemy and bot placement). A map id
+that is not a safe file name is treated as "no file". A new player — and a respawn — lands on
+the spawn point named `default` when the map has one; otherwise behaviour is unchanged.
+
+### Abilities by delivery, and lag compensation (ADR-29, ADR-30)
+
+`InputHandler.ProcessAbility` validates with the status-aware `AbilityLogic.ValidateCast`
+(stun/silence → `caster cannot cast`), charges the cooldown, emits `AbilityCast`, then:
+
+- **Self / Entity**: the effect list on the caster / the named target. A projectile, a dropped
+  item or a held (link-dead) player is never a valid target (reported as a missing target);
+  the range check uses the target's REWOUND position.
+- **Ground**: every roster entry whose feet are within `radius` of the aim point — rewound —
+  receives the effect list, in roster order.
+- **Projectile**: a `projectile` entity is spawned with `OwnerId`, the input's `spawn_seq` and
+  the clamped rewind instant; its first step runs later in the same tick. Origin = caster
+  feet + `ProjectileLaunchHeight` (1.0, placeholder), aimed at `(aim_x, aim_y, aim_z +
+  ProjectileLaunchHeight)`: the aim point is a point ON a surface, so a flat-ground shot flies
+  level. **Clients predicting their own projectile must use the same convention.** Each step
+  sweeps against the map (`ProjectileLogic.Step`, a wall ends it) and tests roster capsules
+  with `SegmentCapsuleHit`; the smallest contact `t` wins (ties: roster order), the projectile
+  emits `ProjectileHit`, applies the effects with the caster's state AT CAST TIME, and is
+  despawned. Range, bounds and world hits despawn it too.
+- **Rewind**: `HitboxHistory.ClampRewind(currentTick, render_tick, render_alpha, BaseHz, 200
+  ms)`. Only the first projectile step and Entity/Ground deliveries rewind; later steps use the
+  present. An entity with no record at the rewound instant (spawned since, history overflow)
+  is tested where it is now.
+- **Targeting rule (placeholder pending factions)**: Ground and Projectile deliveries affect
+  entities whose TYPE differs from the caster's, never the caster, never a held player
+  (`CombatResolver.IsHostile`).
+
+### Statuses and stats (ADR-30)
+
+`CombatResolver` (`Gameplay/CombatResolver.cs`) is the one place damage, heals, statuses and
+death are applied, with events: `Damage`/`Heal` (ability id, or `Periodic` + `EffectId` for a
+DoT/HoT tick), `StatusApplied` (amount = stacks), `StatusRemoved`, `Death`, `ProjectileHit`.
+Attack, defense and max HP are read through `StatusSet` everywhere combat reads them; the
+basic attack included. Periodic damage is applied as written (no defense mitigation —
+placeholder rule) and credits the status source as the killer; a held player's DoT keeps its
+rhythm but deals nothing. Expiry clamps HP to the new effective max. Death clears every status
+(with removal events) and rolls loot. Every actor gets a stat block from the content stat
+defaults (`level`, `mana` in the dev set); the replicated value is the effective one.
+
+### Loot and items
+
+On any death, `CombatResolver.AfterDeath` rolls the victim type's table (`loot.json`,
+server-only content). Each entry is rolled independently with
+`SplitMix64(seed ^ tick ^ victimKey ^ entryIndex)` — no wall clock, no shared RNG stream; the
+seed is `ServerOptions.LootSeed` or FNV-1a of the map id. A win spawns an `item` entity at the
+victim's feet (fixed ring offsets for several drops) with item id, quantity and
+`despawnTick = tick + despawnTicks`; `GameplaySystems` despawns it when due.
+**`EcsWorld.TryTakeItemEntity(itemEntityId, takerEntityId, maxRange)`** (and
+`WorldWriter.TryTakeItemEntity` inside a scope) is the command layer's pick-up: it checks the
+item, the taker (alive) and the 3D distance, removes the entity and returns
+`ItemTakeResult { Status, ItemId, Quantity }`. Persisting the grant (ADR-31 decision 4) is the
+caller's job.
+
+### Characters on join and save (ADR-31)
+
+With `ServerOptions.CharacterStore` set (Program.cs always sets it): the join resolves
+`CharacterIds.Resolve(cid, userId)`, loads through the store (an ownership mismatch refuses the
+join with `character does not belong to this account`), spawns with
+`PlayerSpawn.Resolve(CharacterState, ...)` (saved x/y/z on the same map, else the map's default
+spawn; HP, level and facing carry), records a `CharacterBinding` in
+`GameServerHost.Characters`, and sets height, the `level` stat and facing. Rejoining a held
+entity as a DIFFERENT character saves and drops the held one first. `AsyncSaver` (30 s sweep,
+leave/transfer/kick saves) writes `character_state` with x/y/z, yaw, HP, level and the loaded
+XP; a dungeon (`StatsOnly`) keeps the loaded origin map and position. The account's default
+character is ALSO written to the legacy `player_states` row, which protocol 2 tooling (the CD
+smoke) still reads. Without a character store the legacy `IPlayerStore` path is unchanged. All
+of it is off the tick thread.
+
+### What the snapshot encoder reads
+
+`EntityView` (composed once in `EcsWorld.ComposeView` for both the scan and the spatial index):
+`Z`, `VelX`, `VelY`, `VelZ`, `OwnerId`, `OwnerKey`, `SpawnSeq`, `StatsVersion`,
+`StatusesVersion`, and `MaxHp` is now the effective max HP (unchanged with no status).
+`WorldReader`: `CopyStats(key, Span<StatValueData>)` / `StatCount(key)`,
+`CopyStatuses(key, Span<StatusEffectData>)` / `StatusCount(key)`,
+`TryGetItemDrop(key, out itemId, out quantity, out despawnTick)`, and a 3D
+`TryGetSnapshotAnchor(userId, out position, out z, out lastInputTick)`. Input: the decoder
+passes InputMessage fields 9-13 as `InputExtras` through
+`EcsWorld.PushInput(userId, input, ingress, in extras)`.
+
+### Limitations
+
+- Hit tests are linear over the roster (with a distance broadphase) and history lookups are
+  linear per tick; fine for the slice, a spatial index is the next step under load.
+- No faction model: the type-based hostility rule above is a placeholder.
+- No mana costs, cast times or XP: content does not define them yet.
+- Mob loot identity is the entity TYPE ("mob"); there is no per-species mob id.
+- `PlayerRespawnSystem` and the join place players on the `default` spawn only; portals load
+  and validate but nothing triggers them yet.
+
+## Core v3 network: version window, snapshot v3, command channel, control lane (2026-10-03, ADR-28..31)
+
+The network half of protocol 3. Normative wire text is `docs/API.md` ("The supported window",
+"Protocol 3 entity state", "Command channel", "Control lane"); this is how it is built and why.
+
+### One server, two shapes
+
+`WireProtocol.CheckProtocolVersion` admits `[MinSupportedProtocolVersion = 2, ProtocolVersion = 3]`
+(Go mirrors it in `shared/messages`, so the gateway admits the same window with no code change).
+The join records the advertised version on the connection (`Connection.PeerProtocolVersion`,
+which also sets `SnapshotDeltaState.PeerProtocolVersion`); everything version-specific keys off
+that one number. **A protocol 2 peer must get byte-identical output to the pre-v3 encoder**, and
+that is proved, not argued: `CoreV3/V2WireIdentityTests` drives a world full of v3-only state
+(stat blocks, statuses, DoTs, jumps) through the encoder with peer version 2 and compares SHA-256
+digests generated with the encoder at commit 3f87b56 (which ignored every v3 field) fed the same
+world with event types 7-9 filtered out. Three digests: Protobuf with the default budget,
+Protobuf with a 120-byte budget (shedding), JSON. How the v2 path stays identical:
+
+- `SentView` (the "what was sent" record) gained z / velocity / owner / spawn_seq, ALWAYS zero
+  below protocol 3, so they cannot make a v2 entity compare unequal.
+- `Fill` writes v3 fields only when `_v3`; `ResetV3` clears them on every fill, so a v2 entity
+  carries proto3 defaults (zero bytes).
+- Projectile and item entities are skipped before they enter `_seen`/`_lastSent` (they never
+  existed for a v2 connection, so there is no despawn either); v3 event types are skipped and
+  `effect_id` is not written.
+- The budget's measuring instance carried the previous candidate's unchanged fields into a
+  partial entity's measured size (over-measurement: conservative, never over budget). Fixed for
+  v3 only — fixing it for v2 moved the tight-budget digest, i.e. moved v2 bytes.
+
+### Stats and statuses across threads
+
+Encoding runs on the connection's write task, after the read lock is released; the scalar v3
+fields ride in `EntityView`, but stat blocks and statuses are variable-length side-table data.
+`Connection.GatherSnapshotView` therefore copies them for v3 peers (only) into a
+`SnapshotV3Gather`, double-buffered exactly like the AOI buffer and handed over with it by
+`TakePendingSnapshot`. Status sources are resolved to world-stable keys during that copy, so the
+write task interns them without touching the world.
+
+Change detection: per connection, `_v3Sent[key]` holds the last-sent stat block and statuses (in
+that connection's terms: source handles) plus the counters (`StatsVersion`, `StatusesVersion`)
+they correspond to. Equal counters = unchanged (fast path). Moved counters = compare content; a
+move with no visible change is absorbed (counters updated, nothing sent). The record is written
+only on the lines that write `_lastSent` and erased wherever `_lastSent` forgets a key (despawn
+commit, keyframe), which is the same invariant that makes budget shedding safe: a shed entity's
+stat change is deferred, never lost (`V3Client_UnderATightBudget_ConvergesExactly`). Records,
+`StatValue` / `StatusEffect` wire objects and the removal lists are pooled:
+`SteadyState_AllocatesNothing` encodes 1000 changing v3 snapshots with 0 bytes allocated.
+
+### Owner and status-source handles
+
+An owner is named by the handle this connection already holds for it — bound in an earlier
+message or earlier in this one. Resolving against handles bound LATER in the same message would
+need a second pass and would make the budget's sizing pass and emit pass disagree; instead an
+owner introduced after its projectile is named on the next delta (bit `0x0800`). The budget's
+all-fits sizing pass tracks the handles it would assign (`_prospective`), so it measures exactly
+what the emit pass writes (`BudgetSizing_IsExact_WithStatsAndStatuses`). JSON names the owner by
+id and has no status-source field (0).
+
+### Velocity
+
+`EntityView` carries the motor's ground velocity for every character, but it is replicated only
+for projectiles and airborne characters (`VelZ != 0`). Ground velocity changes on every
+start/stop/turn and a walking remote is interpolated anyway; sending it would add a field to most
+deltas for nothing a receiver uses. (It is also not reset when a held move stops, so it can be
+stale on the ground.)
+
+### Command channel
+
+`Commands/CommandRouter.cs`. The read loop does only non-blocking work (decode, version gate,
+token bucket, opcode check, enqueue into the connection's bounded queue). Each connection has one
+worker task (started on its first command) that runs requests one at a time in arrival order —
+so a character's inventory is never mutated concurrently — and does all `ICharacterStore` I/O.
+Nothing here touches the tick thread; the pick-up's world access is `EcsWorld.UpdateComponents`
+from the worker (the same locked API the join path uses from network threads). Replies go out on
+the control lane.
+
+Pick-up is take-then-grant: `TryTakeItemEntity` removes the entity in the same locked step that
+validates it, so concurrent requests for one item cannot both succeed
+(`Pickup_TwoPlayersRacingForOneItem_ExactlyOneGetsIt`). The grant id is deterministic per drop
+(`{server_id}:{boot_nonce}:{entity_id}:{despawn_tick}`; ids are recycled, the despawn tick names
+the drop, the boot nonce separates process runs). Failure handling picks "never duplicate" over
+"never lose": a definitive store refusal (nothing written) restores the item to the world; an
+I/O failure is retried 3 times with the same id (idempotent) and then logged with the grant id
+for reconciliation, item not restored. A brand-new character's first grant saves its
+`character_state` row first (`AsyncSaver.SavePlayerAsync`), because item rows need it.
+
+### Control lane
+
+`Connection` has a second queue for messages a client is owed exactly once (CommandResult,
+ServerPush, the concurrent-transfer refusal). Bounded 256, `FullMode.Wait` so a write reports
+full instead of dropping; overflow closes the connection. The write task drains it before every
+item of the 64-slot drop-oldest data lane; `SendControl` wakes the writer with a `Wake` item on
+the data lane — a wake that the data lane drops is harmless because a full data lane means the
+writer is busy and drains control before each item it takes. Kick/Disconnect keep
+`WriteOneAsync`, which completes before the connection closes; a queued message would be lost to
+the close.
+
+### Not done here / open
+
+- A dropped item's identity is not on the wire (`EntitySnapshot` has no item-id field); a client
+  learns it on pick-up. Needs a schema decision (a content stat? a field?).
+- Item use has no effect (content defines none); level requirements are not enforced on equip.
+- No inventory capacity rule (`inventory_full` is never produced); no `not_owner` path (an
+  instance of another character is `not_found`).
+- The v2 sizing over-measurement above stays until protocol 2 is retired.

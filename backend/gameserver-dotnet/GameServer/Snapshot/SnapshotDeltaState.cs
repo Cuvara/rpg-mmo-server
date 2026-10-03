@@ -10,6 +10,7 @@ using Shared.GameLogic.Systems;
 // meet, and that is exactly where an implicit choice would be a bug waiting to happen.
 using SimAction = Shared.GameLogic.Components.EntityAction;
 using WireEventType = RpgMmo.Wire.V1.GameEventType;
+using SimEventType = Shared.GameLogic.Components.GameEventType;
 using WireAction = RpgMmo.Wire.V1.EntityAction;
 using RpgMmo.Wire.V1;
 
@@ -68,6 +69,32 @@ public sealed class SnapshotDeltaState
         /// </summary>
         public readonly uint ActionSeq;
 
+        // ── Protocol 3 scalars (ADR-28/29). ALWAYS zero on a connection below protocol 3, so
+        // they cannot make a version 2 entity compare unequal and the version 2 delta stream
+        // is exactly what it was. Stats and statuses are not here: they are variable-length
+        // and tracked per key in _v3Sent, with the world's change counters as the fast path.
+
+        /// <summary>Height as sent.</summary>
+        public readonly float Z;
+
+        /// <summary>Replicated velocity as sent (see <see cref="ReplicatedVelocity"/>).</summary>
+        public readonly float VelX;
+
+        /// <inheritdoc cref="VelX"/>
+        public readonly float VelY;
+
+        /// <inheritdoc cref="VelX"/>
+        public readonly float VelZ;
+
+        /// <summary>
+        /// Owner as sent: the owner's handle on an interning connection, 1/0 for "owner_id
+        /// written / not written" on JSON. Per connection, because handles are.
+        /// </summary>
+        public readonly uint Owner;
+
+        /// <summary>spawn_seq as sent to THIS connection (non-zero only for the owner's).</summary>
+        public readonly uint SpawnSeq;
+
         public SentView(in EntityView e)
         {
             Id = e.Id;
@@ -80,6 +107,23 @@ public sealed class SnapshotDeltaState
             FacingBrad = e.FacingBrad;
             Action = e.Action;
             ActionSeq = e.ActionSeq;
+            Z = 0f;
+            VelX = 0f;
+            VelY = 0f;
+            VelZ = 0f;
+            Owner = 0;
+            SpawnSeq = 0;
+        }
+
+        public SentView(in EntityView e, float velX, float velY, float velZ, uint owner, uint spawnSeq)
+            : this(in e)
+        {
+            Z = e.Z;
+            VelX = velX;
+            VelY = velY;
+            VelZ = velZ;
+            Owner = owner;
+            SpawnSeq = spawnSeq;
         }
 
         public bool Equals(SentView other) =>
@@ -113,6 +157,13 @@ public sealed class SnapshotDeltaState
             // to the first and the delta encoder would drop it -- reintroducing the exact
             // missed animation this field exists to fix.
             ActionSeq == other.ActionSeq &&
+            // Protocol 3 scalars: zero on both sides for a version 2 connection.
+            Z.Equals(other.Z) &&
+            VelX.Equals(other.VelX) &&
+            VelY.Equals(other.VelY) &&
+            VelZ.Equals(other.VelZ) &&
+            Owner == other.Owner &&
+            SpawnSeq == other.SpawnSeq &&
             string.Equals(Type, other.Type, StringComparison.Ordinal);
 
         public override bool Equals(object? obj) => obj is SentView v && Equals(v);
@@ -352,6 +403,92 @@ public sealed class SnapshotDeltaState
     /// </para>
     /// </summary>
     public bool FieldDelta { get; set; }
+
+    /// <summary>
+    /// Wire protocol version the peer advertised in its join (0 = unversioned). Set once after
+    /// the handshake, like <see cref="FieldDelta"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Version 3 or higher</b> (ADR-28..30) turns on, for this connection only: z, velocity,
+    /// owner (+ spawn_seq for the owner's own connection), the stat block and status effects,
+    /// <c>GameEvent.effect_id</c> and event types 7-9, and projectile/item ENTITIES, which are
+    /// otherwise never sent. On a delta they use mask bits <c>0x0200</c>-<c>0x2000</c> when
+    /// <see cref="FieldDelta"/> is also on.
+    /// </para>
+    /// <para>
+    /// <b>Below 3</b> the encoder produces exactly the protocol 2 bytes: none of the above is
+    /// written, compared or sent (<c>V2WireIdentityTests</c> pins it against the pre-v3 encoder).
+    /// </para>
+    /// </remarks>
+    public uint PeerProtocolVersion { get; set; }
+
+    /// <summary>Latched per encode: <see cref="PeerProtocolVersion"/> &gt;= 3.</summary>
+    private bool _v3;
+
+    /// <summary>Protocol 3 variable-length data of the encode in progress; null = none gathered.</summary>
+    private SnapshotV3Gather? _gather;
+
+    /// <summary>Observer's stable key for the encode in progress (spawn_seq addressing).</summary>
+    private int _observerKey = PendingGameEvent.NoKey;
+
+    /// <summary>
+    /// What this connection was last sent of an entity's stat block and statuses, keyed like
+    /// <see cref="_lastSent"/> and kept in lockstep with it (written only where an entity is
+    /// committed, erased wherever <see cref="_lastSent"/> forgets a key). Protocol 3 only.
+    /// </summary>
+    private readonly Dictionary<int, V3Sent> _v3Sent = new();
+
+    /// <summary>Recycled <see cref="V3Sent"/> records, so a keyframe or despawn allocates nothing.</summary>
+    private readonly List<V3Sent> _v3Free = new();
+
+    /// <summary>
+    /// Handles the budget's sizing pass WOULD assign, so an owner or status source introduced
+    /// earlier in the same message is measured exactly as the emit pass will write it.
+    /// </summary>
+    private readonly Dictionary<int, uint> _prospective = new();
+
+    /// <summary>True only during the budget's all-fits sizing pass: lookups consult <see cref="_prospective"/>.</summary>
+    private bool _sizingProspective;
+
+    // Pools for the repeated wire sub-messages, mirroring the entity pool. The "scratch" pair
+    // serves the sizing instance and is reset on every measurement.
+    private readonly List<StatValue> _statPool = new();
+    private int _statPoolUsed;
+    private readonly List<StatusEffect> _statusPool = new();
+    private int _statusPoolUsed;
+    private readonly List<StatValue> _scratchStatPool = new();
+    private int _scratchStatPoolUsed;
+    private readonly List<StatusEffect> _scratchStatusPool = new();
+    private int _scratchStatusPoolUsed;
+
+    /// <summary>One status as sent: the effect with its source already in this connection's terms.</summary>
+    private readonly struct SentStatus
+    {
+        public readonly uint EffectId;
+        public readonly uint Stacks;
+        public readonly ulong ExpiresTick;
+        public readonly uint Source;
+
+        public SentStatus(uint effectId, uint stacks, ulong expiresTick, uint source)
+        {
+            EffectId = effectId;
+            Stacks = stacks;
+            ExpiresTick = expiresTick;
+            Source = source;
+        }
+    }
+
+    /// <summary>Last-sent stat block and statuses of one entity (protocol 3).</summary>
+    private sealed class V3Sent
+    {
+        public StatValueData[] Stats = new StatValueData[4];
+        public int StatCount;
+        public SentStatus[] Statuses = new SentStatus[4];
+        public int StatusCount;
+        public uint StatsVersion;
+        public uint StatusesVersion;
+    }
 
     /// <summary>
     /// The rate of the tick counter this encoder is HANDED, for converting configured
@@ -765,9 +902,15 @@ public sealed class SnapshotDeltaState
     /// </remarks>
     public SnapshotMessage Encode(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby, int keyframeInterval,
         bool intern = false, Vec2 observer = default,
-        ReadOnlySpan<PendingGameEvent> events = default, int observerKey = PendingGameEvent.NoKey)
+        ReadOnlySpan<PendingGameEvent> events = default, int observerKey = PendingGameEvent.NoKey,
+        SnapshotV3Gather? v3 = null)
     {
         _intern = intern;
+        _v3 = PeerProtocolVersion >= 3;
+        // Only meaningful when it describes THIS span; a gather of another size is ignored
+        // rather than indexed out of step with the entities.
+        _gather = _v3 && v3 != null && v3.EntityCount == nearby.Length ? v3 : null;
+        _observerKey = observerKey;
         // Field-level delta requires interning: changed_fields is a Protobuf-only field,
         // and an interned handle proves the receiver already has the entity's last state.
         // Gating it on intern rather than FieldDelta alone means a caller that sets the
@@ -863,6 +1006,10 @@ public sealed class SnapshotDeltaState
         {
             ref readonly PendingGameEvent pending = ref events[i];
 
+            // Event types 7-9 (status applied/removed, projectile hit) are protocol 3: a
+            // version 2 peer was never promised them and receives exactly the pre-v3 stream.
+            if (!_v3 && IsV3EventType(pending.Data.Type)) continue;
+
             uint sourceHandle = 0;
             uint targetHandle = 0;
             bool sourceKnown = pending.HasSource && IsKnown(pending.SourceKey, out sourceHandle);
@@ -885,6 +1032,7 @@ public sealed class SnapshotDeltaState
             wire.Amount = pending.Data.Amount;
             wire.AbilityId = pending.Data.AbilityId;
             wire.Flags = (uint)pending.Data.Flags;
+            if (_v3) wire.EffectId = pending.Data.EffectId;
 
             if (_intern)
             {
@@ -946,8 +1094,13 @@ public sealed class SnapshotDeltaState
         e.Flags = 0;
         e.SourceId = "";
         e.TargetId = "";
+        e.EffectId = 0;
         return e;
     }
+
+    /// <summary>Game event types a protocol 2 peer is never sent.</summary>
+    private static bool IsV3EventType(SimEventType type) =>
+        type is SimEventType.StatusApplied or SimEventType.StatusRemoved or SimEventType.ProjectileHit;
 
     /// <summary>
     /// Reset the reused message and hand back every pooled entity in one step. Called at
@@ -960,6 +1113,8 @@ public sealed class SnapshotDeltaState
         _message.Removed.Clear();
         _message.Events.Clear();
         _eventPoolUsed = 0;
+        _statPoolUsed = 0;
+        _statusPoolUsed = 0;
         _message.Tick = tick;
         _message.AckTick = ackTick;
         _message.Full = full;
@@ -1004,7 +1159,29 @@ public sealed class SnapshotDeltaState
         e.FacingBrad = 0;
         e.Action = WireAction.Unspecified;
         e.ActionSeq = 0;
+        e.ChangedFields = 0;
+        ResetV3(e);
         return e;
+    }
+
+    /// <summary>
+    /// Clear every protocol 3 field of a wire entity. Called on every rented and every
+    /// measured instance: on a version 2 connection these stay at their proto3 defaults and
+    /// cost zero bytes, which is what keeps the version 2 bytes unchanged.
+    /// </summary>
+    private static void ResetV3(EntitySnapshot e)
+    {
+        e.Z = 0f;
+        e.VelX = 0f;
+        e.VelY = 0f;
+        e.VelZ = 0f;
+        e.Owner = 0;
+        e.OwnerId = "";
+        e.SpawnSeq = 0;
+        if (e.Stats.Count > 0) e.Stats.Clear();
+        if (e.StatsRemoved.Count > 0) e.StatsRemoved.Clear();
+        if (e.Statuses.Count > 0) e.Statuses.Clear();
+        if (e.StatusesRemoved.Count > 0) e.StatusesRemoved.Clear();
     }
 
     private SnapshotMessage EncodeFull(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby)
@@ -1017,6 +1194,7 @@ public sealed class SnapshotDeltaState
         // entity here would not make it a beat late -- it would make it vanish until some
         // later delta happened to carry it.
         _lastSent.Clear();
+        ReleaseAllV3();
         // A keyframe is the synchronisation point for the handle space: both
         // sides drop every binding and start again from 1.
         _handles.Clear();
@@ -1032,8 +1210,10 @@ public sealed class SnapshotDeltaState
             for (int i = 0; i < nearby.Length; i++)
             {
                 ref readonly EntityView e = ref nearby[i];
-                msg.Entities.Add(ToMsg(in e));
-                _lastSent[e.Key] = new SentView(in e);
+                if (!_v3 && IsV3OnlyEntity(in e)) continue;
+                msg.Entities.Add(ToMsg(in e, i));
+                _lastSent[e.Key] = ViewOf(in e);
+                CommitV3(in e, i);
                 // Stamped here as well as in EmitEntity. This path does not go through it,
                 // and an entity introduced on an unbudgeted keyframe with no send tick looks
                 // to the schedule like one that was never sent -- so it would be due on the
@@ -1066,6 +1246,7 @@ public sealed class SnapshotDeltaState
         _seen.Clear();
         for (int i = 0; i < nearby.Length; i++)
         {
+            if (!_v3 && IsV3OnlyEntity(in nearby[i])) continue;
             _candidates.Add(i);
             // Scored here too, so _candidateScores is always parallel to _candidates
             // whichever path built them. The keyframe path does not USE the score to decide
@@ -1093,11 +1274,12 @@ public sealed class SnapshotDeltaState
         for (int i = 0; i < nearby.Length; i++)
         {
             ref readonly EntityView e = ref nearby[i];
+            if (!_v3 && IsV3OnlyEntity(in e)) continue;
             _seen.Add(e.Key);
 
-            var view = new SentView(in e);
+            var view = ViewOf(in e);
             bool known = _lastSent.TryGetValue(e.Key, out var prev);
-            if (known && prev.Equals(view))
+            if (known && prev.Equals(view) && !V3Dirty(in e, i))
                 continue; // unchanged since last send -> omit
 
             // The schedule applies on this path too. It is a SEPARATE concern from the byte
@@ -1114,8 +1296,11 @@ public sealed class SnapshotDeltaState
                 continue;
             }
 
-            msg.Entities.Add(ToMsg(in e));
-            _lastSent[e.Key] = view;
+            msg.Entities.Add(ToMsg(in e, i));
+            // Recomputed after the write, not reused: the owner handle is per connection and
+            // the record must say exactly what the bytes said.
+            _lastSent[e.Key] = _v3 ? ViewOf(in e) : view;
+            CommitV3(in e, i);
             NoteSent(e.Key, tick);
             _lastSentTick[e.Key] = tick;
         }
@@ -1140,6 +1325,7 @@ public sealed class SnapshotDeltaState
             for (int i = 0; i < _removedKeys.Count; i++)
             {
                 _lastSent.Remove(_removedKeys[i]);
+                ReleaseV3(_removedKeys[i]);
                 // The handle is NOT returned to the pool: _nextHandle only ever
                 // advances within an interval. Freeing it would allow reuse, and
                 // reuse is the failure this design exists to avoid.
@@ -1170,10 +1356,11 @@ public sealed class SnapshotDeltaState
         for (int i = 0; i < nearby.Length; i++)
         {
             ref readonly EntityView e = ref nearby[i];
+            if (!_v3 && IsV3OnlyEntity(in e)) continue;
             _seen.Add(e.Key);
 
             bool known = _lastSent.TryGetValue(e.Key, out var prev);
-            if (known && prev.Equals(new SentView(in e)))
+            if (known && prev.Equals(ViewOf(in e)) && !V3Dirty(in e, i))
             {
                 // Nothing owed on this entity: the client's copy already matches. That
                 // includes an entity which was deferred earlier and has since drifted
@@ -1237,9 +1424,14 @@ public sealed class SnapshotDeltaState
         // there.
         int total = headerBytes;
         uint prospective = _nextHandle;
+        // Protocol 3 only: owner and status-source handles introduced earlier in this same
+        // message are measured as the emit pass below will write them.
+        _prospective.Clear();
+        _sizingProspective = _v3;
         for (int c = 0; c < _candidates.Count; c++)
         {
-            ref readonly EntityView e = ref nearby[_candidates[c]];
+            int index = _candidates[c];
+            ref readonly EntityView e = ref nearby[index];
             bool introduce = !_intern || !_handles.ContainsKey(e.Key);
             uint handle = 0;
             if (_intern)
@@ -1248,11 +1440,14 @@ public sealed class SnapshotDeltaState
                 else handle = _handles[e.Key];
             }
             if (_fieldDelta && !introduce && _lastSent.TryGetValue(e.Key, out SentView prev))
-                Fill(_sizingScratch, in e, handle, introduce, fieldDelta: true, hasPrev: true, prev);
+                Fill(_sizingScratch, in e, index, handle, introduce, fieldDelta: true, hasPrev: true, prev, sizing: true);
             else
-                Fill(_sizingScratch, in e, handle, introduce);
+                Fill(_sizingScratch, in e, index, handle, introduce, sizing: true);
             total += EntryBytes(_sizingScratch);
+            if (_v3 && _intern && introduce) _prospective[e.Key] = handle;
+            else if (_v3 && !_intern) _prospective[e.Key] = 1;
         }
+        _sizingProspective = false;
         for (int r = 0; r < _pendingRemovals.Count; r++)
         {
             total += RemovedBytes(_lastSent[_pendingRemovals[r]].Id);
@@ -1264,8 +1459,8 @@ public sealed class SnapshotDeltaState
             // would have produced for this tick — the budget is invisible until it bites.
             for (int c = 0; c < _candidates.Count; c++)
             {
-                ref readonly EntityView e = ref nearby[_candidates[c]];
-                EmitEntity(msg, in e);
+                int index = _candidates[c];
+                EmitEntity(msg, in nearby[index], index);
             }
             CommitRemovals(msg, _pendingRemovals.Count);
             PruneDeferrals();
@@ -1369,8 +1564,8 @@ public sealed class SnapshotDeltaState
         // consume the budget every tick and starve updates indefinitely.
         if (n > 0)
         {
-            ref readonly EntityView top = ref nearby[_sortBuffer[0].Index];
-            used += EmitEntity(msg, in top);
+            int topIndex = _sortBuffer[0].Index;
+            used += EmitEntity(msg, in nearby[topIndex], topIndex);
             next = 1;
         }
 
@@ -1399,14 +1594,15 @@ public sealed class SnapshotDeltaState
         int shed = 0;
         for (int i = next; i < n; i++)
         {
-            ref readonly EntityView e = ref nearby[_sortBuffer[i].Index];
-            int size = MeasureEntity(in e);
+            int index = _sortBuffer[i].Index;
+            ref readonly EntityView e = ref nearby[index];
+            int size = MeasureEntity(in e, index);
             if (used + size > _budgetBytes)
             {
                 for (int j = i; j < n; j++) shed += Defer(in nearby[_sortBuffer[j].Index]);
                 break;
             }
-            used += EmitEntity(msg, in e);
+            used += EmitEntity(msg, in e, index);
         }
 
         if (shed > 0) Interlocked.Add(ref _entitiesShed, shed);
@@ -1497,6 +1693,10 @@ public sealed class SnapshotDeltaState
     private bool DueNow(in EntityView e, in SentView prev, ulong tick, float score)
     {
         if (IsSelf(in e)) return true;
+        // ADR-29 decision 1: a projectile is due every world tick. It lives for a fraction of
+        // a second, and a receiver dead-reckoning one from a stale snapshot draws it through
+        // whatever it already hit.
+        if (ReplicationImportance.IsAlwaysDue(e.Type)) return true;
         if (prev.Hp != e.Hp || prev.MaxHp != e.MaxHp) return true;
         if (prev.Action != e.Action || prev.ActionSeq != e.ActionSeq) return true;
 
@@ -1532,6 +1732,7 @@ public sealed class SnapshotDeltaState
             int key = _pendingRemovals[r];
             msg.Removed.Add(_lastSent[key].Id);
             _lastSent.Remove(key);
+            ReleaseV3(key);
             // The handle is NOT returned to the pool: _nextHandle only ever advances
             // within an interval. Freeing it would allow reuse, and reuse is the failure
             // this design exists to avoid.
@@ -1546,11 +1747,12 @@ public sealed class SnapshotDeltaState
     /// Commit one entity to the wire and to the encoder's model of what the client has.
     /// Returns the bytes it added to the payload.
     /// </summary>
-    private int EmitEntity(SnapshotMessage msg, in EntityView e)
+    private int EmitEntity(SnapshotMessage msg, in EntityView e, int index)
     {
-        var ent = ToMsg(in e);
+        var ent = ToMsg(in e, index);
         msg.Entities.Add(ent);
-        _lastSent[e.Key] = new SentView(in e);
+        _lastSent[e.Key] = ViewOf(in e);
+        CommitV3(in e, index);
         NoteSent(e.Key, _encodingTick);
         _lastSentTick[e.Key] = _encodingTick;
         _shedAge.Remove(e.Key);
@@ -1578,7 +1780,7 @@ public sealed class SnapshotDeltaState
     /// budget spends the budget on this measurement and then emits at that size; any
     /// divergence makes the byte-cap wrong by that many bytes per entity.
     /// </summary>
-    private int MeasureEntity(in EntityView e)
+    private int MeasureEntity(in EntityView e, int index)
     {
         uint handle = 0;
         bool introduce = true;
@@ -1596,9 +1798,9 @@ public sealed class SnapshotDeltaState
         }
 
         if (_fieldDelta && !introduce && _lastSent.TryGetValue(e.Key, out SentView prev))
-            Fill(_sizingScratch, in e, handle, introduce, fieldDelta: true, hasPrev: true, prev);
+            Fill(_sizingScratch, in e, index, handle, introduce, fieldDelta: true, hasPrev: true, prev, sizing: true);
         else
-            Fill(_sizingScratch, in e, handle, introduce);
+            Fill(_sizingScratch, in e, index, handle, introduce, sizing: true);
         return EntryBytes(_sizingScratch);
     }
 
@@ -1640,14 +1842,14 @@ public sealed class SnapshotDeltaState
     /// despawn attribute an update to the wrong entity, which is wrong state
     /// rather than absent state and far harder to detect.
     /// </remarks>
-    private EntitySnapshot ToMsg(in EntityView e)
+    private EntitySnapshot ToMsg(in EntityView e, int index)
     {
         var msg = Rent();
 
         if (!_intern)
         {
             // JSON: never intern. The id is the only identifier that encoding has.
-            Fill(msg, in e, handle: 0, introduceId: true);
+            Fill(msg, in e, index, handle: 0, introduceId: true);
             return msg;
         }
 
@@ -1659,9 +1861,9 @@ public sealed class SnapshotDeltaState
             // (EmitEntity writes both; keyframes clear both), so a present handle
             // guarantees a present SentView.
             if (_fieldDelta && _lastSent.TryGetValue(e.Key, out SentView prev))
-                Fill(msg, in e, handle, introduceId: false, fieldDelta: true, hasPrev: true, prev);
+                Fill(msg, in e, index, handle, introduceId: false, fieldDelta: true, hasPrev: true, prev);
             else
-                Fill(msg, in e, handle, introduceId: false);
+                Fill(msg, in e, index, handle, introduceId: false);
         }
         else
         {
@@ -1670,7 +1872,7 @@ public sealed class SnapshotDeltaState
             // has no previous state to merge against.
             handle = _nextHandle++;
             _handles[e.Key] = handle;
-            Fill(msg, in e, handle, introduceId: true);
+            Fill(msg, in e, index, handle, introduceId: true);
         }
         return msg;
     }
@@ -1712,15 +1914,51 @@ public sealed class SnapshotDeltaState
     /// entity (i.e. the entity is already known to the client). Only meaningful when
     /// <paramref name="fieldDelta"/> is also true.
     /// </param>
-    private static void Fill(EntitySnapshot msg, in EntityView e, uint handle, bool introduceId,
-        bool fieldDelta = false, bool hasPrev = false, in SentView prev = default)
+    private void Fill(EntitySnapshot msg, in EntityView e, int index, uint handle, bool introduceId,
+        bool fieldDelta = false, bool hasPrev = false, in SentView prev = default, bool sizing = false)
     {
+        if (sizing)
+        {
+            // The measuring instance is refilled for every candidate: its sub-message pools
+            // restart with it, so a measurement never holds more than one entity's worth.
+            _scratchStatPoolUsed = 0;
+            _scratchStatusPoolUsed = 0;
+        }
+
+        // Protocol 3 fields are cleared on every fill, so neither a pooled nor the measuring
+        // instance can carry a previous entity's z, owner or stat block. On a version 2
+        // connection they then stay at their proto3 defaults and cost zero bytes.
+        ResetV3(msg);
+
         if (fieldDelta && hasPrev && !introduceId)
         {
             // Field-level delta: write only the fields that differ from what the client
             // was last told, and record which ones via changed_fields. The fields that do
             // NOT change are left at the Rent()-reset proto3 defaults (zero / empty /
             // Unspecified) so the serialiser elides them — they cost zero bytes.
+            //
+            // "Rent()-reset" holds for a pooled instance but NOT for the measuring instance,
+            // which is refilled candidate after candidate: without this reset it kept the
+            // previous candidate's unchanged fields and the budget over-measured every partial
+            // entity by them. Clearing here is a no-op for a pooled instance.
+            //
+            // Protocol 3 connections only. The over-measurement is conservative (it can only
+            // shed early, never exceed the budget), and fixing it for protocol 2 moves which
+            // entity a tight budget sheds - i.e. moves protocol 2 bytes, which this change
+            // promises not to do (V2WireIdentityTests, tight-budget case, fails if applied).
+            if (_v3)
+            {
+                msg.X = 0f;
+                msg.Y = 0f;
+                msg.Hp = 0;
+                msg.MaxHp = 0;
+                msg.Speed = 0f;
+                msg.FacingBrad = 0;
+                msg.Action = WireAction.Unspecified;
+                msg.ActionSeq = 0;
+                msg.TypeName = "";
+                msg.Type = EntityType.Unspecified;
+            }
             uint mask = 0;
 
             if (e.Position.X != prev.X)
@@ -1769,6 +2007,21 @@ public sealed class SnapshotDeltaState
                 msg.ActionSeq = e.ActionSeq;
             }
 
+            if (_v3)
+            {
+                mask |= FillV3Delta(msg, in e, index, in prev, sizing);
+
+                // A mask of 0 means "every field present" (wire.proto), so a partial entity
+                // must never carry one. Version 2 cannot get here with 0 (SentView covers every
+                // field it writes); version 3 could only in a corner where a status source's
+                // handle moved and moved back within one message. Writing x is always valid.
+                if (mask == 0)
+                {
+                    mask = SnapshotFieldBits.X;
+                    msg.X = e.Position.X;
+                }
+            }
+
             msg.Handle = handle;
             msg.Id = ""; // never introducing — handle already known to the client
             msg.ChangedFields = mask;
@@ -1805,5 +2058,381 @@ public sealed class SnapshotDeltaState
         msg.Type = EntityType.Unspecified;
         EntityTypes.SetType(msg, e.Type);
         msg.ChangedFields = 0;
+
+        if (_v3) FillV3Full(msg, in e, index, sizing);
+    }
+
+    // ───────────────────────────── protocol 3 (ADR-28..30) ─────────────────────────────
+
+    /// <summary>Projectile and item entities exist only for protocol 3 peers.</summary>
+    private static bool IsV3OnlyEntity(in EntityView e) =>
+        string.Equals(e.Type, Gameplay.CombatResolver.ProjectileType, StringComparison.Ordinal)
+        || string.Equals(e.Type, Gameplay.CombatResolver.ItemType, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The velocity this encoder replicates: a projectile's always, a character's only while
+    /// it moves vertically (airborne), zero otherwise.
+    /// </summary>
+    /// <remarks>
+    /// wire.proto: velocity is "sent for entities whose motion is ballistic or extrapolated".
+    /// A walking character is interpolated between snapshots, and its ground velocity changes on
+    /// every start, stop and turn, so replicating it would add a field to most deltas for nothing
+    /// a receiver uses. Zero on all three axes is the documented "stationary or not sent".
+    /// </remarks>
+    private static void ReplicatedVelocity(in EntityView e, out float vx, out float vy, out float vz)
+    {
+        if (e.VelZ != 0f || string.Equals(e.Type, Gameplay.CombatResolver.ProjectileType, StringComparison.Ordinal))
+        {
+            vx = e.VelX;
+            vy = e.VelY;
+            vz = e.VelZ;
+            return;
+        }
+
+        vx = 0f;
+        vy = 0f;
+        vz = 0f;
+    }
+
+    /// <summary>
+    /// The owner (or a status source) in this connection's terms: its handle when interning,
+    /// 1 when JSON may name it. 0 when there is none or this connection has not been told
+    /// about it - an unknown entity is never named, the same disclosure rule events follow.
+    /// </summary>
+    private uint EntityToken(int key)
+    {
+        if (key == 0 || key == PendingGameEvent.NoKey) return 0;
+        if (_intern)
+        {
+            if (_handles.TryGetValue(key, out uint h)) return h;
+            if (_sizingProspective && _prospective.TryGetValue(key, out h)) return h;
+            return 0;
+        }
+
+        if (_lastSent.ContainsKey(key)) return 1;
+        return _sizingProspective && _prospective.ContainsKey(key) ? 1u : 0u;
+    }
+
+    /// <summary>
+    /// Status source handle. JSON has no source-id field on <c>StatusEffect</c>, so a JSON
+    /// connection always gets 0 ("unknown").
+    /// </summary>
+    private uint SourceToken(int key) => _intern ? EntityToken(key) : 0u;
+
+    /// <summary>spawn_seq for this connection: only the owner's own connection is told (ADR-29.2).</summary>
+    private uint SpawnSeqFor(in EntityView e)
+    {
+        if (e.SpawnSeq == 0 || e.OwnerKey == 0) return 0;
+        bool own = _observerKey != PendingGameEvent.NoKey
+            ? e.OwnerKey == _observerKey
+            : SelfId != null && string.Equals(e.OwnerId, SelfId, StringComparison.Ordinal);
+        return own ? e.SpawnSeq : 0u;
+    }
+
+    /// <summary>The record of what this connection holds for <paramref name="e"/>, in its own terms.</summary>
+    private SentView ViewOf(in EntityView e)
+    {
+        if (!_v3) return new SentView(in e);
+        ReplicatedVelocity(in e, out float vx, out float vy, out float vz);
+        return new SentView(in e, vx, vy, vz, EntityToken(e.OwnerKey), SpawnSeqFor(in e));
+    }
+
+    private void WriteOwner(EntitySnapshot msg, in EntityView e, uint owner)
+    {
+        if (_intern) msg.Owner = owner;
+        else msg.OwnerId = owner != 0 ? e.OwnerId ?? "" : "";
+    }
+
+    private ReadOnlySpan<StatValueData> StatsAt(int index) =>
+        _gather != null ? _gather.StatsOf(index) : default;
+
+    private ReadOnlySpan<GatheredStatus> StatusesAt(int index) =>
+        _gather != null ? _gather.StatusesOf(index) : default;
+
+    private void FillV3Full(EntitySnapshot msg, in EntityView e, int index, bool sizing)
+    {
+        msg.Z = e.Z;
+        ReplicatedVelocity(in e, out float vx, out float vy, out float vz);
+        msg.VelX = vx;
+        msg.VelY = vy;
+        msg.VelZ = vz;
+        WriteOwner(msg, in e, EntityToken(e.OwnerKey));
+        msg.SpawnSeq = SpawnSeqFor(in e);
+
+        // Complete sets: a keyframe, an introduction and a full-replace entity all REPLACE the
+        // receiver's copy, so anything not listed here is gone on the receiving side.
+        ReadOnlySpan<StatValueData> stats = StatsAt(index);
+        for (int i = 0; i < stats.Length; i++) msg.Stats.Add(RentStat(sizing, stats[i].StatId, stats[i].Value));
+
+        ReadOnlySpan<GatheredStatus> statuses = StatusesAt(index);
+        for (int i = 0; i < statuses.Length; i++)
+        {
+            ref readonly GatheredStatus s = ref statuses[i];
+            msg.Statuses.Add(RentStatus(sizing, s.EffectId, s.Stacks, s.ExpiresTick, SourceToken(s.SourceKey)));
+        }
+    }
+
+    private uint FillV3Delta(EntitySnapshot msg, in EntityView e, int index, in SentView prev, bool sizing)
+    {
+        uint mask = 0;
+
+        if (e.Z != prev.Z)
+        {
+            mask |= SnapshotFieldBits.Z;
+            msg.Z = e.Z;
+        }
+
+        ReplicatedVelocity(in e, out float vx, out float vy, out float vz);
+        if (vx != prev.VelX || vy != prev.VelY || vz != prev.VelZ)
+        {
+            // One bit for the vector: a receiver extrapolating two fresh axes and one stale
+            // one would curve a straight projectile.
+            mask |= SnapshotFieldBits.Velocity;
+            msg.VelX = vx;
+            msg.VelY = vy;
+            msg.VelZ = vz;
+        }
+
+        uint owner = EntityToken(e.OwnerKey);
+        uint seq = SpawnSeqFor(in e);
+        if (owner != prev.Owner || seq != prev.SpawnSeq)
+        {
+            mask |= SnapshotFieldBits.Owner;
+            WriteOwner(msg, in e, owner);
+            msg.SpawnSeq = seq;
+        }
+
+        _v3Sent.TryGetValue(e.Key, out V3Sent? sent);
+
+        // Stats: changed entries upserted by id, vanished ids in stats_removed.
+        bool statsChanged = false;
+        ReadOnlySpan<StatValueData> stats = StatsAt(index);
+        for (int i = 0; i < stats.Length; i++)
+        {
+            ref readonly StatValueData s = ref stats[i];
+            if (sent != null && TryFindStat(sent, s.StatId, out int old) && old == s.Value) continue;
+            msg.Stats.Add(RentStat(sizing, s.StatId, s.Value));
+            statsChanged = true;
+        }
+        if (sent != null)
+        {
+            for (int i = 0; i < sent.StatCount; i++)
+            {
+                uint id = sent.Stats[i].StatId;
+                if (!ContainsStat(stats, id))
+                {
+                    msg.StatsRemoved.Add(id);
+                    statsChanged = true;
+                }
+            }
+        }
+        if (statsChanged) mask |= SnapshotFieldBits.Stats;
+
+        // Statuses: same rule, keyed by effect_id; an entry changed when its stacks, expiry or
+        // source (in this connection's terms) changed.
+        bool statusesChanged = false;
+        ReadOnlySpan<GatheredStatus> statuses = StatusesAt(index);
+        for (int i = 0; i < statuses.Length; i++)
+        {
+            ref readonly GatheredStatus s = ref statuses[i];
+            uint source = SourceToken(s.SourceKey);
+            if (sent != null && TryFindStatus(sent, s.EffectId, out SentStatus old)
+                && old.Stacks == s.Stacks && old.ExpiresTick == s.ExpiresTick && old.Source == source)
+                continue;
+            msg.Statuses.Add(RentStatus(sizing, s.EffectId, s.Stacks, s.ExpiresTick, source));
+            statusesChanged = true;
+        }
+        if (sent != null)
+        {
+            for (int i = 0; i < sent.StatusCount; i++)
+            {
+                uint id = sent.Statuses[i].EffectId;
+                if (!ContainsStatus(statuses, id))
+                {
+                    msg.StatusesRemoved.Add(id);
+                    statusesChanged = true;
+                }
+            }
+        }
+        if (statusesChanged) mask |= SnapshotFieldBits.Statuses;
+
+        return mask;
+    }
+
+    /// <summary>
+    /// Whether the stat block or statuses of a KNOWN entity differ from what this connection
+    /// was last sent. The world's change counters are the fast path; content is compared only
+    /// when a counter moved, and a counter that moved without a visible change is absorbed so
+    /// the comparison is not repeated every tick.
+    /// </summary>
+    private bool V3Dirty(in EntityView e, int index)
+    {
+        if (!_v3) return false;
+        if (!_v3Sent.TryGetValue(e.Key, out V3Sent? sent))
+            return StatsAt(index).Length > 0 || StatusesAt(index).Length > 0;
+
+        if (sent.StatsVersion == e.StatsVersion && sent.StatusesVersion == e.StatusesVersion) return false;
+
+        if (StatsDiffer(sent, StatsAt(index)) || StatusesDiffer(sent, StatusesAt(index))) return true;
+
+        // Same content under a new counter: what the client holds is still exact.
+        sent.StatsVersion = e.StatsVersion;
+        sent.StatusesVersion = e.StatusesVersion;
+        return false;
+    }
+
+    private static bool StatsDiffer(V3Sent sent, ReadOnlySpan<StatValueData> current)
+    {
+        if (sent.StatCount != current.Length) return true;
+        for (int i = 0; i < current.Length; i++)
+        {
+            if (!TryFindStat(sent, current[i].StatId, out int v) || v != current[i].Value) return true;
+        }
+        return false;
+    }
+
+    private bool StatusesDiffer(V3Sent sent, ReadOnlySpan<GatheredStatus> current)
+    {
+        if (sent.StatusCount != current.Length) return true;
+        for (int i = 0; i < current.Length; i++)
+        {
+            ref readonly GatheredStatus s = ref current[i];
+            if (!TryFindStatus(sent, s.EffectId, out SentStatus old)) return true;
+            if (old.Stacks != s.Stacks || old.ExpiresTick != s.ExpiresTick || old.Source != SourceToken(s.SourceKey))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool TryFindStat(V3Sent sent, uint id, out int value)
+    {
+        for (int i = 0; i < sent.StatCount; i++)
+        {
+            if (sent.Stats[i].StatId == id)
+            {
+                value = sent.Stats[i].Value;
+                return true;
+            }
+        }
+        value = 0;
+        return false;
+    }
+
+    private static bool TryFindStatus(V3Sent sent, uint effectId, out SentStatus status)
+    {
+        for (int i = 0; i < sent.StatusCount; i++)
+        {
+            if (sent.Statuses[i].EffectId == effectId)
+            {
+                status = sent.Statuses[i];
+                return true;
+            }
+        }
+        status = default;
+        return false;
+    }
+
+    private static bool ContainsStat(ReadOnlySpan<StatValueData> stats, uint id)
+    {
+        for (int i = 0; i < stats.Length; i++) if (stats[i].StatId == id) return true;
+        return false;
+    }
+
+    private static bool ContainsStatus(ReadOnlySpan<GatheredStatus> statuses, uint id)
+    {
+        for (int i = 0; i < statuses.Length; i++) if (statuses[i].EffectId == id) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Record what was just written for <paramref name="e"/>: the complete current stat block
+    /// and statuses (in this connection's terms), and the counters they correspond to. Called
+    /// on exactly the lines that record <see cref="_lastSent"/>, after the write.
+    /// </summary>
+    private void CommitV3(in EntityView e, int index)
+    {
+        if (!_v3) return;
+        if (!_v3Sent.TryGetValue(e.Key, out V3Sent? sent))
+        {
+            if (_v3Free.Count > 0)
+            {
+                sent = _v3Free[^1];
+                _v3Free.RemoveAt(_v3Free.Count - 1);
+            }
+            else
+            {
+                sent = new V3Sent();
+            }
+            _v3Sent[e.Key] = sent;
+        }
+
+        ReadOnlySpan<StatValueData> stats = StatsAt(index);
+        if (sent.Stats.Length < stats.Length) sent.Stats = new StatValueData[stats.Length + 2];
+        stats.CopyTo(sent.Stats);
+        sent.StatCount = stats.Length;
+
+        ReadOnlySpan<GatheredStatus> statuses = StatusesAt(index);
+        if (sent.Statuses.Length < statuses.Length) sent.Statuses = new SentStatus[statuses.Length + 2];
+        for (int i = 0; i < statuses.Length; i++)
+        {
+            ref readonly GatheredStatus s = ref statuses[i];
+            sent.Statuses[i] = new SentStatus(s.EffectId, s.Stacks, s.ExpiresTick, SourceToken(s.SourceKey));
+        }
+        sent.StatusCount = statuses.Length;
+        sent.StatsVersion = e.StatsVersion;
+        sent.StatusesVersion = e.StatusesVersion;
+    }
+
+    /// <summary>Forget one entity's protocol 3 record (it left this connection's view).</summary>
+    private void ReleaseV3(int key)
+    {
+        if (_v3Sent.Remove(key, out V3Sent? sent)) _v3Free.Add(sent);
+    }
+
+    /// <summary>Forget every protocol 3 record (keyframe).</summary>
+    private void ReleaseAllV3()
+    {
+        if (_v3Sent.Count == 0) return;
+        foreach (var kv in _v3Sent) _v3Free.Add(kv.Value);
+        _v3Sent.Clear();
+    }
+
+    /// <summary>Entities this connection holds a protocol 3 record for. Diagnostics/tests.</summary>
+    internal int V3Records => _v3Sent.Count;
+
+    private StatValue RentStat(bool sizing, uint id, int value)
+    {
+        List<StatValue> pool = sizing ? _scratchStatPool : _statPool;
+        ref int used = ref sizing ? ref _scratchStatPoolUsed : ref _statPoolUsed;
+        StatValue v;
+        if (used < pool.Count) v = pool[used];
+        else
+        {
+            v = new StatValue();
+            pool.Add(v);
+        }
+        used++;
+        v.StatId = id;
+        v.Value = value;
+        return v;
+    }
+
+    private StatusEffect RentStatus(bool sizing, uint effectId, uint stacks, ulong expiresTick, uint source)
+    {
+        List<StatusEffect> pool = sizing ? _scratchStatusPool : _statusPool;
+        ref int used = ref sizing ? ref _scratchStatusPoolUsed : ref _statusPoolUsed;
+        StatusEffect s;
+        if (used < pool.Count) s = pool[used];
+        else
+        {
+            s = new StatusEffect();
+            pool.Add(s);
+        }
+        used++;
+        s.EffectId = effectId;
+        s.Stacks = stacks;
+        s.ExpiresTick = expiresTick;
+        s.Source = source;
+        return s;
     }
 }

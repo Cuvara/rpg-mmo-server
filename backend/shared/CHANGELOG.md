@@ -5,6 +5,46 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Successful handshakes echo the negotiated protocol version** (the client's own inside
+  the supported window [2, 3], otherwise the server's). Clients built at protocol 2 accept
+  only an exact echo, so echoing 3 made them refuse a server that had just admitted them.
+  Refusals still echo the server's own version.
+
+### Changed
+- **`CheckProtocolVersion` admits a window, not an exact match.** New
+  `MinSupportedProtocolVersion = 2`; a peer is accepted when
+  `MinSupportedProtocolVersion <= v <= WireProtocolVersion` and `v >= minVersion` (the
+  unversioned exemption is unchanged). A protocol 3 game server serves protocol 2 peers the
+  protocol 2 shape byte for byte, so refusing them was refusing clients the fleet can serve.
+  Mirrors `WireProtocol.MinSupportedProtocolVersion` (C#). `ProtocolVersionMismatchError` names
+  the window. Tests: `TestCheckProtocolVersion` (new window rows), `TestOlderPeerIsRefused`
+  (below the window), `TestSupportedWindowIsWellFormed`.
+
+### Added
+- **`cid` JWT claim (ADR-31, contract `join-token`).** `jwt.Claims.CharacterID`
+  (`json:"cid,omitempty"`), `jwt.SignWithCharacter` and `Keyring.SignWithCharacter`. Empty omits
+  the claim (= the account's default character), so every existing token and reader is
+  unaffected; `SignWithServer` now delegates with an empty character. `Claims.IsZero` accounts
+  for the new field. Table-driven tests in `jwt/cid_test.go`.
+- **Wire protocol version 3 (ADR-28..31).** `wire.proto` adds 3D (`EntitySnapshot.z`,
+  velocity, `InputMessage.aim_z`), jump, lag-compensation timing (`render_tick`,
+  `render_alpha`), projectile ownership (`owner`, `owner_id`, `spawn_seq`), the extensible stat
+  block and status effects (`StatValue`, `StatusEffect`, mask bits `0x0200`-`0x2000`), status
+  and projectile game events with `GameEvent.effect_id`, `EnterWorldRequest.character_id` /
+  `JoinTokenResponse.character_id`, and the generic gameplay channel `MSG_TYPE_COMMAND`,
+  `MSG_TYPE_COMMAND_RESULT`, `MSG_TYPE_SERVER_PUSH` (32-34). Every addition is a new field
+  number; no number is reused. `shared/messages` mirrors all of it in both encodings
+  (`MsgCommand`, `CommandRequest`, `CommandResult`, `ServerPush`, `StatValue`, `StatusEffect`)
+  and `EntitySnapshot` now also carries `ChangedFields`.
+
+### Changed
+- **`WireProtocolVersion` is 3.** Bumped under rule 4 of the version contract: a receiver that
+  ignores a projectile entity or a `CommandResult` diverges silently. Servers keep serving
+  protocol 2 peers the protocol 2 shape.
+- Bindings regenerated with the CI pins (protoc 29.3, protoc-gen-go v1.36.6 built with Go 1.26).
+  Building protoc-gen-go with Go 1.27 reformats doc comments and makes the CI drift check fail.
+
 ### Added
 - **Gameplay v2 in `shared/messages`.** `InputMessage` gains `AbilityID`, `AbilityTargetID`,
   `AimX`/`AimY`; `EntitySnapshot` gains `ActionSeq`; `SnapshotMessage` gains `Events`, with a

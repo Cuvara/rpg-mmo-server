@@ -627,6 +627,16 @@ this build cannot know — a guess at exactly the point the mechanism exists to
 stop guessing. A real window has to be a min/max pair negotiated on the wire, and
 that is a deliberate schema change, not a comparison operator.
 
+> **Superseded in part on 2026-10-03 (protocol 3, ADR-28..31): the rule is now a WINDOW
+> of this build, `[MinSupportedProtocolVersion, WireProtocolVersion]` = `[2, 3]`.** Still
+> not a `>=` and still not negotiated: a peer AHEAD of this build is refused exactly as
+> above. What changed is that protocol 3 is a superset the game server can withhold — it
+> records each connection's advertised version and serves a protocol 2 peer the protocol 2
+> shape byte for byte (`gameserver-dotnet` `V2WireIdentityTests`) — so every version inside
+> the window is one this build implements in full, which is the condition the paragraph
+> above says admission requires. Retiring 2 is the configured minimum set to 3.
+> Normative text: `gameserver-dotnet/docs/API.md`, "The supported window".
+
 ### The reason is a bare token
 
 `protocol_version_mismatch`, in `error` on `AuthResponse` / `JoinTokenResponse`,

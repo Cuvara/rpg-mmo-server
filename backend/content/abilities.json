@@ -1,0 +1,87 @@
+{
+  "$comment": [
+    "PLACEHOLDER CONTENT. EVERY NUMBER IN THIS FILE IS A PLACEHOLDER PENDING GAME DESIGN.",
+    "Power, range, radius, cooldowns and projectile speeds are NOT design decisions; they",
+    "exist only so the Core v3 vertical slice can run. Design owns every value here.",
+    "",
+    "Abilities, protocol 3 form (ADR-30): a delivery and an ordered effect list.",
+    "delivery: self | entity | ground | projectile.",
+    "effects[].kind: damage (power) | heal (power) | apply_status (statusId, see statuses.json).",
+    "projectile delivery needs a projectile block: speed (units/s), radius, range (units).",
+    "cooldownTicks is BASE SIMULATION TICKS (60 per second at the default critical rate).",
+    "Ground and projectile deliveries affect entities of a different type than the caster",
+    "(placeholder hostility rule pending a faction design).",
+    "Ability 1 is an entity-targeted damage ability because Netcode's live tests",
+    "(GameplayV2LiveTests.BoltAbility) cast id 1 at an entity; keep that id stable."
+  ],
+  "abilities": [
+    {
+      "id": 1,
+      "name": "Bolt",
+      "delivery": "entity",
+      "range": 8,
+      "effects": [
+        {
+          "kind": "damage",
+          "power": 10
+        }
+      ],
+      "cooldownTicks": 30
+    },
+    {
+      "id": 2,
+      "name": "Frost Snare",
+      "delivery": "ground",
+      "range": 12,
+      "radius": 3,
+      "effects": [
+        {
+          "kind": "damage",
+          "power": 5
+        },
+        {
+          "kind": "apply_status",
+          "statusId": 2
+        },
+        {
+          "kind": "apply_status",
+          "statusId": 3
+        }
+      ],
+      "cooldownTicks": 300
+    },
+    {
+      "id": 3,
+      "name": "Rejuvenate",
+      "delivery": "self",
+      "effects": [
+        {
+          "kind": "apply_status",
+          "statusId": 4
+        }
+      ],
+      "cooldownTicks": 600
+    },
+    {
+      "id": 4,
+      "name": "Fire Bolt",
+      "delivery": "projectile",
+      "effects": [
+        {
+          "kind": "damage",
+          "power": 15
+        },
+        {
+          "kind": "apply_status",
+          "statusId": 1
+        }
+      ],
+      "projectile": {
+        "speed": 20,
+        "radius": 0.3,
+        "range": 25
+      },
+      "cooldownTicks": 45
+    }
+  ]
+}

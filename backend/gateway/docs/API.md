@@ -227,8 +227,22 @@ This keeps a Redis-backed store from reporting ghost-online players after a drop
 ## Join token
 
 `transfer.GenerateJoinToken(userID, serverID, secret)` — HS256, TTL
-`constants.JoinTokenTTL` (30s), claims `{sub: userID, sid: serverID, jti}`. The
+`constants.JoinTokenTTL` (30s), claims `{sub: userID, sid: serverID, jti, cid?}`. The
 game server verifies it as the first frame on its socket.
+
+### Character (`cid`, ADR-31)
+
+The join token's `cid` is **copied from the gateway (auth) token's `cid`**, which Nakama's
+`gateway_token` set after checking the caller owns the character
+(`transfer.GenerateJoinTokenCharacter`, `AssignMapCharacter`, `DungeonDeps.CharacterID`). The
+gateway never takes the character from the request. An absent claim (every protocol 2 client)
+mints no `cid`, i.e. the account's default character.
+
+`EnterWorldRequest.character_id` is only a consistency check: if non-empty and different from
+the auth token's `cid` (including "token has none"), EnterWorld is refused with
+`error = "character_mismatch"` and no join token. The client must fetch a new gateway token
+for the selected character and re-authenticate; retrying on the same connection cannot succeed.
+Logged as `enter world failed reason=character_mismatch` with both ids.
 
 Signed with **`JOIN_TOKEN_SECRET`**, not `JWT_SECRET` (added 2026-08-06). The
 join secret is distributed to every game-server pod; the auth secret is not, so

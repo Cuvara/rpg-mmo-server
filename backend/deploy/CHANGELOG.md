@@ -5,6 +5,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Expected game-state schema version is now 2 (`002_characters`, ADR-31): smoketest
+  `DefaultExpectMigration` and the k8s verify `VERIFY_GAME_MIGRATION` defaults and targets.
+
+### Added
+- **Game-state migration `002_characters`** (ADR-31) — ops copy
+  `db/migrations/gamestate/002_characters.sql` of the embedded canonical file: tables
+  `character_state`, `character_items`, `item_grants`. Expand only; `init-gamestate.sql` and
+  `001_init.sql` unchanged. `docs/DATABASE.md` lists both migrations.
+
 ### Fixed
 
 - **The GHCR packages were 5+ weeks old, and nothing said so.** `cd.yml` pushes images only

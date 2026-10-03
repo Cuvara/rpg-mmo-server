@@ -77,6 +77,15 @@ public sealed class PostgresPlayerStore : IPlayerStore, IAsyncDisposable
     }
 
     /// <summary>
+    /// The pooled data source, shared with <see cref="PostgresCharacterStore.Over"/> so the
+    /// character store rides the same pool and the same disposal as this store.
+    /// </summary>
+    internal NpgsqlDataSource DataSource => _dataSource;
+
+    /// <summary>Per-command timeout this store applies, in seconds.</summary>
+    internal int CommandTimeoutSeconds => _commandTimeoutSeconds;
+
+    /// <summary>
     /// Build a pooled store for <paramref name="dsn"/> and verify the server is
     /// reachable (round-trips a <c>SELECT 1</c>). Throws when the database cannot be
     /// reached — callers are expected to fail fast rather than silently degrade to

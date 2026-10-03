@@ -27,8 +27,14 @@ type Claims struct {
 	UserID   string `json:"sub"`
 	ServerID string `json:"sid,omitempty"`
 	Jti      string `json:"jti,omitempty"`
-	IssuedAt int64  `json:"iat"`
-	ExpireAt int64  `json:"exp"`
+	// CharacterID is the `cid` claim (ADR-31): the roster character this token
+	// plays. Nakama puts it in the gateway token after checking the caller owns
+	// the character; the gateway copies it into the join token. Empty (claim
+	// absent) means the account's default character, which is what every
+	// token minted before protocol 3 carries, so readers must tolerate absence.
+	CharacterID string `json:"cid,omitempty"`
+	IssuedAt    int64  `json:"iat"`
+	ExpireAt    int64  `json:"exp"`
 }
 
 // IsExpired returns true if the token has expired, accounting for ClockSkew.
@@ -47,12 +53,21 @@ func Sign(userID, secret string, expiry time.Duration) (string, error) {
 // When serverID is non-empty (join tokens), a unique JTI claim is added
 // for replay protection.
 func SignWithServer(userID, serverID, secret string, expiry time.Duration) (string, error) {
+	return SignWithCharacter(userID, serverID, "", secret, expiry)
+}
+
+// SignWithCharacter creates a HS256 JWT with optional server ID and character
+// ID (`cid`, ADR-31) claims. An empty characterID omits the claim, which
+// readers interpret as the account's default character. As with
+// SignWithServer, a non-empty serverID (join tokens) adds a unique JTI.
+func SignWithCharacter(userID, serverID, characterID, secret string, expiry time.Duration) (string, error) {
 	now := time.Now()
 	claims := Claims{
-		UserID:   userID,
-		ServerID: serverID,
-		IssuedAt: now.Unix(),
-		ExpireAt: now.Add(expiry).Unix(),
+		UserID:      userID,
+		ServerID:    serverID,
+		CharacterID: characterID,
+		IssuedAt:    now.Unix(),
+		ExpireAt:    now.Add(expiry).Unix(),
 	}
 	if serverID != "" {
 		jti, err := generateJTI()

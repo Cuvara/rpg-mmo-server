@@ -533,6 +533,314 @@
       "expectedEntityIds": ["p1"],
       "expectedCount": 1,
       "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41A00000", "y": "0x41E00000", "speed": "0x40A00000", "facingBrad": 16385, "action": 2}
+    },
+    {
+      "name": "v3_keyframe_carries_all_v3_fields",
+      "description": "Protocol version 3: a keyframe entity carries z, velocity, owner/spawnSeq, the complete stat set and the complete status set; all of it is stored as given.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "pr1", "type": "projectile", "x": "0x41200000", "y": "0x41A00000", "hp": 0, "maxHp": 0, "z": "0x3FC00000", "velX": "0x40400000", "velY": "0xBF800000", "velZ": "0x00000000", "ownerId": "p1", "spawnSeq": 7,
+             "stats": [{"statId": 1, "value": 100}, {"statId": 2, "value": -3}],
+             "statuses": [{"effectId": 5, "stacks": 2, "expiresTick": 120, "sourceId": "m1"}]}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 10,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 0,
+      "expectedEntityIds": ["pr1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "pr1", "hp": 0, "x": "0x41200000", "y": "0x41A00000", "z": "0x3FC00000", "velX": "0x40400000", "velY": "0xBF800000", "velZ": "0x00000000", "ownerId": "p1", "spawnSeq": 7,
+        "stats": [{"statId": 1, "value": 100}, {"statId": 2, "value": -3}],
+        "statuses": [{"effectId": 5, "stacks": 2, "expiresTick": 120, "sourceId": "m1"}]}
+    },
+    {
+      "name": "v3_field_delta_z_only_keeps_everything_else",
+      "description": "changedFields=0x0200 (z only). Velocity, owner, spawnSeq, stats and statuses must be kept from the keyframe even though the partial update carries zeros/empties for them.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100, "z": "0x00000000", "velX": "0x3F000000", "velY": "0x00000000", "velZ": "0x40400000",
+             "stats": [{"statId": 1, "value": 50}],
+             "statuses": [{"effectId": 3, "stacks": 1, "expiresTick": 0}]}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x00000000", "y": "0x00000000", "hp": 0, "maxHp": 0, "z": "0x40000000", "changedFields": 512}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41200000", "y": "0x41200000", "z": "0x40000000", "velX": "0x3F000000", "velY": "0x00000000", "velZ": "0x40400000", "ownerId": "", "spawnSeq": 0,
+        "stats": [{"statId": 1, "value": 50}],
+        "statuses": [{"effectId": 3, "stacks": 1, "expiresTick": 0}]}
+    },
+    {
+      "name": "v3_field_delta_velocity_and_owner",
+      "description": "changedFields=0x0C00 (velocity|owner). All three velocity axes and owner+spawnSeq are taken from the delta, including a velocity axis that became zero; z is kept.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "pr1", "type": "projectile", "x": "0x00000000", "y": "0x00000000", "hp": 0, "maxHp": 0, "z": "0x3FC00000", "velX": "0x40400000", "velY": "0x40400000", "velZ": "0x40400000", "ownerId": "p1", "spawnSeq": 4}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "pr1", "type": "projectile", "x": "0x00000000", "y": "0x00000000", "hp": 0, "maxHp": 0, "velX": "0xBF800000", "velY": "0x00000000", "velZ": "0x3F000000", "ownerId": "p2", "spawnSeq": 9, "changedFields": 3072}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["pr1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "pr1", "hp": 0, "x": "0x00000000", "y": "0x00000000", "z": "0x3FC00000", "velX": "0xBF800000", "velY": "0x00000000", "velZ": "0x3F000000", "ownerId": "p2", "spawnSeq": 9}
+    },
+    {
+      "name": "v3_field_delta_stats_upsert_and_remove",
+      "description": "changedFields=0x1000 (stats). stats lists changed entries (2 updated in place, 4 appended) and statsRemoved drops 3; stat 1 is in neither list and keeps its value. Statuses are untouched.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100,
+             "stats": [{"statId": 1, "value": 100}, {"statId": 2, "value": 50}, {"statId": 3, "value": 7}],
+             "statuses": [{"effectId": 5, "stacks": 1, "expiresTick": 40, "sourceId": "m1"}]}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x00000000", "y": "0x00000000", "hp": 0, "maxHp": 0, "changedFields": 4096,
+             "stats": [{"statId": 2, "value": 45}, {"statId": 4, "value": 1}],
+             "statsRemoved": [3]}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41200000", "y": "0x41200000",
+        "stats": [{"statId": 1, "value": 100}, {"statId": 2, "value": 45}, {"statId": 4, "value": 1}],
+        "statuses": [{"effectId": 5, "stacks": 1, "expiresTick": 40, "sourceId": "m1"}]}
+    },
+    {
+      "name": "v3_field_delta_statuses_upsert_and_remove",
+      "description": "changedFields=0x2000 (statuses). Status 5 is restacked and refreshed in place, 7 is appended, 6 is removed. Stats are untouched.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "m1", "type": "mob", "x": "0x42480000", "y": "0x42480000", "hp": 50, "maxHp": 50,
+             "stats": [{"statId": 1, "value": 3}],
+             "statuses": [{"effectId": 5, "stacks": 1, "expiresTick": 120, "sourceId": "p1"}, {"effectId": 6, "stacks": 2, "expiresTick": 0}]}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "m1", "type": "mob", "x": "0x00000000", "y": "0x00000000", "hp": 0, "maxHp": 0, "changedFields": 8192,
+             "statuses": [{"effectId": 5, "stacks": 2, "expiresTick": 130, "sourceId": "p1"}, {"effectId": 7, "stacks": 1, "expiresTick": 140, "sourceId": "p2"}],
+             "statusesRemoved": [6]}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["m1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "m1", "hp": 50, "x": "0x42480000", "y": "0x42480000",
+        "stats": [{"statId": 1, "value": 3}],
+        "statuses": [{"effectId": 5, "stacks": 2, "expiresTick": 130, "sourceId": "p1"}, {"effectId": 7, "stacks": 1, "expiresTick": 140, "sourceId": "p2"}]}
+    },
+    {
+      "name": "v3_field_delta_without_stats_bit_ignores_stats_payload",
+      "description": "changedFields=0x0004 (hp). The partial update happens to carry stats/statuses, but their bits are unset, so the keyframe's sets are kept.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100,
+             "stats": [{"statId": 1, "value": 100}],
+             "statuses": [{"effectId": 5, "stacks": 1, "expiresTick": 40}]}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x00000000", "y": "0x00000000", "hp": 80, "maxHp": 0, "changedFields": 4,
+             "stats": [{"statId": 1, "value": 1}], "statsRemoved": [1],
+             "statuses": [], "statusesRemoved": [5]}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 80, "x": "0x41200000", "y": "0x41200000",
+        "stats": [{"statId": 1, "value": 100}],
+        "statuses": [{"effectId": 5, "stacks": 1, "expiresTick": 40}]}
+    },
+    {
+      "name": "v3_full_entity_update_replaces_stat_and_status_sets",
+      "description": "changedFields=0 on a delta is a full entity update: stats is the COMPLETE set (replacing, not merging) and an absent statuses list means none.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100, "z": "0x40000000",
+             "stats": [{"statId": 1, "value": 100}, {"statId": 2, "value": 5}],
+             "statuses": [{"effectId": 5, "stacks": 1, "expiresTick": 40}]}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100,
+             "stats": [{"statId": 9, "value": 1}]}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41200000", "y": "0x41200000", "z": "0x00000000",
+        "stats": [{"statId": 9, "value": 1}],
+        "statuses": []}
+    },
+    {
+      "name": "v3_version2_mask_keeps_every_v3_field",
+      "description": "changedFields=0x0003 (x|y), a mask a version 2 encoder could send. Every version 3 field must survive the merge unchanged.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100, "z": "0x3FC00000", "velX": "0x3F000000", "velY": "0x3F000000", "velZ": "0x3F000000", "ownerId": "p9", "spawnSeq": 3,
+             "stats": [{"statId": 1, "value": 100}],
+             "statuses": [{"effectId": 5, "stacks": 3, "expiresTick": 99, "sourceId": "p9"}]}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41A00000", "y": "0x41A00000", "hp": 0, "maxHp": 0, "changedFields": 3}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41A00000", "y": "0x41A00000", "z": "0x3FC00000", "velX": "0x3F000000", "velY": "0x3F000000", "velZ": "0x3F000000", "ownerId": "p9", "spawnSeq": 3,
+        "stats": [{"statId": 1, "value": 100}],
+        "statuses": [{"effectId": 5, "stacks": 3, "expiresTick": 99, "sourceId": "p9"}]}
+    },
+    {
+      "name": "v3_field_delta_removing_every_stat_leaves_none",
+      "description": "changedFields=0x1000 with every stat id in statsRemoved and nothing in stats: the merged set is empty.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100,
+             "stats": [{"statId": 1, "value": 100}, {"statId": 2, "value": 5}]}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x00000000", "y": "0x00000000", "hp": 0, "maxHp": 0, "changedFields": 4096, "statsRemoved": [2, 1]}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41200000", "y": "0x41200000",
+        "stats": [],
+        "statuses": []}
     }
   ]
 }

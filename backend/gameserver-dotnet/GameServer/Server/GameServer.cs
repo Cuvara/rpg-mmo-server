@@ -16,6 +16,7 @@ using GameServer.Persistence;
 using GameServer.Registry;
 using GameServer.Snapshot;
 using GameServer.World;
+using GameServer.World.Components;
 
 namespace GameServer.Server;
 
@@ -258,6 +259,30 @@ public class ServerOptions
     public Shared.GameLogic.Content.ContentDatabase? Content { get; set; }
 
     /// <summary>
+    /// The map's collision world (ADR-28), loaded from <c>content/maps/&lt;map_id&gt;.json</c>
+    /// by the composition root, or null for the flat protocol 2 world inside
+    /// <see cref="MapBounds"/>. When set, its bounds REPLACE <see cref="MapBounds"/>.
+    /// </summary>
+    public Shared.GameLogic.World.MapGeometry? Geometry { get; set; }
+
+    /// <summary>Loot tables rolled on death (server-only content), or null for no loot.</summary>
+    public GameServer.Content.LootTables? Loot { get; set; }
+
+    /// <summary>
+    /// Seed of the deterministic loot RNG, or null to derive one from <see cref="MapId"/>.
+    /// Never the wall clock: the same kills on the same server roll the same loot.
+    /// </summary>
+    public ulong? LootSeed { get; set; }
+
+    /// <summary>
+    /// Character store (ADR-31). When set, joins load the character named by the join
+    /// token's <c>cid</c> (or the account's default character) through it and the save
+    /// paths write <c>character_state</c>; when null, the legacy <see cref="PlayerStore"/>
+    /// path is used unchanged.
+    /// </summary>
+    public ICharacterStore? CharacterStore { get; set; }
+
+    /// <summary>
     /// Delta snapshots between full keyframes. 0 or less disables delta encoding
     /// (every snapshot is a full keyframe).
     /// </summary>
@@ -475,6 +500,12 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly AsyncSaver _saver;
     private readonly InputHandler _inputHandler;
 
+    /// <summary>The gameplay command channel (ADR-30); see <see cref="Commands.CommandRouter"/>.</summary>
+    private readonly Commands.CommandRouter _commands;
+
+    /// <summary>The command router, for tests.</summary>
+    internal Commands.CommandRouter CommandRouter => _commands;
+
     /// <summary>
     /// Events produced by the current tick. Cleared by the tick loop before input runs and
     /// read by every connection's gather in the same tick — see
@@ -482,6 +513,14 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </summary>
     private readonly Snapshot.TickEventBuffer _tickEvents = new();
     private readonly IPlayerStore _playerStore;
+    private readonly ICharacterStore? _characterStore;
+    private readonly CharacterSessions _characterSessions = new();
+
+    /// <summary>Character bound to each in-world player (ADR-31). Diagnostics and tests.</summary>
+    public CharacterSessions Characters => _characterSessions;
+
+    /// <summary>The play area: the map file's bounds when there is one, else <see cref="ServerOptions.MapBounds"/>.</summary>
+    private readonly MapBounds _bounds;
     private readonly IAgonesSdk _agonesSdk;
     private readonly EventPublisher? _publisher;
     private readonly Nakama.NakamaClient? _nakamaClient;
@@ -612,6 +651,15 @@ public sealed class GameServerHost : IAsyncDisposable
     /// rather than a parallel count that could agree while the gauge lies.
     /// </summary>
     public int EntityCount => _world.EntityCount;
+
+    /// <summary>The server's world. Tests and diagnostics only.</summary>
+    internal EcsWorld World => _world;
+
+    /// <summary>The live connection of <paramref name="userId"/>, if any. Tests.</summary>
+    internal Connection? ConnectionOf(string userId) => _connections.Get(userId);
+
+    /// <summary>Run the on-removal save for one player now. Tests only.</summary>
+    internal Task<bool> SavePlayerNowAsync(string userId) => _saver.SavePlayerAsync(userId);
 
     /// <summary>
     /// Connections currently registered in <see cref="ConnectionManager"/> — the set the
@@ -803,6 +851,18 @@ public sealed class GameServerHost : IAsyncDisposable
         SimulationRates rates = options.SimulationRates ?? SimulationRates.Uniform(options.TickRate);
         _rates = rates;
 
+        // Core v3 world (ADR-28..31): geometry, content for stat defaults, loot, and the base
+        // rate the hitbox history, statuses and projectiles step at. Configured before the
+        // input handler is built, which reads the geometry.
+        _bounds = options.Geometry?.Bounds ?? options.MapBounds;
+        _world.Gameplay.Configure(
+            geometry: options.Geometry ?? Shared.GameLogic.World.MapGeometry.Flat(_bounds),
+            content: options.Content,
+            loot: options.Loot,
+            baseHz: rates.BaseHz,
+            lootSeed: options.LootSeed ?? DeriveLootSeed(options.MapId));
+        _characterStore = options.CharacterStore;
+
         // Same two inputs the per-attack cooldown uses, so the audit's bound is derived
         // from the rule it is auditing rather than restated next to it.
         _attackRates = new Input.AttackRateAudit(
@@ -823,7 +883,7 @@ public sealed class GameServerHost : IAsyncDisposable
             // tick), so AttackCooldownTicks must be derived from the rate that advances it.
             // Passing the world rate here would make a 500ms cooldown last 2s.
             rates.MovementHz,
-            options.MapBounds,
+            _bounds,
             // Refused input feeds two places at once: the per-reason counters (both
             // surfaces) and the per-account anomaly score. Wired here rather than inside
             // InputHandler so that class keeps no dependency on the observability stack —
@@ -911,7 +971,22 @@ public sealed class GameServerHost : IAsyncDisposable
             // would stamp the instance's id over the player's origin map, and they would
             // come back to that map's spawn point rather than where they left — a silent
             // permanent teleport as the price of a dungeon run (ADR-26 decision 5).
-            _isDungeon ? PlayerSaveScope.StatsOnly : PlayerSaveScope.Full);
+            _isDungeon ? PlayerSaveScope.StatsOnly : PlayerSaveScope.Full,
+            characters: _characterStore,
+            sessions: _characterSessions);
+
+        _commands = new Commands.CommandRouter(
+            _world,
+            _characterStore,
+            _characterSessions,
+            options.Content,
+            options.ServerId,
+            // Process start in ms, hex: grant ids of this run cannot collide with a previous
+            // run of the same server id (see CommandRouter's constructor).
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x"),
+            _metrics,
+            _loggerFactory.CreateLogger<Commands.CommandRouter>(),
+            _saver.SavePlayerAsync);
 
         if (options.ServerRegistry != null)
         {
@@ -1543,17 +1618,85 @@ public sealed class GameServerHost : IAsyncDisposable
                 _logger.LogInformation("Player {UserId} reconnected, hold cancelled", userId);
             }
 
-            // Acquire or reattach entity
+            // Acquire or reattach entity. ADR-31: the join token's cid names the character;
+            // no cid is the account's default character, whose id is the user id.
+            string characterId = CharacterIds.Resolve(claims.CharacterId, userId);
             var existing = _world.GetEntity(userId);
-            if (existing == null)
+
+            // A held entity is the character the user left as. Rejoining as a DIFFERENT
+            // character persists and drops the held one, then loads the requested one —
+            // otherwise the second character would silently inherit the first one's body.
+            if (existing != null && _characterStore != null &&
+                _characterSessions.TryGet(userId, out CharacterBinding heldAs) &&
+                !string.Equals(heldAs.CharacterId, characterId, StringComparison.Ordinal))
             {
-                // Load from store or create new. PlayerSpawn owns the policy: saved
-                // coordinates are only reused when the row belongs to THIS map, because
+                await _saver.SavePlayerAsync(userId);
+                _world.RemoveEntity(userId);
+                existing = null;
+            }
+
+            if (existing == null && _characterStore != null)
+            {
+                // Character path (ADR-31). The store falls back to the account's
+                // player_states row on a character's first load, so a protocol 2 player keeps
+                // their position and HP across the migration. Saved coordinates — now with
+                // height — are reused only on the map that wrote them (PlayerSpawn).
+                CharacterState? loaded;
+                try
+                {
+                    loaded = await _characterStore.LoadCharacterAsync(characterId, userId, ct);
+                }
+                catch (CharacterStoreException ex) when (ex.Error == CharacterStoreError.OwnershipMismatch)
+                {
+                    _logger.LogWarning(
+                        "Join refused for {UserId}: character {CharacterId} belongs to another account",
+                        userId, characterId);
+                    await SendError(tempConn, "character does not belong to this account", handshakeToken);
+                    return;
+                }
+
+                var spawn = PlayerSpawn.Resolve(loaded, _options.MapId, _bounds, _world.Gameplay.DefaultSpawn());
+                if (spawn.DiscardedMapId != null)
+                {
+                    _logger.LogInformation(
+                        "Character {CharacterId} of {UserId} last saved on map {SavedMapId}; spawning at the " +
+                        "{MapId} spawn point instead of stale coordinates",
+                        characterId, userId, spawn.DiscardedMapId, _options.MapId);
+                }
+
+                _characterSessions.Bind(new CharacterBinding(
+                    characterId,
+                    userId,
+                    loaded ?? new CharacterState(
+                        characterId, userId, _options.MapId,
+                        spawn.Position.X, spawn.Position.Y, spawn.Position.Z, 0f,
+                        spawn.Hp, spawn.MaxHp, Level: 1, Xp: 0)));
+
+                _world.AddEntity(new EntityState
+                {
+                    Id = userId,
+                    Type = "player",
+                    Position = new Vec2(spawn.Position.X, spawn.Position.Y),
+                    Hp = spawn.Hp,
+                    MaxHp = spawn.MaxHp,
+                    Speed = ServerDefaults.DefaultPlayerSpeed,
+                    Attack = ServerDefaults.DefaultPlayerAttack,
+                    Defense = ServerDefaults.DefaultPlayerDefense
+                });
+                PlaceSpawnedPlayer(userId, spawn.Position.Z, spawn.Level, spawn.Yaw);
+            }
+            else if (existing == null)
+            {
+                // Legacy path: no character store configured. PlayerSpawn owns the policy:
+                // saved coordinates are only reused when the row belongs to THIS map, because
                 // player_states holds one row per player and a row written by another
                 // map's server describes a position that does not exist here. HP and
-                // max HP are map-independent and carry across either way.
+                // max HP are map-independent and carry across either way. A new player spawns
+                // at the map's "default" spawn point when the map file has one (ADR-28).
                 var saved = await _playerStore.LoadPlayerAsync(userId, ct);
-                var spawn = PlayerSpawn.Resolve(saved, _options.MapId, _options.MapBounds);
+                bool hasMapSpawn = _world.Gameplay.TryGetDefaultSpawn(out Vec3 mapSpawn);
+                var spawn = PlayerSpawn.Resolve(
+                    saved, _options.MapId, _bounds, hasMapSpawn ? new Vec2(mapSpawn.X, mapSpawn.Y) : null);
 
                 if (spawn.DiscardedMapId != null)
                 {
@@ -1575,6 +1718,10 @@ public sealed class GameServerHost : IAsyncDisposable
                     Defense = ServerDefaults.DefaultPlayerDefense
                 };
                 _world.AddEntity(entity);
+                if (hasMapSpawn && !spawn.PositionRestored)
+                {
+                    PlaceSpawnedPlayer(userId, mapSpawn.Z, null, null);
+                }
             }
             else
             {
@@ -1632,6 +1779,10 @@ public sealed class GameServerHost : IAsyncDisposable
             conn = new Connection(userId, accepted, connLogger, tempConn.Encoding)
             {
                 JoinJti = claims.Jti,
+                // Recorded per connection (it also sets DeltaState.PeerProtocolVersion): it
+                // decides the snapshot shape and whether the command channel is open. 0 for an
+                // unversioned peer, which gets the version 2 shape.
+                PeerProtocolVersion = joinReq.ProtocolVersion,
                 // Derived, not received. The gateway computed the same value from the same
                 // secret and jti and gave it to the client; nothing carrying it crosses
                 // this hop. See GameServer.Net.Security.SessionKey.
@@ -1649,11 +1800,13 @@ public sealed class GameServerHost : IAsyncDisposable
         // though snapshots are only built on world ticks. See SnapshotDeltaState.TickHz.
         conn.DeltaState.TickHz = _tickLoop.Rates.BaseHz;
         conn.DeltaState.WorldEvery = _tickLoop.Rates.WorldEvery;
-        // Field-level delta requires the client to have proved it speaks protocol version 2
-        // (exact match, not AcceptedUnversioned) AND to be using Protobuf, which the encoder
-        // re-checks via intern. An unversioned client cannot merge partial entities safely.
+        // Field-level delta requires the client to have proved it speaks protocol version 2 or
+        // later (an advertised version, not AcceptedUnversioned) AND to be using Protobuf, which
+        // the encoder re-checks via intern. An unversioned client cannot merge partial entities
+        // safely. Version 2 and 3 peers both merge partial entities; version 3 adds mask bits
+        // 0x0200-0x2000, which the encoder only writes for a version 3 peer.
         conn.DeltaState.FieldDelta =
-            _options.FieldDelta && joinReq.ProtocolVersion == WireProtocol.ProtocolVersion;
+            _options.FieldDelta && joinReq.ProtocolVersion >= WireProtocol.MinSupportedProtocolVersion;
 
             // Register connection, retiring the reservation under the same lock it was
             // taken under. The one way this fails: the reservation was a replacement of a
@@ -1749,7 +1902,9 @@ public sealed class GameServerHost : IAsyncDisposable
                 Ok = true,
                 UserId = userId,
                 TickRate = (uint)_rates.MovementHz,
-                ProtocolVersion = WireProtocol.ProtocolVersion,
+                // Negotiated, not ours: a protocol 2 client accepts only an exact echo.
+                ProtocolVersion = WireProtocol.NegotiatedProtocolVersion(joinReq.ProtocolVersion),
+                CharacterId = claims.CharacterId, // ADR-31: the join token's cid, "" = default
             },
                 conn.Encoding);
             await conn.WriteOneAsync(resp);
@@ -1927,7 +2082,11 @@ public sealed class GameServerHost : IAsyncDisposable
                     // aim is meaningless without an ability and the simulation says so, and
                     // a branch here would be a second place that has to agree about which
                     // field gates which. Two float copies cost less than that agreement.
-                    new Vec2(input.AimX, input.AimY)), conn.Ingress);
+                    new Vec2(input.AimX, input.AimY)), conn.Ingress,
+                    // Protocol 3 fields 9-13 (ADR-28/29). Read for every peer: a version 2
+                    // client cannot send them, so they decode as the zero "not sent" values
+                    // and the input is exactly a protocol 2 input.
+                    new InputExtras(input.Jump, input.AimZ, input.RenderTick, input.RenderAlpha, input.SpawnSeq));
                 switch (ingest)
                 {
                     case InputIngestResult.Coalesced:
@@ -1955,7 +2114,9 @@ public sealed class GameServerHost : IAsyncDisposable
                 if (!conn.TryBeginTransfer())
                 {
                     _metrics?.RecordTransferRejected();
-                    conn.Send(WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+                    // Control lane: a reply the client is waiting for must not be the item the
+                    // snapshot queue drops when it is full.
+                    conn.SendControl(WireProtocol.NewEnvelope(MsgType.TransferMapResp,
                         new TransferMapResponse { Ok = false, Error = "transfer already in progress" },
                         conn.Encoding));
                     break;
@@ -1963,6 +2124,13 @@ public sealed class GameServerHost : IAsyncDisposable
                 // Fire-and-forget: the transfer handler is async (save + respond),
                 // but the read loop must not block on it.
                 _ = HandleTransferMapAsync(conn, env);
+                break;
+
+            case MsgType.Command:
+                // ADR-30 command channel. Non-blocking here: decode, version gate, rate limit,
+                // then the connection's worker runs the handler (store I/O) off this loop and
+                // off the tick thread, and answers on the control lane.
+                _commands.OnRequest(conn, env);
                 break;
 
             case MsgType.Ping:
@@ -2554,6 +2722,50 @@ public sealed class GameServerHost : IAsyncDisposable
 
         // Give TCP time to flush the send buffers before CloseAll tears them down.
         await Task.Delay(TimeSpan.FromSeconds(2));
+    }
+
+    /// <summary>
+    /// A loot seed that is a pure function of the map id (FNV-1a 64): deterministic per
+    /// server, different between maps, and never the wall clock.
+    /// </summary>
+    internal static ulong DeriveLootSeed(string? mapId)
+    {
+        ulong h = 14695981039346656037UL;
+        foreach (char c in mapId ?? string.Empty)
+        {
+            h ^= c;
+            h *= 1099511628211UL;
+        }
+
+        return h;
+    }
+
+    /// <summary>
+    /// Place a freshly spawned player: height (never below the ground under it), the
+    /// <c>level</c> stat from the character row, and facing from its saved yaw.
+    /// </summary>
+    private void PlaceSpawnedPlayer(string userId, float z, int? level, float? yaw)
+    {
+        _world.WithEntity(userId, (z, level, yaw), static (writer, in h, args) =>
+        {
+            ref Position p = ref writer.PositionOf(in h);
+            float ground = writer.Gameplay.GroundAt(p.Value.X, p.Value.Y);
+            p.Z = args.z > ground ? args.z : ground;
+            ref Locomotion loc = ref writer.LocomotionOf(in h);
+            loc.Grounded = p.Z <= ground;
+            loc.VelocityZ = 0f;
+            if (args.yaw is float yawRadians && float.IsFinite(yawRadians))
+            {
+                uint brad = Net.FacingCodec.FromRadians(yawRadians);
+                if (brad != Net.FacingCodec.NotSent) loc.FacingBrad = brad;
+            }
+
+            if (args.level is int lv && writer.RecordOf(in h) is { } rec)
+            {
+                uint levelId = writer.Gameplay.StatIdFor("level");
+                if (levelId != 0) writer.Gameplay.TrySetBaseStat(rec, levelId, lv);
+            }
+        });
     }
 
     private void OnEntityDeath(EntityState victim, EntityState killer)

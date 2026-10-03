@@ -6,6 +6,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Successful handshakes echo the negotiated protocol version** (the client's own inside
+  the supported window [2, 3], otherwise the server's). Clients built at protocol 2 accept
+  only an exact echo, so echoing 3 made them refuse a server that had just admitted them.
+  Refusals still echo the server's own version.
+
+### Added
+- **Protocol 2 and 3 clients are both admitted (wire protocol window).** No gateway code
+  change: `handleAuth` uses `shared/messages.CheckProtocolVersion`, which now admits
+  `[MinSupportedProtocolVersion = 2, WireProtocolVersion = 3]`, narrowed by
+  `--min-protocol-version` (set it to 3 to retire protocol 2). The gateway still echoes its own
+  version (3). Table-driven socket test `TestSupportedProtocolWindowOverTheSocket` (2 and 3
+  admitted, 1 and 4 refused, a minimum of 3 retires 2).
+- **Character selection carried into the join token (ADR-31).** `handleAuth` keeps the gateway
+  token's `cid` claim on the connection (`ClientConn.SetAuthenticatedCharacter` /
+  `CharacterID`, cleared with the identity); `handleEnterWorld` mints the join token with it
+  (`transfer.AssignMapCharacter`, `GenerateJoinTokenCharacter`, `DungeonDeps.CharacterID`). The
+  gateway never takes the character from the request: a non-empty
+  `EnterWorldRequest.character_id` that differs from the token's `cid` is refused with the
+  terminal error `character_mismatch` and no join token. Protocol 2 clients (no `cid`, no
+  `character_id`) are unchanged. New `session.VerifyClientClaimsKeyring`. Tests:
+  `server/character_test.go`, `transfer/join_token_character_test.go`.
+
+### Fixed
 - **The gateway failed EVERY dungeon entry the moment the meta hop's TLS went on, and the
   client saw only "internal error".** It reads `NAKAMA_URL` from the same ConfigMap key the
   game server does, so it followed the URL to `https://` — with no pin, and Nakama's

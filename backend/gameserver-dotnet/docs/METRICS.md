@@ -72,6 +72,9 @@ human inspection and for the Unity DOTS sample, which polls it.
   "handshakes_rejected": 0,
   "inputs_dropped": 0,
   "transfers_rejected": 0,
+  "commands_received": 0,
+  "commands_accepted": 0,
+  "commands_rejected": 0,
   "postgres": "connected",
   "uptime_seconds": 12105
 }
@@ -146,6 +149,7 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `snapshot_max_state_age` | Longest gap, in **base ticks** (the base rate, `SIM_CRITICAL_HZ`, 60 by default — **not** world ticks; the encoder is handed the base tick), between an entity's state going stale for a client and being re-sent — the cost side of the schedule. **Not the same number as `snapshot_max_shed_age`**: a not-due entity is not a shed entity, so the budget's bookkeeping is blind to schedule deferrals, and reading one for the other reports a healthy zero while entities go seconds without an update. |
 | `inputs_dropped` | Client inputs discarded at ingest since process start (per-connection budget or world-wide queue cap, summed). Same value as `sum(gameserver_inputs_dropped_total)`. Movement coalesced in place is **not** a drop and not counted here |
 | `transfers_rejected` | `MsgTransferMap` requests refused because a transfer was already running on that connection. Same value as `gameserver_transfers_rejected_total` |
+| `commands_received` / `commands_accepted` / `commands_rejected` | Gameplay commands (MsgType 32, ADR-30; `docs/API.md` "Command channel") received, answered `ok = true`, and answered `ok = false`, since start. `received = accepted + rejected` once in-flight commands finish — every command gets exactly one result. The per-reason split of `commands_rejected` is on `gameserver_commands_rejected_total{reason}` |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
 
 ### Do not compute a rate — read `achieved_tick_hz`
@@ -224,6 +228,9 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_inputs_dropped_total` | counter | `map_id`, `reason` | Inputs discarded at ingest: `connection_budget` (one connection exceeded `GAMESERVER_MAX_INPUTS_PER_TICK` between two drains) or `queue_full` (the world-wide queue hit `GAMESERVER_MAX_PENDING_INPUTS`). A rising `connection_budget` from one map with flat `processed_inputs` is one client flooding; a rising `queue_full` is the population as a whole |
 | `gameserver_inputs_coalesced_total` | counter | `map_id` | Movement-only inputs that replaced the sender's previous queued movement in place. **Not a loss** — the tick integrates one direction per player per tick regardless — but the rate says how far above the tick rate clients are sending |
 | `gameserver_transfers_rejected_total` | counter | `map_id` | `MsgTransferMap` refused because one was already in flight on that connection |
+| `gameserver_commands_received_total` | counter | `map_id` | `CommandRequest`s received (MsgType 32), every opcode and outcome |
+| `gameserver_commands_accepted_total` | counter | `map_id` | Commands answered `ok = true` |
+| `gameserver_commands_rejected_total` | counter | `map_id`, `reason` | Commands answered `ok = false`. `reason` is the `CommandResult.error` code (`unknown_opcode`, `invalid_payload`, `rate_limited`, `not_found`, `out_of_range`, `slot_mismatch`, `not_owner`, `unavailable`), or `protocol_version` for a command from a peer below protocol 3 (answered `unknown_opcode`). A climbing `rate_limited` from one map is one client over `CommandLimits` (10 burst, 5/s); a climbing `unavailable` is the character store failing |
 
 > **A counter that has never incremented is not in `/metrics` at all.** The OpenTelemetry
 > Prometheus exporter emits an instrument only once it has recorded a value, so on a

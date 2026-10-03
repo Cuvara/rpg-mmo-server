@@ -31,6 +31,16 @@ namespace GameServer.Snapshot;
 public static class ReplicationImportance
 {
     /// <summary>
+    /// Entity types that are due every world tick whatever their score or the configured
+    /// schedule says (ADR-29 decision 1): projectiles. A projectile lives for a fraction of a
+    /// second and a receiver advances it by its velocity, so withholding an update for a
+    /// schedule interval would draw it through whatever it already hit. Ordering under the
+    /// byte budget is unaffected - this answers "is it due", not "what goes first".
+    /// </summary>
+    public static bool IsAlwaysDue(string? entityType) =>
+        string.Equals(entityType, Gameplay.CombatResolver.ProjectileType, StringComparison.Ordinal);
+
+    /// <summary>
     /// Everything the score is allowed to look at, gathered at the one point where all of
     /// it is already in hand.
     /// </summary>

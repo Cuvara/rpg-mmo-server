@@ -62,6 +62,25 @@ namespace Shared.GameLogic.Components
 
         /// <summary>Target reached level Amount. Private to the subject.</summary>
         LevelUp = 6,
+
+        /// <summary>
+        /// Source applied status <see cref="GameEventData.EffectId"/> to Target; Amount is the
+        /// stack count after applying. Protocol version 3.
+        /// </summary>
+        StatusApplied = 7,
+
+        /// <summary>
+        /// Status <see cref="GameEventData.EffectId"/> ended on Target (expired, cleansed or
+        /// replaced). Protocol version 3.
+        /// </summary>
+        StatusRemoved = 8,
+
+        /// <summary>
+        /// A projectile owned by Source hit Target. Damage it dealt, if any, is a separate
+        /// <see cref="Damage"/> event; this one lets a client play the impact even when the
+        /// hit dealt nothing. Protocol version 3.
+        /// </summary>
+        ProjectileHit = 9,
     }
 
     /// <summary>
@@ -129,6 +148,27 @@ namespace Shared.GameLogic.Components
             int amount,
             uint abilityId,
             GameEventFlags flags)
+            : this(type, sourceId, targetId, amount, abilityId, flags, effectId: 0u)
+        {
+        }
+
+        /// <summary>
+        /// Builds an event that names a status effect (protocol version 3).
+        /// </summary>
+        /// <param name="effectId">
+        /// Content status id for <see cref="GameEventType.StatusApplied"/> /
+        /// <see cref="GameEventType.StatusRemoved"/> and for a periodic damage or heal; 0
+        /// otherwise. Pass it NAMED: it follows another <c>uint</c>
+        /// (<paramref name="abilityId"/>) and a positional mix-up between the two would compile.
+        /// </param>
+        public GameEventData(
+            GameEventType type,
+            string? sourceId,
+            string? targetId,
+            int amount,
+            uint abilityId,
+            GameEventFlags flags,
+            uint effectId)
         {
             Type = type;
             SourceId = sourceId;
@@ -136,6 +176,7 @@ namespace Shared.GameLogic.Components
             Amount = amount;
             AbilityId = abilityId;
             Flags = flags;
+            EffectId = effectId;
         }
 
         public GameEventType Type { get; }
@@ -165,6 +206,14 @@ namespace Shared.GameLogic.Components
         public uint AbilityId { get; }
 
         public GameEventFlags Flags { get; }
+
+        /// <summary>
+        /// Content id of the status effect involved (wire <c>GameEvent.effect_id</c>), 0 when
+        /// none. Set for <see cref="GameEventType.StatusApplied"/>,
+        /// <see cref="GameEventType.StatusRemoved"/>, and for a periodic
+        /// <see cref="GameEventType.Damage"/> / <see cref="GameEventType.Heal"/>.
+        /// </summary>
+        public uint EffectId { get; }
 
         /// <summary>
         /// True when this event is addressed to <see cref="TargetId"/> alone and must not
@@ -201,7 +250,37 @@ namespace Shared.GameLogic.Components
         public static GameEventData AbilityCast(string casterId, string? targetId, uint abilityId) =>
             new GameEventData(GameEventType.AbilityCast, casterId, targetId, 0, abilityId, GameEventFlags.None);
 
+        /// <summary>
+        /// A periodic (DoT) damage tick of status <paramref name="effectId"/>, flagged
+        /// <see cref="GameEventFlags.Periodic"/>.
+        /// </summary>
+        public static GameEventData PeriodicDamage(string? sourceId, string targetId, int amount, uint effectId) =>
+            new GameEventData(GameEventType.Damage, sourceId, targetId, amount, 0u, GameEventFlags.Periodic, effectId);
+
+        /// <summary>
+        /// A periodic (HoT) heal tick of status <paramref name="effectId"/>, flagged
+        /// <see cref="GameEventFlags.Periodic"/>.
+        /// </summary>
+        public static GameEventData PeriodicHeal(string? sourceId, string targetId, int amount, uint effectId) =>
+            new GameEventData(GameEventType.Heal, sourceId, targetId, amount, 0u, GameEventFlags.Periodic, effectId);
+
+        /// <summary>
+        /// <paramref name="sourceId"/> applied status <paramref name="effectId"/> to
+        /// <paramref name="targetId"/>, which now has <paramref name="stacks"/> stacks.
+        /// </summary>
+        public static GameEventData StatusApplied(string? sourceId, string targetId, uint effectId, int stacks, uint abilityId = 0) =>
+            new GameEventData(GameEventType.StatusApplied, sourceId, targetId, stacks, abilityId, GameEventFlags.None, effectId);
+
+        /// <summary>Status <paramref name="effectId"/> ended on <paramref name="targetId"/>.</summary>
+        public static GameEventData StatusRemoved(string targetId, uint effectId) =>
+            new GameEventData(GameEventType.StatusRemoved, null, targetId, 0, 0u, GameEventFlags.None, effectId);
+
+        /// <summary>A projectile of <paramref name="abilityId"/> owned by <paramref name="ownerId"/> hit <paramref name="targetId"/>.</summary>
+        public static GameEventData ProjectileHit(string? ownerId, string targetId, uint abilityId) =>
+            new GameEventData(GameEventType.ProjectileHit, ownerId, targetId, 0, abilityId, GameEventFlags.None, 0u);
+
+        /// <inheritdoc />
         public override string ToString() =>
-            $"{Type}({SourceId ?? "-"} -> {TargetId ?? "-"}, amount={Amount}, ability={AbilityId}, flags={Flags})";
+            $"{Type}({SourceId ?? "-"} -> {TargetId ?? "-"}, amount={Amount}, ability={AbilityId}, effect={EffectId}, flags={Flags})";
     }
 }

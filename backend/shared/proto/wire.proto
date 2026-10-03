@@ -56,6 +56,20 @@ enum MsgType {
   // than reused.
   MSG_TYPE_SEALED_CLIENT_HELLO = 16; // client -> gameserver
   MSG_TYPE_SEALED_SERVER_HELLO = 17; // gameserver -> client
+
+  // Generic gameplay channel (protocol version 3, ADR-30). 32-34 rather than 18:
+  // 18-31 stay reserved for the gateway hop's handshake (see above), and 32-34
+  // are still one-byte varints.
+  //
+  // These three carry an OPCODE plus OPAQUE BYTES. The payload schema of each
+  // opcode is NOT defined in this file: it lives in Shared.GameLogic's
+  // gameplay.proto, shared by the game server and the Unity client. That is the
+  // point of the channel -- a new gameplay command (loot, equip, interact) is a
+  // new opcode there, and needs no change here, no protocol bump and no Netcode
+  // release.
+  MSG_TYPE_COMMAND = 32;         // client -> gameserver (CommandRequest)
+  MSG_TYPE_COMMAND_RESULT = 33;  // gameserver -> client (CommandResult)
+  MSG_TYPE_SERVER_PUSH = 34;     // gameserver -> client (ServerPush)
 }
 
 // Envelope is the top-level wire message.
@@ -121,6 +135,16 @@ message Envelope {
 // bump the number — a rule that fired on every change would be a build counter,
 // not a compatibility contract.
 //
+// HISTORY.
+//   1  first advertised version.
+//   2  EntitySnapshot.changed_fields (field-level delta; class 3 above).
+//   3  ADR-28..31: 3D (z, velocity), projectile entities, stat block, status
+//      effects, the command channel (MsgType 32-34) and character slots. Bumped
+//      under class 4: a receiver that ignores a projectile entity or a
+//      CommandResult diverges silently. A server keeps serving version 2 peers
+//      the version 2 shape (no v3-only data) until the gateway and game server
+//      minimum is raised; that raise is a production decision.
+//
 // ZERO MEANS "NOT SENT", AND IS NOT REFUSED BY DEFAULT. proto3 elides a zero
 // uint32, so a peer predating this field is indistinguishable on the wire from
 // one sending 0 — the same trap documented at length on EntitySnapshot.speed.
@@ -147,10 +171,19 @@ message Envelope {
 // snapshot, and a client can hold a valid join token while disagreeing with the
 // game server about the schema the join token gives it access to.
 //
-// The responses ECHO the server's own version. That is the only way a NEW client
-// detects an OLD server: an old server does not know the field, ignores it, and
-// replies without one, so a client that sees 0 coming back knows it is talking
-// to a peer that never checked. Nothing else on the wire reveals that.
+// The responses ECHO a version. That is the only way a NEW client detects an OLD
+// server: an old server does not know the field, ignores it, and replies without
+// one, so a client that sees 0 coming back knows it is talking to a peer that
+// never checked. Nothing else on the wire reveals that.
+//
+// WHICH VERSION IS ECHOED (protocol 3). A server that admits a window of
+// versions echoes the NEGOTIATED one on a successful handshake: the client's own
+// version when it lies inside the window, the server's otherwise. That is the
+// version whose shape the server then serves, and it is what lets a protocol 2
+// client -- which accepts only an exact echo -- keep working against a protocol
+// 3 server. Refusals echo the server's own (highest) version, so a refused client
+// learns which version to be. An old server still echoes its own lower version
+// or 0, never a newer client's, so detection of an old server is unchanged.
 
 // --- Gateway handshake ---
 
@@ -195,6 +228,13 @@ message AuthResponse {
 message EnterWorldRequest {
   string map_id = 1;
   string party_id = 2;
+
+  // Character to play, from the account's roster (ADR-31). The gateway does not
+  // trust this field: it must equal the `cid` claim of the gateway token Nakama
+  // minted for this session, which is where ownership was checked. Empty means
+  // the account's default character (slot 0) -- the behaviour of every client
+  // that predates character slots. Introduced in protocol version 3.
+  string character_id = 3;
 }
 
 // EnterWorldResponse contains the game server address and join token.
@@ -296,6 +336,12 @@ message JoinTokenResponse {
   // has to be told which version it failed against, or the refusal is as opaque
   // as the parse error it replaces and the operator learns nothing from it.
   uint32 protocol_version = 5;
+
+  // The character this connection plays, taken from the join token's `cid`
+  // claim (ADR-31). Echoed so the client binds its local view to the right
+  // character without trusting its own request. Empty on a rejected join and
+  // from a server predating character slots. Introduced in protocol version 3.
+  string character_id = 6;
 }
 
 // --- Gameplay ---
@@ -352,6 +398,34 @@ message InputMessage {
   // meaningful: aim fields are only read when it is non-zero.
   float aim_x = 7;
   float aim_y = 8;
+
+  // --- Protocol version 3 (ADR-28, ADR-29) ---
+
+  // Height of the aim point (ADR-28: x/y are the ground plane, z is up). With
+  // aim_x/aim_y this is the full 3D point a skillshot is fired AT; the server
+  // derives the direction from the caster's own authoritative position, never
+  // from a client-supplied origin.
+  float aim_z = 9;
+
+  // The server tick the client was RENDERING remote entities at when it
+  // produced this input -- its interpolation time, not its prediction tick.
+  // Lag compensation (ADR-29) rewinds hit targets to this instant, clamped to at
+  // most `max_rewind` (200 ms) behind the server's current tick. Zero means "not
+  // sent": no rewind, targets are tested where they are now.
+  uint64 render_tick = 10;
+
+  // Jump request. Level-triggered for the tick it is sent on; the motor ignores
+  // it unless the character is grounded, so a held button does not fly.
+  bool jump = 11;
+
+  // Client-chosen sequence number for a projectile this input fires, so the
+  // client can match its predicted projectile to the server's entity
+  // (EntitySnapshot.spawn_seq). Zero when the input fires nothing.
+  uint32 spawn_seq = 12;
+
+  // Fraction [0, 1) of the way from render_tick to render_tick + 1 that the
+  // client was rendering at. Rewind interpolates hitboxes to the same instant.
+  float render_alpha = 13;
 }
 
 // EntityType enumerates the entity kinds the simulation knows about.
@@ -578,6 +652,11 @@ message EntitySnapshot {
   //   0x0040 → facing_brad (field 10)
   //   0x0080 → action     (field 11)
   //   0x0100 → action_seq (field 12)
+  //   0x0200 → z          (field 14)                  protocol version 3
+  //   0x0400 → velocity   (fields 15-17)              protocol version 3
+  //   0x0800 → owner / spawn_seq (fields 18 / 19)     protocol version 3
+  //   0x1000 → stats      (fields 20 / 21)            protocol version 3
+  //   0x2000 → statuses   (fields 22 / 23)            protocol version 3
   //
   // ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
   // delta never sets this field; a receiver that sees 0 MUST apply the same rule
@@ -601,6 +680,77 @@ message EntitySnapshot {
   //
   // Introduced in protocol version 2.
   uint32 changed_fields = 13;
+
+  // --- Protocol version 3: 3D, projectiles, extensible state ---
+  //
+  // Everything below is sent ONLY to a connection that advertised protocol
+  // version >= 3. A version 2 peer receives the version 2 shape unchanged: no
+  // projectile entities, no stats, no statuses, and z omitted.
+
+  // Height above the ground plane (ADR-28). x/y keep their version 2 meaning as
+  // the ground plane, which is what makes this field additive: a renderer maps
+  // (x, y, z) to Unity's (x, z, y).
+  float z = 14;
+
+  // Velocity in units per second, all three axes. Sent for entities whose
+  // motion is ballistic or extrapolated -- projectiles always, characters while
+  // airborne -- so a receiver can advance them between snapshots. Zero on all
+  // three axes means "stationary or not sent"; the bit in changed_fields says
+  // which on a delta.
+  float vel_x = 15;
+  float vel_y = 16;
+  float vel_z = 17;
+
+  // Interned handle of the entity that owns this one: the caster of a
+  // projectile. 0 for none.
+  uint32 owner = 18;
+
+  // InputMessage.spawn_seq of the input that created this projectile, sent only
+  // to the OWNER's connection so it can replace its predicted projectile with
+  // this entity. 0 for every other receiver and every non-projectile.
+  uint32 spawn_seq = 19;
+
+  // Extensible stat block (ADR-30): (stat_id, value) pairs whose ids are content
+  // (ADR-19), not schema. A new visible stat -- mana, level, a cast bar -- is a
+  // content entry and needs no change to this file.
+  //
+  // On a keyframe or a first introduction `stats` is the COMPLETE set. On a delta
+  // with bit 0x1000 set it lists only the stats that changed, and
+  // `stats_removed` names the ids that no longer exist; every stat in neither
+  // list keeps its last-known value.
+  repeated StatValue stats = 20;
+  repeated uint32 stats_removed = 21;
+
+  // Active status effects (DoT/HoT, buffs, debuffs, crowd control), keyed by
+  // StatusEffect.effect_id with the same complete-set / delta rule as `stats`
+  // under bit 0x2000.
+  repeated StatusEffect statuses = 22;
+  repeated uint32 statuses_removed = 23;
+
+  // Full id of `owner`, used ONLY by the non-interning legacy JSON encoding, for
+  // which `owner` is always 0 -- the same id/handle duality as GameEvent's
+  // source/source_id. Empty on every Protobuf connection.
+  string owner_id = 24;
+}
+
+// StatValue is one entry of EntitySnapshot.stats. `stat_id` is allocated from 1
+// by the content validator, for the same reason ability ids are: a proto3 zero
+// is elided and would read as "no stat".
+message StatValue {
+  uint32 stat_id = 1;
+  sint32 value = 2;
+}
+
+// StatusEffect is one active effect on an entity. `effect_id` is the content id
+// of the status definition (ADR-19), which says whether it is periodic, a stat
+// modifier or crowd control -- the client looks that up rather than being told.
+message StatusEffect {
+  uint32 effect_id = 1;
+  uint32 stacks = 2;
+  // Server tick the effect ends on; 0 means "until removed".
+  uint64 expires_tick = 3;
+  // Interned handle of the entity that applied it, 0 for none.
+  uint32 source = 4;
 }
 
 // --- Game events (gameplay v2) ---
@@ -654,6 +804,19 @@ enum GameEventType {
 
   // `target` reached level `amount`.
   GAME_EVENT_TYPE_LEVEL_UP = 6;
+
+  // `source` applied status `effect_id` to `target`; `amount` is the stack count
+  // after applying. Protocol version 3.
+  GAME_EVENT_TYPE_STATUS_APPLIED = 7;
+
+  // Status `effect_id` ended on `target` (expired, cleansed or replaced).
+  // Protocol version 3.
+  GAME_EVENT_TYPE_STATUS_REMOVED = 8;
+
+  // A projectile owned by `source` hit `target`. Damage it dealt, if any, is a
+  // separate DAMAGE event; this one exists so a client can play the impact even
+  // when the hit dealt nothing. Protocol version 3.
+  GAME_EVENT_TYPE_PROJECTILE_HIT = 9;
 }
 
 // GameEvent is one edge-triggered occurrence, addressed to entities by the SAME
@@ -750,6 +913,11 @@ message GameEvent {
   // `type`/`type_name`.
   string source_id = 7;
   string target_id = 8;
+
+  // Content id of the status effect for STATUS_APPLIED / STATUS_REMOVED, and of
+  // the status that ticked for a periodic DAMAGE / HEAL (flags bit 2). 0 when
+  // none. Protocol version 3.
+  uint32 effect_id = 9;
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -792,6 +960,50 @@ message DisconnectMessage {
 // ResyncRequest asks the game server to make the next snapshot a full keyframe.
 // It carries no fields and encodes to zero bytes.
 message ResyncRequest {}
+
+// --- Generic gameplay channel (protocol version 3, ADR-30) ---
+//
+// One request/response pair and one server push carry every discrete gameplay
+// command that is not per-tick input: loot, use item, equip, interact, quest,
+// chat. Each `opcode` names a payload schema defined in Shared.GameLogic's
+// gameplay.proto (not here), so the realtime protocol and Netcode never change
+// when a command is added.
+//
+// Opcodes are allocated from 1; 0 is "not sent" and is refused. A server that
+// does not know an opcode answers `unknown_opcode` rather than dropping the
+// request, so a newer client against an older server fails loudly.
+//
+// Sent only by and to peers that advertised protocol version >= 3. These are
+// RELIABLE and ORDERED like every other message on the gameplay hop, and unlike
+// snapshots they are never coalesced: each request gets exactly one result.
+
+// CommandRequest is a client's discrete gameplay request.
+message CommandRequest {
+  // Client-chosen, unique per connection, echoed in the CommandResult. Starts
+  // at 1 so a zero can never be mistaken for a real request.
+  uint32 seq = 1;
+  uint32 opcode = 2;
+  bytes payload = 3;
+}
+
+// CommandResult is the server's answer to exactly one CommandRequest.
+message CommandResult {
+  uint32 seq = 1;
+  bool ok = 2;
+  // Machine-readable reason when ok = false (`unknown_opcode`, `rate_limited`,
+  // `invalid_payload`, or an opcode-specific code). Empty on success.
+  string error = 3;
+  // Opcode-specific response payload, possibly empty.
+  bytes payload = 4;
+}
+
+// ServerPush is an unsolicited server -> client gameplay message (inventory
+// changed, quest progress, chat line), addressed by opcode in the same space as
+// CommandRequest.
+message ServerPush {
+  uint32 opcode = 1;
+  bytes payload = 2;
+}
 
 // --- Map transfer ---
 
