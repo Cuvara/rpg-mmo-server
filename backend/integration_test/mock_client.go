@@ -2,28 +2,52 @@ package integration
 
 import (
 	"net"
+	"os"
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
-// MockClient simulates a game client speaking length-prefixed JSON envelopes
-// over any transport kind. Used in integration tests to drive the full flow:
-// gateway auth -> enter world -> gameserver join -> input/snapshot cycle.
+// MockClient simulates a game client speaking length-prefixed envelopes. Used
+// in integration tests to drive the full flow: gateway auth -> enter world ->
+// gameserver join -> input/snapshot cycle. The two hops use fixed transports,
+// exactly as the shipped client does: the gateway hop is TCP
+// (NewGatewayClient) and the game-server hop is KCP over UDP (NewGameClient,
+// NewGameClientFor). There is no TCP game-server client.
 type MockClient struct {
 	conn net.Conn
 }
 
-// NewMockClient dials the given address over TCP with a 2-second timeout.
-func NewMockClient(addr string) (*MockClient, error) {
-	return NewMockClientTransport(transport.KindTCP, addr)
+// NewGatewayClient dials the gateway over TCP with a 2-second timeout.
+func NewGatewayClient(addr string) (*MockClient, error) {
+	conn, err := transport.Dial(transport.KindTCP, addr, 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return &MockClient{conn: conn}, nil
 }
 
-// NewMockClientTransport dials addr over the given transport kind ("tcp" or
-// "kcp"; empty means tcp) with a 2-second timeout.
-func NewMockClientTransport(kind, addr string) (*MockClient, error) {
-	conn, err := transport.Dial(kind, addr, 2*time.Second)
+// NewGameClient dials a game server over KCP/UDP, the only gameplay
+// transport, using TRANSPORT_KEY from the environment (the spawned game
+// servers inherit the same environment). KCP has no handshake, so a dead port
+// surfaces as the first Receive timing out, not as a dial error.
+func NewGameClient(addr string) (*MockClient, error) {
+	return NewGameClientAdvertised(transport.Gameplay, addr)
+}
+
+// NewGameClientFor dials the game server an EnterWorldResponse names, over the
+// transport it names. Anything but kcp fails here, which is how every gateway
+// flow test also proves the gateway advertised KCP.
+func NewGameClientFor(resp messages.EnterWorldResponse) (*MockClient, error) {
+	return NewGameClientAdvertised(resp.Transport, resp.ServerAddr)
+}
+
+// NewGameClientAdvertised dials addr after checking advertised is the gameplay
+// transport (no fallback).
+func NewGameClientAdvertised(advertised, addr string) (*MockClient, error) {
+	conn, err := transport.DialGameplay(advertised, addr, 2*time.Second,
+		transport.WithKey(os.Getenv(transport.KeyEnvVar)))
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +71,7 @@ func (c *MockClient) Receive() (messages.Envelope, error) {
 	return messages.Decode(c.conn)
 }
 
-// Close shuts down the underlying TCP connection.
+// Close shuts down the underlying connection.
 func (c *MockClient) Close() error {
 	return c.conn.Close()
 }

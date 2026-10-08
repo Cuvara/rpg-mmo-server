@@ -5,6 +5,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The gateway hop is always TCP (optionally TLS); gameplay is always KCP/UDP.** The gateway
+  listens on TCP unconditionally. `GATEWAY_TRANSPORT=kcp` (or any non-`tcp` value) is now a
+  startup error naming the reason; `GATEWAY_TRANSPORT=tcp` is accepted and flagged obsolete.
+- **Assignments are refused for a game server that does not advertise `kcp`.** Map and dungeon
+  assignment check the registry entry's transport before minting a join token; an empty or
+  `tcp` entry fails with the new client-facing reason `server_transport_unsupported` and an
+  error log naming the server. `EnterWorldResponse.Transport` is therefore always `kcp`.
+- The Agones allocator stamps `transport.Gameplay` on allocated entries.
+
+### Removed
+- `--transport`, `--allocator-transport` and `--transport-key` flags, `ALLOCATOR_TRANSPORT`
+  (it never reached a client: the transport handed out comes from the pod's own registry entry)
+  and `server.WithTransport` / `server.WithTransportKey`. `ALLOCATOR_TRANSPORT` and
+  `TRANSPORT_KEY` set on the gateway are ignored with a warning naming the variable.
+- The TLS-on-KCP startup refusal and its test: the listener can no longer be KCP.
+
 ### Fixed
 - **Successful handshakes echo the negotiated protocol version** (the client's own inside
   the supported window [2, 3], otherwise the server's). Clients built at protocol 2 accept

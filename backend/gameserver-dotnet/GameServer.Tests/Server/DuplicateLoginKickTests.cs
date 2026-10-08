@@ -6,6 +6,7 @@ using GameServer.Net.Transport;
 using GameServer.Observability;
 using GameServer.Server;
 using RpgMmo.Wire.V1;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -202,7 +203,7 @@ public class DuplicateLoginKickTests
                 ServerId = ServerId,
                 MapId = MapId,
                 Mode = "map",
-                Transport = TransportKind.Tcp,
+                Transport = TransportKind.Kcp,
                 TickRate = 20,
                 Capacity = 100,
                 JwtSecret = JwtSecret,
@@ -221,9 +222,9 @@ public class DuplicateLoginKickTests
             return new Harness { Server = server, Metrics = metrics, Port = port, Cts = cts, RunTask = runTask };
         }
 
-        public async Task<TcpClient> JoinAsync(string userId, string jti)
+        public async Task<KcpTestClient> JoinAsync(string userId, string jti)
         {
-            var client = new TcpClient();
+            var client = new KcpTestClient();
             await client.ConnectAsync(IPAddress.Loopback, Port);
             var stream = client.GetStream();
 

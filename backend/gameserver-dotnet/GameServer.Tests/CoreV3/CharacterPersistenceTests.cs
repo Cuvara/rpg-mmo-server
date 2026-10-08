@@ -173,7 +173,7 @@ public class CharacterPersistenceTests
             ServerId = ServerId,
             MapId = MapId,
             Mode = "map",
-            Transport = TransportKind.Tcp,
+            Transport = TransportKind.Kcp,
             TickRate = 20,
             Capacity = 10,
             JwtSecret = Secret,
@@ -203,9 +203,9 @@ public class CharacterPersistenceTests
         return $"{header}.{body}.{B64(hmac.ComputeHash(Encoding.ASCII.GetBytes($"{header}.{body}")))}";
     }
 
-    private static async Task<(TcpClient Client, JoinTokenResponse Response)> JoinAsync(Host h, string userId, string? cid)
+    private static async Task<(KcpTestClient Client, JoinTokenResponse Response)> JoinAsync(Host h, string userId, string? cid)
     {
-        var client = new TcpClient();
+        var client = new KcpTestClient();
         for (int attempt = 0; ; attempt++)
         {
             try { await client.ConnectAsync(IPAddress.Loopback, h.Port); break; }

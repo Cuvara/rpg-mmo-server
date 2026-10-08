@@ -25,12 +25,22 @@ JWT_SECRET=dev-secret-change-me ./loadtest -sweep 1,10,50,100 -json sweep.json
 
 ```
 [presign JWT | Nakama device auth]        -auth
-   -> MsgAuth / MsgEnterWorld (gateway)   -join=gateway   (skipped by -join=direct)
-   -> MsgJoinToken (game server)
+   -> MsgAuth / MsgEnterWorld (gateway)   -join=gateway   (skipped by -join=direct)   TCP
+   -> MsgJoinToken (game server)                                                      KCP/UDP
    -> MsgInput every tick  +  consume MsgSnapshot, merging deltas
    -> answer MsgPing with MsgPong on every socket it holds open
    -> MsgDisconnect
 ```
+
+The two hops use fixed transports, exactly as the real client does: the gateway
+hop is always **TCP** (auth + redirect only), and the game-server hop is always
+**KCP over UDP** (`transport.DialGameplay`). There is no transport flag. If the
+gateway advertises anything other than `kcp` in `EnterWorldResponse.Transport`
+(empty, `tcp`, unknown) the player fails at join instead of falling back to
+another protocol. `-join=direct` dials the game server over KCP as well. When
+the game servers run with a `TRANSPORT_KEY`, pass the same key with
+`-transport-key` (or `TRANSPORT_KEY`); a mismatch shows up as datagrams dropped
+as checksum errors (`client.kcp.in_csum_errors`) and players timing out at join.
 
 ### Heartbeat
 
@@ -68,6 +78,7 @@ because it kept the run alive past the 30s timeout.
 | players_online, entities, snapshots_sent | game server `/metrics` |
 | gateway_connections_active, auth/enter-world ok+fail, rate-limited | gateway `/metrics` |
 | Snapshots received ÷ snapshots the server enqueued | cross-check for silent frame loss |
+| KCP transport counters (`client.kcp`) | client-side kcp-go SNMP, differenced over the window: segments and packets in/out, UDP bytes in/out (real wire cost incl. KCP headers and retransmissions, unlike the application byte counters), retransmitted / fast / early retransmitted segments, inferred lost segments, duplicate segments, input errors (socket, crypto checksum = key mismatch, malformed KCP), `retrans_ratio` / `loss_ratio`, and end-of-window send/receive queue depths. The table shows the ratios as `kcp retx` and `kcp lost` |
 
 Output is a compact table plus JSON (`-json`, schema `rpg-mmo.loadtest/v1`) so
 runs are directly comparable.
@@ -132,7 +143,9 @@ tooling originally waited only on `/metrics`, and since the game server starts i
 metrics endpoint well before its listener, levels could begin against a port that
 was not accepting — losing a client to `connection reset by peer` on roughly one
 cold start in four. The pattern already existed in this repo; it just had not
-travelled here.
+travelled here. (The game-server port is now UDP/KCP, so a raw TCP connect no
+longer proves the listener is up; a readiness wait has to rely on `/healthz` or
+on a KCP join.)
 
 **Why this is a property of the tool and not of a benchmark script:** a broken
 run does not announce itself in the headline numbers, and it can look *better*
@@ -180,6 +193,7 @@ it is evidence that capacity is higher.
 | `-sweep 1,10,50,100` | — | Run several levels in one go. `-cooldown` between them. |
 | `-auth presigned\|nakama` | `presigned` | **Pre-signed is the default on purpose.** See below. |
 | `-join gateway\|direct` | `gateway` | `direct` skips the gateway. See below. |
+| `-transport-key` | `TRANSPORT_KEY` (empty) | The game servers' pre-shared KCP key; empty = plaintext. Must match the servers. There is no `-transport` flag: gateway hop TCP, game-server hop KCP, neither selectable. |
 | `-movement cluster\|still\|spread` | `cluster` | The bottleneck experiment control. See below. |
 | `-encoding proto\|json` | `proto` | **Protobuf is the default because it is the wire the client speaks (ADR-9).** `json` is the legacy arm, kept for A/B sweeps (`scripts/encoding-sweep.sh`). The two differ ~5x in bytes per client from identical load, so the summary header always names the arm it drove. Until 2026-09-07 the default was `json`, and one full sweep measured the wrong wire before the header said so. |
 | `-baseline-entities N` | 0 | Entities the server holds with **no** players — its enemy spawner, 6 on a stock map server. The validity gate marks a level INVALID when the server reports more entities than players (a dirty server); this declares how many are there by design. Players never get an allowance. Recorded in the JSON as `config.baseline_entities`. Or start the bench server with `GAMESERVER_ENEMIES=false` and leave this at 0. |

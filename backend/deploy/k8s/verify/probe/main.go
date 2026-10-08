@@ -41,7 +41,8 @@ type config struct {
 	nakamaTLSCert string
 	serverKey     string
 	gateway       string
-	transport     string
+	transportKey  string
+	kcpJoin       bool
 	jwtSecret     string
 	mapID         string
 	deviceID      string
@@ -61,7 +62,9 @@ func main() {
 		"PEM of Nakama's certificate; required when -nakama-url is https (ADR-24)")
 	fs.StringVar(&cfg.serverKey, "server-key", envOr("NAKAMA_SERVER_KEY", "defaultkey"), "Nakama server key")
 	fs.StringVar(&cfg.gateway, "gateway-addr", envOr("GATEWAY_ADDR", "127.0.0.1:8000"), "Gateway address")
-	fs.StringVar(&cfg.transport, "transport", envOr("TRANSPORT", "tcp"), "Gateway transport: tcp or kcp")
+	fs.StringVar(&cfg.transportKey, "transport-key", os.Getenv("TRANSPORT_KEY"), "Pre-shared KCP key of the game servers (empty = plaintext)")
+	fs.BoolVar(&cfg.kcpJoin, "kcp-join", envOr("PROBE_KCP_JOIN", "1") != "0",
+		"After enter world, dial the advertised game server over KCP/UDP and complete MsgJoinToken (proves the UDP endpoint is reachable). 0 to stop at the gateway")
 	fs.StringVar(&cfg.jwtSecret, "jwt-secret", os.Getenv("JWT_SECRET"), "Shared HS256 secret, for local token verification")
 	fs.StringVar(&cfg.mapID, "map-id", envOr("PROBE_MAP_ID", "map_01"), "Map to request in MsgEnterWorld")
 	fs.StringVar(&cfg.deviceID, "device-id", os.Getenv("PROBE_DEVICE_ID"), "Nakama device id (default: random per run)")
@@ -193,9 +196,10 @@ func mustToken(cfg config) (token, userID string) {
 // successful observation: the caller decides whether that refusal was the right
 // one.
 func enterWorld(cfg config, token string) {
-	conn, err := transport.Dial(cfg.transport, normalizeDial(cfg.gateway), cfg.timeout)
+	// The gateway hop is always TCP.
+	conn, err := transport.Dial(transport.KindTCP, normalizeDial(cfg.gateway), cfg.timeout)
 	if err != nil {
-		fatal("dial gateway %s over %s: %v", cfg.gateway, cfg.transport, err)
+		fatal("dial gateway %s: %v", cfg.gateway, err)
 	}
 	defer conn.Close()
 

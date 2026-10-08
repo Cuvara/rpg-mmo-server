@@ -25,7 +25,7 @@ namespace GameServer.Snapshot;
 /// <c>keyframeInterval</c> snapshots thereafter. Everything in between is a delta.
 /// </para>
 /// <para>
-/// Correctness rests on the transport being ordered and reliable (TCP today): the
+/// Correctness rests on the transport being ordered and reliable (KCP stream mode): the
 /// server treats "last sent" as "last received". The periodic keyframe is the recovery
 /// path if that ever stops holding (KCP in unreliable mode, a client that joined late,
 /// a client that lost its local state).

@@ -309,9 +309,9 @@ type EnterWorldRequest struct {
 
 // EnterWorldResponse contains the game server address and join token.
 //
-// Transport tells the client which realtime transport the target game server
-// speaks ("tcp" or "kcp"). It is omitted when the server speaks TCP, so old
-// clients that never read the field keep working — empty means "tcp".
+// Transport names the realtime gameplay transport the target game server
+// speaks. It is always "kcp" on a successful assignment; a client treats any
+// other value, including empty, as a failed join (no fallback).
 type EnterWorldResponse struct {
 	ServerAddr string `json:"server_addr,omitempty"`
 	JoinToken  string `json:"join_token,omitempty"`

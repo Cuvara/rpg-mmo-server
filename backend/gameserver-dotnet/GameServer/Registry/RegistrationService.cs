@@ -42,7 +42,12 @@ public sealed record RegistrationOptions
     /// </summary>
     public required string PublicAddr { get; init; }
 
-    public string Transport { get; init; } = "tcp";
+    /// <summary>
+    /// Transport advertised in the registry's <c>transport</c> field. Always <c>kcp</c>,
+    /// the only gameplay transport: the constructor refuses anything else, because the
+    /// gateway refuses to hand out a server advertising another value.
+    /// </summary>
+    public string Transport { get; init; } = GameServer.Net.Transport.TransportKind.Kcp;
     public int Capacity { get; init; } = 100;
     public TimeSpan Ttl { get; init; } = RegistryDefaults.HeartbeatTtl;
 
@@ -111,8 +116,14 @@ public sealed class RegistrationService : IAsyncDisposable
         ILogger logger,
         TimeSpan? interval = null)
     {
+        if (!GameServer.Net.Transport.TransportKind.IsValid(options.Transport))
+        {
+            throw new ArgumentException(
+                $"registry transport \"{options.Transport}\" is not supported: realtime gameplay is KCP/UDP only " +
+                $"(want \"{GameServer.Net.Transport.TransportKind.Kcp}\")", nameof(options));
+        }
         _registry = registry;
-        _options = options;
+        _options = options with { Transport = GameServer.Net.Transport.TransportKind.Kcp };
         _playerCount = playerCount;
         _logger = logger;
         _interval = interval ?? RegistryDefaults.HeartbeatInterval(options.Ttl);

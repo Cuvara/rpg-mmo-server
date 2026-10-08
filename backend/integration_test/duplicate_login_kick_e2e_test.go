@@ -68,7 +68,7 @@ func TestDotnetInterop_DuplicateLoginKick(t *testing.T) {
 	gwA := dialAndAuth(t, gwAddr, userID, enc)
 	defer gwA.Close()
 	enterA := enterWorldE2E(t, gwA, enc)
-	gsA, err := NewMockClient(enterA.ServerAddr)
+	gsA, err := NewGameClientFor(enterA)
 	if err != nil {
 		t.Fatalf("A connect to game server: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestDotnetInterop_DuplicateLoginKick(t *testing.T) {
 	// --- Client B joins cleanly and gets a fresh keyframe: the entity was
 	// released (no reconnect hold blocking, no stale connection owning it). ---
 	enterB := enterWorldE2E(t, gwB, enc)
-	gsB, err := NewMockClient(enterB.ServerAddr)
+	gsB, err := NewGameClientFor(enterB)
 	if err != nil {
 		t.Fatalf("B connect to game server: %v", err)
 	}
@@ -140,10 +140,11 @@ func startGatewayWithKickStream(t *testing.T, gsAddr string, kickStream storage.
 	sessionStore := storage.NewMemorySessionStore()
 	reg := storage.NewMemoryServerRegistry()
 	if err := reg.Register(context.Background(), storage.ServerInfo{
-		ServerID: dotnetServerID,
-		MapID:    dotnetMapID,
-		Addr:     gsAddr,
-		Capacity: 100,
+		ServerID:  dotnetServerID,
+		MapID:     dotnetMapID,
+		Addr:      gsAddr,
+		Transport: "kcp",
+		Capacity:  100,
 	}); err != nil {
 		t.Fatalf("register dotnet gameserver: %v", err)
 	}
@@ -172,7 +173,7 @@ func startGatewayWithKickStream(t *testing.T, gsAddr string, kickStream storage.
 
 func dialAndAuth(t *testing.T, gwAddr, userID string, enc messages.Encoding) *MockClient {
 	t.Helper()
-	c, err := NewMockClient(gwAddr)
+	c, err := NewGatewayClient(gwAddr)
 	if err != nil {
 		t.Fatalf("connect to gateway: %v", err)
 	}
@@ -267,21 +268,35 @@ func readUntilType(t *testing.T, c *MockClient, want messages.MsgType, what stri
 	return messages.Envelope{}
 }
 
-// waitForClose asserts the peer actually closes the connection (EOF/reset)
-// once the eviction frames are flushed.
+// waitForClose asserts the server stopped serving the connection once the
+// eviction frames were delivered.
+//
+// The gameplay hop is KCP over UDP, which has no FIN or RST: a server that
+// closes its session sends nothing more, and the client learns it from the
+// explicit application frame the caller has already asserted (Kick /
+// MsgDisconnect), not from the transport. So "closed" means the stream goes
+// quiet and stays quiet: late in-flight frames are drained, then a full window
+// must pass with no frame at all. A server that kept serving would keep sending
+// snapshots (at least one per snapshot period) and fail this.
 func waitForClose(t *testing.T, c *MockClient, what string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	const quiet = 2 * time.Second
+	deadline := time.Now().Add(15 * time.Second)
+	silentSince := time.Now()
 	for time.Now().Before(deadline) {
 		_, err := c.Receive()
-		if err == nil {
-			continue // late snapshot still in flight
-		}
-		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || !isTimeout(err) {
-			return // closed (EOF, reset, ...) — anything but a bare timeout
+		switch {
+		case err == nil:
+			silentSince = time.Now() // late snapshot still in flight
+		case errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || !isTimeout(err):
+			return // closed locally or reset: certainly not being served
+		default:
+			if time.Since(silentSince) >= quiet {
+				return
+			}
 		}
 	}
-	t.Fatalf("%s was never closed by the server", what)
+	t.Fatalf("%s kept receiving frames: the server never stopped serving it", what)
 }
 
 func isTimeout(err error) bool {

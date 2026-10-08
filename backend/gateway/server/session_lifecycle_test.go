@@ -54,7 +54,7 @@ func allBackends(t *testing.T) []backend {
 func startGatewayWith(t *testing.T, b backend) (*Gateway, *session.SessionManager) {
 	t.Helper()
 
-	if err := b.registry.Register(context.Background(), storage.ServerInfo{
+	if err := b.registry.Register(context.Background(), storage.ServerInfo{Transport: "kcp",
 		ServerID:    "srv1",
 		MapID:       "map_forest",
 		Addr:        "10.0.0.1:9000",

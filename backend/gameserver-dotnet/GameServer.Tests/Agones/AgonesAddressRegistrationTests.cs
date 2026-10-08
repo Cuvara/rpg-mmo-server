@@ -547,7 +547,7 @@ public class AgonesAddressRegistrationTests
         ServerId = ServerId,
         MapId = MapId,
         PublicAddr = publicAddr,
-        Transport = "tcp",
+        Transport = "kcp",
         Capacity = 8,
         // Long TTL: the heartbeat is not what is under test, and a short one would
         // interleave writes with the ordering assertions.

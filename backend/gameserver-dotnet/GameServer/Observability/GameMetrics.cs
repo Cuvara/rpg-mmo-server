@@ -25,6 +25,12 @@ namespace GameServer.Observability;
 /// gameserver.snapshots.max_state_age  -> gameserver_snapshots_max_state_age
 /// gameserver.transport.encrypted      -> gameserver_transport_encrypted{transport,cipher}
 /// gameserver.transport.authenticated  -> gameserver_transport_authenticated{transport,cipher}
+/// gameserver.kcp.sessions             -> gameserver_kcp_sessions
+/// gameserver.kcp.sessions.created     -> gameserver_kcp_sessions_created_total
+/// gameserver.kcp.sessions.rejected    -> gameserver_kcp_sessions_rejected_total{reason}
+/// gameserver.kcp.sessions.closed      -> gameserver_kcp_sessions_closed_total{reason}
+/// gameserver.kcp.datagrams.dropped    -> gameserver_kcp_datagrams_dropped_total{reason}
+/// gameserver.kcp.writes.rejected      -> gameserver_kcp_writes_rejected_total
 /// gameserver.player.saves             -> gameserver_player_saves_total
 /// gameserver.events.published         -> gameserver_events_published_total
 /// gameserver.events.dropped           -> gameserver_events_dropped_total
@@ -466,8 +472,8 @@ public sealed class GameMetrics : IDisposable
             "gameserver.transport.encrypted",
             ObserveTransportEncrypted,
             description: "1 when packets leave this server as ciphertext, 0 when they are in " +
-                         "cleartext. 0 is the DEFAULT (transport=tcp has no packet encryption, " +
-                         "and TRANSPORT_KEY defaults to empty) -- alert on it rather than " +
+                         "cleartext. 0 is the DEFAULT (TRANSPORT_KEY defaults to empty, and KCP " +
+                         "without a key is cleartext) -- alert on it rather than " +
                          "assuming it. Labelled with the transport and cipher in force.");
 
         _meter.CreateObservableGauge(
@@ -506,6 +512,41 @@ public sealed class GameMetrics : IDisposable
             "gameserver.entities",
             ObserveEntities,
             description: "Entities currently present in the world.");
+
+        // KCP listener counters. Observable rather than pushed: the listener owns the
+        // numbers (it sits below the layer that holds a GameMetrics), and every one of them
+        // must be present on /metrics from the first scrape, including at zero.
+        _meter.CreateObservableGauge(
+            "gameserver.kcp.sessions",
+            ObserveKcpSessionsLive,
+            description: "KCP sessions in the listener's table, pre-authentication included. " +
+                         "Bounded by GAMESERVER_KCP_MAX_SESSIONS.");
+        _meter.CreateObservableCounter(
+            "gameserver.kcp.sessions.created",
+            ObserveKcpSessionsCreated,
+            description: "KCP sessions opened (a PUSH sn=0 from a new endpoint or a new conversation).");
+        _meter.CreateObservableCounter(
+            "gameserver.kcp.sessions.rejected",
+            ObserveKcpSessionsRejected,
+            description: "New KCP sessions refused before any state was created, labelled by reason: " +
+                         "global_cap, per_ip_cap, rate (new-session token bucket) or backlog (accept queue full).");
+        _meter.CreateObservableCounter(
+            "gameserver.kcp.sessions.closed",
+            ObserveKcpSessionsClosed,
+            description: "KCP sessions closed by the transport itself, labelled by reason: idle (no " +
+                         "datagram within the idle timeout), dead_link (retransmission limit) or " +
+                         "slow_consumer (send queue past its hard limit).");
+        _meter.CreateObservableCounter(
+            "gameserver.kcp.datagrams.dropped",
+            ObserveKcpDatagramsDropped,
+            description: "Inbound UDP datagrams dropped by the KCP listener, labelled by reason: oversize " +
+                         "(over 1500 bytes), undersize, rate (per-session token bucket), bad_crypto, fec, " +
+                         "no_session (not a session opener from an unknown endpoint), conv_mismatch, malformed.");
+        _meter.CreateObservableCounter(
+            "gameserver.kcp.writes.rejected",
+            ObserveKcpWritesRejected,
+            description: "Application frames KCP could not carry (larger than the maximum message size); " +
+                         "each one closes its session.");
 
         _meter.CreateObservableGauge(
             "gameserver.achieved_tick_hz",
@@ -763,6 +804,68 @@ public sealed class GameMetrics : IDisposable
 
     private Measurement<int> ObserveTransportAuthenticated()
         => new(_transportAuthenticated ? 1 : 0, _transportTags);
+
+    // ── KCP listener ─────────────────────────────────────────────────────────
+
+    private Func<GameServer.Net.Transport.KcpListenerStats?>? _kcpStatsProvider;
+
+    /// <summary>
+    /// Register the KCP listener whose counters the <c>gameserver_kcp_*</c> instruments
+    /// report. Called once the listener is bound; until then they report zero.
+    /// </summary>
+    public void SetKcpStatsProvider(Func<GameServer.Net.Transport.KcpListenerStats?> provider)
+        => _kcpStatsProvider = provider;
+
+    private GameServer.Net.Transport.KcpListenerStats? KcpStats => _kcpStatsProvider?.Invoke();
+
+    private TagList KcpTags(string reason) => new() { { "map_id", _mapId }, { "reason", reason } };
+
+    private Measurement<int> ObserveKcpSessionsLive() => new(KcpStats?.SessionsLive ?? 0, _mapTags);
+
+    private Measurement<long> ObserveKcpSessionsCreated() => new(KcpStats?.SessionsCreated ?? 0, _mapTags);
+
+    private Measurement<long> ObserveKcpWritesRejected() => new(KcpStats?.WritesRejected ?? 0, _mapTags);
+
+    // Scrape-thread callbacks: allocating the measurement array here is fine, nothing
+    // on the tick path ever runs them.
+    private IEnumerable<Measurement<long>> ObserveKcpSessionsRejected()
+    {
+        var s = KcpStats;
+        return
+        [
+            new(s?.SessionsRejectedGlobalCap ?? 0, KcpTags("global_cap")),
+            new(s?.SessionsRejectedPerIpCap ?? 0, KcpTags("per_ip_cap")),
+            new(s?.SessionsRejectedRate ?? 0, KcpTags("rate")),
+            new(s?.SessionsRejectedBacklog ?? 0, KcpTags("backlog")),
+        ];
+    }
+
+    private IEnumerable<Measurement<long>> ObserveKcpSessionsClosed()
+    {
+        var s = KcpStats;
+        return
+        [
+            new(s?.SessionsClosedIdle ?? 0, KcpTags("idle")),
+            new(s?.SessionsClosedDeadLink ?? 0, KcpTags("dead_link")),
+            new(s?.SessionsClosedSlowConsumer ?? 0, KcpTags("slow_consumer")),
+        ];
+    }
+
+    private IEnumerable<Measurement<long>> ObserveKcpDatagramsDropped()
+    {
+        var s = KcpStats;
+        return
+        [
+            new(s?.DatagramsDroppedOversize ?? 0, KcpTags("oversize")),
+            new(s?.DatagramsDroppedUndersize ?? 0, KcpTags("undersize")),
+            new(s?.DatagramsDroppedRate ?? 0, KcpTags("rate")),
+            new(s?.DatagramsDroppedBadCrypto ?? 0, KcpTags("bad_crypto")),
+            new(s?.DatagramsDroppedFec ?? 0, KcpTags("fec")),
+            new(s?.DatagramsDroppedNoSession ?? 0, KcpTags("no_session")),
+            new(s?.DatagramsDroppedConvMismatch ?? 0, KcpTags("conv_mismatch")),
+            new(s?.DatagramsDroppedMalformed ?? 0, KcpTags("malformed")),
+        ];
+    }
 
     /// <summary>
     /// Record snapshot frames actually written to sockets.

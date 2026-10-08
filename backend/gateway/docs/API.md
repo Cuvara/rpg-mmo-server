@@ -31,6 +31,10 @@ field 2 — a silent half-parse rather than an error.
 
 ## Handshake
 
+All of these frames travel on the client → gateway hop, which is **TCP**
+(optionally TLS, ADR-23). The gameplay hop that follows is client → game server
+over **KCP/UDP only** (ADR-32); the gateway never carries it.
+
 ```
 1. Client → Gateway  MsgAuth          AuthRequest{Token}          (JWT from Nakama)
 2. Gateway → Client  MsgAuthResp      AuthResponse{OK, UserID}
@@ -68,8 +72,8 @@ through every string, logging and JSON path, and a test asserts the serialised
 `/status` payload contains no key material.
 
 > **Limitation, and it is not a footnote.** This field carries the key in the
-> clear, and the gateway hop is the *same transport stack* as the gameplay hop —
-> plaintext TCP by default. So in the default configuration an eavesdropper on
+> clear, and the gateway hop is plaintext TCP unless gateway TLS (ADR-23) is
+> configured. So in the default configuration an eavesdropper on
 > the gateway hop reads the key and can decrypt that session. Per-session keys
 > turn *"compromise one binary, decrypt everyone for ever"* into *"eavesdrop the
 > gateway hop, decrypt one session"* — a real improvement, and **not** the
@@ -78,11 +82,16 @@ through every string, logging and JSON path, and a test asserts the serialised
 
 Nothing consumes the key yet: the AEAD that will use it is a separate change.
 
-`Transport` names the realtime transport the **target game server** speaks —
-`"tcp"` or `"kcp"` — copied from that server's registry entry. **Empty means
-`"tcp"`**, which is what entries written before the field existed carry. The
-client must dial the game server with this transport, not with whatever it used
-to reach the gateway: the two are configured independently.
+`Transport` names the realtime transport the **target game server** speaks,
+copied from that server's registry entry. It is **always `"kcp"`**: gameplay is
+KCP over UDP only. The gateway refuses to assign a server whose registry entry
+says anything else — empty (a stale or hand-written entry), `"tcp"` (a server
+from before the KCP-only migration) or unknown — and answers
+`server_transport_unsupported` without minting a join token. The empty string no
+longer means TCP anywhere. A client must treat any value other than `kcp`
+(case-insensitive) as a connection failure naming the value, and must never fall
+back to TCP; the TCP stack it used to reach the gateway is not a gameplay
+transport.
 
 ## Messages handled by the gateway
 
@@ -206,6 +215,7 @@ classified below is reported as `internal error` and logged server-side.
 | `all servers busy, retry shortly` | the map has no live server and the allocation API answered `UnAllocated`: every GameServer in the fleet is taken and none is `Ready` at this instant (`registry.ErrNoCapacity`). **Retryable** — retry after a few seconds. Distinct from `no server available for map`: nothing here is full, the fleet is momentarily empty and the Fleet controller is already bringing a replacement to `Ready` (5.38s measured on k3d, ADR-18) |
 | `server is starting, retry shortly` | an allocation is (or was) under way for this map but no address exists yet: the allocated pod had not registered itself when the wait window expired, or the handler's own `server.EnterWorldBudget` (18s) ran out while the allocation was still in flight — the allocation keeps running detached either way. **Retryable** — retry after a few seconds. Distinct from `all servers busy, retry shortly`, where no server was allocated at all |
 | `map is not available` | no fleet or server in this deployment hosts the requested `map_id`: the pod that answered the allocation serves a different map (its fleet's `GAMESERVER_MAP_ID`), or the registry index returned a server for another map. **Terminal — do not retry**: retrying cannot change which map a fleet serves, and every retry costs a GameServer Agones never un-allocates. Distinct from `no server available for map`, which means the map exists but is full |
+| `server_transport_unsupported` | the selected game server's registry entry does not advertise `kcp` (empty, `tcp` or unknown — a stale or misconfigured deployment). Logged with the server id; no join token is minted. **Terminal until an operator fixes the deployment** — a retry lands on the same entry |
 | `not implemented` | the requested transfer mode is unimplemented (e.g. dungeon) |
 | `internal error` | anything else — store failure, allocator failure, token signing failure |
 | `rate limited` | connection tripped the inbound frame limiter |

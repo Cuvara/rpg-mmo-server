@@ -96,11 +96,6 @@ type AgonesConfig struct {
 	Kubeconfig string
 	// Capacity reported for an allocated server in the registry.
 	Capacity int
-	// Transport the fleet's game servers listen with ("tcp" or "kcp"). It is
-	// stamped onto the allocated ServerInfo so the gateway announces the right
-	// transport to the client before the pod's own registration lands. Empty
-	// means tcp. Must match the fleet manifest's --transport argument.
-	Transport string
 	// Timeout bounds a single allocation call (default DefaultTimeout).
 	Timeout time.Duration
 }
@@ -119,7 +114,6 @@ func (c *AgonesConfig) applyDefaults() {
 	if c.Timeout <= 0 {
 		c.Timeout = DefaultTimeout
 	}
-	c.Transport = transport.Normalize(c.Transport)
 }
 
 // AgonesAllocator asks the Agones aggregated allocation API for a GameServer.
@@ -135,7 +129,6 @@ type AgonesAllocator struct {
 	fleets    map[string]string
 	capacity  int
 	timeout   time.Duration
-	transport string
 }
 
 // Compile-time interface checks.
@@ -173,9 +166,8 @@ func newAgonesAllocator(httpClient *http.Client, baseURL string, cfg AgonesConfi
 			KindMap:     cfg.FleetMap,
 			KindDungeon: cfg.FleetDungeon,
 		}),
-		capacity:  cfg.Capacity,
-		timeout:   cfg.Timeout,
-		transport: cfg.Transport,
+		capacity: cfg.Capacity,
+		timeout:  cfg.Timeout,
 	}
 }
 
@@ -292,10 +284,13 @@ func (a *AgonesAllocator) Allocate(ctx context.Context, req AllocationRequest) (
 	}
 
 	return storage.ServerInfo{
-		ServerID:    out.Status.GameServerName,
-		MapID:       req.MapID,
-		Addr:        fmt.Sprintf("%s:%d", out.Status.Address, port),
-		Transport:   a.transport,
+		ServerID: out.Status.GameServerName,
+		MapID:    req.MapID,
+		Addr:     fmt.Sprintf("%s:%d", out.Status.Address, port),
+		// Every game server speaks the one gameplay transport. This entry is
+		// informational only: the gateway hands the client the pod.s own
+		// registry entry (allocateAndWait), never this one.
+		Transport:   transport.Gameplay,
 		Capacity:    a.capacity,
 		PlayerCount: 0,
 	}, nil

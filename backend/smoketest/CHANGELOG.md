@@ -6,6 +6,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **The game-server hop is KCP/UDP only.** `smoketest` and `killprobe` dial the game server with
+  `transport.DialGameplay` using the transport the gateway advertised; anything but `kcp` fails
+  the step by name. `killprobe` previously dialled the game server over raw TCP. The gateway hop
+  is always TCP (+ the optional TLS pin).
+
+### Added
+- `-transport-key` / `TRANSPORT_KEY` for the game servers' pre-shared KCP key.
+
+### Removed
+- `-transport` / `TRANSPORT` (gateway-hop transport, now fixed to TCP). Passing it is an error.
+
+### Changed
 - Expected game-state schema version is now 2 (`002_characters`, ADR-31): smoketest
   `DefaultExpectMigration` and the k8s verify `VERIFY_GAME_MIGRATION` defaults and targets.
 

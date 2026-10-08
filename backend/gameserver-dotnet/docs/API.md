@@ -120,7 +120,7 @@ shutdown; events whose `server_id` names another server are ACKed and skipped.
 ```
 
 **The handshake has a deadline.** `join_token` must arrive, complete and valid,
-within `GAMESERVER_HANDSHAKE_TIMEOUT_MS` (default 5000 ms) of the TCP/KCP accept,
+within `GAMESERVER_HANDSHAKE_TIMEOUT_MS` (default 5000 ms) of the KCP session opening,
 or the server closes the connection with no reply. A client that connects early
 and joins later must budget for that. A first frame that is not a `join_token`
 gets `{ "ok": false, "error": "Expected JoinToken message" }` and the close; a
@@ -536,7 +536,7 @@ or when** — the invariant `MovementSystem` is written around.
    Network jitter shifts *when* a step happens; it cannot change *how many* there are,
    which is what reconciliation is built to absorb.
 
-   Time lost to rule 1 — four packets clumping into one tick under TCP batching, a client
+   Time lost to rule 1 — four packets clumping into one tick under transport batching, a client
    GC pause, a mobile radio waking — is recovered by rule 2 stepping on each tick of the
    gap, not by any step growing.
 
@@ -1405,7 +1405,7 @@ A snapshot is a keyframe when **any** of the following holds:
    every snapshot becomes a keyframe, which is the escape hatch for a client that
    cannot merge deltas.
 
-Delta correctness assumes an ordered, reliable transport (TCP today): the server
+Delta correctness assumes an ordered, reliable transport (KCP stream mode): the server
 treats "last sent" as "last received". The periodic keyframe is the recovery path
 for anything that breaks that assumption.
 
@@ -1712,54 +1712,78 @@ back. Do not tear down the local world until step 5 succeeds.
 
 ---
 
-## Transport: TCP and KCP
+## Transport: KCP over UDP (the only gameplay transport)
 
-The gateway tells you which transport the destination speaks — the `transport`
-field of `enter_world_resp`, `"tcp"` or `"kcp"`, where empty means `"tcp"`. A
-server on KCP is **not** listening on TCP at all, so there is no fallback: a
-TCP-only client must fail loudly on `"kcp"` rather than attempt a connection
-that cannot succeed.
+The gameplay hop (client → game server) is **KCP over UDP and nothing else**
+(ADR-32). There is no TCP listener on the game server and no fallback: the
+server refuses to start with `GAMESERVER_TRANSPORT` set to anything but `kcp`
+(unset is fine), and the registry always advertises `transport = "kcp"`. The
+`transport` field of `enter_world_resp` is therefore always `"kcp"`; a client
+must treat any other value — **including the empty string**, which used to mean
+TCP — as a connection failure naming the value, never as a reason to try TCP.
+The client → gateway hop is unaffected: it is TCP, optionally TLS.
 
-> **Client status: TCP only today.** Advertising `kcp` from the server therefore
-> breaks every current client. That is a deployment-order constraint, not a bug.
-
-### What changes on KCP, and what does not
+### What KCP changes, and what it does not
 
 **The framing and the message layer do not change at all.** The same 4-byte
 big-endian length prefix, the same envelope, the same encoding sniffing, the
-same message types. KCP replaces the *stream transport* underneath and nothing
-above it — `KcpStream` exists precisely so "the length-prefixed codec in
-`WireProtocol` runs unchanged over" it. There is no KCP-specific handshake and
-no session-establishment message in this protocol: the KCP session forms at the
-ARQ layer, then `join_token` proceeds exactly as on TCP.
+same message types. KCP runs in stream mode and `KcpStream` exposes the session
+as a byte stream, so the length-prefixed codec in `WireProtocol` runs unchanged
+over it. There is no KCP-specific handshake and no session-establishment message
+in this protocol: the session forms at the ARQ layer, then `join_token` proceeds.
 
-What does change is that you need a KCP implementation and the exact ARQ
-parameters. The server's settings (`shared/transport/transport.go`) are:
+**How a session forms.** The server opens a session only for a datagram whose
+first KCP segment is a `PUSH` with `sn = 0` — the first thing any kcp-go dialer
+sends when it writes. Stray ACKs, retransmissions and probes from an endpoint
+with no session are dropped (they are what a peer whose session already ended
+sends). A `PUSH sn = 0` with a **new conversation id** from an endpoint that
+already has a session replaces it: that is a restarted client behind the same
+address and port.
+
+**How a session ends.** KCP has no FIN or RST on the wire. The server closes a
+session when the application closes it (handshake refused, kick, `disconnect`,
+shutdown), when no datagram arrives for the idle timeout (60 s), or when a
+segment reaches the dead-link limit (20 unacknowledged transmissions — about
+3.5 s on a link that had been acknowledging). A client that wants to leave
+promptly should send `disconnect`; one that just goes quiet is found by those
+timers.
+
+**Exact ARQ parameters** (`shared/transport/transport.go`, mirrored in
+`KcpTuning`):
 
 | Setting | Value | Why (from the source comments) |
 |---|---|---|
 | NoDelay | 1 | nodelay ARQ on |
 | Interval | 10 ms | matches a 10-15 Hz server tick; slower adds up to a full tick of jitter |
 | Resend | 2 | fast retransmit after 2 duplicate ACKs |
-| NoCongestion | 1 | congestion control **off** — a near-constant realtime bitrate; a TCP-style window only delays state the client already needs |
+| NoCongestion | 1 | congestion control **off** — a near-constant realtime bitrate |
 | Send/Recv window | 128 / 128 packets | ~170 KB in flight; bounded per-session memory |
 | MTU | 1350 | kcp-go default, stays under common 1400-1500 B path MTUs so segments are never IP-fragmented |
-| FEC | 0 data / 0 parity — **disabled** | |
+| Stream mode | on | the codec above needs a byte stream |
+| FEC | 0 data / 0 parity — **disabled** | an FEC-framed datagram is dropped |
+| Largest datagram accepted | 1500 B | kcp-go's `mtuLimit`; anything larger is dropped unparsed |
 | UDP socket buffer | 4 MiB | one socket multiplexes every session on a listener |
 
-### Encryption exists only on the KCP path
+### Limits a client can run into
 
-**TCP is not "unencrypted for now" — it has no encryption path at all.**
-`TcpTransportListener(bind)` takes no key; `KcpTransportListener(bind,
-transportKey, logger)` does (`shared/transport/transport.go`). Gameplay traffic
-over TCP is plaintext on the wire. Encryption is therefore not a separable task:
-**it arrives with KCP or not at all.**
+The listener enforces flood limits (`docs/RUNBOOK.md`, "KCP listener limits"):
+at most 4096 live sessions, 16 per source IP (loopback exempt), 200 new sessions
+per second listener-wide (burst 400), and 500 inbound datagrams per second per
+session (burst 1000). A refused opener gets no reply — the client's connect
+simply times out and it should back off and retry. Datagrams over a session's
+rate are dropped and recovered by KCP's retransmission; they never close the
+session. A single application write larger than one maximum frame
+(`4 + WireProtocol.MaxMessageSize` bytes) closes the session.
 
-When a key is set, AES-256 is applied **per UDP datagram, below the KCP ARQ** —
-every packet including the one carrying the join token. There is no negotiation,
-no key id and no downgrade path, so an encrypted listener and a plaintext dialer
-simply never form a session; the datagrams decrypt to noise and are dropped as
-malformed KCP segments. Fail-closed by construction.
+### Encryption
+
+When `TRANSPORT_KEY` is set, AES-256 is applied **per UDP datagram, below the
+KCP ARQ** — every packet including the one carrying the join token. There is no
+negotiation, no key id and no downgrade path, so an encrypted listener and a
+plaintext dialer simply never form a session; the datagrams fail their checksum
+and are dropped (counted as `bad_crypto`). Fail-closed by construction. Without a
+key the gameplay hop is cleartext; authenticated confidentiality is the sealed
+session (`GAMESERVER_SEALED`), which runs above the transport either way.
 
 **Key derivation** (`shared/transport/crypto.go`, `DeriveKey`), which a client
 must reproduce exactly:
@@ -1799,41 +1823,27 @@ there is no error message telling you why.
 
 ### You do not have to hand-roll KCP
 
-`GameServer/Net/Transport/` already contains a **complete, dependency-free C#
+`GameServer/Net/Transport/` contains a **complete, dependency-free C#
 implementation**: `Kcp.cs` (a direct port of kcp-go's `kcp.go`, itself a port of
 `ikcp.c`), plus `KcpListener`, `KcpSession`, `KcpStream` and `KcpCrypto`. It
-pulls in **no external package** — nothing KCP-related appears in
-`GameServer.csproj` — so it is plain C# that can be ported to a Unity client
-rather than reimplemented or replaced with a third-party library.
+pulls in **no external package**. The dialer half used by the test suite,
+`GameServer.Tests/Infrastructure/KcpTestClient.cs`, is a working example of a
+client built on the same classes.
 
-Two caveats: it lives in the server project, **not** in `Shared.GameLogic`, so it
-is not currently shipped to Unity; and it implements the *listener* side, so the
-dialer path needs the client half.
+### What is tested
 
-### What is actually tested — read this before trusting the above
-
-The pure-C# KCP layer is well covered: **44 tests pass** in `KcpTransportTests`
-and related suites.
-
-The **cross-language** verification is a different story. `KcpInteropTests`
-exercises exactly the right things against the *real* `kcp-go` client — key
-derivation agreement, echo through the C# listener for plaintext / hex key /
-passphrase, a wrong-key-must-fail-closed case, and a full join for both
-plaintext and encrypted KCP. **All nine of them currently skip.**
-
-They skip because the Go probe they drive (`gameserver-dotnet/interop/kcpprobe`)
-**no longer builds**: its `go.sum` has no entry for `google.golang.org/protobuf
-v1.36.6`, which `shared` now requires — only `/go.mod` hashes for 2020-era
-versions. The harness catches the build failure and calls `Skip.If`, so the
-tests report as skipped rather than failed, and `dotnet test` stays green. CI
-runs `dotnet test --no-build -c Release` and skips do not fail a build, so this
-is invisible there too.
-
-**So: KCP is verified in C#-to-C#, and its agreement with the Go implementation
-is currently unverified.** The tests that would prove it exist and are the right
-tests — they are simply not running, and have not been since `shared` took its
-Protobuf dependency. Anyone implementing a KCP client should expect to fix that
-probe first, so there is a working cross-language oracle to develop against.
+- `KcpInteropTests` drive the **real kcp-go client** (`interop/kcpprobe`, built
+  against `backend/shared/transport`) against the C# listener: key derivation
+  agreement, echo for plaintext / hex key / passphrase, wrong keys failing
+  closed, and a full join for plaintext and encrypted KCP. They run whenever a
+  Go toolchain is present (skip only when none is; a probe that fails to build
+  fails the test).
+- `KcpListenerHardeningTests` cover the listener's defences with hand-built
+  datagrams; `KcpGameplayTests` the gameplay hop end to end (join, refused
+  tokens, unauthenticated sessions, vanished and restarted clients, server
+  restart, flood caps); `KcpNetworkConditionsTests` run movement and snapshots
+  through a UDP impairment proxy with loss, delay and jitter, reordering and
+  duplication.
 
 ---
 

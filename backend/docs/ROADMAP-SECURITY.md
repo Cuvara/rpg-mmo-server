@@ -2,6 +2,12 @@
 
 Status: **plan, nothing here is implemented.** Written 2026-09-09.
 
+> **Transport premise partly superseded (2026-10-08, ADR-32).** Statements below that the
+> gameplay hop "defaults to `tcp`" or is "plaintext TCP by default" are stale: realtime
+> gameplay is now KCP/UDP only, and the gateway hop is TCP with optional TLS. What remains
+> true is that `TRANSPORT_KEY` defaults to empty (plaintext datagrams) and that the PSK is
+> not a session key. See [`NETWORKING.md`](NETWORKING.md).
+
 Companion to [ADR-21](ARCHITECTURE-DECISIONS.md#adr-21--transport-confidentiality-what-exists-is-a-pre-shared-key-on-the-non-default-transport-and-it-is-not-a-session-key),
 which records the measured posture. This document is the plan ADR-21 deferred, plus the
 anti-cheat work that ADR-21 is **not**.

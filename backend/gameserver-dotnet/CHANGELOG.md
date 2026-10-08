@@ -6,6 +6,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Realtime gameplay is KCP/UDP only (ADR-32).** The game server always listens KCP;
+  `--transport` / `GAMESERVER_TRANSPORT` may be unset or `kcp`, and anything else is fatal
+  at startup with `GAMESERVER_TRANSPORT=<v> is not supported: realtime gameplay is KCP/UDP
+  only`. `ServerOptions.Transport` defaults to `kcp`, `RegistrationService` refuses any
+  other value (the registry always writes `transport=kcp`), and the empty string no longer
+  means TCP (`TransportKind.Normalize` keeps it empty, `IsValid("")` is false). Posture,
+  `/status` and metric descriptions no longer describe a TCP default.
+- **Send backpressure.** `KcpStream.WriteAsync` waits while the session's send queue is at
+  its soft limit (256 segments) — the KCP equivalent of a full TCP send buffer — so a slow
+  peer now engages the connection's drop-the-oldest snapshot lane instead of growing KCP's
+  queue. Writes are split into 64 KiB `Kcp.Send` calls, like kcp-go's `UDPSession.Write`.
+- **Shutdown notice reaches KCP clients.** The listener is disposed after
+  `DrainClientsAsync` and `CloseAll`; disposing it first (the old order) closed the shared
+  UDP socket before `disconnect{server_shutdown}` was sent.
+- **KCP listener loops on dedicated threads.** The UDP receive loop and the ARQ update loop
+  are now two `AboveNormal` threads (like the tick loop) instead of thread-pool tasks: they
+  carry every session's input and retransmissions, which TCP did in the kernel, and a
+  starved thread pool used to stall all realtime traffic at once.
+- **KCP sessions open only on `PUSH sn=0`.** A datagram from an unknown endpoint that is
+  not a conversation opener (an ACK or retransmission from a peer whose session ended) no
+  longer creates a session that starts mid-stream.
+- Tests: every gameplay test dials KCP through the new
+  `GameServer.Tests/Infrastructure/KcpTestClient` (connect, EOF and graceful close modelled
+  explicitly; see `docs/DESIGN.md`); `AdversityProxy` is now a seeded UDP datagram
+  impairment proxy (loss, delay + jitter, reorder, duplication, blackout, cut);
+  `KcpPair` replaces the loopback TCP pairs under `Connection` unit tests. The downstream
+  blackout case is 2 s (inside the ~3.5 s KCP dead-link bound) and the cut case uses a
+  500 ms idle timeout, since over UDP there is no RST.
+
+### Added
+- **KCP flood protection**: global session cap (`GAMESERVER_KCP_MAX_SESSIONS`, 4096),
+  per-source-IP cap (`GAMESERVER_KCP_MAX_SESSIONS_PER_IP`, 16, loopback exempt), new-session
+  token bucket (`GAMESERVER_KCP_NEW_SESSIONS_PER_SEC`, 200/s, burst 2x) and per-session
+  inbound datagram token bucket (`GAMESERVER_KCP_DATAGRAMS_PER_SEC`, 500/s, burst 2x; excess
+  dropped, never fatal). Invalid values are fatal at boot; the limits in force are logged.
+- **KCP listener counters** (`KcpListenerStats`, `GameServerHost.TransportStats`) and
+  metrics `gameserver_kcp_sessions`, `gameserver_kcp_sessions_created_total`,
+  `gameserver_kcp_sessions_rejected_total{reason}`, `gameserver_kcp_sessions_closed_total{reason}`,
+  `gameserver_kcp_datagrams_dropped_total{reason}`, `gameserver_kcp_writes_rejected_total`.
+- Tests: `KcpListenerHardeningTests` (oversize/undersize/garbage/malformed/foreign-conv
+  datagrams, wrong key, session replacement, per-IP/global/rate caps, idle and dead-link
+  close, oversized write, maximum frame, soft/hard send limits, receive backpressure,
+  listener restart), `KcpGameplayTests` (join, invalid/expired/wrong-server tokens,
+  unauthenticated session removal, unknown message type, non-KCP datagrams, oversized
+  length prefix, vanished client, restarted client, server restart, session cap on
+  metrics), `KcpNetworkConditionsTests` (movement and snapshots under loss, delay+jitter,
+  reorder, duplication, all combined).
+
+### Removed
+- `TcpTransportListener`, `TcpTransportConnection`, `TransportKind.Tcp` and the
+  `Connection(string, TcpClient, ...)` constructor. There is no TCP gameplay listener.
+
+### Fixed
+- `KcpSession.Write` ignored `Kcp.Send`'s return code, so a frame needing more than 255
+  fragments vanished silently (and could leave a partial prefix queued). A write larger
+  than one maximum frame is now refused before anything is queued, and any refusal closes
+  the session with an `IOException`, a warning and `writes_rejected`.
+- Unbounded KCP queues: the receive side stops draining the ARQ at 256 KiB of unread input
+  (the window closes and the peer is throttled — no bytes dropped); the send side closes
+  the session as a slow consumer past 1024 queued segments.
+- `KcpListener` received into a 1500-byte buffer, so a larger datagram was truncated and
+  its prefix parsed. It now receives into 64 KiB and drops (and counts) anything over 1500.
+
+### Security
+- Any datagram from any endpoint used to create a session, an accept and a pending
+  handshake. Session creation is now gated (opener only, parse-checked) and capped
+  globally, per source IP and by rate, with every refusal counted; inbound datagrams are
+  rate-limited per session.
+
 ### Fixed
 - **Successful handshakes echo the negotiated protocol version** (the client's own inside
   the supported window [2, 3], otherwise the server's). Clients built at protocol 2 accept

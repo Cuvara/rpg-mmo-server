@@ -67,7 +67,7 @@ func (f *fakeRegistry) AllocateDungeon(_ context.Context, contentID string) (sto
 		ServerID:  id,
 		MapID:     contentID,
 		Addr:      fmt.Sprintf("10.0.0.%d:7100", f.nextID),
-		Transport: "tcp",
+		Transport: "kcp",
 	}
 	f.servers[id] = info
 	return info, nil

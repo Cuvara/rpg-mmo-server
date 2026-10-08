@@ -40,10 +40,11 @@ public sealed class AdversityCollection
 /// one. They were all green under conditions that cannot test them.</para>
 ///
 /// <para><b>Where the adversity is injected.</b> Between a real client socket and the real
-/// game server listener, by <see cref="AdversityProxy"/>. The server runs its own
-/// <c>TcpListener</c> and its real tick loop; the client is a real <see cref="TcpClient"/>
-/// speaking the real <c>WireProtocol</c> framing. Nothing is stubbed, so shipping code sits
-/// on both sides of the injection point. A hand-written transport returning canned frames
+/// game server listener, by <see cref="AdversityProxy"/>, a UDP datagram impairment proxy.
+/// The server runs its own <c>KcpListener</c> and its real tick loop; the client is a real
+/// <see cref="KcpTestClient"/> running the production KCP profile and speaking the real
+/// <c>WireProtocol</c> framing. Nothing is stubbed, so shipping code sits on both sides of
+/// the injection point — including the ARQ that has to recover what the link loses. A hand-written transport returning canned frames
 /// would have measured the fixture instead, which is the failure this design exists to
 /// avoid.</para>
 ///
@@ -314,9 +315,11 @@ public class NetworkAdversityTests
     [Fact]
     public async Task DownstreamBlackoutDoesNotStopTheSimulation()
     {
-        // A NARROW link, not merely a slow one, so the claim is not an artefact of generous
-        // buffers. Both arms run over the same link.
-        var link = AdversityProxy.Profile.Clean(Seed, socketBufferBytes: NarrowLinkBytes);
+        // Both arms run over the same link. Over UDP a blackout LOSES what was in flight
+        // rather than buffering it, and the server's KCP window (128 segments) plus the
+        // session's send-queue soft limit are what bound the backlog — so the narrowness the
+        // TCP version had to force with tiny socket buffers is now the transport's own.
+        var link = AdversityProxy.Profile.Clean(Seed);
         var clean = await MeasureTravelAsync(link, "stall:clean", moveSeconds: StallRunSeconds);
         var stalled = await MeasureTravelAsync(
             link, "stall:stalled", downstreamBlackoutMs: LongBlackoutMs, moveSeconds: StallRunSeconds);
@@ -394,7 +397,10 @@ public class NetworkAdversityTests
     /// <para>Existing coverage (<c>EntityLifecycleTests.ReconnectWithinHold_KeepsTheEntity</c>)
     /// closes the socket politely and asserts the hold count. This is the case a polite close
     /// cannot reach: the link goes dark first, so nothing is said and the server does not
-    /// learn of the disconnect until TCP itself gives up.</para>
+    /// learn of the disconnect until the transport itself gives up — over KCP, its idle
+    /// timeout (shortened to <see cref="CutIdleTimeoutMs"/> for this case so the hold window
+    /// stays short) or its dead-link limit, whichever fires first. There is no RST over UDP:
+    /// the "reset" is the link staying dark for good.</para>
     /// </summary>
     [Theory]
     [InlineData(true)]
@@ -403,7 +409,7 @@ public class NetworkAdversityTests
     {
         var hold = TimeSpan.FromMilliseconds(1200);
         using var metrics = new GameMetrics("map_adversity", $"test.{Guid.NewGuid():N}");
-        var (server, runTask, port, cts) = await StartServerAsync(hold, metrics);
+        var (server, runTask, port, cts) = await StartServerAsync(hold, metrics, idleTimeoutMs: CutIdleTimeoutMs);
 
         string userId = $"adv{Guid.NewGuid():N}"[..14];
         float spawnX, atCut, speed;
@@ -412,7 +418,7 @@ public class NetworkAdversityTests
         {
             await using (var proxy = AdversityProxy.Start(port, AdversityProxy.Profile.Clean(Seed)))
             {
-                using var client = new TcpClient { NoDelay = true };
+                using var client = new KcpTestClient();
                 await ConnectWithRetryAsync(client, proxy.Port);
                 var stream = client.GetStream();
                 await JoinAsync(stream, userId, cts.Token);
@@ -466,7 +472,12 @@ public class NetworkAdversityTests
             // Poll across the gap. Whether the count ever reached zero is the whole
             // measurement — a single reading taken at rejoin time cannot distinguish a held
             // entity from one removed and reloaded a moment earlier.
-            int waitMs = insideHoldWindow ? 300 : (int)hold.TotalMilliseconds + 2500;
+            //
+            // The server only learns of the cut by silence: CutIdleTimeoutMs after the last
+            // datagram, which was at the blackout, 200ms before the cut. The inside arm
+            // therefore rejoins after detection (so it is a reconnect, not a duplicate login
+            // racing a live session) and well inside the hold that detection starts.
+            int waitMs = insideHoldWindow ? CutIdleTimeoutMs + 200 : CutIdleTimeoutMs + (int)hold.TotalMilliseconds + 2500;
             bool sawZero = false;
             var gap = Stopwatch.StartNew();
             while (gap.ElapsedMilliseconds < waitMs)
@@ -475,7 +486,7 @@ public class NetworkAdversityTests
                 await Task.Delay(20, cts.Token);
             }
 
-            using var rejoin = new TcpClient { NoDelay = true };
+            using var rejoin = new KcpTestClient();
             await ConnectWithRetryAsync(rejoin, port);
             var stream2 = rejoin.GetStream();
             await JoinAsync(stream2, userId, cts.Token);
@@ -570,10 +581,16 @@ public class NetworkAdversityTests
 
     /// <summary>
     /// The downstream blackout. Long enough that the gap it opens at the client is
-    /// unmistakable — 60 snapshot intervals — and short enough that the case does not cost
-    /// the suite half a minute per arm.
+    /// unmistakable — 30 snapshot intervals — and short enough to stay inside the KCP
+    /// dead-link bound: with the production profile a segment's RTO grows linearly from
+    /// ~30ms, so 20 unacknowledged transmissions take ~3.4s on loopback and the server
+    /// closes the session. A 4s blackout (the TCP-era value) would measure that close, not
+    /// a stall.
     /// </summary>
-    private const int LongBlackoutMs = 4000;
+    private const int LongBlackoutMs = 2000;
+
+    /// <summary>Idle timeout for the cut case: how long silence takes to end a KCP session.</summary>
+    private const int CutIdleTimeoutMs = 500;
 
     /// <summary>Run length for the stall case: long enough to bracket the blackout.</summary>
     private const double StallRunSeconds = 9.0;
@@ -583,13 +600,6 @@ public class NetworkAdversityTests
     /// to drain. It is counted into the upper bound on the gain across the stall.
     /// </summary>
     private const int StallSettleMs = 600;
-
-    /// <summary>
-    /// Socket buffer size that makes the link narrow rather than merely slow. It bounds what
-    /// the relay's own sockets hold; it cannot bound the server's send buffer, which loopback
-    /// sizes in megabytes and which is why a stall here is absorbed rather than lost.
-    /// </summary>
-    private const int NarrowLinkBytes = 4096;
 
     /// <summary>
     /// Slack on the spread comparison, for the tick phase and for scheduler lateness on a
@@ -638,7 +648,7 @@ public class NetworkAdversityTests
         string userId = $"adv{Guid.NewGuid():N}"[..14];
         try
         {
-            using var client = new TcpClient { NoDelay = true };
+            using var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, proxy.Port);
             var stream = client.GetStream();
             await JoinAsync(stream, userId, cts.Token);
@@ -746,9 +756,10 @@ public class NetworkAdversityTests
         await using var proxy = AdversityProxy.Start(port, profile);
 
         string userId = $"cad{Guid.NewGuid():N}"[..14];
+        _out.WriteLine($"[{arm}] ambient: {KcpTestClient.Ambient()}");
         try
         {
-            using var client = new TcpClient { NoDelay = true };
+            using var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, proxy.Port);
             var stream = client.GetStream();
             await JoinAsync(stream, userId, cts.Token);
@@ -833,7 +844,7 @@ public class NetworkAdversityTests
     }
 
     private static async Task<(ulong MaxGap, long Snapshots, double MaxArrivalGapMs)> DrainTickGapsAsync(
-        NetworkStream stream, CancellationToken ct, string? userId = null, SnapshotProbe? probe = null)
+        Stream stream, CancellationToken ct, string? userId = null, SnapshotProbe? probe = null)
     {
         ulong prev = 0, maxGap = 0;
         long snaps = 0;
@@ -881,7 +892,7 @@ public class NetworkAdversityTests
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<(GameServerHost Server, Task RunTask, int Port, CancellationTokenSource Cts)>
-        StartServerAsync(TimeSpan hold, GameMetrics metrics)
+        StartServerAsync(TimeSpan hold, GameMetrics metrics, int idleTimeoutMs = 0)
     {
         Assert.True(SimulationRates.TryCreate(60, 15, 5, out var rates, out string? err), err);
         var options = new ServerOptions
@@ -890,13 +901,16 @@ public class NetworkAdversityTests
             ServerId = ServerId,
             MapId = "map_adversity",
             Mode = "map",
-            Transport = TransportKind.Tcp,
+            Transport = TransportKind.Kcp,
             TickRate = rates!.CriticalHz,
             SimulationRates = rates,
             Capacity = 8,
             JwtSecret = JwtSecret,
             JoinTokenSecret = JwtSecret,
             HoldTtl = hold,
+            KcpLimits = idleTimeoutMs > 0
+                ? KcpListenerOptions.Default with { IdleTimeoutMs = idleTimeoutMs }
+                : KcpListenerOptions.Default,
             SaveInterval = TimeSpan.FromHours(1),
             PlayerStore = new MemoryPlayerStore(),
             Metrics = metrics,
@@ -915,7 +929,7 @@ public class NetworkAdversityTests
         while (sw.Elapsed < timeout && !condition()) await Task.Delay(25);
     }
 
-    private static async Task JoinAsync(NetworkStream stream, string userId, CancellationToken ct)
+    private static async Task JoinAsync(Stream stream, string userId, CancellationToken ct)
     {
         await WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.JoinToken,
             new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
@@ -926,7 +940,7 @@ public class NetworkAdversityTests
         Assert.True(resp.Ok, resp.Error);
     }
 
-    private static Task SendInputAsync(NetworkStream stream, InputMessage input, CancellationToken ct)
+    private static Task SendInputAsync(Stream stream, InputMessage input, CancellationToken ct)
         => WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.Input, input, WireEncoding.Json), ct);
 
     /// <summary>
@@ -934,7 +948,7 @@ public class NetworkAdversityTests
     /// the server reads, so there is no payload type to pick and picking one would imply the
     /// server parses it.
     /// </summary>
-    private static Task SendResyncAsync(NetworkStream stream, CancellationToken ct)
+    private static Task SendResyncAsync(Stream stream, CancellationToken ct)
         => WriteFrameAsync(stream, new GameServer.Net.Envelope
         {
             Type = (byte)MsgType.Resync,
@@ -942,14 +956,14 @@ public class NetworkAdversityTests
             Encoding = WireEncoding.Json
         }, ct);
 
-    private static async Task WriteFrameAsync(NetworkStream stream, GameServer.Net.Envelope env, CancellationToken ct)
+    private static async Task WriteFrameAsync(Stream stream, GameServer.Net.Envelope env, CancellationToken ct)
     {
         byte[] frame = WireProtocol.Encode(env);
         await stream.WriteAsync(frame, ct);
         await stream.FlushAsync(ct);
     }
 
-    private static async Task<EntitySnapshot> ReadOwnEntityAsync(NetworkStream stream, string userId, CancellationToken ct)
+    private static async Task<EntitySnapshot> ReadOwnEntityAsync(Stream stream, string userId, CancellationToken ct)
     {
         for (int frames = 0; frames < 400; frames++)
         {
@@ -967,7 +981,7 @@ public class NetworkAdversityTests
     /// accepting any snapshot: a delta arriving between the resync and the keyframe answers
     /// with whatever changed, which is the stale reading this exists to avoid.
     /// </summary>
-    private static async Task<EntitySnapshot> ReadKeyframeEntityAsync(NetworkStream stream, string userId, CancellationToken ct)
+    private static async Task<EntitySnapshot> ReadKeyframeEntityAsync(Stream stream, string userId, CancellationToken ct)
     {
         for (int frames = 0; frames < 600; frames++)
         {
@@ -982,7 +996,7 @@ public class NetworkAdversityTests
         throw new InvalidOperationException($"player {userId} never appeared in a keyframe after MsgResync");
     }
 
-    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    private static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int attempt = 0; attempt < 50; attempt++)
         {

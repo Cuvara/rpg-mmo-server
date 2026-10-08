@@ -24,7 +24,7 @@ public class RegistrationServiceTests
         ServerId = serverId,
         MapId = mapId,
         PublicAddr = "203.0.113.7:9200",
-        Transport = "tcp",
+        Transport = "kcp",
         Capacity = 64,
         Ttl = ttl,
         IdentityKey = identityKey

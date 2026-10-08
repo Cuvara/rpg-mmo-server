@@ -22,7 +22,7 @@ func startInstrumentedGateway(t *testing.T) (*Gateway, *metrics.Metrics) {
 	t.Helper()
 
 	serverRegistry := storage.NewMemoryServerRegistry()
-	serverRegistry.Register(nil, storage.ServerInfo{
+	serverRegistry.Register(nil, storage.ServerInfo{Transport: "kcp",
 		ServerID:    "srv1",
 		MapID:       "map_forest",
 		Addr:        "10.0.0.1:9000",

@@ -156,6 +156,14 @@ PostgreSQL.
 
 ## 2026-08-04 — KCP/UDP transport for the realtime path (`shared/transport`)
 
+> **Superseded in part 2026-10-08 (ADR-32).** KCP is no longer opt-in: it is the
+> **only** gameplay transport, and TCP survives solely as the gateway hop (auth +
+> redirect, optionally TLS). `transport.Gameplay`, `ValidateGameplay` and
+> `DialGameplay` were added; `Normalize("")` no longer returns `tcp` and
+> `Validate("")` is an error, so "empty means `tcp`" below no longer holds anywhere.
+> `config.GatewayTransport` / `GameServerTransport` were removed. The KCP profile
+> and rationale below are unchanged.
+
 **Decision.** Add `shared/transport`, a `Listen(kind, addr)` / `Dial(kind, addr,
 timeout)` abstraction over `tcp` and `kcp` (`github.com/xtaci/kcp-go/v5`), and
 route gateway + game server listeners through it. TCP stays the default; KCP is

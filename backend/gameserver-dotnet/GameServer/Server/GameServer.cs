@@ -25,16 +25,20 @@ public class ServerOptions
 {
     public string ServerAddr { get; set; } = ":9000";
     /// <summary>
-    /// Realtime transport the listener speaks: "tcp" (default) or "kcp". The same
-    /// strings the Go side uses, because this value travels to clients through the
+    /// Realtime transport the listener speaks. Must be "kcp", the only gameplay transport;
+    /// the listener refuses anything else. The string travels to clients through the
     /// registry and <c>EnterWorldResponse.Transport</c>.
     /// </summary>
-    public string Transport { get; set; } = TransportKind.Tcp;
+    public string Transport { get; set; } = TransportKind.Kcp;
     /// <summary>
     /// Pre-shared AES-256 key for KCP (<c>TRANSPORT_KEY</c>). Empty means plaintext.
-    /// Ignored for TCP, where TLS or the cluster network is the answer instead.
     /// </summary>
     public string TransportKey { get; set; } = "";
+    /// <summary>
+    /// Flood-protection and backpressure limits for the KCP listener (session caps, rate
+    /// limits, idle timeout, queue bounds). Defaults are the production values.
+    /// </summary>
+    public KcpListenerOptions KcpLimits { get; set; } = KcpListenerOptions.Default;
     public string ServerId { get; set; } = "";
     public string MapId { get; set; } = "map_01";
     public string Mode { get; set; } = "map"; // "map" or "dungeon"
@@ -477,7 +481,7 @@ public class ServerOptions
 }
 
 /// <summary>
-/// Main game server. Accepts TCP connections, validates JWT tokens,
+/// Main game server. Accepts KCP sessions, validates JWT tokens,
 /// manages player entities with reconnect hold, runs the tick loop,
 /// and periodically saves state.
 /// Port of Go server/server.go.
@@ -702,6 +706,12 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <c>gameserver_handshakes_pending</c> gauge and <c>/status</c> publish.
     /// </summary>
     public int PendingHandshakes => _handshakes.Pending;
+
+    /// <summary>
+    /// Counters of the KCP listener (sessions, flood-protection refusals, datagram drops),
+    /// or null before the listener is bound.
+    /// </summary>
+    public KcpListenerStats? TransportStats => _listener?.Stats;
 
     /// <summary>Capacity reservations taken and not yet committed or released. Diagnostics and tests.</summary>
     public int PendingReservations => _admission.PendingReservations;
@@ -1018,11 +1028,14 @@ public sealed class GameServerHost : IAsyncDisposable
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
-        // Bind the configured transport. TCP and KCP both yield a reliable ordered
-        // stream, so everything above the listener is transport-agnostic.
+        // Bind the KCP listener. It yields a reliable ordered stream per session, so
+        // everything above the listener is transport-agnostic.
         try
         {
-            _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger);
+            _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger,
+                _options.KcpLimits);
+            var listener = _listener;
+            _metrics?.SetKcpStatsProvider(() => listener.Stats);
         }
         catch (Exception ex)
         {
@@ -1282,10 +1295,6 @@ public sealed class GameServerHost : IAsyncDisposable
             // but a caller-supplied linked token can still be torn down underneath us.
             try { _cts?.Cancel(); } catch (ObjectDisposedException) { /* already gone */ }
 
-            // Closing the listener also tears down every live KCP session: unlike TCP
-            // there is no socket per peer whose close the kernel would propagate.
-            try { _listener?.Dispose(); } catch { /* ignore */ }
-
             // If we are shutting down before the bind ever completed, release anyone waiting
             // on the address instead of leaving them on a task that will never finish.
             _listening.TrySetCanceled();
@@ -1303,11 +1312,17 @@ public sealed class GameServerHost : IAsyncDisposable
 
             // Notify connected clients before closing: send MsgDisconnect with
             // reason "server_shutdown" so clients can reconnect to another server
-            // rather than waiting for a timeout. The 2s grace period lets TCP drain
-            // the send buffer; clients that have already disconnected will ignore it.
+            // rather than waiting for a timeout. The 2s grace period lets KCP deliver
+            // (and retransmit) it; clients that have already disconnected will ignore it.
             await DrainClientsAsync();
 
             _connections.CloseAll();
+
+            // The listener goes last. Every KCP session shares its one UDP socket, so
+            // closing it before the drain above would have silently discarded the
+            // shutdown notification for every client. Cancelling _cts already stopped
+            // the accept loop; disposing also closes any session still mid-handshake.
+            try { _listener?.Dispose(); } catch { /* ignore */ }
 
             // Settle the allocation gate before deregistering. It is already cancelled by
             // the Cancel above, but it can be mid-flight between "state read said Allocated"
@@ -1834,7 +1849,7 @@ public sealed class GameServerHost : IAsyncDisposable
             inHandshake = false;
             _handshakes.Exit();
 
-            // Record the join BEFORE sending the response: the TCP stack may
+            // Record the join BEFORE sending the response: the transport may
             // deliver the frame to the client before our FlushAsync Task
             // completes, so any observer that acts on the response (tests,
             // monitoring) must see the counters already updated.  If the
@@ -2720,7 +2735,8 @@ public sealed class GameServerHost : IAsyncDisposable
             "Sent shutdown notification to {Count} client(s), waiting 2s for drain",
             _connections.Count);
 
-        // Give TCP time to flush the send buffers before CloseAll tears them down.
+        // Give KCP time to deliver (and if needed retransmit) the notification before
+        // CloseAll tears the sessions down.
         await Task.Delay(TimeSpan.FromSeconds(2));
     }
 

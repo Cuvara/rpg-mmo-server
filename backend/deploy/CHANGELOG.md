@@ -6,6 +6,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Realtime gameplay is KCP/UDP only (ADR-32); every deploy path now says so.**
+  - Game port is UDP everywhere: Agones/k8s fleet ports `game` are `protocol: UDP`
+    (`agones/fleet-map-dotnet-dev.yaml`, `k8s/app/50-fleet-map.yaml`, `60-fleet-dungeon.yaml`);
+    compose publishes `${GAMESERVER_CONTAINER_PORT}:9000/udp`, and the override `9000:9000/udp`
+    / `9002:9000/udp`; `Dockerfile.gameserver-dotnet` exposes `9000/udp` (+ `9101/tcp`) and
+    `Dockerfile.gateway` `8000/tcp`. Metrics/status ports and the gateway port stay TCP.
+  - `TRANSPORT_KEY` is now actually delivered: all three fleets read Secret key `transport-key`
+    (`optional: true`); both compose game-server services forward `TRANSPORT_KEY`; `cd.yml`
+    writes it from the environment secret `TRANSPORT_KEY`; `deploy-local.sh` exports it.
+  - Removed `ALLOCATOR_TRANSPORT` (gateway manifest, compose, `.env.example`, `cd.yml` env and
+    generated `.env`) and `GAMESERVER_TRANSPORT` (both compose services).
+  - Forwarded the new KCP listener knobs `GAMESERVER_KCP_MAX_SESSIONS`,
+    `GAMESERVER_KCP_MAX_SESSIONS_PER_IP`, `GAMESERVER_KCP_NEW_SESSIONS_PER_SEC`,
+    `GAMESERVER_KCP_DATAGRAMS_PER_SEC` in both compose services and all three fleets
+    (ConfigMap keys `kcp-*`, optional).
+  - Health checks no longer TCP-connect to the game port (always refused on UDP; a UDP probe
+    proves nothing): `deploy-local.sh health` uses the game server's `/healthz`; `cd.yml`'s
+    containers-mode healthcheck drops the game-port TCP probe and, under Agones, asserts the
+    registration's `transport=kcp`; `loadtest/scripts/encoding-sweep.sh` waits for the
+    "Game server listening on" log line and publishes `9000/udp`.
+  - `k8s/verify`: `registry.addr_dialable` (TCP connect) replaced by `registry.transport_kcp`
+    and `registry.addr_kcp_join` (the verify probe's real KCP join); an empty registry
+    transport no longer reads as `tcp`; `VERIFY_TRANSPORT_KEY` (k8s targets read it from the
+    cluster Secret) is passed to the smoketest and probe as `TRANSPORT_KEY`. Staging no longer
+    exempts an empty `transport-key`; only `k8s-dev` may run plaintext datagrams.
+  - `k8s/dev-up.sh` stops when the k3d serverlb does not publish the Agones range as `/udp`,
+    and prints the `k3d cluster edit --port-add` fix. k3d flags documented for dev and staging.
+  - `preflight-isolation.sh` checks UDP as well as TCP listeners (`ss -ltun`).
+  - `scripts/bootstrap-vps.sh`: gateway port TCP only, game port UDP only; re-runs delete the
+    old gateway/udp and gameserver/tcp rules.
+  - Docs: new `backend/docs/NETWORKING.md`; deploy docs (`CICD.md`, `K3S.md`, `README.md`,
+    `REALTIME-FLOW.md`, `RUNBOOK-local-dev.md`, `VPS-SETUP.md`), k8s READMEs, secret templates
+    and `.env.example` updated; `stack.sh` prints the game port as UDP and the key status.
 - Expected game-state schema version is now 2 (`002_characters`, ADR-31): smoketest
   `DefaultExpectMigration` and the k8s verify `VERIFY_GAME_MIGRATION` defaults and targets.
 

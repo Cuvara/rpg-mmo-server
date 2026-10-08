@@ -94,7 +94,10 @@ scripts/deploy-local.sh start|stop|restart|status|health
 - **Env** — sourced from the first readable of `/etc/rpg-mmo/env`,
   `$RPG_DEPLOY_DIR/.env`. Values are never echoed; only the file path is logged.
 - **Healthcheck** — TCP connect (`nc -z`, fallback bash `/dev/tcp`) to the
-  gateway and gameserver ports, retried once a second for 30s, plus a best-effort
+  gateway port, and HTTP `/healthz` on the game server's metrics port
+  (`GAMESERVER_METRICS_PORT`, default 9101) — the game port is KCP/UDP only, so
+  a TCP connect to it is always refused and a UDP probe proves nothing. Both
+  retried once a second for 30s, plus a best-effort
   `curl` of the Nakama `/healthcheck` (warn-only — the meta stack may still be
   migrating).
 
@@ -261,7 +264,7 @@ other, and the switch is reversible.
 | Images | — | built **on the runner** from `backend/deploy/docker/Dockerfile.{gateway,gameserver-dotnet}`, tagged `rpg-mmo/<svc>:<sha>` |
 | Compose profiles | `monitoring` | `monitoring` + `realtime` |
 | Redis / game DB | over the published host ports (`localhost:6379`, `localhost:5433`) | in-network service names (`redis:6379`, `postgres-game:5432`) |
-| Healthcheck | TCP connect to both ports (`deploy-local.sh health`) | HTTP `/healthz` on each metrics port **and** TCP on each game port |
+| Healthcheck | TCP connect to the gateway port + HTTP `/healthz` on the game server's metrics port (`deploy-local.sh health`) | HTTP `/healthz` on each metrics port, TCP on the gateway port, and (Agones) `transport=kcp` on the registration. The game port is UDP; its reachability is proven by the smoke job's KCP join |
 | Registration | the game server self-registers (`REDIS_ADDR`) | the game server self-registers (`REDIS_ADDR`) |
 | Ports | the process binds `GATEWAY_ADDR` / `GAMESERVER_ADDR` directly | the container publishes `GATEWAY_CONTAINER_PORT` / `GAMESERVER_CONTAINER_PORT`, which **default to the ports those same addresses name** — so `:8000` / `:9200` stay true either way |
 
@@ -921,9 +924,9 @@ to clients verbatim and is not dialable by them. Set it to
   The `resolve` → `deploy` label plumbing (`fromJSON`) and the Environment secret
   wiring need one real run per environment to confirm.
 - The `deploy` job assumes `docker compose` v2 and a Linux runner.
-- Host mode still healthchecks with a TCP connect. Both binaries do serve
-  `/healthz` on their metrics port now (containers mode uses it) — host mode
-  could be upgraded the same way.
+- Host mode healthchecks the gateway with a TCP connect (it is a TCP listener)
+  and the game server with `/healthz`, since its KCP/UDP game port cannot be
+  TCP-probed. The gateway could move to `/healthz` too.
 - Containers mode is verified on the dev runner. On a real VPS,
   `bootstrap-vps.sh` itself has only been exercised via `--dry-run` plus
   `bash -n` — the apt/runner/ufw paths need one real box to confirm.

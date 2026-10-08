@@ -175,6 +175,13 @@ public class ComposeEnvPassthroughTests
                 "A property of the map, not of the deployment — see GAMESERVER_MAP_WIDTH " +
                 "above; the two are set together or not at all, since MapBounds.FromSize " +
                 "takes both.",
+
+            // ── Not a choice any more ────────────────────────────────────────
+            ["GAMESERVER_TRANSPORT"] =
+                "Realtime gameplay is KCP/UDP only (ADR-32): unset and `kcp` are the only " +
+                "accepted values and anything else is fatal at startup. Forwarding it would " +
+                "offer a knob whose every other setting stops the server, so the compose " +
+                "services deliberately omit it and run the only transport there is.",
         };
 
     // ── The gate ─────────────────────────────────────────────────────────────

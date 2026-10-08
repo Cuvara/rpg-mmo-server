@@ -40,7 +40,8 @@ internal sealed class HardeningHarness : IAsyncDisposable
         IPlayerStore? playerStore = null,
         int maxInputsPerConnection = 0,
         int maxPendingInputs = 0,
-        uint minProtocolVersion = 0)
+        uint minProtocolVersion = 0,
+        KcpListenerOptions? kcpLimits = null)
     {
         var options = new ServerOptions
         {
@@ -48,7 +49,8 @@ internal sealed class HardeningHarness : IAsyncDisposable
             ServerId = ServerId,
             MapId = MapId,
             Mode = "map",
-            Transport = TransportKind.Tcp,
+            Transport = TransportKind.Kcp,
+            KcpLimits = kcpLimits ?? KcpListenerOptions.Default,
             TickRate = 20,
             Capacity = capacity,
             MaxPendingHandshakes = maxPendingHandshakes,
@@ -74,10 +76,10 @@ internal sealed class HardeningHarness : IAsyncDisposable
         };
     }
 
-    /// <summary>Open a raw TCP connection to the server and send nothing.</summary>
-    public async Task<TcpClient> ConnectAsync()
+    /// <summary>Open a KCP session to the server (the opening segment only) and send nothing else.</summary>
+    public async Task<KcpTestClient> ConnectAsync()
     {
-        var client = new TcpClient();
+        var client = new KcpTestClient();
         for (int attempt = 0; ; attempt++)
         {
             try
@@ -100,7 +102,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
     /// the field existed, or any other value to imitate a skewed rollout.
     /// </remarks>
     public static async Task<JoinTokenResponse> SendJoinAsync(
-        TcpClient client, string userId, TimeSpan? timeout = null,
+        KcpTestClient client, string userId, TimeSpan? timeout = null,
         uint protocolVersion = WireProtocol.ProtocolVersion,
         WireEncoding encoding = WireEncoding.Json)
     {
@@ -127,7 +129,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
     /// Send a join carrying a deliberately invalid token, to prove which check fires first.
     /// </summary>
     public static async Task<JoinTokenResponse> SendJoinBadTokenAsync(
-        TcpClient client, uint protocolVersion, TimeSpan? timeout = null)
+        KcpTestClient client, uint protocolVersion, TimeSpan? timeout = null)
     {
         var stream = client.GetStream();
         var join = WireProtocol.NewEnvelope(
@@ -145,7 +147,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
     }
 
     /// <summary>Connect, join, and require success.</summary>
-    public async Task<TcpClient> JoinAsync(string userId)
+    public async Task<KcpTestClient> JoinAsync(string userId)
     {
         var client = await ConnectAsync();
         var resp = await SendJoinAsync(client, userId);
@@ -155,7 +157,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
 
     /// <summary>Send one <c>MsgInput</c> on a joined connection.</summary>
     public static async Task SendInputAsync(
-        NetworkStream stream, ulong tick, float moveX, float moveY, string? attackTargetId = null)
+        Stream stream, ulong tick, float moveX, float moveY, string? attackTargetId = null)
     {
         var msg = new InputMessage { Tick = tick, MoveX = moveX, MoveY = moveY };
         if (attackTargetId != null) msg.AttackTargetId = attackTargetId;
@@ -167,7 +169,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
     /// True when the peer has closed: the next read returns EOF within
     /// <paramref name="within"/>. False when bytes arrive or the wait runs out.
     /// </summary>
-    public static async Task<bool> ObservesEofAsync(TcpClient client, TimeSpan within)
+    public static async Task<bool> ObservesEofAsync(KcpTestClient client, TimeSpan within)
     {
         var buf = new byte[256];
         using var cts = new CancellationTokenSource(within);
@@ -187,7 +189,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
     }
 
     /// <summary>Read frames until one of <paramref name="type"/> arrives.</summary>
-    public static async Task<GameServer.Net.Envelope> ReadUntilAsync(NetworkStream stream, MsgType type, TimeSpan? timeout = null)
+    public static async Task<GameServer.Net.Envelope> ReadUntilAsync(Stream stream, MsgType type, TimeSpan? timeout = null)
     {
         using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(15));
         while (true)

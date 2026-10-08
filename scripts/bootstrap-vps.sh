@@ -312,12 +312,16 @@ configure_firewall() {
 	run ufw --force default deny incoming
 	run ufw --force default allow outgoing
 	run ufw allow "$SSH_PORT/tcp" comment 'ssh'
-	# Gateway: TCP today, UDP reserved for the KCP transport (shared/transport
-	# already speaks it; opening the port now avoids a second firewall change).
+	# Gateway: TCP only (auth + redirect hop, optionally TLS). Game server: UDP
+	# only — realtime gameplay is KCP/UDP, there is no TCP game listener. A
+	# TCP-only rule for the game port leaves every client join timing out.
 	run ufw allow "$GATEWAY_PORT/tcp" comment 'rpg gateway (tcp)'
-	run ufw allow "$GATEWAY_PORT/udp" comment 'rpg gateway (kcp, future)'
-	run ufw allow "$GAMESERVER_PORT/tcp" comment 'rpg gameserver (tcp)'
-	run ufw allow "$GAMESERVER_PORT/udp" comment 'rpg gameserver (kcp, future)'
+	run ufw allow "$GAMESERVER_PORT/udp" comment 'rpg gameserver (kcp/udp)'
+	# Re-running on a box bootstrapped before KCP-only: drop the rules the old
+	# script opened that no listener uses any more. `ufw delete` of a rule that
+	# does not exist only prints a notice, so this is idempotent.
+	run_sh "ufw --force delete allow $GATEWAY_PORT/udp >/dev/null 2>&1 || true"
+	run_sh "ufw --force delete allow $GAMESERVER_PORT/tcp >/dev/null 2>&1 || true"
 
 	# Grafana stays CLOSED. The bundled Prometheus (9090) and OTLP (4317/4318)
 	# have no authentication at all and are bound to loopback by compose, so they
@@ -361,7 +365,7 @@ print_summary() {
     Deploy user    : $DEPLOY_USER (member of 'docker')
     Deploy dir     : $DEPLOY_DIR
     Runner         : $RUNNER_NAME  labels=[self-hosted,$RUNNER_LABELS]  dir=$RUNNER_DIR
-    Open ports     : ssh/$SSH_PORT, gateway $GATEWAY_PORT/tcp+udp, gameserver $GAMESERVER_PORT/tcp+udp
+    Open ports     : ssh/$SSH_PORT, gateway $GATEWAY_PORT/tcp, gameserver $GAMESERVER_PORT/udp (KCP)
     Closed         : grafana/$GRAFANA_PORT${ADMIN_IP:+ (except $ADMIN_IP)}, prometheus/9090, otlp/4317-4318
 
     Next steps — all of them are GitHub-side; no code change is needed:

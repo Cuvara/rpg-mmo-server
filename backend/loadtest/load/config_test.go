@@ -108,7 +108,6 @@ func TestConfigValidate(t *testing.T) {
 		{"bad auth", func(c *Config) { c.AuthMode = "oauth" }, true},
 		{"bad movement", func(c *Config) { c.Movement = "teleport" }, true},
 		{"bad join", func(c *Config) { c.JoinMode = "magic" }, true},
-		{"bad transport", func(c *Config) { c.Transport = "carrier-pigeon" }, true},
 		{"direct without addr", func(c *Config) {
 			c.JoinMode = JoinDirect
 			c.GameServerAddr = ""

@@ -300,12 +300,10 @@ spec:
                   name: gameserver-config
                   key: nakama-tls-pin
                   optional: true
-            # What the FLEET listens with, not what this gateway listens with.
-            # It is announced to the client BEFORE the pod's own registration
-            # lands, so a mismatch tells the client to speak the wrong
-            # protocol. The fleet below is TCP.
-            - name: ALLOCATOR_TRANSPORT
-              value: "tcp"
+            # ALLOCATOR_TRANSPORT was REMOVED: the fleet is always KCP/UDP and the
+            # gateway announces "kcp" unconditionally. Setting it now only logs a
+            # WARN ("ignored, removed"). The gateway's own client listener stays
+            # TCP (auth + redirect hop, optional TLS).
             # ALLOCATOR_KUBECONFIG IS ABSENT ON PURPOSE. DO NOT ADD IT.
             # resolveRESTConfig tries rest.InClusterConfig() FIRST and only
             # when Kubeconfig is empty; any value here — including the compose

@@ -69,7 +69,7 @@ public class SealedRefusalNamesItselfTests
         await using var server = new GameServerHost(RequireSealed());
         var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
-        using var client = new TcpClient();
+        using var client = new KcpTestClient();
         await client.ConnectAsync("127.0.0.1", port, cts.Token);
         await using var stream = client.GetStream();
 
@@ -106,7 +106,7 @@ public class SealedRefusalNamesItselfTests
         await using var server = new GameServerHost(RequireSealed());
         var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
-        using var client = new TcpClient();
+        using var client = new KcpTestClient();
         await client.ConnectAsync("127.0.0.1", port, cts.Token);
         await using var stream = client.GetStream();
 

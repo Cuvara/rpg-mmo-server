@@ -8,14 +8,13 @@ namespace GameServer.Net.Transport;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why this exists.</b> Encryption here is off by default twice — the transport defaults
-/// to TCP, which has no packet encryption at all, and <c>TRANSPORT_KEY</c> defaults to
-/// empty. Before this type, the server warned about exactly two of the four combinations:
-/// KCP without a key, and a key set on TCP. <b>The default configuration — TCP, no key, no
-/// encryption whatsoever — logged nothing.</b> A deployment that believed it was encrypted
-/// and was not had nothing anywhere telling it so, which is the silent-divergence class this
-/// repository keeps recording. Every combination is now reported, on every boot, and
-/// published on <c>/status</c> where it can be read without grepping logs.
+/// <b>Why this exists.</b> Packet encryption is off by default: <c>TRANSPORT_KEY</c> defaults
+/// to empty, and KCP without a key sends cleartext. When the server also had a TCP gameplay
+/// transport, the default configuration (TCP, no key) logged nothing at all, so a deployment
+/// that believed it was encrypted had nothing telling it otherwise — the silent-divergence
+/// class this repository keeps recording. Every configuration is now reported, on every
+/// boot, and published on <c>/status</c> where it can be read without grepping logs. KCP is
+/// now the only gameplay transport, so the remaining axis is whether the key is set.
 /// </para>
 /// <para>
 /// <b>Encrypted and authenticated are separate fields on purpose.</b> The KCP path is
@@ -40,7 +39,7 @@ public readonly struct TransportPosture
     /// <summary>Cipher name for the KCP packet-crypt path (<see cref="KcpCrypto"/>).</summary>
     public const string CipherAesCfb = "aes-256-cfb";
 
-    /// <summary>Normalised transport kind — <c>tcp</c> or <c>kcp</c>.</summary>
+    /// <summary>Normalised transport kind — always <c>kcp</c> on a running server.</summary>
     public string Transport { get; }
 
     /// <summary><c>TRANSPORT_KEY</c> holds a non-empty value, whether or not it is used.</summary>
@@ -90,16 +89,17 @@ public readonly struct TransportPosture
     /// <summary>
     /// Derive the posture from the configuration as given.
     /// </summary>
-    /// <param name="transport">Transport kind; normalised, so <c>""</c> means TCP.</param>
+    /// <param name="transport">Transport kind; normalised. Null or empty is reported as <c>kcp</c>,
+    /// the only gameplay transport.</param>
     /// <param name="transportKey">Value of <c>TRANSPORT_KEY</c>, possibly null or blank.</param>
     /// <param name="addr">Listen address, e.g. <c>:9000</c> or <c>127.0.0.1:9000</c>.</param>
     public static TransportPosture For(string? transport, string? transportKey, string? addr)
     {
         string kind = TransportKind.Normalize(transport);
+        if (kind.Length == 0) kind = TransportKind.Kcp;
         bool keyConfigured = !string.IsNullOrWhiteSpace(transportKey);
 
-        // Only the KCP path has a packet-crypt layer. TCP ignores the key entirely, which
-        // is the case worth naming rather than leaving to be discovered.
+        // Only the KCP path has a packet-crypt layer.
         bool encrypted = kind == TransportKind.Kcp && keyConfigured;
         string cipher = encrypted ? CipherAesCfb : CipherNone;
 
@@ -116,14 +116,9 @@ public readonly struct TransportPosture
             summary = $"ENCRYPTED ({CipherAesCfb}) but NOT AUTHENTICATED -- CFB with a CRC32 is not a MAC, " +
                       "so a modified packet is not detectable";
         }
-        else if (kind == TransportKind.Tcp && keyConfigured)
+        else if (kind != TransportKind.Kcp)
         {
-            summary = $"PLAINTEXT -- transport is TCP, which has no packet encryption; {TransportKind.KeyEnvVar} " +
-                      "is set but IGNORED";
-        }
-        else if (kind == TransportKind.Tcp)
-        {
-            summary = "PLAINTEXT -- transport is TCP, which has no packet encryption";
+            summary = $"PLAINTEXT -- transport \"{kind}\" is not a supported gameplay transport and has no packet encryption";
         }
         else
         {

@@ -163,10 +163,18 @@ bool migrateOnly = HasFlag(args, "--migrate-only") || Env(ServerEnv.MigrateOnly)
 // (single-process / test default), and the gateway will not find this server.
 string? redisAddr = GetArg(args, "--redis") ?? Env("REDIS_ADDR");
 string? redisPassword = GetArg(args, "--redis-password") ?? Env("REDIS_PASSWORD");
-// Realtime transport for the gameplay hop: "tcp" (default) or "kcp". Matches Go's
-// --transport flag; the value is also what gets advertised to clients through the
-// registry, so it must describe what the listener actually speaks.
-string transport = TransportKind.Normalize(GetArg(args, "--transport") ?? Env(ServerEnv.Transport));
+// Realtime transport for the gameplay hop. KCP over UDP is the only one: unset or "kcp"
+// is accepted, anything else (including "tcp") is fatal below, once a logger exists. The
+// value is also what gets advertised to clients through the registry.
+string? transportSetting = GetArg(args, "--transport") ?? Env(ServerEnv.Transport);
+bool transportOk = TransportKind.ResolveConfigured(transportSetting, out string transport, out string? transportError);
+// KCP flood-protection overrides. Unset keeps the compiled defaults
+// (KcpListenerOptions.Default); a set value that does not parse as a positive number is
+// fatal rather than silently ignored.
+string? kcpMaxSessionsRaw = Env(ServerEnv.KcpMaxSessions);
+string? kcpMaxSessionsPerIpRaw = Env(ServerEnv.KcpMaxSessionsPerIp);
+string? kcpNewSessionsPerSecRaw = Env(ServerEnv.KcpNewSessionsPerSec);
+string? kcpDatagramsPerSecRaw = Env(ServerEnv.KcpDatagramsPerSec);
 // Pre-shared AES-256 key for KCP. The SAME variable and the same derivation as the
 // Go side (backend/shared/transport): 64 hex chars are used verbatim, anything else
 // is stretched with HKDF-SHA256. Empty = plaintext.
@@ -222,6 +230,45 @@ using var loggerFactory = LoggerFactory.Create(builder =>
     builder.SetMinimumLevel(LogLevel.Information);
 });
 var logger = loggerFactory.CreateLogger("Program");
+
+// First check after the logger exists: a server that cannot speak the transport its
+// clients will dial must not get as far as migrations, registration or Agones Ready.
+if (!transportOk)
+{
+    logger.LogCritical("{Error}", transportError);
+    return 2;
+}
+
+static bool TryParseOptionalPositive(string? raw, out double? value)
+{
+    value = null;
+    if (raw == null) return true;
+    if (!double.TryParse(raw, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out double v) || v <= 0 || double.IsNaN(v) || double.IsInfinity(v))
+        return false;
+    value = v;
+    return true;
+}
+
+KcpListenerOptions kcpLimits;
+{
+    if (!TryParseOptionalPositive(kcpMaxSessionsRaw, out double? maxSessions) ||
+        !TryParseOptionalPositive(kcpMaxSessionsPerIpRaw, out double? maxPerIp) ||
+        !TryParseOptionalPositive(kcpNewSessionsPerSecRaw, out double? newPerSec) ||
+        !TryParseOptionalPositive(kcpDatagramsPerSecRaw, out double? dgPerSec) ||
+        !KcpListenerOptions.TryFromOverrides(
+            maxSessions is { } ms ? (int)Math.Min(ms, int.MaxValue) : null,
+            maxPerIp is { } mp ? (int)Math.Min(mp, int.MaxValue) : null,
+            newPerSec, dgPerSec, out kcpLimits, out string? kcpError))
+    {
+        logger.LogCritical(
+            "invalid KCP limit configuration ({MaxSessions}={V1}, {PerIp}={V2}, {NewRate}={V3}, {DgRate}={V4}): " +
+            "each must be a positive number when set",
+            ServerEnv.KcpMaxSessions, kcpMaxSessionsRaw, ServerEnv.KcpMaxSessionsPerIp, kcpMaxSessionsPerIpRaw,
+            ServerEnv.KcpNewSessionsPerSec, kcpNewSessionsPerSecRaw, ServerEnv.KcpDatagramsPerSec, kcpDatagramsPerSecRaw);
+        return 2;
+    }
+}
 
 if (!GameServer.Server.AoiSettings.TryCreate(
         aoiRadiusRaw, mapWidth, mapHeight,
@@ -347,10 +394,9 @@ if (GameServerHost.IsDungeonMode(mode))
         joinDeadline.TotalSeconds);
 }
 logger.LogInformation("  Address:   {Addr}", addr);
-logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
-    transport == TransportKind.Kcp
-        ? string.IsNullOrWhiteSpace(transportKey) ? " (UNENCRYPTED)" : " (AES-256)"
-        : "");
+logger.LogInformation("  Transport: {Transport}/udp{Encryption}", transport,
+    string.IsNullOrWhiteSpace(transportKey) ? " (UNENCRYPTED)" : " (AES-256)");
+logger.LogInformation("  KCP limits: {Limits}", kcpLimits);
 logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
@@ -508,7 +554,7 @@ logger.LogInformation("  Kicks:     {Kicks}",
         : $"consuming {RedisKickConsumer.StreamKey} as group {RedisKickConsumer.GroupPrefix}{serverId}");
 // A HOSTLESS advertised address (empty, 0.0.0.0, :: or [::] as the host part) is
 // not dialable by a client: the gateway hands the value back verbatim, so only
-// clients that rewrite it to loopback themselves will connect (a C# TcpClient
+// clients that rewrite it to loopback themselves will connect (a C# socket dial
 // throws outright). Two shapes reach here and both deserve a word, but they are
 // not equally wrong:
 //   - unset, so publicAddr fell back to the listen address. Correct for host-mode
@@ -620,20 +666,9 @@ var sealedRequirement = sealedMode == "require"
     ? GameServer.Net.Sealed.SealedRequirement.Required
     : GameServer.Net.Sealed.SealedRequirement.Disabled;
 
-if (!TransportKind.IsValid(transport))
-{
-    logger.LogCritical("unknown transport {Transport} (want {Tcp} or {Kcp})",
-        transport, TransportKind.Tcp, TransportKind.Kcp);
-    return 2;
-}
-
-// Transport confidentiality posture, reported on EVERY boot rather than only on the two
-// combinations that used to warn.
-//
-// What this replaces logged nothing at all for the default configuration -- TCP with no
-// key, i.e. no encryption whatsoever -- because it only warned about KCP-without-a-key and
-// a key-set-on-TCP. The configuration most likely to be deployed by accident was the one
-// configuration that said nothing, which is exactly backwards. See TransportPosture.
+// Transport confidentiality posture, reported on EVERY boot. The configuration most likely
+// to be deployed by accident (no TRANSPORT_KEY, so KCP in cleartext) must not be the one
+// that says nothing. See TransportPosture.
 var transportPosture = TransportPosture.For(transport, transportKey, addr);
 
 if (transportPosture.Encrypted)
@@ -668,7 +703,7 @@ else
 {
     logger.LogWarning(
         "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr}). " +
-        "Set {KeyVar} (32-byte hex) and --transport kcp, or terminate TLS in front of this listener.",
+        "Set {KeyVar} (32-byte hex), or require the sealed session (GAMESERVER_SEALED=require).",
         transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
         transportPosture.Encrypted, transportPosture.Authenticated, addr, TransportKind.KeyEnvVar);
 }
@@ -974,6 +1009,7 @@ var options = new ServerOptions
     ServerAddr = addr,
     Transport = transport,
     TransportKey = transportKey,
+    KcpLimits = kcpLimits,
     ServerId = serverId,
     MapId = mapId,
     Mode = mode,

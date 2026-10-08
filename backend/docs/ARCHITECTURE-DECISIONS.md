@@ -882,12 +882,15 @@ frame would turn the limiter into an amplifier.
 
 ### Consequences
 
-- **KCP is not reachable end to end today.** `gameserver-dotnet` has no KCP
-  implementation at all (C# side is TCP only), so `--transport=kcp` currently
-  only applies to hop 1 (client→gateway). Transport encryption therefore
-  protects the auth/redirect hop, and the gameplay hop stays TCP-plaintext until
-  the C# side gains both KCP and a matching key. This is the single largest
-  remaining hole and it is **not** closed by this ADR.
+- ~~**KCP is not reachable end to end today.**~~ **Stale; superseded by ADR-32.**
+  When this was written `gameserver-dotnet` had no KCP implementation and
+  `--transport=kcp` applied only to the client→gateway hop. Since then the C#
+  server gained KCP with kcp-go-compatible `TRANSPORT_KEY` crypto
+  (`GameServer/Net/Transport/KcpCrypto.cs`), and ADR-32 makes KCP/UDP the
+  **only** gameplay transport: the game-server hop is always KCP, while the
+  gateway hop is always TCP (optionally TLS, ADR-23) and no longer uses
+  `TRANSPORT_KEY`. Authenticated confidentiality on the gameplay hop is the
+  sealed session (ADR-22/25), not the PSK.
 - Encryption fails closed and *silently*: a peer with the wrong key produces
   datagrams that decrypt to noise and are dropped as malformed segments. There
   is no error, only a connection that never establishes. Operators rolling
@@ -905,8 +908,8 @@ frame would turn the limiter into an amplifier.
 - **L** — Per-session transport keys: mint a key with the join token, return it
   in `EnterWorldResponse`, key the game server's KCP session from it. Requires
   Unity-client work.
-- **M** — KCP + `TRANSPORT_KEY` in `gameserver-dotnet`, so hop 2 can be
-  encrypted at all. Blocking the item above.
+- ~~**M** — KCP + `TRANSPORT_KEY` in `gameserver-dotnet`, so hop 2 can be
+  encrypted at all.~~ Done; KCP is now the only gameplay transport (ADR-32).
 - **M** — `JOIN_TOKEN_SECRET` support in `gameserver-dotnet` (see the gateway
   CHANGELOG for the exact call site); until then the split cannot be turned on
   in production without breaking joins.
@@ -2356,7 +2359,8 @@ blocks the connection's read loop, which is also what records `MsgPong`.
   (StatefulSets, ConfigMaps, registry, RBAC) are untouched and still stand between this and a
   real cluster.
 - **`--allocator-transport` is inert**, since the allocation response is now used only for its
-  `ServerID`.
+  `ServerID`. (Removed altogether by ADR-32, with `ALLOCATOR_TRANSPORT`: the transport is
+  always `kcp`.)
 
 **Operational facts worth not re-deriving.** Pods reach the compose data tier as
 `host.k3d.internal`. The gateway container reaches the API server by joining network
@@ -2858,7 +2862,7 @@ That is real, it is symmetric across the Go and C# implementations, and it shoul
 
 ### The four things it is not
 
-1. **It is off by default, twice over.** The transport default is `tcp`, not `kcp` (`GameServer/Program.cs`, `--transport`), and TCP has no encryption path at all. Independently, the key variable defaults to `""`, and empty means plaintext. So the shipped default configuration carries gameplay traffic in the clear on both counts, and nothing reports that it is doing so.
+1. **It is off by default, twice over.** *(Half superseded by ADR-32: the gameplay transport is now always KCP, so the first half below no longer holds; the key still defaults to empty.)* The transport default is `tcp`, not `kcp` (`GameServer/Program.cs`, `--transport`), and TCP has no encryption path at all. Independently, the key variable defaults to `""`, and empty means plaintext. So the shipped default configuration carries gameplay traffic in the clear on both counts, and nothing reports that it is doing so.
 2. **A pre-shared key is not a session key.** Every client shares one static key, so it is a secret that ships inside the game binary. It resists a passive observer on the network path. It does not resist a *player*, who has the key by construction. There is no per-session key exchange, no forward secrecy, and no rotation story: changing the key is a simultaneous redeploy of every server and every client.
 3. **There is no negotiation and no key id.** The class says so itself. That is a deliberate and defensible choice — it removes the downgrade attack that negotiation invites — but it means a key rotation is a hard cutover, not a rollout, and it interacts directly with the protocol-versioning gap being closed separately.
 4. **CFB with a CRC32 is confidentiality, not authentication.** CFB is malleable and CRC32 is linear. The construction is inherited from kcp-go and compatibility with it is the reason to keep it; it is not a modern AEAD and should not be described as one. Anyone reasoning about an *active* attacker, as opposed to an eavesdropper, must not treat the CRC as a MAC.
@@ -3713,7 +3717,7 @@ description is "open-world maps + instanced dungeons"; half of it has no plumbin
 | 5 | Events | Redis Streams with ACK only; raw pub/sub reserved and currently unused |
 | 6 | Crash recovery | ≤30s loss window accepted for gameplay state, conditional on economy going through Nakama transactionally |
 | 7 | CCU/cost | All figures are unbenchmarked estimates; benchmark plan anchored to the 66ms tick budget |
-| 8 | Realtime security | Opt-in KCP PSK encryption + **per-session keys implemented 2026-09-04**: gateway mints 32-byte session key via `transfer.GenerateSessionKey()`, returns it in `EnterWorldResponse.SessionKey` for KCP sessions; C# `KcpCrypto.TryCreateFromRawKey()` accepts raw keys. `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token` |
+| 8 | Realtime security | Optional KCP PSK datagram encryption (`TRANSPORT_KEY`, kcp-go-compatible AES-256; KCP is the only gameplay transport since ADR-32). Per-session keying is **not** a gateway-minted key field: the sealed session derives its key on the game server (`GameServer/Net/Security/SessionKey.cs`, from `JOIN_TOKEN_SECRET` and the join token's jti; target model ADR-22/25). An earlier revision of this row named `transfer.GenerateSessionKey()`, `EnterWorldResponse.SessionKey` and `KcpCrypto.TryCreateFromRawKey()` — none of these exist. `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token` |
 | 9 | Wire encoding | Protobuf from one committed schema; JSON kept during migration and distinguished by the first body byte, so components upgrade in any order |
 | 10 | Shared simulation | Arch replaces `GameWorld` on the server; `Shared.GameLogic` stays ECS-free and ships to Unity as multi-targeted **source**; golden vectors run on both sides in CI; only IEEE-exact float ops permitted in shared code |
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
@@ -3726,7 +3730,7 @@ description is "open-world maps + instanced dungeons"; half of it has no plumbin
 | 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem. **Amended 2026-09-13:** the unlock arrived as a *second fleet* rather than as either mechanism — the dungeon fleet pins no map id, so it carries the project's first `FleetAutoscaler` (Buffer 2/2-6, 30s). The map fleet's prohibition is unchanged and the check was not loosened to allow it; it was widened to sweep **every** fleet in the target namespaces instead of only the one a target names. `maxReplicas` is a bound on ADR-26's measured instance leak, not a capacity figure |
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
 | 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
-| 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
+| 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default** — the key variable defaults to empty, which means plaintext (the other half of the original finding, a `tcp` transport default, is gone: ADR-32 makes KCP the only gameplay transport) — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
 | 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work; and measured on .NET 10, **X25519 is absent there too** while ChaCha20-Poly1305 and HKDF are built in — so **X25519 must be vendored on two runtimes**, ideally by one pure-C# library serving both. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Library settled: BouncyCastle 2.7.0** — the only candidate supplying X25519; RFC vectors pass in a built IL2CPP player at **both Minimal and High stripping**, at a cost of 4.7 MB and 2 350 types. **Replay: strict counter, no sliding window** — zero inversions in 22 374 frames across both transports under hostile `tc netem`, and chosen because a wrong counter fails loudly while a wrong window accepts a replay silently; three conditions attach, including bounding the forward jump, since the ordering guarantee is inherited from a hand-ported KCP rather than owned. **Does not ship until the gateway hop is confidential** |
 | 23 | Gateway-hop confidentiality | **TLS terminated in the gateway process**, behind `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY`, **defaulting off** and pinned explicitly at every deploy site. A second sealed handshake for this hop is **rejected**: the Go server half of the sealed protocol does not exist, the hop has no `jti` to anchor a transcript, and an unauthenticated exchange would make `BindingVerified` a field that is always false. Terminating **in the process, not at an edge**, because an edge terminator is confidential only to the edge and buys nothing on the single-node dev/staging boxes. **The measurement that motivated this was incomplete**: the auth token is minted over a plaintext HTTP hop to Nakama that also carries a 2-hour reusable Nakama session token, so the meta hop is the higher-value half and is NOT fixed here. No negotiation, no plaintext fallback. The client half (TLS on the gateway connection, `https://` for Nakama) is unwritten, so the flag is off everywhere |
 | 24 | Meta-hop (Nakama) confidentiality | **Nakama terminates TLS itself** (`--socket.ssl_certificate`), behind `NAKAMA_TLS_CERT`/`NAKAMA_TLS_KEY`, **defaulting off** and pinned at every deploy path; `NAKAMA_URL` moves to `https://` in the same change because the **C# game server is a second consumer of this hop** (`NakamaClient.cs`, compose only — absent under Agones). Measured: the flag covers port 7350 **including the `/ws` realtime socket**, TLS-only, and does **NOT** cover the console (7351) or metrics (9100), both published on `0.0.0.0` in compose; upstream explicitly warns against direct SSL termination and we take it anyway because an edge terminator buys nothing on a single-node box. **The larger finding is not confidentiality**: both Nakama static keys sit at their published defaults and both authenticate — `defaulthttpkey` reaches the server-only reward and leaderboard RPCs — and `cd.yml` never wrote `NAKAMA_HTTP_KEY` at all, so every deployed compose environment ran the default. CD now fails on a missing or default key. **No `InsecureSkipVerify` anywhere, including dev**: dev runs the flag off rather than on with a disabled check. Credentials in URLs (the `/ws` token, `http_key`) survive TLS into access logs and are an upstream API shape we cannot fix |
@@ -4200,4 +4204,89 @@ nothing of value (items, equipment) is persisted at all.
 **Consequences.** One account can hold several characters, and items survive a crash.
 Character creation rules (slot count, name rules) are content limits with placeholder values
 until design supplies them.
+
+---
+
+## ADR-32 — Realtime gameplay transport is KCP/UDP only
+
+**Status:** accepted 2026-10-08 (user decision; the project is pre-release, so there is no
+TCP fallback and no rollback path to TCP). **Supersedes** every statement in this document
+that gameplay runs over TCP by default with KCP as an opt-in: ADR-8 consequence 1, ADR-16's
+`--allocator-transport` note, ADR-21 item 1, and the transport rows of the root `CLAUDE.md`
+extension-seams table. Does not change ADR-3 (the gateway is a redirector), ADR-22/25 (the
+sealed session) or ADR-23 (gateway-hop TLS).
+
+**Context.** Two transports existed for the game-server hop: TCP (the default) and KCP over
+UDP (opt-in via `--transport=kcp` / `GAMESERVER_TRANSPORT`, announced by the gateway through
+`ALLOCATOR_TRANSPORT`). Every deploy path ran TCP, so the KCP path was the less-exercised one
+while being the one the design targets for mobile networks (head-of-line blocking under loss).
+Keeping both meant two code paths, a registry `transport` field whose empty value silently
+meant TCP, and a deploy-time coupling — the Agones port `protocol:` and the transport env had
+to be flipped together — that no test could see.
+
+**Decision.**
+
+1. **Hops.**
+
+   | Hop | Transport |
+   |---|---|
+   | Client -> Nakama (meta: auth, economy, social) | HTTP/RPC (optionally TLS, ADR-24). Nakama's WebSocket is not used for gameplay |
+   | Client -> Gateway (auth + redirect only, ADR-3) | **TCP**, optionally TLS (ADR-23). Unchanged |
+   | Client -> Game server (realtime gameplay) | **KCP over UDP only** |
+   | Client -> content (`/content`, ADR-19) | HTTP |
+
+2. **One gameplay transport value.** `"kcp"` travels in the Redis registry hash
+   `servers:id:{id}` field `transport` and in `EnterWorldResponse.transport` (field 3,
+   unchanged). An empty, `tcp` or unknown value on a gameplay hop is a **hard error**, never a
+   default: the gateway refuses to assign such a server (no join token is minted), and the
+   client fails the connection naming the value.
+3. **Switches removed.** `GATEWAY_TRANSPORT` / `--transport` (gateway) and
+   `ALLOCATOR_TRANSPORT` / `--allocator-transport` are removed; the gateway always listens TCP,
+   exits if `GATEWAY_TRANSPORT` is set to anything other than empty or `tcp`, and only WARNs on
+   a leftover `ALLOCATOR_TRANSPORT`. The game server always listens KCP;
+   `GAMESERVER_TRANSPORT` unset or `kcp` is accepted, anything else is fatal at startup.
+4. **Wire profile.** Unchanged application framing (4-byte big-endian length + Protobuf,
+   legacy JSON told apart by the first byte) carried in a KCP **stream**-mode session: nodelay
+   1/10/2/1, window 128/128, MTU 1350, no FEC. The first frame is `MsgJoinToken`; the sealed
+   handshake (ADR-22/25) follows when `GAMESERVER_SEALED=require`. KCP has no FIN, so a session
+   with no inbound datagram for 60 s is closed (idle / dead-link sweep), and the listener caps
+   sessions, sessions per IP, new-session rate and per-session datagram rate
+   (`GAMESERVER_KCP_*`).
+5. **Datagram key.** `TRANSPORT_KEY` stays an optional pre-shared AES-256 key (kcp-go
+   compatible, 32-byte hex). Empty = plaintext datagrams plus a startup WARN, acceptable for
+   dev only. Clients receive it as `-cuvara-transport-key <hex>` / `CUVARA_TRANSPORT_KEY`; Go
+   tools (smoketest, loadtest, verify probe, integration tests) read env `TRANSPORT_KEY`.
+   ADR-21's assessment of what the PSK is and is not still holds; authenticated
+   confidentiality is the sealed session, not this key.
+6. **Ports.** The game port (default 9000, published 9200 in compose) is **UDP**; the metrics /
+   `/healthz` / `/status` / `/content` HTTP port stays TCP; the gateway client port 8000 stays
+   TCP. Docker publishes `host:9000/udp`; Agones/k8s ports named `game` declare
+   `protocol: UDP`; k3d publishes the Agones range with `/udp`; VPS firewalls open the game
+   port as UDP only.
+
+**Consequences.**
+
+- **Liveness checks change shape.** A TCP connect to the game port is now always refused, and
+  a UDP "probe" proves nothing (no handshake), so shell checks use the game server's HTTP
+  `/healthz` for liveness and the registry `transport=kcp` for configuration. Reachability of
+  the advertised UDP address is proven only by a real KCP join: the smoketest
+  (`flow.smoke` in `deploy/k8s/verify`) and the verify probe.
+- **Failures become timeouts.** UDP blocked by a firewall, a port published as TCP, a wrong
+  advertised host, or a `TRANSPORT_KEY` mismatch all present the same way: `EnterWorld`
+  succeeds and the join times out. `backend/docs/NETWORKING.md` has the troubleshooting table.
+- **WebGL cannot play.** Browsers cannot open raw UDP sockets. A WebGL build can reach Nakama
+  and the gateway but not a game server; supporting it needs a separate relay transport
+  (e.g. WebSocket/WebTransport) and a new decision.
+- **Local development over WSL2.** WSL2's NAT-mode localhost forwarding is a TCP mechanism; a
+  Windows client against a stack inside WSL2 may need mirrored networking or the WSL VM's
+  address as the advertised host.
+- **Existing clusters must be re-mapped.** A k3d cluster created with the TCP-only
+  `7000-7100` mapping registers healthy servers that no client can reach; `dev-up.sh` stops
+  on it.
+
+**Follow-up work.**
+
+- **S** — Re-measure the k3d serverlb latency figure in `deploy/docs/K3S.md` (it was taken
+  through the TCP proxy).
+- **M** — Decide whether WebGL is a supported gameplay target; if so, a relay transport ADR.
 

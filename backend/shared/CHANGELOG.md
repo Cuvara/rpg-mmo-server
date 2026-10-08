@@ -5,6 +5,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Realtime gameplay is KCP/UDP only (`transport`).** New `transport.Gameplay` (`"kcp"`),
+  `ValidateGameplay` and `DialGameplay`: the gameplay hop accepts `kcp` and nothing else, and
+  `DialGameplay` refuses any other advertised transport before a packet is sent — there is no
+  fallback to TCP. `KindTCP` remains for the client<->gateway hop only.
+- **The empty transport no longer means TCP.** `Normalize("")` returns `""` and `Validate("")`
+  is an error; a registry entry or `EnterWorldResponse` without a transport is a failed join.
+  `Kinds()` now lists `kcp` first.
+- `wire.proto` / `storage.ServerInfo` / `messages.EnterWorldResponse`: the `transport` field is
+  documented as always `"kcp"` (comments only; generated code regenerated, no wire change).
+
+### Removed
+- `config.Config.GatewayTransport` / `GameServerTransport` (`GATEWAY_TRANSPORT`,
+  `GAMESERVER_TRANSPORT` defaults of `"tcp"`). Neither hop has a transport choice any more.
+
 ### Fixed
 - **Successful handshakes echo the negotiated protocol version** (the client's own inside
   the supported window [2, 3], otherwise the server's). Clients built at protocol 2 accept

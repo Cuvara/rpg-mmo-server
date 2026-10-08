@@ -120,7 +120,7 @@ public class AgonesLifecycleTests
 
             // A player joins: the Allocate hook lives on this path, so this is what proves
             // the disabled build does not reach for the sidecar mid-game either.
-            using var client = new TcpClient();
+            using var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, port);
             await using var stream = client.GetStream();
             await JoinAsync(stream, "disabled-user", runCts.Token);
@@ -161,7 +161,7 @@ public class AgonesLifecycleTests
         {
             Assert.Equal(0, sdk.AllocateCalls);
 
-            using var first = new TcpClient();
+            using var first = new KcpTestClient();
             await ConnectWithRetryAsync(first, port);
             await using var firstStream = first.GetStream();
             await JoinAsync(firstStream, "alloc-user-1", runCts.Token);
@@ -169,7 +169,7 @@ public class AgonesLifecycleTests
             await sdk.FirstAllocate.Task.WaitAsync(TimeSpan.FromSeconds(20));
             Assert.Equal(1, sdk.AllocateCalls);
 
-            using var second = new TcpClient();
+            using var second = new KcpTestClient();
             await ConnectWithRetryAsync(second, port);
             await using var secondStream = second.GetStream();
             await JoinAsync(secondStream, "alloc-user-2", runCts.Token);
@@ -206,7 +206,7 @@ public class AgonesLifecycleTests
             ServerId = ServerId,
             MapId = "map_agones",
             PublicAddr = "203.0.113.9:9200",
-            Transport = "tcp",
+            Transport = "kcp",
             Capacity = 8,
             // Long TTL: the heartbeat is not what is under test, and a short one would
             // interleave writes with the ordering assertions.
@@ -332,7 +332,7 @@ public class AgonesLifecycleTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private static async Task JoinAsync(NetworkStream stream, string userId, CancellationToken ct)
+    private static async Task JoinAsync(Stream stream, string userId, CancellationToken ct)
     {
         var env = WireProtocol.NewEnvelope(
             MsgType.JoinToken,
@@ -347,7 +347,7 @@ public class AgonesLifecycleTests
         Assert.True(resp.Ok, resp.Error);
     }
 
-    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    private static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int attempt = 0; attempt < 50; attempt++)
         {

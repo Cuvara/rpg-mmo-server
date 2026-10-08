@@ -5,6 +5,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Every game-server connection in the suite is KCP/UDP.** `MockClient` is split by hop:
+  `NewGatewayClient` (TCP) and `NewGameClient` / `NewGameClientFor` (KCP via
+  `transport.DialGameplay`, `TRANSPORT_KEY` from the environment). `NewGameClientFor` dials the
+  transport the gateway advertised, so every gateway flow test also asserts the gateway handed
+  out `kcp`. `NewMockClient` / `NewMockClientTransport` are removed; there is no TCP game client.
+- The sealed-session client and the self-registration flow dial KCP (the latter reserves a UDP
+  port for the advertised address).
+- `hop_confidentiality_tap_test.go` taps the gameplay hop with the new `datagramTap`
+  (`datagram_tap_test.go`): a UDP relay that reassembles the KCP PUSH stream per direction, so
+  the same credential scan runs over the gameplay hop as over the TCP gateway hop.
+- Pre-registered registry entries carry `Transport: "kcp"` (the gateway refuses entries without it).
+- **New `kcp_gameplay_e2e_test.go`**: the gateway advertises `kcp` + the UDP endpoint and a client
+  joins on it; the gateway refuses a `tcp`/empty registry entry with `server_transport_unsupported`;
+  hostile datagrams (empty, undersized, 9000-byte, junk, unknown cmd) from 8 source ports do not
+  disturb a following join + input + ack; a game server restarted on the same UDP port accepts a
+  fresh join.
+- **"Connection closed" is asserted as silence, not EOF.** KCP has no FIN/RST, so after the
+  explicit refusal/kick/disconnect frame (still required) `waitForClose` and the sealed-session
+  refusal tests assert that no further frame arrives within the window instead of a socket EOF.
+
 ### Added
 - **`core_v3_e2e_test.go`** — wire protocol 3 against the real C# game server, both encodings:
   `TestCoreV3_CommandInventory` (a protocol 3 client's InventoryRequest gets exactly one

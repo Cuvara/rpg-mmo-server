@@ -143,7 +143,7 @@ public sealed class TieringRateMeasurement
         var options = new ServerOptions
         {
             ServerAddr = ":0", ServerId = ServerId, MapId = "map_tiermeasure", Mode = "map",
-            Transport = TransportKind.Tcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
+            Transport = TransportKind.Kcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
             Capacity = 32, JwtSecret = JwtSecret, JoinTokenSecret = JwtSecret,
             SaveInterval = TimeSpan.FromHours(1), PlayerStore = new MemoryPlayerStore(),
             Importance = ImportanceSettings.Balanced,
@@ -156,7 +156,7 @@ public sealed class TieringRateMeasurement
         var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
         var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
-        var sockets = new List<TcpClient>();
+        var sockets = new List<KcpTestClient>();
         var moverTasks = new List<Task>();
         var moverIds = new HashSet<string>();
 
@@ -175,7 +175,7 @@ public sealed class TieringRateMeasurement
             {
                 string id = $"mv{i}-{Guid.NewGuid():N}"[..14];
                 moverIds.Add(id);
-                var c = new TcpClient { NoDelay = true };
+                var c = new KcpTestClient();
                 sockets.Add(c);
                 await ConnectWithRetryAsync(c, port);
                 var s = c.GetStream();
@@ -185,7 +185,7 @@ public sealed class TieringRateMeasurement
             }
 
             string idlerId = $"id-{Guid.NewGuid():N}"[..14];
-            var idler = new TcpClient { NoDelay = true };
+            var idler = new KcpTestClient();
             sockets.Add(idler);
             await ConnectWithRetryAsync(idler, port);
             await JoinAsync(idler.GetStream(), idlerId, WireEncoding.Json, cts.Token);
@@ -193,7 +193,7 @@ public sealed class TieringRateMeasurement
             // Protobuf, because the byte budget only runs on interned connections — a JSON
             // observer would make every budget arm identical to the unbudgeted one.
             string observerId = $"ob-{Guid.NewGuid():N}"[..14];
-            using var observer = new TcpClient { NoDelay = true };
+            using var observer = new KcpTestClient();
             await ConnectWithRetryAsync(observer, proxy.Port);
             var counting = new CountingStream(observer.GetStream());
             await JoinAsync(counting, observerId, WireEncoding.Proto, cts.Token);
@@ -294,7 +294,7 @@ public sealed class TieringRateMeasurement
     /// Walks in a circle. Position change alone does not raise the importance score, so a
     /// walking non-combat player lands in the schedule's bottom band — the deferred case.
     /// </summary>
-    private static async Task MoveForeverAsync(NetworkStream stream, int phase, CancellationToken ct)
+    private static async Task MoveForeverAsync(Stream stream, int phase, CancellationToken ct)
     {
         ulong t = 0;
         try
@@ -331,7 +331,7 @@ public sealed class TieringRateMeasurement
         await stream.FlushAsync(ct);
     }
 
-    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    private static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int attempt = 0; attempt < 50; attempt++)
         {

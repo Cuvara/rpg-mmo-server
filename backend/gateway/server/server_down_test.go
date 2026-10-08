@@ -21,7 +21,7 @@ func newServerDownFixture(t *testing.T) (*Gateway, *registry.RegistryService, st
 	sessions := session.NewSessionManager(storage.NewMemorySessionStore())
 	gw := New(sessions, reg, testSecret, logger.New("error"))
 
-	info := storage.ServerInfo{
+	info := storage.ServerInfo{Transport: "kcp",
 		ServerID: "srv1", MapID: "map_forest", Addr: "10.0.0.1:9000", Capacity: 100,
 	}
 	if err := reg.RegisterServer(context.Background(), info); err != nil {

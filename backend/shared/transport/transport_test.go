@@ -78,7 +78,7 @@ func TestNormalize(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"empty means tcp", "", KindTCP},
+		{"empty stays empty, never tcp", "", ""},
 		{"tcp", "tcp", KindTCP},
 		{"kcp", "kcp", KindKCP},
 		{"uppercase", "KCP", KindKCP},
@@ -100,7 +100,7 @@ func TestValidate(t *testing.T) {
 		in      string
 		wantErr bool
 	}{
-		{"empty is tcp", "", false},
+		{"empty is invalid", "", true},
 		{"tcp", "tcp", false},
 		{"kcp", "kcp", false},
 		{"uppercase kcp", "KCP", false},
@@ -116,10 +116,85 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// TestValidateGameplay pins the KCP-only rule: the gameplay hop accepts kcp and
+// nothing else. The empty string used to mean TCP; it is now an error, so a
+// registry entry or EnterWorldResponse without a transport fails the join
+// instead of silently selecting another protocol.
+func TestValidateGameplay(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{"kcp", "kcp", false},
+		{"uppercase kcp", " KCP ", false},
+		{"empty is refused", "", true},
+		{"tcp is refused", "tcp", true},
+		{"unknown is refused", "quic", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateGameplay(tt.in)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateGameplay(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
+			}
+			if err != nil && !errors.Is(err, ErrNotGameplayTransport) {
+				t.Errorf("ValidateGameplay(%q) error %v does not wrap ErrNotGameplayTransport", tt.in, err)
+			}
+		})
+	}
+}
+
+// TestDialGameplayRefusesNonKCPBeforeDialing proves there is no fallback: a
+// tcp advertisement is refused even when a TCP listener is answering at addr.
+func TestDialGameplayRefusesNonKCPBeforeDialing(t *testing.T) {
+	ln, err := Listen(KindTCP, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	defer ln.Close()
+
+	for _, advertised := range []string{"", "tcp", "TCP"} {
+		conn, err := DialGameplay(advertised, ln.Addr().String(), time.Second)
+		if err == nil {
+			conn.Close()
+			t.Fatalf("DialGameplay(%q) succeeded against a TCP listener; want refusal", advertised)
+		}
+		if !errors.Is(err, ErrNotGameplayTransport) {
+			t.Errorf("DialGameplay(%q) error = %v, want ErrNotGameplayTransport", advertised, err)
+		}
+	}
+}
+
+// TestDialGameplayCarriesFramesOverKCP proves the gameplay dial is a working KCP
+// session carrying the unchanged length-prefixed codec.
+func TestDialGameplayCarriesFramesOverKCP(t *testing.T) {
+	addr := echoServer(t, KindKCP)
+	conn, err := DialGameplay("kcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("DialGameplay: %v", err)
+	}
+	defer conn.Close()
+	sent, err := messages.NewEnvelope(messages.MsgAuth, messages.AuthRequest{Token: "over-kcp"})
+	if err != nil {
+		t.Fatalf("NewEnvelope: %v", err)
+	}
+	got, err := roundTrip(conn, sent)
+	if err != nil {
+		t.Fatalf("round trip over kcp: %v", err)
+	}
+	if got.Type != messages.MsgAuth {
+		t.Errorf("echoed type = %d, want %d", got.Type, messages.MsgAuth)
+	}
+}
+
 func TestKinds(t *testing.T) {
 	got := Kinds()
-	if len(got) != 2 || got[0] != KindTCP || got[1] != KindKCP {
-		t.Errorf("Kinds() = %v, want [tcp kcp]", got)
+	if len(got) != 2 || got[0] != KindKCP || got[1] != KindTCP {
+		t.Errorf("Kinds() = %v, want [kcp tcp]", got)
+	}
+	if Gameplay != KindKCP {
+		t.Errorf("Gameplay = %q, want %q", Gameplay, KindKCP)
 	}
 }
 

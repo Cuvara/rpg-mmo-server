@@ -11,10 +11,6 @@ type Config struct {
 	GatewayAddr    string
 	GameServerAddr string
 	TickRate       int
-	// GatewayTransport / GameServerTransport select the realtime transport
-	// ("tcp" or "kcp") each service listens with. See shared/transport.
-	GatewayTransport    string
-	GameServerTransport string
 
 	// Auth
 	//
@@ -78,9 +74,6 @@ func Load() Config {
 		GatewayAddr:    envOrDefault("GATEWAY_ADDR", ":8000"),
 		GameServerAddr: envOrDefault("GAMESERVER_ADDR", ":9000"),
 		TickRate:       envOrDefaultInt("TICK_RATE", 10),
-
-		GatewayTransport:    envOrDefault("GATEWAY_TRANSPORT", "tcp"),
-		GameServerTransport: envOrDefault("GAMESERVER_TRANSPORT", "tcp"),
 
 		JWTSecret:       envOrDefault("JWT_SECRET", "dev-secret-change-me"),
 		JoinTokenSecret: envOrDefault("JOIN_TOKEN_SECRET", ""),

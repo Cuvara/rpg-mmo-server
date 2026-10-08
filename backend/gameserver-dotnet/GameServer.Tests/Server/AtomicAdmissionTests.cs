@@ -4,6 +4,7 @@ using GameServer.Persistence;
 using RpgMmo.Wire.V1;
 using Shared.GameLogic.Components;
 using Xunit;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -44,7 +45,7 @@ public class AtomicAdmissionTests
 
         // Connect everyone first so the joins themselves land as close together as the
         // loopback allows, then fire them all at once.
-        var clients = new List<TcpClient>();
+        var clients = new List<KcpTestClient>();
         try
         {
             for (int i = 0; i < joiners; i++) clients.Add(await h.ConnectAsync());

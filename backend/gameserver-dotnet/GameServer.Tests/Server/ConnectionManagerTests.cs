@@ -1,9 +1,8 @@
 using System.Collections.Concurrent;
-using System.Net;
-using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using GameServer.Net;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -13,32 +12,26 @@ public class ConnectionManagerTests : IDisposable
     /// Concurrent, because <see cref="CreateFakeConnection"/> is called from four threads at
     /// once by <see cref="ConcurrentAccess_NoDeadlock"/>. This was a plain <c>List</c>: an
     /// unsynchronised <c>Add</c> from four threads can corrupt the backing array, throw, or
-    /// silently drop entries — and a dropped entry is a socket triple <see cref="Dispose"/>
+    /// silently drop entries — and a dropped entry is a transport pair <see cref="Dispose"/>
     /// never closes, which leaks into whatever test runs next.
     /// </summary>
-    private readonly ConcurrentBag<(TcpListener listener, TcpClient client, TcpClient serverSide)> _tcpPairs = new();
+    private readonly ConcurrentBag<KcpPair> _pairs = new();
 
     /// <summary>
-    /// Creates a real Connection backed by a loopback TCP pair.
+    /// Creates a real Connection backed by a loopback KCP pair.
     /// </summary>
     private Connection CreateFakeConnection(string userId)
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var client = new TcpClient();
-        client.Connect((IPEndPoint)listener.LocalEndpoint);
-        var serverSide = listener.AcceptTcpClient();
-        _tcpPairs.Add((listener, client, serverSide));
-        return new Connection(userId, serverSide, NullLogger.Instance);
+        var pair = KcpPair.Create();
+        _pairs.Add(pair);
+        return new Connection(userId, pair.ServerSide, NullLogger.Instance);
     }
 
     public void Dispose()
     {
-        foreach (var (listener, client, serverSide) in _tcpPairs)
+        foreach (var pair in _pairs)
         {
-            try { client.Close(); } catch { }
-            try { serverSide.Close(); } catch { }
-            try { listener.Stop(); } catch { }
+            try { pair.Dispose(); } catch { }
         }
     }
 

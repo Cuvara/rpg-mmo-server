@@ -70,7 +70,13 @@ K8S_DUNGEON_REPLICAS="${K8S_DUNGEON_REPLICAS:-2}"
 K8S_FLEET_DUNGEON_AUTOSCALER="${K8S_FLEET_DUNGEON_AUTOSCALER:-dungeon-servers-dotnet-k8s-buffer}"
 # Floor of the Agones dynamic port range. Everything BELOW it in k3d's
 # published 7000-7100 is reserved for infrastructure (gateway 7000, nakama
-# 7001). See app/40-gateway.yaml.
+# 7001 -- both TCP). See app/40-gateway.yaml. The Agones range itself carries
+# the KCP/UDP game ports, so k3d must publish it as /udp:
+#   k3d cluster create rpg-dev \
+#     --port "7000-7009:7000-7009@loadbalancer" \
+#     --port "7010-7100:7010-7100/udp@loadbalancer" ...
+# (staging: "7200-7209:7000-7009@loadbalancer" and
+#  "7210-7300:7210-7300/udp@loadbalancer"). Asserted below.
 AGONES_MIN_PORT="${AGONES_MIN_PORT:-7010}"
 # HOST-SIDE ports, i.e. what k3d's serverlb publishes -- NOT the hostPorts in the
 # manifests, which stay 7000/7001 in every cluster.
@@ -848,7 +854,9 @@ echo "compose dev stack stopped (containers and volumes kept)"
 # ---------------------------------------------------------------- exposure
 # The gateway and Nakama are reached on REAL published ports, not port-forwards:
 # 40-gateway.yaml and data/nakama.yaml carry hostPort 7000 / 7001, which k3d's
-# serverlb publishes onto the host because 7000-7100 is a mapped range. The
+# serverlb publishes onto the host because 7000-7009 is a mapped TCP range. The
+# game ports (Agones range, from MIN_PORT up) are KCP/UDP and must be published
+# /udp -- asserted right after the MIN_PORT step. The
 # Agones controller is pinned to MIN_PORT=7010 so its allocator can never take
 # those two. Nothing here needs to start or supervise anything for the CLIENT
 # path, which is the point -- a port-forward is a developer's terminal, not a
@@ -870,6 +878,27 @@ if [ "$cur_min" != "$AGONES_MIN_PORT" ]; then
 else
   echo "MIN_PORT already $AGONES_MIN_PORT"
 fi
+
+# The game port is KCP/UDP ONLY. A cluster created with the old TCP-only
+# `--port 7000-7100:7000-7100@loadbalancer` publishes the Agones range as TCP,
+# so every GameServer is Ready and registered and every client join silently
+# times out (UDP never reaches the node). Nothing on the cluster side can see
+# that, so read the serverlb's own docker publish table. Dialing the port would
+# prove nothing: UDP has no handshake. End-to-end proof is the verify suite's
+# flow.smoke (a real KCP join).
+say "game ports are published as UDP (KCP-only gameplay)"
+lb="${K3D_SERVERLB:-${CTX}-serverlb}"
+if ! docker port "$lb" "${AGONES_MIN_PORT}/udp" >/dev/null 2>&1; then
+  echo "ERROR: $lb does not publish ${AGONES_MIN_PORT}/udp." >&2
+  echo "  Gameplay is KCP/UDP only; the Agones range must be published as /udp or" >&2
+  echo "  every join times out. Add it (recreates the serverlb, not the cluster):" >&2
+  echo "    k3d cluster edit ${CTX#k3d-} --port-add \"${AGONES_MIN_PORT}-<max>:${AGONES_MIN_PORT}-<max>/udp@loadbalancer\"" >&2
+  echo "  (dev: 7010-7100, staging: 7210-7300), or recreate the cluster with that --port." >&2
+  echo "  Current publish table of $lb:" >&2
+  docker port "$lb" 2>&1 | sed 's/^/    /' >&2 || true
+  exit 1
+fi
+echo "$lb publishes ${AGONES_MIN_PORT}/udp"
 for probe in "gateway $PUBLISHED_GATEWAY_PORT" "nakama $PUBLISHED_NAKAMA_PORT"; do
   set -- $probe
   for i in $(seq 1 30); do

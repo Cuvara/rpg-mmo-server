@@ -16,7 +16,7 @@ namespace GameServer.Registry;
 /// It must be dialable BY THE CLIENT, which is not necessarily the address this
 /// process listens on — see <see cref="RegistrationOptions.PublicAddr"/>.
 /// </param>
-/// <param name="Transport">Transport clients must use ("tcp" or "kcp").</param>
+/// <param name="Transport">Transport clients must use: always "kcp" (the gateway refuses any other value).</param>
 /// <param name="Capacity">Maximum concurrent players.</param>
 /// <param name="PlayerCount">Current player count, refreshed on join/leave.</param>
 /// <param name="IdentityKey">

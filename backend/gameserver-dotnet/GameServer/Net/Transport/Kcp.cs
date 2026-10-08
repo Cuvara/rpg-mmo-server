@@ -303,6 +303,14 @@ public sealed class Kcp
         return 0;
     }
 
+    /// <summary>
+    /// Queues a zero-length PUSH segment. Legal on the wire (<c>len = 0</c>) and delivered
+    /// to the receiver as an empty message, which a stream reader skips. It lets a dialer
+    /// open a conversation (the listener only adopts a PUSH at <c>sn = 0</c>) before it has
+    /// application bytes to send. The server's own sessions never call it.
+    /// </summary>
+    internal void SendEmptySegment() => _sndQueue.Add(new Segment());
+
     // ── ACK / RTT bookkeeping ────────────────────────────────────────────────
 
     private void UpdateAck(int rtt)

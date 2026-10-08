@@ -58,7 +58,9 @@ every dev box here**, so nothing in the documented path requires it.
 
 `./stack.sh check` runs `backend/smoketest`, which walks exactly the path a
 Unity client walks and prints a PASS/FAIL line per step (this transcript is a
-real `--scratch` run, hence the offset ports):
+real `--scratch` run, hence the offset ports; it predates KCP-only gameplay, so
+it shows `transport=tcp` -- a current run joins the game server over KCP/UDP and
+the gateway reports `kcp`):
 
 ```
 --- smoke test summary ---
@@ -111,14 +113,23 @@ means host-qualified: `GAMESERVER_PUBLIC_ADDR=127.0.0.1:9200` in `.env`. A bare
 `:9200` is **not** portable: nothing in the protocol promises normalization, and
 only some clients rewrite a hostless address to loopback themselves. The Go
 smoketest does (`backend/smoketest/smoke/helpers.go`, `NormalizeDialAddr`) which
-is why it can pass against a misconfigured stack, but a C# `TcpClient` throws on
-it outright — so a Unity client fails the second hop while the smoke test looks
-green. A bare `:port` is only correct for host-mode deploys, where the listen
+is why it can pass against a misconfigured stack, but the Unity client's KCP
+transport cannot use it — so a Unity client fails the second hop while the smoke
+test looks green. A bare `:port` is only correct for host-mode deploys, where the listen
 address already is what clients reach.
 
 If the client runs on a phone or another machine, use this host's LAN address:
 `GAMESERVER_PUBLIC_ADDR=<this-host-ip>:9200`, then restart the game server. The
 server logs a warning at startup when the advertised address has no host part.
+
+**The game port is UDP.** Gameplay is KCP/UDP only: compose publishes the game
+port as `/udp`, the gateway port stays TCP. If `.env` sets `TRANSPORT_KEY`,
+launch the client with the same value (`-cuvara-transport-key <hex>` or
+`CUVARA_TRANSPORT_KEY`); empty means plaintext datagrams. With this stack inside
+WSL2 and the Unity client on Windows, do not assume WSL2's NAT-mode localhost
+forwarding carries UDP — see `backend/docs/NETWORKING.md` ("Local development").
+A join that times out right after `EnterWorld` is almost always UDP not
+arriving or a key mismatch, never a server error.
 
 ### Two stacks side by side
 

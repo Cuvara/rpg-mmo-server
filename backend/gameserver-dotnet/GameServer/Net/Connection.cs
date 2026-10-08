@@ -1,4 +1,3 @@
-using System.Net.Sockets;
 using System.Threading.Channels;
 using GameServer.Net.Transport;
 using Microsoft.Extensions.Logging;
@@ -13,8 +12,8 @@ namespace GameServer.Net;
 /// </summary>
 /// <remarks>
 /// The transport is deliberately abstracted behind <see cref="ITransportConnection"/>:
-/// the length-prefixed JSON codec only needs a reliable ordered stream, which TCP
-/// and KCP both provide, so nothing in this class knows which one it is on.
+/// the length-prefixed codec only needs a reliable ordered stream, which the KCP
+/// session provides, so nothing in this class depends on the transport underneath.
 /// </remarks>
 /// <summary>
 /// One item in a connection's send queue: either an envelope that is already built, or a
@@ -895,16 +894,6 @@ public sealed class Connection : IDisposable
             SingleReader = true,
             SingleWriter = false
         });
-    }
-
-    /// <summary>
-    /// Convenience overload for TCP callers (and tests) that already hold a
-    /// <see cref="TcpClient"/>. Ownership of the client transfers to this connection.
-    /// </summary>
-    public Connection(string userId, TcpClient tcp, ILogger logger,
-        WireEncoding encoding = WireEncoding.Json)
-        : this(userId, new TcpTransportConnection(tcp), logger, encoding)
-    {
     }
 
     /// <summary>Enqueue an envelope for sending. Non-blocking; drops oldest if full.</summary>

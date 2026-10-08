@@ -62,15 +62,20 @@ data:
   #
   # 127.0.0.1 is correct HERE, on k3d, and is correct for a reason worth
   # keeping: the k3d serverlb container publishes 7000-7100 to the host with
-  # docker's own port publishing, and Agones' MIN_PORT/MAX_PORT are set to the
-  # same range, so every dynamic port a GameServer can receive is reachable at
-  # 127.0.0.1:<that port> from Windows and WSL2 alike. status.address is the
+  # docker's own port publishing (the Agones part, 7010-7100, as UDP -- gameplay
+  # is KCP/UDP only), and Agones' MIN_PORT/MAX_PORT are set to the same range,
+  # so every dynamic port a GameServer can receive is reachable at
+  # 127.0.0.1:<that port>/udp from the machine running the cluster. (A Windows
+  # client against a cluster inside WSL2 in NAT mode: localhost forwarding is a
+  # TCP mechanism, do not assume UDP -- see backend/docs/NETWORKING.md.)
+  # status.address is the
   # NODE container's docker-network address (172.20.0.3 on this cluster) and
   # is not dialable by a client, which is why the read alone is insufficient.
   #
   # ON A REAL SINGLE-NODE k3s NODE this is the node's PUBLIC address — the IP
   # or DNS name a client on the internet dials — e.g. "gs.example.com" or the
-  # VPS's public IPv4, with 7000-7100/tcp open in the firewall. NOT the node's
+  # VPS's public IPv4, with the Agones range open as UDP in the firewall
+  # (7010-7100/udp; plus 7000/tcp for the gateway). NOT the node's
   # private/internal IP (which is what status.address would give you and what
   # this override exists to replace) and NOT 127.0.0.1, which would send every
   # client to its own loopback.
@@ -80,6 +85,13 @@ data:
   # or a per-pod value via the downward API (status.hostIP), and neither
   # exists in this repo. ADR-16 records this as the condition to revisit on.
   advertise-host: "127.0.0.1"
+  # PER-SOURCE-IP KCP SESSION CAP. The compiled default (16) assumes clients
+  # arrive with their own addresses. Behind k3d's serverlb every client datagram
+  # is relayed by the load-balancer container, so the game server sees ONE source
+  # address for all players and the default would refuse the 17th player. The
+  # global cap (GAMESERVER_KCP_MAX_SESSIONS) and the rate limits still apply. On a
+  # real node where clients keep their addresses, delete this key.
+  kcp-max-sessions-per-ip: "4096"
   # WHERE THE GAME SERVER POSTS ITS RUNTIME RPCs (reward_kills / submit_kill).
   #
   # Absent, the C# server logs `Nakama: disabled (NAKAMA_URL unset)` and issues

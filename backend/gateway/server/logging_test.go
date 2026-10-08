@@ -97,7 +97,7 @@ func startLoggingGateway(t *testing.T) (*Gateway, *logSink) {
 
 	sessionStore := storage.NewMemorySessionStore()
 	serverRegistry := storage.NewMemoryServerRegistry()
-	serverRegistry.Register(nil, storage.ServerInfo{
+	serverRegistry.Register(nil, storage.ServerInfo{Transport: "kcp",
 		ServerID:    "srv1",
 		MapID:       "map_forest",
 		Addr:        "10.0.0.1:9000",

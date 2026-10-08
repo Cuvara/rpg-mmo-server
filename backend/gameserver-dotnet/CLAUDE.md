@@ -39,6 +39,11 @@ docker build -f deploy/docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver
 ## Key Constraints
 
 - Wire protocol MUST match Go gateway exactly (4-byte BE length + JSON, snake_case fields)
+- The gameplay hop is **KCP over UDP only** (ADR-32): the server listens on a UDP port,
+  `GAMESERVER_TRANSPORT` unset or `kcp` is the only accepted value, the registry always says
+  `kcp`. There is no TCP gameplay listener — do not add one back as a fallback
+- Tests that talk to an in-process server dial KCP with `GameServer.Tests/Infrastructure/KcpTestClient`
+  (not `TcpClient`); network adversity goes through the UDP `AdversityProxy`
 - `Shared.GameLogic` MUST have zero Unity dependencies (standard .NET 10 class library)
 - `Shared.GameLogic` MUST NOT contain server-specific code (no networking, persistence, logging)
 - Tick loop MUST NOT do synchronous I/O (persistence is async background task)

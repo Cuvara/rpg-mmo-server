@@ -17,7 +17,7 @@ func TestAssignMap_Success(t *testing.T) {
 	secret := "test-secret"
 
 	// Register a server with capacity.
-	info := storage.ServerInfo{
+	info := storage.ServerInfo{Transport: "kcp",
 		ServerID:    "srv1",
 		MapID:       "map_forest",
 		Addr:        "10.0.0.1:9000",
@@ -87,7 +87,7 @@ func TestAssignMap_AllocatedServerMintsFromItsOwnEntry(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemoryServerRegistry()
 	alloc := &selfRegisteringAllocator{
-		info:     storage.ServerInfo{ServerID: "gs-new", Addr: "10.0.0.9:9000", Capacity: 50},
+		info:     storage.ServerInfo{Transport: "kcp", ServerID: "gs-new", Addr: "10.0.0.9:9000", Capacity: 50},
 		store:    store,
 		after:    10 * time.Millisecond,
 		selfAddr: "10.0.0.9:7257",
@@ -116,7 +116,7 @@ func TestAssignMap_AllocatedServerMintsFromItsOwnEntry(t *testing.T) {
 func TestAssignMap_AllocatedServerNeverRegisters(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemoryServerRegistry()
-	alloc := &selfRegisteringAllocator{info: storage.ServerInfo{ServerID: "gs-ghost", Addr: "10.0.0.9:9000", Capacity: 50}}
+	alloc := &selfRegisteringAllocator{info: storage.ServerInfo{Transport: "kcp", ServerID: "gs-ghost", Addr: "10.0.0.9:9000", Capacity: 50}}
 	reg := registry.NewRegistryServiceWithAllocator(store, alloc,
 		registry.WithAllocationWait(50*time.Millisecond, 5*time.Millisecond))
 
@@ -139,7 +139,7 @@ func TestAssignMap_AllocatedServerServesAnotherMap(t *testing.T) {
 	ctx := context.Background()
 	store := storage.NewMemoryServerRegistry()
 	alloc := &selfRegisteringAllocator{
-		info:     storage.ServerInfo{ServerID: "map-servers-dotnet-dev-q7bdn-hctpd", Addr: "127.0.0.1:7002", Capacity: 100},
+		info:     storage.ServerInfo{Transport: "kcp", ServerID: "map-servers-dotnet-dev-q7bdn-hctpd", Addr: "127.0.0.1:7002", Capacity: 100},
 		store:    store,
 		after:    5 * time.Millisecond,
 		selfAddr: "127.0.0.1:7002",

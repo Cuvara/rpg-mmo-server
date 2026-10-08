@@ -60,7 +60,8 @@ and does nothing else to it — no rewriting, no normalisation, no validation. T
 consequences follow, and both flows below are stories about them:
 
 - whatever value the game server wrote into the registry is what the client
-  will try to open a TCP connection to; and
+  will open a KCP/UDP session to (gameplay is KCP/UDP only; the registry's
+  `transport` must be `kcp` or the gateway refuses to assign the server); and
 - nothing in the gateway can notice that the value is wrong. A hostless or
   wrong-port address fails two hops later, inside the client, where no server
   log is watching.
@@ -157,7 +158,8 @@ and a runtime handshake between them.
    ├─ gameserver-dotnet --migrate-only --game-db-url …               (cd.yml:802-820)
    ├─ docker compose --profile monitoring [--profile realtime] up -d --remove-orphans
    │                                                                 (cd.yml:828-893)
-   └─ healthcheck: /healthz on both metrics ports + TCP on both game ports
+   └─ healthcheck: /healthz on both metrics ports + TCP on the gateway port
+        (game port is UDP: proven by the smoke job's KCP join, not here)
    │
    ▼
  post-deploy-smoke — bin/smoketest, same runner                      (cd.yml:995-1031)

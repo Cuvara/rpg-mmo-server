@@ -63,7 +63,7 @@ func TestFullFlow_SelfRegistration(t *testing.T) {
 	// port: with `--addr 127.0.0.1:0` the advertised value would be the literal
 	// ":0" string (GameServer/Program.cs falls back to the configured addr, not
 	// the resolved one), which is exactly the undialable-address failure above.
-	port := reserveTCPPort(t)
+	port := reserveUDPPort(t)
 	listenAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 
 	gsAddr, gsCleanup := startDotnetGameServerWith(t,
@@ -119,7 +119,7 @@ func TestFullFlow_SelfRegistration(t *testing.T) {
 	defer gwCleanup()
 
 	// ---- 1/2: MsgAuth ------------------------------------------------------
-	client, err := NewMockClient(gwAddr)
+	client, err := NewGatewayClient(gwAddr)
 	if err != nil {
 		t.Fatalf("connect to gateway: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestFullFlow_SelfRegistration(t *testing.T) {
 	client.Close()
 
 	// ---- 5/6: dial the returned address and join ---------------------------
-	gsClient, err := NewMockClient(enterResp.ServerAddr)
+	gsClient, err := NewGameClientFor(enterResp)
 	if err != nil {
 		t.Fatalf("dial the address the gateway handed back (%s): %v", enterResp.ServerAddr, err)
 	}
@@ -239,7 +239,7 @@ func TestFullFlow_SelfRegistration(t *testing.T) {
 	gsClient.Close()
 	time.Sleep(500 * time.Millisecond)
 
-	rejoin, err := NewMockClient(listenAddr)
+	rejoin, err := NewGameClient(listenAddr)
 	if err != nil {
 		t.Fatalf("game server stopped accepting connections after a client left: %v", err)
 	}
@@ -305,17 +305,18 @@ func startRedisBackedGateway(t *testing.T, client redis.UniversalClient) (addr s
 	return addr, func() { gw.Shutdown() }
 }
 
-// reserveTCPPort returns a port that was free a moment ago. The listener is
+// reserveUDPPort returns a UDP port that was free a moment ago (the game
+// server listens KCP over UDP). The socket is
 // closed before returning, so this races with anything else on the box — which
 // is acceptable in a test and unavoidable when a process must be told its own
 // advertised address before it starts listening.
-func reserveTCPPort(t *testing.T) int {
+func reserveUDPPort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
+	port := l.LocalAddr().(*net.UDPAddr).Port
 	if err := l.Close(); err != nil {
 		t.Fatalf("release reserved port: %v", err)
 	}

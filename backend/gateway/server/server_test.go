@@ -23,7 +23,7 @@ func startTestGateway(t *testing.T) *Gateway {
 	serverRegistry := storage.NewMemoryServerRegistry()
 
 	// Pre-register a game server with capacity.
-	serverRegistry.Register(nil, storage.ServerInfo{
+	serverRegistry.Register(nil, storage.ServerInfo{Transport: "kcp",
 		ServerID:    "srv1",
 		MapID:       "map_forest",
 		Addr:        "10.0.0.1:9000",

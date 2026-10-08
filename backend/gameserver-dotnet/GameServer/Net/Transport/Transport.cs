@@ -1,37 +1,57 @@
 using System.Net;
-using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 
 namespace GameServer.Net.Transport;
 
 /// <summary>
-/// The transport kinds the server can listen with. Values must match Go's
-/// <c>transport.KindTCP</c> / <c>KindKCP</c>, because the same strings travel to
-/// the client through the registry and <c>EnterWorldResponse.Transport</c>.
+/// The realtime gameplay transport. KCP over UDP is the only one: the TCP gameplay path was
+/// removed when the project went KCP-only (see the module CHANGELOG). The string travels to
+/// clients through the registry (<c>servers:id:{id}</c> field <c>transport</c>) and
+/// <c>EnterWorldResponse.Transport</c>, so it must equal Go's <c>transport.KindKCP</c>.
 /// </summary>
 public static class TransportKind
 {
-    /// <summary>TCP, the default.</summary>
-    public const string Tcp = "tcp";
-
-    /// <summary>KCP over UDP.</summary>
+    /// <summary>KCP over UDP — the only gameplay transport.</summary>
     public const string Kcp = "kcp";
 
     /// <summary>Environment variable holding the pre-shared AES key, shared with the Go side.</summary>
     public const string KeyEnvVar = "TRANSPORT_KEY";
 
     /// <summary>
-    /// Lowercases a kind and maps the empty string to <see cref="Tcp"/> — the
-    /// backward-compatible "unset" spelling used on the wire and in the registry.
+    /// Trims and lowercases a configured kind. The empty string stays empty: it no longer
+    /// means anything, and in particular it never means TCP. Callers that accept "unset"
+    /// (the <c>--transport</c> flag and <c>GAMESERVER_TRANSPORT</c>) map null to
+    /// <see cref="Kcp"/> themselves — see <see cref="ResolveConfigured"/>.
     /// </summary>
-    public static string Normalize(string? kind)
+    public static string Normalize(string? kind) => (kind ?? "").Trim().ToLowerInvariant();
+
+    /// <summary>Reports whether <paramref name="kind"/> is the gameplay transport, <c>kcp</c>.</summary>
+    public static bool IsValid(string? kind) => Normalize(kind) == Kcp;
+
+    /// <summary>
+    /// Resolves the operator's <c>--transport</c> / <c>GAMESERVER_TRANSPORT</c> setting.
+    /// Unset (null, empty or whitespace) and <c>kcp</c> resolve to <see cref="Kcp"/>;
+    /// anything else — <c>tcp</c> included — is refused with the message the startup path
+    /// logs before exiting.
+    /// </summary>
+    /// <returns>True and <c>kcp</c> when accepted; false and the fatal message otherwise.</returns>
+    public static bool ResolveConfigured(string? configured, out string resolved, out string? error)
     {
-        string k = (kind ?? "").Trim().ToLowerInvariant();
-        return k.Length == 0 ? Tcp : k;
+        string k = Normalize(configured);
+        if (k.Length == 0 || k == Kcp)
+        {
+            resolved = Kcp;
+            error = null;
+            return true;
+        }
+        resolved = "";
+        error = UnsupportedMessage(configured);
+        return false;
     }
 
-    /// <summary>Reports whether <paramref name="kind"/> names a supported transport.</summary>
-    public static bool IsValid(string? kind) => Normalize(kind) is Tcp or Kcp;
+    /// <summary>The fatal startup message for an unsupported transport value (shared contract text).</summary>
+    public static string UnsupportedMessage(string? value) =>
+        $"GAMESERVER_TRANSPORT={value} is not supported: realtime gameplay is KCP/UDP only";
 }
 
 /// <summary>An accepted client connection, independent of the transport underneath.</summary>
@@ -58,33 +78,33 @@ public interface ITransportListener : IDisposable
 
     /// <summary>Waits for the next client.</summary>
     Task<ITransportConnection> AcceptAsync(CancellationToken ct);
+
+    /// <summary>Flood-protection and drop counters for this listener.</summary>
+    KcpListenerStats Stats { get; }
 }
 
-/// <summary>Builds listeners for a transport kind.</summary>
+/// <summary>Builds the gameplay listener.</summary>
 public static class TransportFactory
 {
     /// <summary>
-    /// Starts a listener of <paramref name="kind"/> on <paramref name="addr"/>
-    /// (":9000" or "host:port").
+    /// Starts a KCP listener on <paramref name="addr"/> (":9000" or "host:port").
     /// </summary>
-    /// <param name="transportKey">
-    /// Pre-shared AES key for KCP. Ignored for TCP, where TLS or the cluster
-    /// network is the answer instead — the same rule the Go side follows.
-    /// </param>
-    /// <exception cref="ArgumentException">The kind is not supported.</exception>
-    public static ITransportListener Listen(string kind, string addr, string? transportKey, ILogger logger)
+    /// <param name="kind">Must be <c>kcp</c>. Anything else — including <c>tcp</c> and the
+    /// empty string — throws, because there is no other gameplay transport.</param>
+    /// <param name="transportKey">Pre-shared AES key for KCP; empty means plaintext.</param>
+    /// <param name="limits">Flood and backpressure limits; null means
+    /// <see cref="KcpListenerOptions.Default"/>.</param>
+    /// <exception cref="ArgumentException">The kind is not <c>kcp</c>.</exception>
+    public static ITransportListener Listen(string kind, string addr, string? transportKey, ILogger logger,
+        KcpListenerOptions? limits = null)
     {
+        if (!TransportKind.IsValid(kind))
+            throw new ArgumentException(TransportKind.UnsupportedMessage(kind), nameof(kind));
+
         var (host, port) = ParseAddr(addr);
         var ip = string.IsNullOrEmpty(host) ? IPAddress.Any : IPAddress.Parse(host);
         var bind = new IPEndPoint(ip, port);
-
-        return TransportKind.Normalize(kind) switch
-        {
-            TransportKind.Tcp => new TcpTransportListener(bind),
-            TransportKind.Kcp => new KcpTransportListener(bind, transportKey, logger),
-            _ => throw new ArgumentException(
-                $"unknown transport \"{kind}\" (want \"{TransportKind.Tcp}\" or \"{TransportKind.Kcp}\")", nameof(kind))
-        };
+        return new KcpTransportListener(bind, transportKey, logger, limits ?? KcpListenerOptions.Default);
     }
 
     /// <summary>Splits ":9000" / "0.0.0.0:9000" into host and port.</summary>
@@ -99,69 +119,14 @@ public static class TransportFactory
     }
 }
 
-/// <summary>TCP listener adapter.</summary>
-internal sealed class TcpTransportListener : ITransportListener
-{
-    private readonly TcpListener _listener;
-
-    public TcpTransportListener(IPEndPoint bind)
-    {
-        _listener = new TcpListener(bind.Address, bind.Port);
-        _listener.Start();
-        LocalEndPoint = _listener.LocalEndpoint.ToString()!;
-    }
-
-    public string LocalEndPoint { get; }
-    public string Kind => TransportKind.Tcp;
-
-    public async Task<ITransportConnection> AcceptAsync(CancellationToken ct)
-    {
-        var tcp = await _listener.AcceptTcpClientAsync(ct);
-        return new TcpTransportConnection(tcp);
-    }
-
-    public void Dispose() => _listener.Stop();
-}
-
-/// <summary>A single accepted TCP connection.</summary>
-internal sealed class TcpTransportConnection : ITransportConnection
-{
-    private readonly TcpClient _tcp;
-    private readonly NetworkStream _stream;
-    private int _closed;
-
-    public TcpTransportConnection(TcpClient tcp)
-    {
-        // Disable Nagle's algorithm: the game protocol sends many small messages
-        // (inputs, snapshots) and Nagle batches them for up to 200ms, which is
-        // perceived as lag even with 1-2 clients. Go's net.TCPConn has NoDelay on
-        // by default; C#'s TcpClient does not.
-        tcp.NoDelay = true;
-        _tcp = tcp;
-        _stream = tcp.GetStream();
-    }
-
-    public Stream Stream => _stream;
-    public string RemoteEndPoint => _tcp.Client.RemoteEndPoint?.ToString() ?? "unknown";
-
-    public void Close()
-    {
-        if (Interlocked.Exchange(ref _closed, 1) != 0) return;
-        try { _stream.Close(); } catch { /* ignore */ }
-        try { _tcp.Close(); } catch { /* ignore */ }
-    }
-
-    public void Dispose() => Close();
-}
-
 /// <summary>KCP listener adapter.</summary>
 internal sealed class KcpTransportListener : ITransportListener
 {
     private readonly KcpListener _listener;
 
-    public KcpTransportListener(IPEndPoint bind, string? transportKey, ILogger logger)
+    public KcpTransportListener(IPEndPoint bind, string? transportKey, ILogger logger, KcpListenerOptions limits)
     {
-        _listener = new KcpListener(bind, transportKey, logger);
+        _listener = new KcpListener(bind, transportKey, logger, limits);
         LocalEndPoint = _listener.LocalEndPoint.ToString();
     }
 
@@ -170,6 +135,9 @@ internal sealed class KcpTransportListener : ITransportListener
 
     /// <summary>True when a transport key is set and every datagram is encrypted.</summary>
     public bool IsEncrypted => _listener.IsEncrypted;
+
+    /// <inheritdoc />
+    public KcpListenerStats Stats => _listener.Stats;
 
     public async Task<ITransportConnection> AcceptAsync(CancellationToken ct)
     {

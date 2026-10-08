@@ -146,7 +146,7 @@ func startGatewayWithSessionStore(t *testing.T, store storage.SessionStore) *Gat
 	t.Helper()
 
 	reg := storage.NewMemoryServerRegistry()
-	if err := reg.Register(context.Background(), storage.ServerInfo{
+	if err := reg.Register(context.Background(), storage.ServerInfo{Transport: "kcp",
 		ServerID: "srv1", MapID: "map_forest", Addr: "10.0.0.1:9000",
 		Capacity: 100, PlayerCount: 10,
 	}); err != nil {

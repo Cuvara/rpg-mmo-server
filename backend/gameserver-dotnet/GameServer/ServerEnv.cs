@@ -127,10 +127,23 @@ internal static class ServerEnv
     // ── Transport and lifecycle ──────────────────────────────────────────────
 
     /// <summary>
-    /// Realtime transport for the gameplay hop: <c>tcp</c> or <c>kcp</c>. On a fleet it is
-    /// coupled to the port's <c>protocol:</c>, which no environment variable can change.
+    /// Realtime transport for the gameplay hop. KCP/UDP is the only one: unset or
+    /// <c>kcp</c> is accepted, any other value is fatal at startup. On a fleet the port's
+    /// <c>protocol:</c> must be UDP.
     /// </summary>
     public const string Transport = "GAMESERVER_TRANSPORT";
+
+    /// <summary>KCP listener: cap on live sessions (default 4096).</summary>
+    public const string KcpMaxSessions = "GAMESERVER_KCP_MAX_SESSIONS";
+
+    /// <summary>KCP listener: cap on live sessions per source IP (default 16; loopback exempt).</summary>
+    public const string KcpMaxSessionsPerIp = "GAMESERVER_KCP_MAX_SESSIONS_PER_IP";
+
+    /// <summary>KCP listener: new sessions per second, listener-wide (default 200, burst 2x).</summary>
+    public const string KcpNewSessionsPerSec = "GAMESERVER_KCP_NEW_SESSIONS_PER_SEC";
+
+    /// <summary>KCP listener: inbound datagrams per second per session (default 500, burst 2x).</summary>
+    public const string KcpDatagramsPerSec = "GAMESERVER_KCP_DATAGRAMS_PER_SEC";
 
     /// <summary>Sealed transport posture on the gameplay hop: <c>require</c> or <c>off</c>.</summary>
     public const string Sealed = "GAMESERVER_SEALED";

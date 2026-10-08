@@ -202,7 +202,7 @@ public class EntityIntervalUnderAdversityTests
         var options = new ServerOptions
         {
             ServerAddr = ":0", ServerId = ServerId, MapId = "map_interval", Mode = "map",
-            Transport = TransportKind.Tcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
+            Transport = TransportKind.Kcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
             Capacity = 16, JwtSecret = JwtSecret, JoinTokenSecret = JwtSecret,
             SaveInterval = TimeSpan.FromHours(1), PlayerStore = new MemoryPlayerStore(),
             Importance = ImportanceSettings.Balanced,
@@ -214,7 +214,7 @@ public class EntityIntervalUnderAdversityTests
         var cts = new CancellationTokenSource(TimeSpan.FromSeconds(180));
         var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
-        var moverSockets = new List<TcpClient>();
+        var moverSockets = new List<KcpTestClient>();
         var moverTasks = new List<Task>();
         var moverIds = new List<string>();
 
@@ -235,7 +235,7 @@ public class EntityIntervalUnderAdversityTests
             {
                 string id = $"mv{i}-{Guid.NewGuid():N}"[..14];
                 moverIds.Add(id);
-                var c = new TcpClient { NoDelay = true };
+                var c = new KcpTestClient();
                 moverSockets.Add(c);
                 await ConnectWithRetryAsync(c, port);
                 var s = c.GetStream();
@@ -247,18 +247,18 @@ public class EntityIntervalUnderAdversityTests
             // changing, so its gaps run to the keyframe interval while the cadence stays at
             // the world rate — which is the divergence the instrument check needs.
             string? idlerId = null;
-            TcpClient? idler = null;
+            KcpTestClient? idler = null;
             if (withIdler)
             {
                 idlerId = $"id-{Guid.NewGuid():N}"[..14];
-                idler = new TcpClient { NoDelay = true };
+                idler = new KcpTestClient();
                 moverSockets.Add(idler);
                 await ConnectWithRetryAsync(idler, port);
                 await JoinAsync(idler.GetStream(), idlerId, cts.Token);
             }
 
             string observerId = $"ob-{Guid.NewGuid():N}"[..14];
-            using var observer = new TcpClient { NoDelay = true };
+            using var observer = new KcpTestClient();
             await ConnectWithRetryAsync(observer, proxy.Port);
             var os = observer.GetStream();
             await JoinAsync(os, observerId, cts.Token);
@@ -330,7 +330,7 @@ public class EntityIntervalUnderAdversityTests
     /// walking, non-combat player scores distance + type and lands in the schedule's bottom
     /// band, which is the ordinary case this measurement is about.
     /// </summary>
-    private static async Task MoveForeverAsync(NetworkStream stream, CancellationToken ct)
+    private static async Task MoveForeverAsync(Stream stream, CancellationToken ct)
     {
         ulong t = 0;
         try
@@ -349,7 +349,7 @@ public class EntityIntervalUnderAdversityTests
         catch (ObjectDisposedException) { }
     }
 
-    private static async Task JoinAsync(NetworkStream stream, string userId, CancellationToken ct)
+    private static async Task JoinAsync(Stream stream, string userId, CancellationToken ct)
     {
         await WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.JoinToken,
             new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
@@ -360,14 +360,14 @@ public class EntityIntervalUnderAdversityTests
         Assert.True(resp.Ok, resp.Error);
     }
 
-    private static async Task WriteFrameAsync(NetworkStream stream, GameServer.Net.Envelope env, CancellationToken ct)
+    private static async Task WriteFrameAsync(Stream stream, GameServer.Net.Envelope env, CancellationToken ct)
     {
         byte[] frame = WireProtocol.Encode(env);
         await stream.WriteAsync(frame, ct);
         await stream.FlushAsync(ct);
     }
 
-    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    private static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int attempt = 0; attempt < 50; attempt++)
         {

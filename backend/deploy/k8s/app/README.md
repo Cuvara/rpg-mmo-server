@@ -83,24 +83,38 @@ number and only the order matters.
 Two hops, and now **one mechanism** for both — which is the point of the
 current shape.
 
-**Hop 2, the game server.** The client dials it directly (ADR-3). Agones
-assigns a dynamic host port and the k3d serverlb publishes `0.0.0.0:7000-7100`
-to the host — verified with `docker ps`, not assumed — so
-`127.0.0.1:<agones port>` is genuinely dialable from Windows and WSL2, which is
-why `advertise-host: 127.0.0.1` is correct here.
+**Hop 2, the game server.** The client dials it directly (ADR-3) over
+**KCP/UDP — the only gameplay transport** (fleet port `game` is
+`protocol: UDP`). Agones assigns a dynamic host port in `7010-7100`, and the k3d
+serverlb must publish that range **as UDP**
+(`--port "7010-7100:7010-7100/udp@loadbalancer"`; `dev-up.sh` refuses to
+continue otherwise). Then `127.0.0.1:<agones port>/udp` is dialable from the
+machine running the cluster, which is why `advertise-host: 127.0.0.1` is correct
+here — for a client on that machine. For a Windows client against a cluster
+inside WSL2 in NAT mode, localhost forwarding is a TCP mechanism and must not be
+assumed to carry UDP; see `backend/docs/NETWORKING.md`.
 
-**Hop 1, the gateway.** Reached the same way: a `hostPort` inside that same
-published range. The default NodePort range is 30000-32767 and the serverlb
+**Hop 1, the gateway.** TCP (auth + redirect only), reached through a
+`hostPort` in the infrastructure part of the published range (7000, TCP). The default NodePort range is 30000-32767 and the serverlb
 publishes nothing in it, so a NodePort Service is allocated and unreachable —
 it prints in `kubectl get svc` as `8000:32276/TCP` and looks exactly like the
 client's route while being a dead end. The Service is therefore ClusterIP now,
 and the client path is the pod's hostPort.
 
-| Host port | Reaches |
-|---|---|
-| 7000 | gateway (`hostPort`, containerPort 8000) |
-| 7001 | Nakama HTTP (`hostPort`, containerPort 7350) |
-| 7010-7100 | Agones GameServers |
+| Host port | Protocol | Reaches |
+|---|---|---|
+| 7000 | TCP | gateway (`hostPort`, containerPort 8000) |
+| 7001 | TCP | Nakama HTTP (`hostPort`, containerPort 7350) |
+| 7010-7100 | **UDP** | Agones GameServers (KCP, port `game`) |
+
+k3d flags that produce this (dev; staging publishes host `7200-7209` onto
+`7000-7009` and `7210-7300/udp` 1:1):
+
+```
+k3d cluster create rpg-dev --api-port 127.0.0.1:6550 \
+  --port "7000-7009:7000-7009@loadbalancer" \
+  --port "7010-7100:7010-7100/udp@loadbalancer" ...
+```
 
 **The collision is handled by splitting the range, not by hoping.** 7000-7100
 is Agones' allocation range, and the allocator does not know about a hostPort it
@@ -110,9 +124,12 @@ maddeningly. So the Agones controller runs with `MIN_PORT=7010`, reserving
 continue without it: changing the hostPorts without the floor, or the floor
 without the hostPorts, brings the collision straight back.
 
-`k3d cluster edit --port-add` remains rejected — it recreates the serverlb
-container and so interrupts the published 7000-7100 range the fleet's clients
-are using.
+`k3d cluster edit --port-add` remains rejected as a routine operation — it
+recreates the serverlb container and so interrupts the published range the
+fleet's clients are using. The one exception is the one-time KCP/UDP migration
+of a cluster created with the old TCP-only `7000-7100` mapping: adding
+`7010-7100:7010-7100/udp@loadbalancer` (or recreating the cluster) is required,
+and the interruption is accepted.
 
 **What this costs.** A `hostPort` pins the pod to a node and allows one replica
 per node. On this single-node k3d that is free. On a multi-node cluster it is
@@ -137,6 +154,14 @@ Wired to the **real** data tier in `rpg-k8s-data` — Redis, PostgreSQL
 value as `rpg-k8s-data/nakama`'s `JWT_SECRET`, which is the cross-namespace
 contract that makes a Nakama-issued client token verifiable at the gateway;
 `join-token-secret` is a different value (ADR-8).
+
+> **Historical evidence (TCP era).** The transcripts below were recorded while
+> gameplay still ran over TCP, so they show `transport=tcp` and a TCP
+> reachability test. Today the registry says `transport kcp`, the gateway
+> refuses any other value, and the game port is UDP: a TCP connect to it proves
+> nothing. Current proof of the game hop is `verify.sh` layer 4 (`flow.smoke`, a
+> real KCP join). What these transcripts prove about addressing, RBAC and the
+> strict-address flow is unchanged.
 
 ```
 $ kubectl get pods,gs -n rpg-k8s-realtime
@@ -228,7 +253,10 @@ PASS  gamestate_reload         9.029s  respawned at x=4.8333 from persisted x=4.
 SMOKE=PASS
 ```
 
-### Reachability from the host
+### Reachability from the host (historical, TCP era)
+
+No longer applicable to the game port, which is UDP: there is no connect to
+observe, and `nc -u` "succeeds" against anything. Kept for the gateway row.
 
 A bare connect proves nothing on k3d — the serverlb accepts on **every** port
 in 7000-7100 and only then fails upstream — so each dial writes a byte and

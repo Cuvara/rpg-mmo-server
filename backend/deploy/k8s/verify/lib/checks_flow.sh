@@ -149,7 +149,7 @@ check_flow_smoke() {
   fi
 
   local out rc
-  out=$(JWT_SECRET="$VERIFY_JWT_SECRET" "$bin" "${args[@]}" 2>&1); rc=$?
+  out=$(JWT_SECRET="$VERIFY_JWT_SECRET" TRANSPORT_KEY="${VERIFY_TRANSPORT_KEY:-}" "$bin" "${args[@]}" 2>&1); rc=$?
   echo "$out" | sed 's/^/      | /'
   if [ $rc -ne 0 ] || [[ "$out" != *"SMOKE=PASS"* ]]; then
     fail "the end-to-end flow did not complete" \
@@ -179,7 +179,7 @@ check_flow_stack_identity() {
     skip "flow.smoke did not run or did not complete -- nothing to attribute (this is NOT a pass: the gateway that answered $VERIFY_GATEWAY_ADDR is unidentified)"
     return
   fi
-  # The smoke test prints: PASS gateway_auth ... server=<host:port> (tcp)
+  # The smoke test prints: PASS gateway_auth ... server=<host:port> (kcp)
   local got
   got=$(printf '%s\n' "$VERIFY_SMOKE_OUTPUT" | sed -n 's/.*[[:space:]]server=\([^[:space:]]*\).*/\1/p' | head -1)
   if [ -z "$got" ]; then

@@ -12,9 +12,9 @@ namespace GameServer.Net.Sealed;
 /// <c>[4-byte big-endian length][Envelope protobuf]</c>. The KCP path has a packet-crypt
 /// layer under the ARQ (<see cref="Transport.KcpCrypto"/>), but that layer is
 /// per-<i>listener</i> — kcp-go takes one BlockCrypt for every datagram and offers no
-/// per-remote key selection — so it cannot carry a per-session key; and TCP, the default
-/// transport, has no such layer at all. Sealing therefore happens ABOVE the transport,
-/// around the Envelope, which makes it identical on both and independent of the ARQ.
+/// per-remote key selection — so it cannot carry a per-session key. Sealing therefore
+/// happens ABOVE the transport, around the Envelope, which makes it independent of the
+/// ARQ and of whether TRANSPORT_KEY is set.
 /// </para>
 /// <para>
 /// <b>No cipher lives here.</b> ADR-22 has not settled which library provides

@@ -53,7 +53,7 @@ func gameplayV2ContentDir(t *testing.T) string {
 func gameplayV2Join(t *testing.T, gsAddr, playerID string, enc messages.Encoding) *MockClient {
 	t.Helper()
 
-	client, err := NewMockClient(gsAddr)
+	client, err := NewGameClient(gsAddr)
 	if err != nil {
 		t.Fatalf("connect %s: %v", playerID, err)
 	}

@@ -1,5 +1,45 @@
 # Gateway — Design Decisions
 
+## 2026-10-08 — TCP-only listener; gameplay is KCP/UDP only (ADR-32)
+
+### Context
+
+Realtime gameplay moved to KCP over UDP **only**, with no TCP fallback. The
+gateway hop (auth + redirect) never was gameplay, and a transport knob on it
+only offered ways to misconfigure the deployment: `GATEWAY_TRANSPORT=kcp` moved
+the client's login hop to UDP, which no shipped client speaks, and
+`ALLOCATOR_TRANSPORT` had been inert since 2026-08-17.
+
+### Decision
+
+- `Gateway.Run` always listens with `transport.KindTCP`, wrapped in TLS when
+  `GATEWAY_TLS_CERT`/`_KEY` are set (ADR-23). `server.WithTransport`,
+  `server.WithTransportKey`, `AgonesConfig.Transport` and the flags
+  `--transport`, `--allocator-transport`, `--transport-key` are removed.
+- Stale environment is checked at startup (`checkRemovedTransportSettings`):
+  `GATEWAY_TRANSPORT` set to anything but `tcp` is **fatal**; `tcp` warns
+  "obsolete and ignored"; any `ALLOCATOR_TRANSPORT` warns and is ignored;
+  `TRANSPORT_KEY` on the gateway warns that it does nothing here (the key belongs
+  to the game servers and clients).
+- Assignment validates the selected registry entry with
+  `transport.ValidateGameplay` **before** minting a join token, for map and
+  dungeon assignment alike (`transfer.checkGameplayTransport`). An entry whose
+  `transport` is empty, `tcp` or unknown fails with `transfer.ErrServerTransport`;
+  the client gets `server_transport_unsupported` and the server id is logged. No
+  token is burned and nothing falls back.
+- `EnterWorldResponse.Transport` is therefore always `kcp`. The allocator stamps
+  `transport.Gameplay` on its (informational) `ServerInfo`; the announced entry is
+  still the pod's own registration.
+
+### Consequences
+
+- The empty string no longer means TCP anywhere. A game server registered
+  before the migration, or a hand-written registry entry without `transport`,
+  is not assignable until it re-registers as `kcp`.
+- The boot line logs `transport=tcp gameplay_transport=kcp`. The posture
+  remedy for a plaintext listener is TLS, no longer "set `TRANSPORT_KEY` and
+  `--transport kcp`".
+
 ## 2026-08-27 — server_down is consumed: eviction, not just detection (#236)
 
 ### Context
@@ -347,6 +387,7 @@ class with no runtime coupling at all.
   used only for its `ServerID`; the announced transport always comes from the
   pod's own registry entry. The flag is retained (it costs nothing and the
   allocator still fills the field) but it is now inert — a candidate for removal.
+  *(Removed 2026-10-08, see the entry at the top of this file.)*
 - A map whose only server is full is now a hard refusal for as long as it is
   full. Raising capacity, or sharding into separate `map_id`s, is the answer —
   not a second instance.
@@ -595,6 +636,12 @@ gateway's transport) is correct for a uniform rollout, which is the normal case.
 > mismatch failure mode described above cannot occur any more, and the flag is
 > inert.
 
+> **Superseded 2026-10-08 (ADR-32).** The gateway listener is TCP only, gameplay is
+> KCP/UDP only, and `--transport`, `--allocator-transport` and `--transport-key` are
+> removed. "Empty means `tcp`" no longer holds: a registry entry that does not say
+> `kcp` is refused with `server_transport_unsupported`. See the entry at the top
+> of this file.
+
 
 ---
 
@@ -669,7 +716,8 @@ Draining deliberately stays in `ReadLoop` rather than happening inside
 very teardown this exists to make orderly. Transports without half-close (KCP —
 `kcp.UDPSession` has no `CloseWrite`) fall back to a plain `Close`, which is
 safe there for the same reason it is unsafe on TCP: no kernel receive queue, no
-RST, and kcp-go flushes pending output on close.
+RST, and kcp-go flushes pending output on close. *(Since 2026-10-08 the gateway
+listener is TCP only, so the fallback is no longer reachable here.)*
 
 `handleDisconnect` uses the same path — a client that pipelined anything after
 `MsgDisconnect` would otherwise turn an orderly goodbye into a reset.

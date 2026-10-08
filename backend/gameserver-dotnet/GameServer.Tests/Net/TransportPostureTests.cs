@@ -8,20 +8,20 @@ namespace GameServer.Tests.Net;
 /// </summary>
 /// <remarks>
 /// The case that matters most is <see cref="DefaultConfiguration_IsPlaintext_AndSaysSo"/>:
-/// before this type the server warned about KCP-without-a-key and about a key set on TCP,
-/// and said <b>nothing at all</b> about the default — TCP with no key, no encryption of any
-/// kind. The configuration most likely to be deployed by accident was the one that produced
-/// no signal.
+/// the default configuration — KCP with no <c>TRANSPORT_KEY</c>, so no packet encryption of
+/// any kind — must say so on every boot. Before this type the default (then TCP) produced
+/// no signal at all.
 /// </remarks>
 public class TransportPostureTests
 {
     [Fact]
     public void DefaultConfiguration_IsPlaintext_AndSaysSo()
     {
-        // Exactly the stock container: transport unset (=> tcp), no key, wildcard bind.
+        // Exactly the stock container: transport unset (=> kcp, the only one), no key,
+        // wildcard bind.
         var p = TransportPosture.For(transport: null, transportKey: null, addr: ":9000");
 
-        Assert.Equal(TransportKind.Tcp, p.Transport);
+        Assert.Equal(TransportKind.Kcp, p.Transport);
         Assert.False(p.Encrypted);
         Assert.False(p.Authenticated);
         Assert.False(p.KeyConfigured);
@@ -32,16 +32,18 @@ public class TransportPostureTests
     }
 
     [Fact]
-    public void KeyOnTcp_IsReportedAsIgnored_NotAsEncryption()
+    public void UnsupportedTransport_IsNeverReportedAsEncrypted()
     {
-        // The configuration most easily mistaken for working encryption: a key is set, and
-        // it does nothing at all.
-        var p = TransportPosture.For(TransportKind.Tcp, "00112233445566778899aabbccddeeff", ":9000");
+        // "tcp" is no longer a gameplay transport (the server refuses to start with it).
+        // If the posture is ever asked about it anyway, a configured key must not be
+        // reported as encryption: nothing would use it.
+        var p = TransportPosture.For("tcp", "00112233445566778899aabbccddeeff", ":9000");
 
         Assert.True(p.KeyConfigured);
         Assert.False(p.Encrypted);
         Assert.True(p.KeyIgnored);
-        Assert.Contains("IGNORED", p.Summary);
+        Assert.Contains("PLAINTEXT", p.Summary);
+        Assert.Contains("not a supported gameplay transport", p.Summary);
     }
 
     [Fact]
@@ -104,7 +106,7 @@ public class TransportPostureTests
     [InlineData("", true)]
     public void BindScope_IsClassifiedPessimistically(string addr, bool beyondLoopback)
     {
-        var p = TransportPosture.For(TransportKind.Tcp, null, addr);
+        var p = TransportPosture.For(TransportKind.Kcp, null, addr);
         Assert.Equal(beyondLoopback, p.BindsBeyondLoopback);
     }
 

@@ -40,6 +40,8 @@ var tableCols = []struct {
 	{"rx B/s/p", func(r *Result) string { return fmt.Sprintf("%.0f", r.Client.RxBytesPerSecPerPlayer) }},
 	{"tx B/s/p", func(r *Result) string { return fmt.Sprintf("%.0f", r.Client.TxBytesPerSecPerPlayer) }},
 	{"recv%", func(r *Result) string { return pct(r.Client.SnapshotsReceivedRatio) }},
+	{"kcp retx", func(r *Result) string { return pct(r.Client.KCP.RetransRatio) }},
+	{"kcp lost", func(r *Result) string { return pct(r.Client.KCP.LossRatio) }},
 	{"fail", func(r *Result) string { return fmt.Sprint(r.Client.PlayersFailed) }},
 	{"verdict", func(r *Result) string {
 		switch {

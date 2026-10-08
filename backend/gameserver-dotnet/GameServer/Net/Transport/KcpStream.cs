@@ -2,13 +2,12 @@ namespace GameServer.Net.Transport;
 
 /// <summary>
 /// Exposes a <see cref="KcpSession"/> as a <see cref="Stream"/>, so the
-/// length-prefixed JSON codec in <see cref="WireProtocol"/> runs unchanged over
+/// length-prefixed codec in <see cref="WireProtocol"/> runs unchanged over
 /// KCP.
 /// </summary>
 /// <remarks>
-/// KCP in stream mode is a reliable, ordered byte pipe — the same contract
-/// <c>NetworkStream</c> offers — so nothing above this class needs to know which
-/// transport it is on. Reads are chunk-buffered: the ARQ hands back whole
+/// KCP in stream mode is a reliable, ordered byte pipe, so nothing above this class
+/// needs to know it is not a socket stream. Reads are chunk-buffered: the ARQ hands back whole
 /// messages, callers ask for arbitrary counts, and the remainder is held here
 /// until the next read.
 /// </remarks>
@@ -34,7 +33,7 @@ public sealed class KcpStream(KcpSession session) : Stream
         if (_pending == null)
         {
             var chunk = await session.ReadChunkAsync(ct);
-            if (chunk == null) return 0; // session closed — EOF, same as a TCP FIN
+            if (chunk == null) return 0; // session closed: end of stream
             _pending = chunk;
             _pendingOffset = 0;
         }
@@ -50,15 +49,22 @@ public sealed class KcpStream(KcpSession session) : Stream
     public override int Read(byte[] buffer, int offset, int count) =>
         ReadAsync(buffer.AsMemory(offset, count), CancellationToken.None).AsTask().GetAwaiter().GetResult();
 
-    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
     {
-        // KCP.Send only queues into the ARQ; it never blocks on the socket, so there
-        // is nothing to await and no benefit to hopping threads here.
+        // KCP.Send only queues into the ARQ and never blocks on the socket, so the one
+        // place a write can wait is here: when the peer is not acknowledging, the send
+        // queue reaches its soft limit and the writer is held until ACKs drain it — the
+        // same backpressure a full TCP send buffer applies, and what lets the connection's
+        // drop-the-oldest snapshot lane engage instead of KCP queueing without bound.
+        await session.WaitForSendSpaceAsync(ct);
         session.Write(buffer.Span);
-        return ValueTask.CompletedTask;
     }
 
-    public override void Write(byte[] buffer, int offset, int count) => session.Write(buffer.AsSpan(offset, count));
+    public override void Write(byte[] buffer, int offset, int count)
+    {
+        session.WaitForSendSpaceAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        session.Write(buffer.AsSpan(offset, count));
+    }
 
     public override void Flush() { /* Write already flushes the ARQ */ }
     public override Task FlushAsync(CancellationToken ct) => Task.CompletedTask;

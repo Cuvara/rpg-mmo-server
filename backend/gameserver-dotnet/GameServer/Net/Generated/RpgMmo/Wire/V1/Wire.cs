@@ -1502,8 +1502,11 @@ namespace RpgMmo.Wire.V1 {
   /// <summary>
   /// EnterWorldResponse contains the game server address and join token.
   ///
-  /// `transport` tells the client which realtime transport the target game server
-  /// speaks ("tcp" or "kcp"). Empty means "tcp".
+  /// `transport` names the realtime gameplay transport the target game server
+  /// speaks. It is always "kcp" (KCP over UDP, the only gameplay transport): the
+  /// gateway refuses to assign a server advertising anything else, and a client
+  /// must treat any other value, including empty, as a failed join and never
+  /// fall back to another transport. Set on success only.
   /// </summary>
   [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
   public sealed partial class EnterWorldResponse : pb::IMessage<EnterWorldResponse>

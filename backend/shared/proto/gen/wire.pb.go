@@ -701,8 +701,11 @@ func (x *EnterWorldRequest) GetCharacterId() string {
 
 // EnterWorldResponse contains the game server address and join token.
 //
-// `transport` tells the client which realtime transport the target game server
-// speaks ("tcp" or "kcp"). Empty means "tcp".
+// `transport` names the realtime gameplay transport the target game server
+// speaks. It is always "kcp" (KCP over UDP, the only gameplay transport): the
+// gateway refuses to assign a server advertising anything else, and a client
+// must treat any other value, including empty, as a failed join and never
+// fall back to another transport. Set on success only.
 type EnterWorldResponse struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	ServerAddr string                 `protobuf:"bytes,1,opt,name=server_addr,json=serverAddr,proto3" json:"server_addr,omitempty"`

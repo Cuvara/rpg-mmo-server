@@ -1,22 +1,26 @@
-// Package transport is the pluggable listen/dial layer for the realtime path
-// (client <-> gateway, client <-> game server).
+// Package transport is the listen/dial layer for the two framed hops a client
+// opens (client <-> gateway, client <-> game server).
 //
 // The wire codec in shared/messages is a 4-byte length prefix over an
 // io.Reader/io.Writer, so it works unchanged on any net.Conn. This package
-// therefore only decides *which* net.Conn the servers get:
+// only decides *which* net.Conn each hop gets, and the answer is fixed per hop:
 //
-//	tcp — the default. Reliable, ordered, kernel congestion control.
-//	kcp — KCP over UDP (github.com/xtaci/kcp-go/v5). Reliable + ordered like
-//	      TCP, but with an ARQ tuned for low latency instead of throughput,
-//	      which is what a 10-15Hz authoritative tick loop wants on mobile
-//	      networks (head-of-line blocking recovers in ~1 RTT instead of an
-//	      RTO backoff).
+//	kcp — KCP over UDP (github.com/xtaci/kcp-go/v5). The ONLY realtime
+//	      gameplay transport (client <-> game server). Reliable + ordered, with
+//	      an ARQ tuned for low latency instead of throughput, which is what a
+//	      10-15Hz authoritative tick loop wants on mobile networks (head-of-line
+//	      blocking recovers in ~1 RTT instead of an RTO backoff).
+//	tcp — the gateway hop only (auth + redirect, optionally TLS, ADR-23). It is
+//	      never a gameplay transport and there is no fallback from KCP to it.
 //
-// Business logic never sees the difference: both kinds return a net.Conn and
-// a net.Listener, and handlers stay byte-identical.
+// Gameplay callers go through ValidateGameplay / DialGameplay, which refuse
+// anything but kcp — including the empty string, which used to mean TCP.
+// Business logic never sees the transport: both kinds return a net.Conn and a
+// net.Listener, and handlers stay byte-identical.
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -28,10 +32,15 @@ import (
 
 // Supported transport kinds.
 const (
-	// KindTCP is the default transport.
+	// KindTCP is the gateway hop's transport. Never a gameplay transport.
 	KindTCP = "tcp"
-	// KindKCP is KCP over UDP.
+	// KindKCP is KCP over UDP, the only realtime gameplay transport.
 	KindKCP = "kcp"
+
+	// Gameplay is the transport every client <-> game server connection uses.
+	// It is what the game server registers, what the gateway hands out in
+	// EnterWorldResponse.Transport, and the only value a gameplay dialer accepts.
+	Gameplay = KindKCP
 )
 
 // KCP tuning constants.
@@ -82,29 +91,60 @@ const (
 	KCPSocketBuffer = 4 * 1024 * 1024
 )
 
-// Kinds returns every supported transport kind, in preference order.
-func Kinds() []string { return []string{KindTCP, KindKCP} }
+// Kinds returns every kind Listen and Dial accept. KindTCP is in the list for
+// the gateway hop only; a gameplay hop accepts Gameplay and nothing else.
+func Kinds() []string { return []string{KindKCP, KindTCP} }
 
-// Normalize lowercases a transport kind and maps the empty string to KindTCP.
-// The empty string is the backward-compatible "unset" value used on the wire
-// (EnterWorldResponse.Transport) and in the registry (storage.ServerInfo).
+// Normalize lowercases and trims a transport kind. It no longer maps the empty
+// string to anything: an unset transport is an error for every caller, never
+// a silent default.
 func Normalize(kind string) string {
-	k := strings.ToLower(strings.TrimSpace(kind))
-	if k == "" {
-		return KindTCP
-	}
-	return k
+	return strings.ToLower(strings.TrimSpace(kind))
 }
 
-// Validate reports whether kind names a supported transport. The empty string
-// is valid and means TCP.
+// Validate reports whether kind names a transport Listen and Dial support.
+// The empty string is invalid.
 func Validate(kind string) error {
 	switch Normalize(kind) {
 	case KindTCP, KindKCP:
 		return nil
 	default:
-		return fmt.Errorf("unknown transport %q (want %q or %q)", kind, KindTCP, KindKCP)
+		return fmt.Errorf("unknown transport %q (want %q or %q)", kind, KindKCP, KindTCP)
 	}
+}
+
+// ErrNotGameplayTransport is wrapped by ValidateGameplay for any transport
+// other than Gameplay.
+var ErrNotGameplayTransport = errors.New("realtime gameplay transport must be " + Gameplay)
+
+// ValidateGameplay reports whether kind is the gameplay transport. Only "kcp"
+// (any case) passes: an empty value — a registry entry or EnterWorldResponse
+// with no transport — and "tcp" are errors, so a misconfigured server or
+// gateway surfaces as a failed join that names the problem instead of a
+// connection over the wrong protocol.
+func ValidateGameplay(kind string) error {
+	switch k := Normalize(kind); k {
+	case Gameplay:
+		return nil
+	case "":
+		return fmt.Errorf("%w: no transport advertised", ErrNotGameplayTransport)
+	default:
+		return fmt.Errorf("%w: got %q", ErrNotGameplayTransport, k)
+	}
+}
+
+// DialGameplay dials a game server. advertised is the transport the gateway
+// returned in EnterWorldResponse.Transport; anything but Gameplay is refused
+// before a packet is sent, and there is no fallback to another transport.
+//
+// A KCP dial has no handshake (see Dial), so a dead or filtered UDP port is
+// only detected by the caller's read deadline on the first reply
+// (MsgJoinTokenResp).
+func DialGameplay(advertised, addr string, timeout time.Duration, opts ...Option) (net.Conn, error) {
+	if err := ValidateGameplay(advertised); err != nil {
+		return nil, fmt.Errorf("dial game server %s: %w", addr, err)
+	}
+	return Dial(Gameplay, addr, timeout, opts...)
 }
 
 // options is the resolved set of Option values for one Listen/Dial call.

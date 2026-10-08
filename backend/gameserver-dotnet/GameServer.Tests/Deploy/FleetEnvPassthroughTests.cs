@@ -127,13 +127,11 @@ public class FleetEnvPassthroughTests
                 "takes both.",
 
             ["GAMESERVER_TRANSPORT"] =
-                "Structurally coupled to a field no environment variable can reach. Choosing " +
-                "`kcp` changes the wire to UDP, but the fleet's port is declared " +
-                "`protocol: TCP` in the ports block above the container; forwarding this " +
-                "alone would let an operator advertise kcp through the registry while the " +
-                "port still speaks TCP, and every client would fail to connect to a fleet " +
-                "that is Ready and healthy. Moving a fleet to KCP is a manifest change — the " +
-                "port's protocol and this value together — not a ConfigMap edit.",
+                "Realtime gameplay is KCP/UDP only (ADR-32): unset and `kcp` are the only " +
+                "accepted values and anything else is fatal at startup. The fleet's game " +
+                "port is declared `protocol: UDP`, which is what actually decides the wire; " +
+                "forwarding this would only offer a knob whose every other setting makes the " +
+                "pod exit at boot, so the fleets deliberately omit it.",
         };
 
     private static readonly IReadOnlyDictionary<string, string> MapFleetExclusions =

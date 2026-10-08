@@ -3,6 +3,7 @@ using GameServer.Net;
 using GameServer.Observability;
 using RpgMmo.Wire.V1;
 using Xunit;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -33,7 +34,7 @@ public class ReconnectInputCursorTests
 {
     private static GameMetrics NewMetrics() => new(HardeningHarness.MapId, $"test.{Guid.NewGuid():N}");
 
-    private static async Task SendInputAsync(System.Net.Sockets.TcpClient c, ulong tick, float x)
+    private static async Task SendInputAsync(KcpTestClient c, ulong tick, float x)
     {
         var env = WireProtocol.NewEnvelope(
             MsgType.Input,

@@ -28,11 +28,11 @@ const (
 //
 // # Why this exists
 //
-// Encryption is off by default twice: the transport defaults to TCP, which has
-// no packet-crypt layer at all, and the key defaults to empty. So "is this
-// deployment encrypted" is not answerable from either value alone, and the
-// combination that answers "no" most emphatically — TCP with no key — is the
-// default.
+// Encryption is not answerable from one value: the gateway hop is TCP, which has
+// no packet-crypt layer and is protected only by TLS, while the gameplay hop is
+// KCP, which is encrypted only when TRANSPORT_KEY is set. Both default to
+// plaintext, so "is this deployment encrypted" needs the kind, the key and the
+// TLS switch together.
 //
 // # Encrypted and Authenticated are separate on purpose
 //

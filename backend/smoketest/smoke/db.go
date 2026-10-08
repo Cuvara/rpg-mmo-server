@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/duycuong/rpg-mmo/shared/messages"
-	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // ---------------------------------------------------------------------------
@@ -474,7 +473,7 @@ func (r *Runner) stepGameStateReload() (string, error) {
 
 	// A fresh join token: tokens are single-use / short-lived, so redo the
 	// gateway hop with the JWT we already hold.
-	gwConn, err := r.dial(r.cfg.Transport, r.cfg.GatewayAddr)
+	gwConn, err := r.dial(r.cfg.GatewayAddr)
 	if err != nil {
 		return "", fmt.Errorf("reload: %w", err)
 	}
@@ -499,7 +498,7 @@ func (r *Runner) stepGameStateReload() (string, error) {
 		return "", fmt.Errorf("reload: enter world gave no join token: %s", enterResp.Error)
 	}
 
-	conn, err := r.dialServer(transport.Normalize(enterResp.Transport), enterResp.ServerAddr)
+	conn, err := r.dialServer(enterResp.Transport, enterResp.ServerAddr)
 	if err != nil {
 		return "", fmt.Errorf("reload: %w", err)
 	}

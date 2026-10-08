@@ -53,7 +53,7 @@ public class PostgresPersistenceIntegrationTests
 
         try
         {
-            using var client = new TcpClient();
+            using var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, port);
             await using var stream = client.GetStream();
 
@@ -121,7 +121,7 @@ public class PostgresPersistenceIntegrationTests
         await stream.FlushAsync();
     }
 
-    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    private static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int attempt = 0; attempt < 50; attempt++)
         {
