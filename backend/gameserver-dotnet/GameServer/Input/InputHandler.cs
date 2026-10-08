@@ -649,6 +649,10 @@ public sealed class InputHandler
             return;
         }
         cursor.LastInputTick = input.Tick;
+        // The tick that applied it, on the server's own tick line (ack_applied_tick). This is
+        // the DRAIN tick, not input.Tick: an input is applied on whichever tick drains it, and
+        // the client cannot know which one that was without being told.
+        cursor.LastInputAppliedTick = currentTick;
 
         // A jump is an edge: latch it for the next motor step, whichever path takes it, so
         // a jump on an input that coalescing does not integrate is not lost.

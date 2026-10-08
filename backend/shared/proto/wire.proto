@@ -948,6 +948,25 @@ message SnapshotMessage {
   //
   // See GameEvent for why these live here rather than in a message of their own.
   repeated GameEvent events = 6;
+
+  // Server base tick on which the input acknowledged by `ack_tick` was APPLIED, i.e.
+  // the tick whose input drain accepted it. Zero means "not sent": no input accepted
+  // yet, a protocol 2 peer, or an older server. Receivers then fall back to the
+  // previous behaviour.
+  //
+  // WHY THE CLIENT NEEDS IT. `ack_tick` is a CLIENT tick; `tick` is a SERVER tick.
+  // The server does not apply an input on the tick number the client stamped on it
+  // but on the tick that drains it, so the two tick lines are offset by
+  // (ack_tick - ack_applied_tick) - roughly the client's input lead minus one, plus
+  // clock skew. A client that compares this snapshot with its own prediction history
+  // at client tick `tick` compares two different moments of the same motion, and
+  // every tick of that offset is a reconciliation error (a fraction of a step on a
+  // curve, a whole step at a start or a stop). With this field the client compares
+  // against its history at `tick + (ack_tick - ack_applied_tick)` instead.
+  //
+  // Additive and value-only: sent only to protocol 3 peers (protocol 2 bytes stay
+  // pinned), and ignoring it is always safe. No protocol version bump.
+  uint64 ack_applied_tick = 7;
 }
 
 // DisconnectMessage is sent by either side to end the session politely.

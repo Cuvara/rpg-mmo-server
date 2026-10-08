@@ -288,6 +288,13 @@ public sealed class Connection : IDisposable
     private Shared.GameLogic.Components.Vec2 _pendingAnchor;
     private ulong _pendingTick;
     private ulong _pendingAckTick;
+
+    /// <summary>
+    /// Base tick that applied the input <see cref="_pendingAckTick"/> acknowledges, staged with
+    /// it (<c>ack_applied_tick</c>). Encoded only for a protocol 3 peer; see
+    /// <c>SnapshotDeltaState.Encode</c>.
+    /// </summary>
+    private ulong _pendingAckAppliedTick;
     private int _pendingKeyframeInterval;
 
     /// <summary>
@@ -366,7 +373,7 @@ public sealed class Connection : IDisposable
         GameServer.World.WorldReader reader, float radius, ulong tick, int keyframeInterval,
         GameServer.Snapshot.TickEventBuffer? tickEvents = null)
     {
-        if (!reader.TryGetSnapshotAnchor(UserId, out var anchor, out ulong ackTick))
+        if (!reader.TryGetSnapshotAnchor(UserId, out var anchor, out ulong ackTick, out ulong ackAppliedTick))
         {
             // The result used to be discarded. On failure the anchor is default(Vec2) —
             // (0, 0) — so the AOI centred on the world ORIGIN, which on this map is the
@@ -473,6 +480,7 @@ public sealed class Connection : IDisposable
             _pendingAnchor = anchor;
             _pendingTick = tick;
             _pendingAckTick = ackTick;
+            _pendingAckAppliedTick = ackAppliedTick;
             _pendingKeyframeInterval = keyframeInterval;
             _snapshotPending = true;
 
@@ -535,6 +543,20 @@ public sealed class Connection : IDisposable
         out Shared.GameLogic.Components.Vec2 anchor,
         out GameServer.Snapshot.PendingGameEvent[] events, out int eventCount, out int observerKey,
         out GameServer.Snapshot.SnapshotV3Gather? v3)
+        => TakePendingSnapshot(out buffer, out count, out tick, out ackTick, out keyframeInterval,
+                               out anchor, out events, out eventCount, out observerKey, out v3, out _);
+
+    /// <summary>
+    /// The full claim: everything above plus <paramref name="ackAppliedTick"/>, the base tick
+    /// that applied the input <paramref name="ackTick"/> acknowledges. Staged and claimed under
+    /// the same lock as <paramref name="ackTick"/>, so the pair always describes one input.
+    /// </summary>
+    internal bool TakePendingSnapshot(
+        out GameServer.World.EntityView[] buffer, out int count,
+        out ulong tick, out ulong ackTick, out int keyframeInterval,
+        out Shared.GameLogic.Components.Vec2 anchor,
+        out GameServer.Snapshot.PendingGameEvent[] events, out int eventCount, out int observerKey,
+        out GameServer.Snapshot.SnapshotV3Gather? v3, out ulong ackAppliedTick)
     {
         lock (_snapshotLock)
         {
@@ -543,6 +565,7 @@ public sealed class Connection : IDisposable
             {
                 buffer = Array.Empty<GameServer.World.EntityView>();
                 count = 0; tick = 0; ackTick = 0; keyframeInterval = 0; anchor = default;
+                ackAppliedTick = 0;
                 events = Array.Empty<GameServer.Snapshot.PendingGameEvent>();
                 eventCount = 0;
                 observerKey = GameServer.Snapshot.PendingGameEvent.NoKey;
@@ -554,6 +577,7 @@ public sealed class Connection : IDisposable
             if (PeerProtocolVersion >= 3) v3 = _v3Gathers[_pendingBuffer];
             tick = _pendingTick;
             ackTick = _pendingAckTick;
+            ackAppliedTick = _pendingAckAppliedTick;
             keyframeInterval = _pendingKeyframeInterval;
             anchor = _pendingAnchor;
             observerKey = _observerKey;
@@ -1027,7 +1051,7 @@ public sealed class Connection : IDisposable
                                              out ulong ackTick, out int keyframeInterval,
                                              out var anchor, out var stagedEvents,
                                              out int stagedEventCount, out int observerKey,
-                                             out var v3Gather))
+                                             out var v3Gather, out ulong ackAppliedTick))
                     {
                         continue;
                     }
@@ -1036,7 +1060,7 @@ public sealed class Connection : IDisposable
                         tick, ackTick, buffer.AsSpan(0, count), keyframeInterval,
                         intern: Encoding == WireEncoding.Proto, observer: anchor,
                         events: stagedEvents.AsSpan(0, stagedEventCount), observerKey: observerKey,
-                        v3: v3Gather);
+                        v3: v3Gather, ackAppliedTick: ackAppliedTick);
 
                     if (Encoding == WireEncoding.Proto && !IsSealed)
                     {

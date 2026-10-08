@@ -22,6 +22,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (below the window), `TestSupportedWindowIsWellFormed`.
 
 ### Added
+- **`ack_applied_tick` (SnapshotMessage field 7)** in `proto/wire.proto` (regenerated with
+  protoc 29.3 + protoc-gen-go v1.36.6) and `messages.SnapshotMessage.AckAppliedTick`
+  (`json:"ack_applied_tick,omitempty"`, both directions in `proto.go`). The server base tick
+  that applied the input `ack_tick` acknowledges, so a client can map snapshot ticks onto its
+  own tick line. Additive; 0 = not sent; no protocol version bump. Tests:
+  `TestSnapshotRoundTripBothEncodings`, `TestJSONAckAppliedTickKey`.
 - **`cid` JWT claim (ADR-31, contract `join-token`).** `jwt.Claims.CharacterID`
   (`json:"cid,omitempty"`), `jwt.SignWithCharacter` and `Keyring.SignWithCharacter`. Empty omits
   the claim (= the account's default character), so every existing token and reader is

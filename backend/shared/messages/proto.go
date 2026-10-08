@@ -228,6 +228,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.Tick, t.AckTick, t.Full = pb.Tick, pb.AckTick, pb.Full
+		t.AckAppliedTick = pb.AckAppliedTick
 		t.Removed = pb.Removed
 		// A keyframe with no entities and a delta with no entities are both
 		// legal; keep the slice non-nil only when the wire carried one, so
@@ -481,10 +482,11 @@ func EntityTypeNames() []string {
 
 func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 	pb := &wirepb.SnapshotMessage{
-		Tick:    t.Tick,
-		AckTick: t.AckTick,
-		Full:    t.Full,
-		Removed: t.Removed,
+		Tick:           t.Tick,
+		AckTick:        t.AckTick,
+		Full:           t.Full,
+		Removed:        t.Removed,
+		AckAppliedTick: t.AckAppliedTick,
 	}
 	if len(t.Events) > 0 {
 		pb.Events = make([]*wirepb.GameEvent, len(t.Events))

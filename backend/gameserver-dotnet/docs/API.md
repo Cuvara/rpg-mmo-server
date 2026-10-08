@@ -589,6 +589,7 @@ the reason recorded in `backend/TEAM.md`.
 | `full` | bool | omitted when false | `true` = keyframe: `entities` is the complete AOI set. `false`/absent = delta. |
 | `entities` | array | always (may be `[]`) | Keyframe: everything in AOI. Delta: only entities whose visible state changed since the previous snapshot **sent to this connection**. |
 | `removed` | string[] | omitted when empty | Delta only: entity IDs that left the AOI or the world. Never present on a keyframe. |
+| `ack_applied_tick` | uint64 | omitted when 0; protocol 3 peers only (field 7) | Server tick on which the input acknowledged by `ack_tick` was **applied** (the tick whose input drain accepted it). Pairs with `ack_tick` to map server ticks onto the client's tick line - see [Reconciliation](#reconciliation). 0 = not sent. |
 
 `entities[]` element: `id` (string), `type` (a category string — see below),
 `x`, `y` (float32), `hp`, `max_hp` (int), `speed` (float32), `facing_brad` (uint32),
@@ -1303,6 +1304,8 @@ on snapshot s:
     # STEP 4 — clocks.
     tick     = max(tick, s.tick)
     ack_tick = max(ack_tick, s.ack_tick)   # monotonic; a 0 never lowers it
+    if s.ack_applied_tick != 0 and s.ack_tick == ack_tick:
+        ack_applied_tick = s.ack_applied_tick   # the pair always moves together
 ```
 
 ```
@@ -1452,6 +1455,46 @@ entity — one client's ack never reflects another's inputs. A client should:
 
 `ack_tick = 0` means the server has accepted no input yet — do not treat it as an
 ack of tick 0.
+
+#### Which history entry a snapshot describes — `ack_applied_tick` (normative)
+
+`tick` and `ack_tick` live on **two different tick lines**. `tick` is the server's base
+tick; `ack_tick` is the number the **client** stamped on its input. The server does not
+apply an input on the tick the client stamped but on the tick whose **input drain**
+accepted it (`TickLoop` drains the queue at the top of the critical group;
+`InputHandler.ProcessInput` records it). That tick is `ack_applied_tick`.
+
+A predicting client keeps a history of its own predicted state indexed by **client** tick.
+The snapshot at server tick `T` therefore matches the client's history at
+
+```
+offset          = ack_tick - ack_applied_tick      # client tick - server tick, same input
+history_tick(T) = T + offset
+```
+
+not at client tick `T`. Comparing at `T` compares two different moments of the same
+motion: `offset` is roughly the client's input lead minus one plus clock skew, and every
+tick of it is a reconciliation error — measured at about 0.0033 units per tick of offset
+per reconcile on a curve, and a whole movement step at every start and stop, which the
+client then "corrects" into visible rubber-banding.
+
+Receiver rules:
+
+1. `ack_applied_tick` is only meaningful **together with the `ack_tick` of the same
+   snapshot**. Never pair one snapshot's `ack_applied_tick` with another's `ack_tick`.
+2. `ack_applied_tick = 0` means **not sent** — a protocol 2 peer, a server older than this
+   field, no input accepted yet, or a reattached entity before its first new input. Fall
+   back to the previous behaviour (compare at `T`, or rebase on the ack as before).
+3. Between inputs the server keeps stepping the entity on its held direction, so later
+   snapshots repeat the same `(ack_tick, ack_applied_tick)` pair while `tick` moves on; the
+   formula above still holds because both tick lines advance one per tick.
+4. The offset is jittery by a tick or two (input arrival vs drain). A receiver should smooth
+   it (e.g. the median of recent pairs) rather than act on each pair alone.
+
+**Who is sent it.** Protocol 3 peers only. The field is additive and a protocol 2
+receiver would skip it, but the protocol 2 bytes are pinned against the pre-v3 encoder
+(`V2WireIdentityTests`), and a field no protocol 2 client reads is not worth breaking that
+pin for. No `protocol_version` bump: absent and zero mean the same thing.
 
 ### Backward compatibility
 

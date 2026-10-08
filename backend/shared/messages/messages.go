@@ -453,6 +453,15 @@ type SnapshotMessage struct {
 	// the world's state because a client may have missed a delta; it does not
 	// restate its history.
 	Events []GameEvent `json:"events,omitempty"`
+
+	// AckAppliedTick is the server base tick on which the input acknowledged by
+	// AckTick was APPLIED - the tick whose input drain accepted it. AckTick is a
+	// CLIENT tick and Tick a SERVER tick; their offset, AckTick - AckAppliedTick,
+	// is what lets a client compare this snapshot with the matching entry of its
+	// prediction history instead of the entry at client tick Tick. Zero means
+	// "not sent" (protocol 2 peer, older server, no input accepted yet) and
+	// receivers fall back to the previous behaviour.
+	AckAppliedTick uint64 `json:"ack_applied_tick,omitempty"`
 }
 
 // GameEventType is the kind of an edge-triggered occurrence. Numbers are FROZEN

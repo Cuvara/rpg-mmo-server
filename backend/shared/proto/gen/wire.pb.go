@@ -1952,9 +1952,27 @@ type SnapshotMessage struct {
 	// damage number arriving late is worse than one that never arrives.
 	//
 	// See GameEvent for why these live here rather than in a message of their own.
-	Events        []*GameEvent `protobuf:"bytes,6,rep,name=events,proto3" json:"events,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Events []*GameEvent `protobuf:"bytes,6,rep,name=events,proto3" json:"events,omitempty"`
+	// Server base tick on which the input acknowledged by `ack_tick` was APPLIED, i.e.
+	// the tick whose input drain accepted it. Zero means "not sent": no input accepted
+	// yet, a protocol 2 peer, or an older server. Receivers then fall back to the
+	// previous behaviour.
+	//
+	// WHY THE CLIENT NEEDS IT. `ack_tick` is a CLIENT tick; `tick` is a SERVER tick.
+	// The server does not apply an input on the tick number the client stamped on it
+	// but on the tick that drains it, so the two tick lines are offset by
+	// (ack_tick - ack_applied_tick) - roughly the client's input lead minus one, plus
+	// clock skew. A client that compares this snapshot with its own prediction history
+	// at client tick `tick` compares two different moments of the same motion, and
+	// every tick of that offset is a reconciliation error (a fraction of a step on a
+	// curve, a whole step at a start or a stop). With this field the client compares
+	// against its history at `tick + (ack_tick - ack_applied_tick)` instead.
+	//
+	// Additive and value-only: sent only to protocol 3 peers (protocol 2 bytes stay
+	// pinned), and ignoring it is always safe. No protocol version bump.
+	AckAppliedTick uint64 `protobuf:"varint,7,opt,name=ack_applied_tick,json=ackAppliedTick,proto3" json:"ack_applied_tick,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *SnapshotMessage) Reset() {
@@ -2027,6 +2045,13 @@ func (x *SnapshotMessage) GetEvents() []*GameEvent {
 		return x.Events
 	}
 	return nil
+}
+
+func (x *SnapshotMessage) GetAckAppliedTick() uint64 {
+	if x != nil {
+		return x.AckAppliedTick
+	}
+	return 0
 }
 
 // DisconnectMessage is sent by either side to end the session politely.
@@ -2833,14 +2858,15 @@ const file_wire_proto_rawDesc = "" +
 	"\x05flags\x18\x06 \x01(\rR\x05flags\x12\x1b\n" +
 	"\tsource_id\x18\a \x01(\tR\bsourceId\x12\x1b\n" +
 	"\ttarget_id\x18\b \x01(\tR\btargetId\x12\x1b\n" +
-	"\teffect_id\x18\t \x01(\rR\beffectId\"\xdd\x01\n" +
+	"\teffect_id\x18\t \x01(\rR\beffectId\"\x87\x02\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +
 	"\x04full\x18\x03 \x01(\bR\x04full\x12:\n" +
 	"\bentities\x18\x04 \x03(\v2\x1e.rpgmmo.wire.v1.EntitySnapshotR\bentities\x12\x18\n" +
 	"\aremoved\x18\x05 \x03(\tR\aremoved\x121\n" +
-	"\x06events\x18\x06 \x03(\v2\x19.rpgmmo.wire.v1.GameEventR\x06events\"+\n" +
+	"\x06events\x18\x06 \x03(\v2\x19.rpgmmo.wire.v1.GameEventR\x06events\x12(\n" +
+	"\x10ack_applied_tick\x18\a \x01(\x04R\x0eackAppliedTick\"+\n" +
 	"\x11DisconnectMessage\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x0f\n" +
 	"\rResyncRequest\"T\n" +

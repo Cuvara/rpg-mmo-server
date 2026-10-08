@@ -13,6 +13,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Refusals still echo the server's own version.
 
 ### Added
+- **`SnapshotMessage.ack_applied_tick` (field 7)** — the base tick on which the input
+  acknowledged by `ack_tick` was applied (its drain tick). `ack_tick` is a client tick and
+  `tick` a server tick; their offset is what a predicting client needs to compare a snapshot
+  with the right entry of its history (see `docs/API.md`, Reconciliation, "Which history entry
+  a snapshot describes"). Recorded as `InputCursor.LastInputAppliedTick` next to
+  `LastInputTick` in `InputHandler.ProcessInput`, read with it by
+  `WorldReader.TryGetSnapshotAnchor`, staged/claimed with `ack_tick` in `Connection`, and
+  written by `SnapshotDeltaState.Encode(..., ackAppliedTick)` (counted in the budget header)
+  and `JsonWriter`/`JsonReader` (`ack_applied_tick`, omitted when zero). **Protocol 3 peers
+  only**: the protocol 2 bytes stay pinned by `V2WireIdentityTests`. Additive, no protocol
+  version bump. Tests: `CoreV3/AckAppliedTickTests`.
 - **Core v3 network (ADR-28..31, wire protocol 3)** — see `docs/API.md` (normative) and
   `docs/DESIGN.md`, "Core v3 network".
   - **Protocol window 2-3.** `WireProtocol.CheckProtocolVersion` admits
