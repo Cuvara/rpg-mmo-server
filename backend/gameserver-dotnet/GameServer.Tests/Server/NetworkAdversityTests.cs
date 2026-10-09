@@ -230,7 +230,15 @@ public class NetworkAdversityTests
                 "ordered transport does not lose one to jitter, so a pattern of them is frame " +
                 $"loss on the server's outbound path. seed={Seed}. {r}");
 
-            Assert.InRange(r.Rate, 15.0 - 1.0 / WindowSeconds, 15.0 + 1.0 / WindowSeconds);
+            // The rate is arrivals over the ARRIVAL window, so the link's jitter lands on the
+            // window's two end points (see RatioTolerance): up to 2 x JitterMs of the window is
+            // the link's, not the server's. One snapshot of slack covers the tick phase; the
+            // jittered arm adds the end-point term on top. First seen on CI after the move to a
+            // per-datagram UDP proxy: 92 snapshots in 6.04s (15.23/s) with 0 non-4 gaps, i.e.
+            // no frame lost and a send period that did not move.
+            double endPointSlack = name == "jittered" ? 15.0 * (2 * JitterMs / 1000.0) / WindowSeconds : 0;
+            double rateTol = 1.0 / WindowSeconds + endPointSlack;
+            Assert.InRange(r.Rate, 15.0 - rateTol, 15.0 + rateTol);
 
             // Jitter spreads arrivals around the send period; it must not move the period
             // itself. A median that has shifted is a rate change wearing jitter's clothes.
