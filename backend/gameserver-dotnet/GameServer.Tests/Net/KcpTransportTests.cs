@@ -65,7 +65,7 @@ public class KcpTransportTests
     public void ResolveConfigured_AnythingElse_IsFatal_WithTheContractMessage(string configured)
     {
         Assert.False(TransportKind.ResolveConfigured(configured, out _, out string? error));
-        // The exact text is part of the cross-repo contract (.kcp-migration/CONTRACT.md).
+        // The exact text is part of the cross-repo contract (ADR-32, backend/docs/NETWORKING.md).
         Assert.Equal($"GAMESERVER_TRANSPORT={configured} is not supported: realtime gameplay is KCP/UDP only", error);
     }
 
