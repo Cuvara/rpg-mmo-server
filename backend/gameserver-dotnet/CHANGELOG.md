@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- `scripts/admission-probe.py`: it dialled the game server over raw TCP, which no longer
+  exists (ADR-32). RUNBOOK §"Probing admission hardening" maps each of its checks to the KCP
+  tests and live probes that cover it now.
+
 ### Changed
 - **Realtime gameplay is KCP/UDP only (ADR-32).** The game server always listens KCP;
   `--transport` / `GAMESERVER_TRANSPORT` may be unset or `kcp`, and anything else is fatal

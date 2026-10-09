@@ -211,7 +211,7 @@ the party → gameplay → loot/fail → final save → transfer back to origin 
 
 ## 4. Deployment topology per tier
 
-Common to all tiers: two channels — meta over HTTPS/WS to Nakama, realtime over TCP (→KCP)
+Common to all tiers: two channels — meta over HTTPS/WS to Nakama, realtime over KCP/UDP to the game server (TCP only for the gateway auth hop)
 to Gateway/GameServers. All components are open source, $0 license.
 
 > **⚠️ ESTIMATES — UNBENCHMARKED.** See ARCHITECTURE-DECISIONS.md ADR-7.

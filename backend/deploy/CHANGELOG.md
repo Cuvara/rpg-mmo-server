@@ -6,6 +6,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Local stack under WSL2 NAT advertises the WSL VM address for gameplay.** Measured
+  2026-10-08: a Windows process sending UDP to `127.0.0.1:<game port>` gets no answer
+  (Windows localhost forwarding carries TCP only) while the same datagram to the WSL VM
+  address is echoed, and a real Windows client against a stack advertising `127.0.0.1:9000`
+  failed every join with a KCP/UDP connect timeout. `stack.sh` now detects WSL2 NAT
+  (`wslinfo --networking-mode`) and exports `LOCAL_ADVERTISE_HOST=<wsl-ip>`, which
+  `docker-compose.override.yml` uses for both game servers' `GAMESERVER_PUBLIC_ADDR`, and
+  rewrites a loopback/host-less `GAMESERVER_PUBLIC_ADDR` the same way.
+  `STACK_ADVERTISE_HOST=<host>` overrides the detected address; `STACK_ADVERTISE_HOST=keep`
+  disables it.
+- **Per-source-IP KCP session cap raised where every client shares one address.** Local
+  compose (`GAMESERVER_KCP_MAX_SESSIONS_PER_IP` default 4096) and the k3d ConfigMap
+  (`kcp-max-sessions-per-ip: "4096"`, the serverlb relays every client from one address).
+  The compiled default of 16 would refuse the 17th local player or load-test bot. Global cap
+  and rate limits unchanged.
 - **Realtime gameplay is KCP/UDP only (ADR-32); every deploy path now says so.**
   - Game port is UDP everywhere: Agones/k8s fleet ports `game` are `protocol: UDP`
     (`agones/fleet-map-dotnet-dev.yaml`, `k8s/app/50-fleet-map.yaml`, `60-fleet-dungeon.yaml`);
