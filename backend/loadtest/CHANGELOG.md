@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Game servers are dialled over KCP/UDP only.** The gateway hop is always TCP; the game-server
+  hop uses `transport.DialGameplay` with whatever the gateway advertised, so a non-`kcp`
+  advertisement fails the player instead of falling back. `-join=direct` dials KCP.
+- The result's `config.transport` is always `kcp`.
+
+### Added
+- **`client.kcp` in every result**: kcp-go's client-side SNMP counters over the measurement
+  window — segments in/out, UDP bytes in/out (wire cost incl. KCP headers and retransmissions),
+  retransmitted / fast / early retransmitted segments, inferred lost segments, duplicate segments,
+  input errors (incl. crypto checksum failures = key mismatch), retransmit and loss ratios, and the
+  end-of-window send/receive queue depths. The summary table gains `kcp retx` and `kcp lost`.
+- `-transport-key` / `TRANSPORT_KEY`: the game servers' pre-shared KCP key.
+
+### Removed
+- `-transport` / `TRANSPORT` (it selected the gateway hop's transport, which is now fixed).
+
 ### Added
 - **`results/2026-09-18-importance/` — the importance A/B**, 200 players x 3 repeats per arm
   on `cluster` and `spread`, one binary and one env-var pair apart. Measured **-47.3%** and

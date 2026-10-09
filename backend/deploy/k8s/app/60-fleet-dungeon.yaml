@@ -100,7 +100,9 @@ spec:
         # allocation status`.
         - name: game
           containerPort: 9000
-          protocol: TCP
+          # UDP: realtime gameplay is KCP/UDP only. A TCP port here leaves the
+          # game port unreachable and every client join times out.
+          protocol: UDP
           # Dynamic on purpose. Static would make containerPort == hostPort
           # and let the address be configured, at the cost of what
           # `scheduling: Packed` is for — one GameServer per port per node
@@ -405,6 +407,18 @@ spec:
                     secretKeyRef:
                       name: rpg-app-secrets
                       key: nakama-http-key
+                # Optional kcp-go-compatible AES-256 pre-shared key for the KCP/UDP
+                # game port (32-byte hex). Clients must hold the same key
+                # (-cuvara-transport-key / CUVARA_TRANSPORT_KEY). Empty = plaintext
+                # datagrams + a startup WARN, allowed for dev only. The server is
+                # KCP-only, so no GAMESERVER_TRANSPORT is set (any value but
+                # "kcp" is fatal at startup).
+                - name: TRANSPORT_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-app-secrets
+                      key: transport-key
+                      optional: true
 
                 # ===========================================================================
                 # TUNING KNOBS -- forwarded from the `gameserver-config` ConfigMap.
@@ -506,6 +520,31 @@ spec:
                     configMapKeyRef:
                       name: gameserver-config
                       key: handshake-timeout-ms
+                      optional: true
+                # KCP/UDP listener flood limits. Absent key = compiled-in default.
+                - name: GAMESERVER_KCP_MAX_SESSIONS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: kcp-max-sessions
+                      optional: true
+                - name: GAMESERVER_KCP_MAX_SESSIONS_PER_IP
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: kcp-max-sessions-per-ip
+                      optional: true
+                - name: GAMESERVER_KCP_NEW_SESSIONS_PER_SEC
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: kcp-new-sessions-per-sec
+                      optional: true
+                - name: GAMESERVER_KCP_DATAGRAMS_PER_SEC
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: kcp-datagrams-per-sec
                       optional: true
                 - name: GAMESERVER_MIN_PROTOCOL_VERSION
                   valueFrom:

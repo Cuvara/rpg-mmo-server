@@ -287,6 +287,23 @@ public struct InputCursor
     /// <summary>Last processed input tick (monotonic).</summary>
     public ulong LastInputTick;
 
+    /// <summary>
+    /// Base tick on which the input named by <see cref="LastInputTick"/> was accepted —
+    /// the tick whose input drain processed it. Zero means "no input accepted yet".
+    /// </summary>
+    /// <remarks>
+    /// Sent as <c>ack_applied_tick</c> next to <c>ack_tick</c>. The two live on different
+    /// tick lines: <see cref="LastInputTick"/> is the number the CLIENT stamped on its input,
+    /// this is the SERVER tick that applied it, and the client needs both to know which
+    /// entry of its prediction history a snapshot at server tick T describes (its history
+    /// at <c>T + (ack_tick - ack_applied_tick)</c>, not at T). Written in the same place as
+    /// <see cref="LastInputTick"/> so the pair can never describe two different inputs.
+    /// <para>Not persisted: it is meaningless across a reattach, and the reset to default
+    /// there (with the rest of the cursor) makes the next snapshot say "not sent" until the
+    /// next input lands, which receivers already handle.</para>
+    /// </remarks>
+    public ulong LastInputAppliedTick;
+
     /// <summary>X of the most recently accepted movement direction.</summary>
     /// <remarks>
     /// Held so the critical group can keep integrating between input packets. A client

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/messages"
-	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // AuthMode selects how a virtual player obtains its gateway JWT.
@@ -151,9 +150,12 @@ type Config struct {
 	NakamaURL   string
 	ServerKey   string
 	GatewayAddr string
-	Transport   string
-	JWTSecret   string
-	MapID       string
+	// TransportKey is the pre-shared KCP key (TRANSPORT_KEY) the game servers
+	// were started with; empty = plaintext. The gateway hop is always TCP and
+	// the game-server hop always KCP, so there is no transport to choose.
+	TransportKey string
+	JWTSecret    string
+	MapID        string
 
 	// --- direct-join topology (JoinDirect only) ---
 	JoinMode        JoinMode
@@ -226,7 +228,6 @@ const (
 	DefaultNakamaURL   = "http://localhost:7350"
 	DefaultServerKey   = "defaultkey"
 	DefaultGatewayAddr = ":8000"
-	DefaultTransport   = "tcp"
 	DefaultMapID       = "map_01"
 	DefaultTimeout     = 15 * time.Second
 	// DefaultTickRate matches GameConstants.DefaultTickRate (15Hz). A client that
@@ -252,18 +253,18 @@ const TickBudget = time.Second / DefaultTickRate
 // getenv is injected for testability (pass os.Getenv in production).
 func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	cfg := Config{
-		NakamaURL:   envOr(getenv, "NAKAMA_URL", DefaultNakamaURL),
-		ServerKey:   envOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
-		GatewayAddr: envOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
-		Transport:   envOr(getenv, "TRANSPORT", DefaultTransport),
-		JWTSecret:   getenv("JWT_SECRET"),
-		MapID:       envOr(getenv, "LOADTEST_MAP_ID", DefaultMapID),
-		Players:     10,
-		RampRate:    20,
-		Duration:    DefaultDuration,
-		TickRate:    DefaultTickRate,
-		AuthMode:    AuthPresigned,
-		Movement:    MovementCluster,
+		NakamaURL:    envOr(getenv, "NAKAMA_URL", DefaultNakamaURL),
+		ServerKey:    envOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
+		GatewayAddr:  envOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
+		TransportKey: getenv("TRANSPORT_KEY"),
+		JWTSecret:    getenv("JWT_SECRET"),
+		MapID:        envOr(getenv, "LOADTEST_MAP_ID", DefaultMapID),
+		Players:      10,
+		RampRate:     20,
+		Duration:     DefaultDuration,
+		TickRate:     DefaultTickRate,
+		AuthMode:     AuthPresigned,
+		Movement:     MovementCluster,
 		// Protobuf is what the Unity client speaks (ADR-9); JSON is the legacy
 		// arm. A sweep that does not say which encoding it drove measures the
 		// wrong wire by default — and did, for one sweep, before this default.
@@ -290,7 +291,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.StringVar(&cfg.NakamaURL, "nakama-url", cfg.NakamaURL, "Nakama HTTP base URL (only used with -auth=nakama)")
 	fs.StringVar(&cfg.ServerKey, "server-key", cfg.ServerKey, "Nakama server key")
 	fs.StringVar(&cfg.GatewayAddr, "gateway-addr", cfg.GatewayAddr, "Gateway address")
-	fs.StringVar(&cfg.Transport, "transport", cfg.Transport, "Transport for the gateway hop: tcp or kcp")
+	fs.StringVar(&cfg.TransportKey, "transport-key", cfg.TransportKey, "Pre-shared KCP key of the game servers (env TRANSPORT_KEY; empty = plaintext)")
 	fs.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "Shared HS256 secret (env JWT_SECRET)")
 	fs.StringVar(&cfg.MapID, "map-id", cfg.MapID, "Map ID to enter")
 	fs.IntVar(&cfg.Players, "players", cfg.Players, "Number of concurrent virtual players")
@@ -387,9 +388,6 @@ func (c Config) Validate() error {
 		}
 	default:
 		return fmt.Errorf("join must be %q or %q, got %q", JoinGateway, JoinDirect, c.JoinMode)
-	}
-	if err := transport.Validate(c.Transport); err != nil {
-		return fmt.Errorf("transport: %w", err)
 	}
 	return nil
 }

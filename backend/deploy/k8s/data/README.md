@@ -241,11 +241,18 @@ curl -s http://127.0.0.1:17350/healthcheck
 ```
 
 **Not NodePort, deliberately.** The k3d cluster publishes exactly
-`7000-7100` (plus `6550` for the API server):
+`7000-7100` (plus `6550` for the API server). Since gameplay became KCP/UDP
+only, the Agones part of that range (`7010-7100`) must be published **as UDP**;
+`7000-7009` (gateway 7000, Nakama 7001) stays TCP. Expected `docker ps` for the
+serverlb of a correctly created dev cluster (k3d flags in `../app/README.md`):
 
 ```
-k3d-rpg-dev-serverlb   0.0.0.0:7000-7100->7000-7100/tcp, 127.0.0.1:6550->6443/tcp
+k3d-rpg-dev-serverlb   0.0.0.0:7000-7009->7000-7009/tcp, 0.0.0.0:7010-7100->7010-7100/udp, 127.0.0.1:6550->6443/tcp
 ```
+
+A cluster created before the migration shows `0.0.0.0:7000-7100->7000-7100/tcp`
+only; its game servers come up Ready and every client join times out.
+`dev-up.sh` detects that and stops.
 
 The default NodePort range (30000-32767) is therefore not reachable from the
 host at all, and `7000-7100` is Agones' `MIN_PORT`/`MAX_PORT` range — taking one

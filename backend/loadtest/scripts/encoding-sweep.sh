@@ -74,7 +74,7 @@ start_server() {
   local image="$1"
   $DOCKER rm -f "$NAME" >/dev/null 2>&1 || true
   $DOCKER run -d --name "$NAME" \
-    -p ${PORT}:9000 -p ${METRICS_PORT}:9101 \
+    -p ${PORT}:9000/udp -p ${METRICS_PORT}:9101 \
     -e JWT_SECRET="$SECRET" -e GAMESERVER_ADDR=:9000 \
     -e GAMESERVER_MAP_ID=map_bench -e GAMESERVER_ID=gs-bench \
     -e GAMESERVER_CAPACITY=2000 -e METRICS_ADDR=:9101 \
@@ -95,16 +95,19 @@ start_server() {
       # /metrics being up proves nothing about the GAME port: Program.cs starts
       # the metrics endpoint (line ~193) well before the listener, so a level
       # that starts on the strength of a metrics scrape can race the listener
-      # and lose a client to "connection reset by peer" during join. Measured at
-      # roughly 1 cold start in 4. Probe the port that matters, then settle.
+      # and lose a client during join. Measured at roughly 1 cold start in 4.
+      # The game port is KCP/UDP only, so it cannot be probed with a TCP
+      # connect (always refused) and a UDP send proves nothing (no handshake).
+      # Wait for the server's own "Game server listening on" log line, which
+      # it writes only after the UDP socket is bound, then settle.
       for _ in $(seq 1 30); do
-        if (exec 3<>/dev/tcp/127.0.0.1/${PORT}) 2>/dev/null; then
+        if $DOCKER logs "$NAME" 2>&1 | grep -q "Game server listening on"; then
           sleep 1
           return 0
         fi
         sleep 1
       done
-      echo "  game port ${PORT} never accepted" >&2
+      echo "  game server never logged 'Game server listening on' (UDP ${PORT})" >&2
       return 1
     fi
     sleep 1

@@ -27,7 +27,7 @@ public class DungeonRegistrationTests
     private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(15);
 
     private static ServerInfo Info(string serverId, string mapId) =>
-        new(serverId, mapId, "10.0.0.9:9200", "tcp", 8, 0);
+        new(serverId, mapId, "10.0.0.9:9200", "kcp", 8, 0);
 
     private async Task<(RedisServerRegistry reg, IConnectionMultiplexer mux)> ConnectAsync()
     {

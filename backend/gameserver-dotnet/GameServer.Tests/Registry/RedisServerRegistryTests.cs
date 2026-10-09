@@ -22,7 +22,7 @@ public class RedisServerRegistryTests
 
     private static ServerInfo Info(string serverId, string mapId, int players = 0,
         string identityKey = TestIdentityKey) =>
-        new(serverId, mapId, "10.0.0.5:9200", "tcp", 100, players, identityKey);
+        new(serverId, mapId, "10.0.0.5:9200", "kcp", 100, players, identityKey);
 
     /// <summary>
     /// The TTL <see cref="ConnectAsync"/> uses unless a test asks for another. Named rather
@@ -57,7 +57,7 @@ public class RedisServerRegistryTests
         Assert.Equal(serverId, hash["server_id"]);
         Assert.Equal("map_shape", hash["map_id"]);
         Assert.Equal("10.0.0.5:9200", hash["addr"]);
-        Assert.Equal("tcp", hash["transport"]);
+        Assert.Equal("kcp", hash["transport"]);
         Assert.Equal("100", hash["capacity"]);
         Assert.Equal("7", hash["player_count"]);
         // ADR-25. The gateway reads this field with sealed.DecodeIdentityKey and hands the

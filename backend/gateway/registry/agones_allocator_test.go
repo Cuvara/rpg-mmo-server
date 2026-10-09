@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -45,11 +46,10 @@ func TestAgonesAllocator_Allocate(t *testing.T) {
 			status: http.StatusCreated,
 			body:   allocatedBody,
 			want: storage.ServerInfo{
-				ServerID: "map-servers-dev-xjh7p-6ndtl",
-				MapID:    "map_01",
-				Addr:     "192.168.65.3:7257",
-				// Empty AgonesConfig.Transport normalizes to the tcp default.
-				Transport:   "tcp",
+				ServerID:    "map-servers-dev-xjh7p-6ndtl",
+				MapID:       "map_01",
+				Addr:        "192.168.65.3:7257",
+				Transport:   transport.Gameplay,
 				Capacity:    DefaultCapacity,
 				PlayerCount: 0,
 			},
@@ -249,42 +249,26 @@ func TestAgonesConfig_Defaults(t *testing.T) {
 	}
 }
 
-// TestAgonesAllocator_Transport pins the transport the allocator stamps onto
-// an allocated ServerInfo. The gateway announces that value to the client
-// before the pod's own registration lands, so a wrong value sends the client
-// to a game server over the wrong transport.
+// TestAgonesAllocator_Transport pins that an allocated server is always stamped
+// with the gameplay transport. There is no per-fleet transport knob any more:
+// every game server speaks KCP, so nothing here can route a client to a game
+// server over TCP.
 func TestAgonesAllocator_Transport(t *testing.T) {
 	const allocated = `{"status":{"state":"Allocated","gameServerName":"gs-1","address":"10.0.0.1",` +
 		`"ports":[{"name":"game","port":7777}]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, allocated)
+	}))
+	defer srv.Close()
 
-	tests := []struct {
-		name      string
-		configure string
-		want      string
-	}{
-		{name: "unset defaults to tcp", configure: "", want: "tcp"},
-		{name: "explicit tcp", configure: "tcp", want: "tcp"},
-		{name: "kcp fleet", configure: "kcp", want: "kcp"},
-		{name: "normalized", configure: "KCP", want: "kcp"},
+	alloc := newAgonesAllocator(srv.Client(), srv.URL, AgonesConfig{})
+	got, err := alloc.AllocateServer(context.Background(), "map_01")
+	if err != nil {
+		t.Fatalf("AllocateServer: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusCreated)
-				_, _ = io.WriteString(w, allocated)
-			}))
-			defer srv.Close()
-
-			alloc := newAgonesAllocator(srv.Client(), srv.URL, AgonesConfig{Transport: tt.configure})
-			got, err := alloc.AllocateServer(context.Background(), "map_01")
-			if err != nil {
-				t.Fatalf("AllocateServer: %v", err)
-			}
-			if got.Transport != tt.want {
-				t.Errorf("Transport = %q, want %q", got.Transport, tt.want)
-			}
-		})
+	if got.Transport != transport.Gameplay {
+		t.Errorf("Transport = %q, want %q", got.Transport, transport.Gameplay)
 	}
 }

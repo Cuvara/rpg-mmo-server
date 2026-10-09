@@ -38,19 +38,26 @@ fill a copy outside the tree and apply it before the first run.
 ### Ports
 
 k3d's serverlb publishes `7000-7100` (per port) and `6550->6443`, and nothing
-in the default NodePort range `30000-32767`. So the client-facing ports are
+in the default NodePort range `30000-32767`. **Protocols:** `7000-7009` is TCP
+(gateway, Nakama) and `7010-7100` must be **UDP** — realtime gameplay is
+KCP/UDP only, and the fleets' `game` port is `protocol: UDP`. The k3d flags are
+`--port "7000-7009:7000-7009@loadbalancer" --port "7010-7100:7010-7100/udp@loadbalancer"`
+(staging: `7200-7209:7000-7009` and `7210-7300:7210-7300/udp`); `dev-up.sh`
+refuses to continue when the serverlb does not publish `$AGONES_MIN_PORT/udp`.
+A cluster created with the old TCP-only `7000-7100` mapping must get the UDP
+range added (`k3d cluster edit <name> --port-add ...`) or be recreated. So the client-facing ports are
 **hostPorts inside the published range** — the same mechanism Agones already
 uses to make a GameServer dialable at `127.0.0.1:<port>`, which means one
 exposure mechanism in this deployment rather than two.
 
 The range is **split**, not borrowed from:
 
-| Host port | Reaches | How |
-|---|---|---|
-| 7000 | gateway | `hostPort` on the gateway pod |
-| 7001 | Nakama HTTP | `hostPort` on the Nakama pod |
-| 7010-7100 | Agones GameServers | Agones dynamic allocation |
-| 15433 | postgres-game | port-forward, **test runner only** |
+| Host port | Protocol | Reaches | How |
+|---|---|---|---|
+| 7000 | TCP | gateway | `hostPort` on the gateway pod |
+| 7001 | TCP | Nakama HTTP | `hostPort` on the Nakama pod |
+| 7010-7100 | **UDP** | Agones GameServers (KCP) | Agones dynamic allocation |
+| 15433 | TCP | postgres-game | port-forward, **test runner only** |
 
 `dev-up.sh` pins the Agones controller to `MIN_PORT=7010`, reserving
 `7000-7009` for infrastructure so the allocator can never hand a GameServer the

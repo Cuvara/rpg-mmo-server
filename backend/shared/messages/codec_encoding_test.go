@@ -116,6 +116,9 @@ func TestSnapshotRoundTripBothEncodings(t *testing.T) {
 		Tick:    math.MaxUint32 + 7, // exercises the 64-bit path
 		AckTick: 12345,
 		Full:    true,
+		// Non-zero and different from both ticks, so a codec that dropped or
+		// swapped the field cannot round-trip it.
+		AckAppliedTick: math.MaxUint32 + 3,
 		Entities: []EntitySnapshot{
 			{ID: "player-1", Type: "player", X: -1.5, Y: 2.25, HP: 90, MaxHP: 100},
 			{ID: "mob-2", Type: "mob", X: 0, Y: 0, HP: 0, MaxHP: 1},
@@ -212,6 +215,28 @@ func TestJSONWireShapeUnchanged(t *testing.T) {
 	}
 	if want := `{"type":8,"payload":` + wantPayload + `}`; string(body) != want {
 		t.Errorf("envelope JSON drifted:\n got: %s\nwant: %s", body, want)
+	}
+}
+
+// TestJSONAckAppliedTickKey pins the legacy JSON key of ack_applied_tick (wire.proto
+// field 7) and that it is omitted when zero, which is what keeps every snapshot
+// without it byte-identical to the shape pinned above.
+func TestJSONAckAppliedTickKey(t *testing.T) {
+	env, err := NewEnvelope(MsgSnapshot, SnapshotMessage{Tick: 42, AckTick: 47, AckAppliedTick: 40})
+	if err != nil {
+		t.Fatalf("NewEnvelope: %v", err)
+	}
+	const want = `{"tick":42,"ack_tick":47,"entities":null,"ack_applied_tick":40}`
+	if string(env.Payload) != want {
+		t.Errorf("payload JSON:\n got: %s\nwant: %s", env.Payload, want)
+	}
+
+	var back SnapshotMessage
+	if err := env.UnmarshalPayload(&back); err != nil {
+		t.Fatalf("UnmarshalPayload: %v", err)
+	}
+	if back.AckAppliedTick != 40 {
+		t.Errorf("ack_applied_tick round trip = %d, want 40", back.AckAppliedTick)
 	}
 }
 
@@ -352,6 +377,9 @@ func assertSnapshotEqual(t *testing.T, got, want SnapshotMessage) {
 	if got.Tick != want.Tick || got.AckTick != want.AckTick || got.Full != want.Full {
 		t.Errorf("header mismatch: got tick=%d ack=%d full=%v, want tick=%d ack=%d full=%v",
 			got.Tick, got.AckTick, got.Full, want.Tick, want.AckTick, want.Full)
+	}
+	if got.AckAppliedTick != want.AckAppliedTick {
+		t.Errorf("ack_applied_tick: got %d, want %d", got.AckAppliedTick, want.AckAppliedTick)
 	}
 	if len(got.Entities) != len(want.Entities) {
 		t.Fatalf("entities: got %d, want %d", len(got.Entities), len(want.Entities))

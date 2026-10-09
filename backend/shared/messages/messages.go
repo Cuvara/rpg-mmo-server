@@ -309,9 +309,9 @@ type EnterWorldRequest struct {
 
 // EnterWorldResponse contains the game server address and join token.
 //
-// Transport tells the client which realtime transport the target game server
-// speaks ("tcp" or "kcp"). It is omitted when the server speaks TCP, so old
-// clients that never read the field keep working — empty means "tcp".
+// Transport names the realtime gameplay transport the target game server
+// speaks. It is always "kcp" on a successful assignment; a client treats any
+// other value, including empty, as a failed join (no fallback).
 type EnterWorldResponse struct {
 	ServerAddr string `json:"server_addr,omitempty"`
 	JoinToken  string `json:"join_token,omitempty"`
@@ -453,6 +453,15 @@ type SnapshotMessage struct {
 	// the world's state because a client may have missed a delta; it does not
 	// restate its history.
 	Events []GameEvent `json:"events,omitempty"`
+
+	// AckAppliedTick is the server base tick on which the input acknowledged by
+	// AckTick was APPLIED - the tick whose input drain accepted it. AckTick is a
+	// CLIENT tick and Tick a SERVER tick; their offset, AckTick - AckAppliedTick,
+	// is what lets a client compare this snapshot with the matching entry of its
+	// prediction history instead of the entry at client tick Tick. Zero means
+	// "not sent" (protocol 2 peer, older server, no input accepted yet) and
+	// receivers fall back to the previous behaviour.
+	AckAppliedTick uint64 `json:"ack_applied_tick,omitempty"`
 }
 
 // GameEventType is the kind of an edge-triggered occurrence. Numbers are FROZEN

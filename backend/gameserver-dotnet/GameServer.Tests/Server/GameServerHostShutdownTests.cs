@@ -45,7 +45,7 @@ public class GameServerHostShutdownTests
         // CTS in the table — those are the objects the two shutdown racers fought over.
         for (int i = 0; i < 3; i++)
         {
-            using var client = new TcpClient();
+            using var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, port);
             await using var stream = client.GetStream();
             await JoinAsync(stream, $"hold-user-{i}", runCts.Token);
@@ -93,7 +93,7 @@ public class GameServerHostShutdownTests
         {
             // One connected player, so the final SaveAllAsync has something to write and
             // therefore actually reaches the blocking store.
-            using var client = new TcpClient();
+            using var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, port);
             await using var stream = client.GetStream();
             await JoinAsync(stream, "blocking-user", runCts.Token);
@@ -164,7 +164,7 @@ public class GameServerHostShutdownTests
         }
     }
 
-    private static async Task JoinAsync(NetworkStream stream, string userId, CancellationToken ct)
+    private static async Task JoinAsync(Stream stream, string userId, CancellationToken ct)
     {
         var env = WireProtocol.NewEnvelope(MsgType.JoinToken, new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) }, WireEncoding.Json);
         await stream.WriteAsync(WireProtocol.Encode(env), ct);
@@ -176,7 +176,7 @@ public class GameServerHostShutdownTests
         Assert.True(resp.Ok, resp.Error);
     }
 
-    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    private static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int attempt = 0; attempt < 50; attempt++)
         {

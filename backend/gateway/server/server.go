@@ -26,8 +26,10 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
-// Gateway is the main TCP server that handles client authentication
-// and map assignment before redirecting to game servers.
+// Gateway is the TCP server (optionally TLS, ADR-23) that handles client
+// authentication and map assignment before redirecting the client to a game
+// server. The gateway hop is always TCP; gameplay itself runs client <-> game
+// server over KCP/UDP (transport.Gameplay) and never passes through here.
 type Gateway struct {
 	sessions *session.SessionManager
 	registry *registry.RegistryService
@@ -49,9 +51,6 @@ type Gateway struct {
 	connLimiter *ratelimit.Limiter
 	msgRate     float64
 	msgBurst    float64
-
-	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
-	transportKey string
 
 	// tlsConfig makes Run wrap the listener so this process terminates TLS
 	// itself (ADR-23). Nil is plaintext and is the default. Immutable after
@@ -80,10 +79,6 @@ type Gateway struct {
 	// recording helper is nil-safe.
 	metrics *metrics.Metrics
 
-	// transportKind is the realtime transport the gateway listens with
-	// ("tcp" or "kcp"); it is immutable after New, so Run reads it lock-free.
-	transportKind string
-
 	// enterWorldBudget caps how long one handleEnterWorld may block its
 	// connection's read loop; EnterWorldBudget by default, overridden only by
 	// tests that need the deadline to expire in milliseconds. Immutable after
@@ -111,13 +106,6 @@ type Gateway struct {
 
 // Option customises a Gateway at construction time.
 type Option func(*Gateway)
-
-// WithTransport selects the realtime transport the gateway listens with.
-// Accepts transport.KindTCP or transport.KindKCP; the empty string keeps the
-// default (TCP).
-func WithTransport(kind string) Option {
-	return func(g *Gateway) { g.transportKind = kind }
-}
 
 // WithDungeons enables dungeon entry: the party -> instance index and the
 // authority that answers "is this user in that party".
@@ -182,12 +170,6 @@ func WithJoinTokenSecret(spec string) Option {
 			g.joinKeys = keys
 		}
 	}
-}
-
-// WithTransportKey sets the pre-shared key that encrypts the KCP listener.
-// Ignored for TCP. Empty means plaintext (and Listen logs a warning).
-func WithTransportKey(key string) Option {
-	return func(g *Gateway) { g.transportKey = key }
 }
 
 // WithTLS makes the gateway terminate TLS on its own listener (ADR-23).
@@ -286,7 +268,6 @@ func New(
 	// rejects every token instead of accepting tokens signed with "".
 	authKeys, _ := sharedjwt.ParseKeyring(jwtSecret)
 	g := &Gateway{
-		transportKind:    transport.KindTCP,
 		sessions:         sessions,
 		registry:         reg,
 		jwtSecret:        jwtSecret,
@@ -426,8 +407,8 @@ func (g *Gateway) ConnCount() int {
 	return len(g.conns)
 }
 
-// Run starts the gateway listener on the given address, using the transport
-// selected with WithTransport (TCP by default).
+// Run starts the gateway listener on the given address. The gateway hop is
+// always TCP (transport.KindTCP), optionally wrapped in TLS.
 func (g *Gateway) Run(addr string) error {
 	// The event relay is a degradable dependency, not a startup requirement.
 	if g.relay != nil {
@@ -444,8 +425,7 @@ func (g *Gateway) Run(addr string) error {
 		}
 	}
 
-	ln, err := transport.Listen(g.transportKind, addr,
-		transport.WithKey(g.transportKey), transport.WithLogger(g.logger))
+	ln, err := transport.Listen(transport.KindTCP, addr, transport.WithLogger(g.logger))
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -454,19 +434,8 @@ func (g *Gateway) Run(addr string) error {
 	// listener is the whole change: TLS hands Accept a net.Conn like any other,
 	// so the 4-byte-length framing, the codec and every handler below are
 	// untouched.
-	//
-	// TLS needs a reliable ordered byte stream, which KCP is not, so a cert on
-	// a KCP listener is refused at startup rather than ignored. Ignoring it
-	// would produce a gateway that was configured for TLS, is serving
-	// plaintext, and says "kcp" — the believed-protected state ADR-21 exists to
-	// prevent.
 	tlsActive := false
 	if g.tlsConfig != nil {
-		if transport.Normalize(g.transportKind) != transport.KindTCP {
-			ln.Close()
-			return fmt.Errorf("listen: TLS is configured but the transport is %q; TLS requires a reliable ordered stream, so use --transport tcp or unset the certificate",
-				transport.Normalize(g.transportKind))
-		}
 		ln = tls.NewListener(ln, g.tlsConfig)
 		tlsActive = true
 	}
@@ -484,7 +453,7 @@ func (g *Gateway) Run(addr string) error {
 	// the wire in cleartext — TCP has no packet-crypt layer and the key is
 	// ignored. A security field that is confidently false is worse than one that
 	// is missing, because nobody goes looking behind it.
-	posture := transport.PostureTLS(g.transportKind, g.transportKey, addr, tlsActive)
+	posture := transport.PostureTLS(transport.KindTCP, "", addr, tlsActive)
 	if g.metrics != nil {
 		g.metrics.SetTransportPosture(posture)
 	}
@@ -502,11 +471,10 @@ func (g *Gateway) Run(addr string) error {
 	if posture.Encrypted {
 		g.logger.Info("transport posture", "summary", posture.Summary)
 	} else {
-		// Warn, every boot, including for the default configuration. Before this
-		// the only cleartext case that warned was KCP-without-a-key, so plain TCP
-		// -- the default, and the one with no encryption at all -- was silent.
+		// Warn, every boot, including for the default configuration: plain TCP
+		// has no encryption at all, and the auth frame and join token cross it.
 		g.logger.Warn("transport posture", "summary", posture.Summary,
-			"remedy", "set "+transport.KeyEnvVar+" (32-byte hex) and --transport kcp, or terminate TLS in front of this listener")
+			"remedy", "set GATEWAY_TLS_CERT and GATEWAY_TLS_KEY, or terminate TLS in front of this listener")
 	}
 
 	for {
@@ -538,7 +506,7 @@ func (g *Gateway) Run(addr string) error {
 		g.logger.Debug("client connected",
 			"conn", cc.ID(),
 			"ip", cc.RemoteIP(),
-			"transport", transport.Normalize(g.transportKind))
+			"transport", transport.KindTCP)
 		go g.handleConn(cc)
 	}
 }
@@ -1295,8 +1263,11 @@ const (
 	// on this connection cannot change the answer. A machine-readable token
 	// rather than a sentence, so a client can branch on it.
 	msgCharacterMismatch = "character_mismatch"
-	msgNotImplemented    = "not implemented"
-	msgInternalError     = "internal error"
+	// msgServerTransport: the selected game server does not advertise the KCP
+	// gameplay transport (a stale or misconfigured deployment). Terminal.
+	msgServerTransport = "server_transport_unsupported"
+	msgNotImplemented  = "not implemented"
+	msgInternalError   = "internal error"
 )
 
 func clientSafeAssignError(err error) string {
@@ -1325,6 +1296,11 @@ func clientSafeAssignError(err error) string {
 	// checked before the generic cases so a membership refusal is never reported
 	// as an internal error -- which would send an operator hunting a fault that
 	// is not there, and a player retrying something that cannot succeed.
+	// A server advertising a non-gameplay transport is a deployment fault, and
+	// retrying lands on the same entry until an operator fixes it. Named, so the
+	// client log says what is wrong instead of "internal error".
+	case errors.Is(err, transfer.ErrServerTransport):
+		return msgServerTransport
 	case errors.Is(err, transfer.ErrNotAPartyMember):
 		return msgNotInParty
 	case errors.Is(err, transfer.ErrPartyUnknown):

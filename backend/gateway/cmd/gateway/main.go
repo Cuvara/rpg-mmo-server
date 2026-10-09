@@ -44,21 +44,18 @@ const (
 func main() {
 	addr := flag.String("addr", "", "Listen address (overrides GATEWAY_ADDR)")
 	backend := flag.String("backend", "", "Store backend: memory or redis (default: redis when REDIS_ADDR is set, else memory)")
-	transportKind := flag.String("transport", "", "Realtime transport: tcp or kcp (overrides GATEWAY_TRANSPORT, default tcp)")
 	instanceID := flag.String("instance-id", "", "Gateway instance id, used as the event-stream consumer name (default: hostname)")
 	allocatorMode := flag.String("allocator", "", "Game server allocator: none or agones (overrides ALLOCATOR; default none)")
 	allocNamespace := flag.String("allocator-namespace", "", "Kubernetes namespace holding the Agones fleets (overrides ALLOCATOR_NAMESPACE)")
 	allocFleetMap := flag.String("allocator-fleet-map", "", "Agones Fleet for map servers (overrides ALLOCATOR_FLEET_MAP)")
 	nakamaURL := flag.String("nakama-url", "", "Base URL of Nakama, used ONLY to check party membership before allocating a dungeon instance (overrides NAKAMA_URL). Unset = dungeons are unavailable; map play is unaffected. The gateway still verifies auth tokens locally and never calls Nakama on the login path (ADR-3)")
 	allocFleetDungeon := flag.String("allocator-fleet-dungeon", "", "Agones Fleet for dungeon servers (overrides ALLOCATOR_FLEET_DUNGEON). No default: no dungeon fleet is deployed yet, and unset makes a dungeon allocation fail immediately and legibly")
-	allocTransport := flag.String("allocator-transport", "", "Realtime transport the allocated fleet's game servers listen with: tcp or kcp (overrides ALLOCATOR_TRANSPORT; defaults to --transport)")
 	metricsAddr := flag.String("metrics-addr", "", "Prometheus metrics listen address, e.g. :9102 (overrides METRICS_ADDR; \"off\" or an empty METRICS_ADDR disables it)")
 	allocWaitTimeout := flag.Duration("allocation-wait-timeout", 0, "How long to wait for a freshly allocated game server to register itself before failing the join as retryable (overrides ALLOCATION_WAIT_TIMEOUT; default 15s). The wait blocks the client connection's read loop, which is also what records its MsgPong, so a value above 20s (pongTimeout-pingInterval) would let the heartbeat disconnect the client mid-allocation; the gateway refuses to start above it")
 	allocPollInterval := flag.Duration("allocation-poll-interval", 0, "How often to re-check the registry while waiting for an allocated game server (overrides ALLOCATION_POLL_INTERVAL; default 250ms)")
 	allocMismatchTTL := flag.Duration("allocation-mismatch-ttl", 0, "How long to refuse further allocations for a map after an allocated server turned out to serve a different map (overrides ALLOCATION_MISMATCH_TTL; default 60s, negative disables). Agones cannot un-allocate, so without this a client retrying an unservable map drains the fleet one GameServer per attempt")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
-	transportKey := flag.String("transport-key", "", "Pre-shared key encrypting the KCP listener, 32-byte hex recommended (overrides TRANSPORT_KEY; empty = plaintext)")
-	tlsCert := flag.String("tls-cert", "", "PEM certificate making the gateway terminate TLS itself (overrides GATEWAY_TLS_CERT). Requires --tls-key and --transport tcp. Unset = plaintext, which is the default. Covers the client<->gateway hop only: the client<->Nakama meta hop mints the auth token and is separate (ADR-23)")
+	tlsCert := flag.String("tls-cert", "", "PEM certificate making the gateway terminate TLS itself (overrides GATEWAY_TLS_CERT). Requires --tls-key. Unset = plaintext, which is the default. Covers the client<->gateway hop only: the client<->Nakama meta hop mints the auth token and is separate (ADR-23)")
 	tlsKey := flag.String("tls-key", "", "PEM private key for --tls-cert (overrides GATEWAY_TLS_KEY). Setting exactly one of the two is a startup error, not a fallback to plaintext")
 	joinTokenSecret := flag.String("join-token-secret", "", "HS256 secret (comma-separated list to rotate) for gateway->gameserver join tokens (overrides JOIN_TOKEN_SECRET; REQUIRED)")
 	connRate := flag.Float64("conn-rate-per-min", -1, "Max accepted connections per minute per source IP (overrides GATEWAY_CONN_RATE_PER_MIN; 0 disables)")
@@ -74,36 +71,20 @@ func main() {
 		listenAddr = *addr
 	}
 
-	listenTransport := cfg.GatewayTransport
-	if *transportKind != "" {
-		listenTransport = *transportKind
-	}
-	if err := transport.Validate(listenTransport); err != nil {
-		log.Error("invalid transport", "err", err)
+	if err := checkRemovedTransportSettings(os.Getenv, log); err != nil {
+		log.Error("invalid transport configuration", "err", err)
 		os.Exit(1)
 	}
 
 	// --- Security configuration -------------------------------------------
 	//
-	// Three independent secrets, each with an explicit "insecure default" that
-	// is legal for local dev and loudly logged so nobody ships it:
-	//   TRANSPORT_KEY      — KCP wire encryption. Empty = plaintext.
+	// Security inputs, each with an explicit "insecure default" that is legal
+	// for local dev and loudly logged so nobody ships it:
 	//   JWT_SECRET         — Nakama-issued client auth token.
 	//   JOIN_TOKEN_SECRET  — gateway-issued join token. REQUIRED (fatal if unset).
 	//   GATEWAY_TLS_CERT/_KEY — TLS on this listener (ADR-23). Both empty =
 	//                      plaintext, the default; exactly one set is FATAL.
-	tKey := cfg.TransportKey
-	if *transportKey != "" {
-		tKey = *transportKey
-	}
-	if tKey != "" {
-		if _, kerr := transport.DeriveKey(tKey); kerr != nil {
-			log.Error("invalid transport key", "err", kerr)
-			os.Exit(1)
-		}
-	}
-
-	// GATEWAY_TLS_CERT / GATEWAY_TLS_KEY — the fourth security input, and the
+	// GATEWAY_TLS_CERT / GATEWAY_TLS_KEY — the
 	// only one that is authenticated (ADR-23). Unset is plaintext and is the
 	// default; a bad or half-set pair is FATAL rather than a fall back, because
 	// falling back hands an operator the plaintext listener they were trying to
@@ -270,15 +251,6 @@ func main() {
 			// dungeon fleet exists (ADR-14 stage 6).
 			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON")),
 			Kubeconfig:   firstNonEmpty(*allocKubeconfig, os.Getenv("ALLOCATOR_KUBECONFIG")),
-			// Allocated servers are announced to clients before the pod's own
-			// registration lands, so the allocator must know what the fleet
-			// speaks. Falls back to the gateway's own transport, which is the
-			// right guess for a uniform rollout.
-			Transport: firstNonEmpty(*allocTransport, os.Getenv("ALLOCATOR_TRANSPORT"), listenTransport),
-		}
-		if terr := transport.Validate(agonesCfg.Transport); terr != nil {
-			log.Error("invalid allocator transport", "err", terr)
-			os.Exit(1)
 		}
 		// An allocated pod is not dialable the moment the allocation API
 		// answers: it still has to boot, bind, report Ready and self-register.
@@ -320,7 +292,6 @@ func main() {
 			"namespace", agonesCfg.Namespace,
 			"fleet_map", agonesCfg.FleetMap,
 			"fleet_dungeon", firstNonEmpty(agonesCfg.FleetDungeon, "(unconfigured)"),
-			"transport", agonesCfg.Transport,
 			"allocation_wait_timeout", waitTimeout,
 			"allocation_poll_interval", pollInterval,
 		)
@@ -396,7 +367,7 @@ func main() {
 	}
 
 	gw = server.New(sessions, reg, cfg.JWTSecret, log,
-		server.WithEventRelay(relay), server.WithTransport(listenTransport),
+		server.WithEventRelay(relay),
 		server.WithMetrics(met),
 		// Duplicate-login supersede events publish into the SAME event stream
 		// backend the relay consumes from (events:kick vs events:game are
@@ -405,7 +376,6 @@ func main() {
 		// single-process scope; on Redis the C# game servers consume it.
 		server.WithKickStream(eventStream),
 		server.WithKickConsumer(kickConsumer),
-		server.WithTransportKey(tKey),
 		server.WithTLS(tlsConf),
 		server.WithJoinTokenSecret(joinSecret),
 		// Dungeons need BOTH the cross-process index and the membership
@@ -445,8 +415,8 @@ func main() {
 	log.Info("starting gateway",
 		slog.String("addr", listenAddr),
 		slog.String("backend", mode),
-		slog.String("transport", transport.Normalize(listenTransport)),
-		slog.Bool("transport_encrypted", tKey != ""),
+		slog.String("transport", transport.KindTCP),
+		slog.String("gameplay_transport", transport.Gameplay),
 		slog.Float64("conn_rate_per_min", connRatePerMin),
 		slog.Float64("msg_rate_per_sec", msgRatePerSec),
 		slog.Uint64("wire_protocol_version", uint64(messages.WireProtocolVersion)),
@@ -633,4 +603,39 @@ func (p eventStreamPublisher) Publish(ctx context.Context, channel string, messa
 		return nil
 	}
 	return p.stream.Publish(ctx, events.DefaultStream, storage.Event{Type: channel, Payload: message})
+}
+
+// checkRemovedTransportSettings refuses or flags the transport settings that
+// existed while TCP was a gameplay option.
+//
+// The gateway hop is always TCP (optionally TLS) and gameplay is always KCP, so
+// neither has a knob any more. A stale environment must not be able to look as
+// if it changed anything:
+//   - GATEWAY_TRANSPORT=kcp would have moved the client's auth hop to UDP, which
+//     no client speaks. Refused, so the misconfiguration fails at deploy time
+//     instead of as every login timing out. "tcp" or unset is accepted and is
+//     what the gateway does anyway.
+//   - ALLOCATOR_TRANSPORT never reached a client (the transport handed out comes
+//     from the game server's own registry entry) and is now gone. Any value is
+//     ignored with a warning naming the variable, so the operator can delete it.
+//   - TRANSPORT_KEY only ever encrypted a KCP gateway listener. The key that
+//     matters now belongs to the game servers and the client; on the gateway it
+//     does nothing, and saying so beats letting it read as protection.
+func checkRemovedTransportSettings(getenv func(string) string, log *slog.Logger) error {
+	if v := transport.Normalize(getenv("GATEWAY_TRANSPORT")); v != "" && v != transport.KindTCP {
+		return fmt.Errorf("GATEWAY_TRANSPORT=%q is not supported: the client<->gateway hop is TCP (optionally TLS); "+
+			"realtime gameplay is %s/UDP between client and game server and is not configured on the gateway", v, transport.Gameplay)
+	}
+	if getenv("GATEWAY_TRANSPORT") != "" {
+		log.Warn("GATEWAY_TRANSPORT is obsolete and ignored; the gateway always listens on TCP", "remedy", "delete the variable")
+	}
+	if v := getenv("ALLOCATOR_TRANSPORT"); v != "" {
+		log.Warn("ALLOCATOR_TRANSPORT is obsolete and ignored; game servers register their own transport and gameplay is always "+transport.Gameplay,
+			"value", v, "remedy", "delete the variable")
+	}
+	if getenv(transport.KeyEnvVar) != "" {
+		log.Warn(transport.KeyEnvVar+" is set on the gateway, where it does nothing: the gateway hop is TCP. The key belongs to the game servers and clients (KCP)",
+			"remedy", "remove it from the gateway environment")
+	}
+	return nil
 }

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using GameServer.Net.Transport;
+using GameServer.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace GameServer.Tests.Net;
@@ -17,28 +18,55 @@ public class KcpTransportTests
     private const string TestKeyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     [Theory]
-    [InlineData("tcp", "tcp")]
     [InlineData("kcp", "kcp")]
     [InlineData("KCP", "kcp")]
     [InlineData("  tcp  ", "tcp")]
-    // The empty string is the backward-compatible "unset" value on the wire and in
-    // the registry, and it must keep meaning TCP.
-    [InlineData("", "tcp")]
-    [InlineData(null, "tcp")]
-    public void Normalize_MatchesGoSemantics(string? input, string expected)
+    // The empty string no longer means anything — in particular it no longer means TCP.
+    // Normalize leaves it empty; only the startup flag resolution treats "unset" as kcp.
+    [InlineData("", "")]
+    [InlineData(null, "")]
+    public void Normalize_TrimsAndLowercases_AndNeverInventsTcp(string? input, string expected)
     {
         Assert.Equal(expected, TransportKind.Normalize(input));
     }
 
     [Theory]
-    [InlineData("tcp", true)]
     [InlineData("kcp", true)]
-    [InlineData("", true)]
+    [InlineData(" KCP ", true)]
+    // Empty is not a transport: on the wire and in the registry it is a hard error.
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    [InlineData("tcp", false)]
     [InlineData("udp", false)]
     [InlineData("quic", false)]
-    public void IsValid_AcceptsOnlyKnownKinds(string kind, bool expected)
+    public void IsValid_AcceptsOnlyKcp(string? kind, bool expected)
     {
         Assert.Equal(expected, TransportKind.IsValid(kind));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("kcp")]
+    [InlineData("KCP")]
+    public void ResolveConfigured_UnsetOrKcp_IsKcp(string? configured)
+    {
+        Assert.True(TransportKind.ResolveConfigured(configured, out string resolved, out string? error));
+        Assert.Equal(TransportKind.Kcp, resolved);
+        Assert.Null(error);
+    }
+
+    [Theory]
+    [InlineData("tcp")]
+    [InlineData("TCP")]
+    [InlineData("udp")]
+    [InlineData("websocket")]
+    public void ResolveConfigured_AnythingElse_IsFatal_WithTheContractMessage(string configured)
+    {
+        Assert.False(TransportKind.ResolveConfigured(configured, out _, out string? error));
+        // The exact text is part of the cross-repo contract (ADR-32, backend/docs/NETWORKING.md).
+        Assert.Equal($"GAMESERVER_TRANSPORT={configured} is not supported: realtime gameplay is KCP/UDP only", error);
     }
 
     [Fact]
@@ -275,38 +303,38 @@ public class KcpTransportTests
         Assert.Throws<ArgumentException>(() => TransportFactory.ParseAddr(addr));
     }
 
-    [Fact]
-    public void Factory_RejectsUnknownTransportKinds()
+    [Theory]
+    [InlineData("quic")]
+    [InlineData("tcp")]   // removed as a gameplay transport: no listener is ever built for it
+    [InlineData("")]      // empty no longer defaults to anything
+    public void Factory_RejectsEverythingButKcp(string kind)
     {
-        Assert.Throws<ArgumentException>(() =>
-            TransportFactory.Listen("quic", "127.0.0.1:0", "", NullLogger.Instance));
+        var ex = Assert.Throws<ArgumentException>(() =>
+            TransportFactory.Listen(kind, "127.0.0.1:0", "", NullLogger.Instance));
+        Assert.Contains("KCP/UDP only", ex.Message);
     }
 
-    [Fact]
-    public async Task Factory_TcpListenerAcceptsAndStreams()
+    [Theory]
+    [InlineData("")]
+    [InlineData(TestKeyHex)]
+    public async Task Factory_KcpListenerAcceptsAndStreams(string key)
     {
-        using var listener = TransportFactory.Listen("tcp", "127.0.0.1:0", "", NullLogger.Instance);
-        Assert.Equal("tcp", listener.Kind);
+        using var listener = TransportFactory.Listen("kcp", "127.0.0.1:0", key, NullLogger.Instance);
+        Assert.Equal("kcp", listener.Kind);
 
         var (_, port) = TransportFactory.ParseAddr(listener.LocalEndPoint);
-        using var client = new System.Net.Sockets.TcpClient();
-        await client.ConnectAsync(IPAddress.Loopback, port);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var accept = listener.AcceptAsync(cts.Token);
+        using var client = new KcpTestClient(key);
+        await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
 
-        using var accepted = await listener.AcceptAsync(CancellationToken.None);
-        await client.GetStream().WriteAsync("ping"u8.ToArray());
+        using var accepted = await accept;
+        await client.GetStream().WriteAsync("ping"u8.ToArray(), cts.Token);
 
         var buf = new byte[4];
-        int n = await accepted.Stream.ReadAsync(buf);
+        int n = await accepted.Stream.ReadAsync(buf, cts.Token);
         Assert.Equal("ping", Encoding.UTF8.GetString(buf, 0, n));
-    }
-
-    [Fact]
-    public void Factory_TcpIgnoresTheTransportKey()
-    {
-        // A transport key is meaningless for TCP (TLS or the cluster network is the
-        // answer there); passing one must not break the listener. Mirrors the Go test.
-        using var listener = TransportFactory.Listen("tcp", "127.0.0.1:0", TestKeyHex, NullLogger.Instance);
-        Assert.Equal("tcp", listener.Kind);
+        Assert.Equal(1, listener.Stats.SessionsCreated);
     }
 
     [Fact]
@@ -370,8 +398,8 @@ public class KcpTransportTests
         Assert.Equal(1, await stream.ReadAsync(buf, cts.Token));
 
         session.Close();
-        // Zero bytes is EOF, the same signal a TCP FIN produces, so Connection's read
-        // loop treats a vanished KCP peer exactly like a closed socket.
+        // Zero bytes is EOF, so Connection's read loop treats a closed KCP session like
+        // any ended stream.
         Assert.Equal(0, await stream.ReadAsync(buf, cts.Token));
     }
 }

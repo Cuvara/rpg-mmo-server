@@ -26,7 +26,7 @@ func startKickTestGateway(t *testing.T) *kickTestRig {
 	t.Helper()
 	sessionStore := storage.NewMemorySessionStore()
 	reg := storage.NewMemoryServerRegistry()
-	if err := reg.Register(context.Background(), storage.ServerInfo{
+	if err := reg.Register(context.Background(), storage.ServerInfo{Transport: "kcp", 
 		ServerID: "srv1", MapID: "map_forest", Addr: "10.0.0.1:9000", Capacity: 100,
 	}); err != nil { t.Fatalf("register: %v", err) }
 	stream := storage.NewMemoryEventStream()

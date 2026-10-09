@@ -31,7 +31,8 @@ ARQ (`KcpCrypto`), and it cannot be used for this:
 
 - it is **per-listener** — kcp-go takes one `BlockCrypt` for every datagram and offers no
   per-remote key selection, so it cannot carry a per-session key;
-- **TCP is the default transport and has no such layer at all.**
+- **TCP had no such layer at all** when this was written (TCP was then the default gameplay
+  transport; since ADR-32 gameplay is KCP/UDP only, and the reasoning above still holds).
 
 Sealing above the transport is therefore identical on TCP and KCP and independent of the
 ARQ, which is also what lets one implementation serve both hops (§6).

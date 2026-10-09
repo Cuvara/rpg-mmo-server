@@ -62,7 +62,7 @@ load_env() {
 # from it, and `status`/`health` need the same ports as `start`.
 load_env
 
-# Service definitions: name | binary | args | tcp port to healthcheck
+# Service definitions: name | binary | args | health probe (see SERVICES below)
 GATEWAY_ADDR="${GATEWAY_ADDR:-:8000}"
 GAMESERVER_ADDR="${GAMESERVER_ADDR:-:9000}"
 GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
@@ -85,6 +85,10 @@ GAMESERVER_SEALED="${GAMESERVER_SEALED:-off}"
 # GAMESERVER_ADDR is correct.
 export GAMESERVER_ADDR GAMESERVER_MAP_ID GAMESERVER_SEALED
 export REDIS_ADDR REDIS_PASSWORD GAMESERVER_PUBLIC_ADDR
+# Optional KCP datagram pre-shared key for the game server's UDP port. Empty =
+# plaintext + a startup WARN (dev). Clients must be given the same value.
+TRANSPORT_KEY="${TRANSPORT_KEY:-}"
+export TRANSPORT_KEY
 # Gateway-hop TLS (ADR-23). Same shape and same reason as GAMESERVER_SEALED
 # above: off unless the environment opts in, pinned explicitly so a reader can
 # see it was considered. Both must be set together — the gateway exits 1 on
@@ -126,9 +130,17 @@ else
 	GAMESERVER_FINAL_ARGS="$GAMESERVER_ARGS"
 fi
 
+# Field 4 is the HEALTH PROBE, not the listen port. The gateway is a TCP
+# listener (auth + redirect hop), so a TCP connect is meaningful for it. The
+# game server's gameplay port is KCP/UDP ONLY: a TCP connect to it is refused
+# even when the server is healthy, and a UDP "probe" (nc -u) proves nothing
+# because UDP has no handshake. So its liveness is its HTTP /healthz on the
+# metrics port (METRICS_ADDR, default :9101); that the UDP game port really
+# answers is proven end to end by the smoketest (a real KCP join).
+GAMESERVER_HEALTH_PORT="${GAMESERVER_METRICS_PORT:-9101}"
 SERVICES=(
-	"gateway|gateway|--addr=${GATEWAY_ADDR}|${GATEWAY_ADDR##*:}"
-	"gameserver|${GAMESERVER_BIN}|${GAMESERVER_FINAL_ARGS}|${GAMESERVER_ADDR##*:}"
+	"gateway|gateway|--addr=${GATEWAY_ADDR}|tcp:${GATEWAY_ADDR##*:}"
+	"gameserver|${GAMESERVER_BIN}|${GAMESERVER_FINAL_ARGS}|http:http://127.0.0.1:${GAMESERVER_HEALTH_PORT}/healthz"
 )
 
 # --------------------------------------------------------------- systemd mode
@@ -230,6 +242,29 @@ wait_tcp() {
 	return 1
 }
 
+wait_http() {
+	local name="$1" url="$2" i
+	command -v curl >/dev/null 2>&1 || fail "curl is required to healthcheck $name ($url)"
+	for i in $(seq 1 30); do
+		if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+			info "$name healthy on $url (after ${i}s)"
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+# probe: "tcp:<port>" or "http:<url>" (see the SERVICES table).
+wait_healthy() {
+	local name="$1" probe="$2"
+	case "$probe" in
+	tcp:*) wait_tcp "$name" "${probe#tcp:}" ;;
+	http:*) wait_http "$name" "${probe#http:}" ;;
+	*) fail "unknown health probe '$probe' for $name" ;;
+	esac
+}
+
 health_nakama() {
 	local url="${NAKAMA_HEALTH_URL:-http://127.0.0.1:7350/healthcheck}"
 	if command -v curl >/dev/null 2>&1; then
@@ -270,11 +305,11 @@ health_monitoring() {
 
 do_health() {
 	step "Healthcheck"
-	local rc=0 entry name bin args port
+	local rc=0 entry name bin args probe
 	for entry in "${SERVICES[@]}"; do
-		IFS='|' read -r name bin args port <<<"$entry"
-		wait_tcp "$name" "$port" || {
-			printf '\033[1;31m    %s NOT healthy on tcp/%s\033[0m\n' "$name" "$port" >&2
+		IFS='|' read -r name bin args probe <<<"$entry"
+		wait_healthy "$name" "$probe" || {
+			printf '\033[1;31m    %s NOT healthy (%s)\033[0m\n' "$name" "$probe" >&2
 			rc=1
 		}
 	done
@@ -312,9 +347,9 @@ do_start() {
 
 do_status() {
 	step "Status"
-	local entry name port
+	local entry name
 	for entry in "${SERVICES[@]}"; do
-		IFS='|' read -r name _ _ port <<<"$entry"
+		IFS='|' read -r name _ _ _ <<<"$entry"
 		if has_systemd_unit "$name"; then
 			info "$name: systemd -> $(systemctl is-active "${SYSTEMD_UNIT_PREFIX}-$name" 2>/dev/null || echo unknown)"
 		elif is_running "$name"; then

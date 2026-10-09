@@ -306,22 +306,21 @@ public sealed class ServerStatus
 
     // ── Transport confidentiality ────────────────────────────────────────────────
     //
-    // Always present, never omitted, and deliberately more than one field. Encryption here
-    // is off by default twice (TCP has no packet-crypt layer; TRANSPORT_KEY defaults to
-    // empty), so the question an operator needs answered is not "is there a key" but "what
-    // is actually happening to these bytes". Published here rather than only as metrics
+    // Always present, never omitted, and deliberately more than one field. Packet
+    // encryption is off by default (TRANSPORT_KEY defaults to empty, and KCP without a key
+    // is cleartext), so the question an operator needs answered is not "is there a key" but
+    // "what is actually happening to these bytes". Published here rather than only as metrics
     // because a never-incremented OpenTelemetry instrument is ABSENT from /metrics rather
     // than zero — see the note in docs/METRICS.md — and "the field is missing" is exactly
     // the wrong answer to a security question.
 
-    /// <summary>Transport this server listens with: <c>tcp</c> or <c>kcp</c>.</summary>
+    /// <summary>Transport this server listens with: always <c>kcp</c> (KCP over UDP).</summary>
     [JsonPropertyName("transport")]
-    public string Transport { get; set; } = "tcp";
+    public string Transport { get; set; } = "kcp";
 
     /// <summary>
-    /// <c>TRANSPORT_KEY</c> holds a value. <b>Not the same as encryption being on</b>: on
-    /// TCP the key is ignored, which is the configuration most easily mistaken for working
-    /// encryption. Compare with <see cref="TransportEncrypted"/>.
+    /// <c>TRANSPORT_KEY</c> holds a value. Compare with <see cref="TransportEncrypted"/>,
+    /// which is what actually reports whether packets leave as ciphertext.
     /// </summary>
     [JsonPropertyName("transport_key_configured")]
     public bool TransportKeyConfigured { get; set; }
@@ -356,7 +355,7 @@ public sealed class ServerStatus
     /// <para>
     /// <b>Read this before concluding anything from <see cref="TransportEncrypted"/>.</b>
     /// The transport fields describe the transport only. On the default configuration —
-    /// TCP with sealing required — <c>transport_encrypted</c> is <c>false</c> while every
+    /// KCP without a TRANSPORT_KEY, sealing required — <c>transport_encrypted</c> is <c>false</c> while every
     /// gameplay frame is in fact encrypted and authenticated a layer above it. A dashboard
     /// or a deploy check reading only the transport fields would report an encrypting
     /// server as plaintext, which is the wrong answer to a security question in the

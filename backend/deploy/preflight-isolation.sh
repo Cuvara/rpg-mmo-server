@@ -206,9 +206,12 @@ if command -v docker >/dev/null 2>&1; then
 			fi
 			continue
 		fi
-		# Not a docker publish. Any other listener still owns the port.
+		# Not a docker publish. Any other listener still owns the port. TCP AND
+		# UDP: the game port is KCP/UDP, so a TCP-only scan (ss -ltn) would
+		# report a UDP holder of it as "free". With -tu, column 5 is the local
+		# address (column 1 is the Netid).
 		if command -v ss >/dev/null 2>&1 &&
-			ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
+			ss -ltun 2>/dev/null | awk '{print $5}' | grep -qE "[:.]${port}\$"; then
 			err "port ${port} (${label}) is already bound by a non-docker process on this host." \
 				"Offset it for '${DEPLOY_ENVIRONMENT}' or stop the listener."
 		else

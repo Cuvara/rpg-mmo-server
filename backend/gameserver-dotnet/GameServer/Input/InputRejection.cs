@@ -55,8 +55,8 @@ public enum InputRejectionReason
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Ambiguous, and the most easily misread value here.</b> On the ordered TCP
-    /// transport an honest client should not produce these at all, which makes a sustained
+    /// <b>Ambiguous, and the most easily misread value here.</b> On the ordered KCP stream
+    /// an honest client should not produce these at all, which makes a sustained
     /// rate interesting. One honest cause remains: an out-of-order UDP/KCP datagram.
     /// </para>
     /// <para>

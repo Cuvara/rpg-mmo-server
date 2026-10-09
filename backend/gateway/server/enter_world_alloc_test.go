@@ -52,7 +52,11 @@ func (c *countingAllocator) AllocateServer(_ context.Context, mapID string) (sto
 		if c.selfAddr != "" {
 			self.Addr = c.selfAddr
 		}
-		self.Transport = c.selfTransport
+		// A pod registers the gameplay transport unless a case says otherwise.
+		self.Transport = "kcp"
+		if c.selfTransport != "" {
+			self.Transport = c.selfTransport
+		}
 		if c.selfMapID != "" {
 			self.MapID = c.selfMapID
 		}
@@ -73,8 +77,8 @@ func startGatewayWithAllocator(t *testing.T, alloc *countingAllocator) (*Gateway
 
 	serverRegistry := storage.NewMemoryServerRegistry()
 	seed := []storage.ServerInfo{
-		{ServerID: "srv1", MapID: "map_forest", Addr: "10.0.0.1:9000", Capacity: 100},
-		{ServerID: "srv-full", MapID: "map_full", Addr: "10.0.0.2:9000", Capacity: 10, PlayerCount: 10},
+		{Transport: "kcp", ServerID: "srv1", MapID: "map_forest", Addr: "10.0.0.1:9000", Capacity: 100},
+		{Transport: "kcp", ServerID: "srv-full", MapID: "map_full", Addr: "10.0.0.2:9000", Capacity: 10, PlayerCount: 10},
 	}
 	for _, info := range seed {
 		if err := serverRegistry.Register(context.Background(), info); err != nil {
@@ -174,7 +178,7 @@ func TestEnterWorldWorstCaseBudgetFitsHandlerWindow(t *testing.T) {
 // same client's retry finds the server ready without a second allocation
 // (issue #235).
 func TestGateway_SlowAllocationYieldsRetryableAndLeaderCompletes(t *testing.T) {
-	allocated := storage.ServerInfo{
+	allocated := storage.ServerInfo{Transport: "kcp",
 		ServerID: "map-servers-dev-slow-1",
 		Addr:     "192.168.65.3:9000",
 		Capacity: 100,
@@ -274,7 +278,7 @@ func TestGateway_SlowAllocationYieldsRetryableAndLeaderCompletes(t *testing.T) {
 func TestGateway_UnservableMapDoesNotLeakAllocationsAcrossRetries(t *testing.T) {
 	const retries = 4
 	alloc := &countingAllocator{
-		info: storage.ServerInfo{
+		info: storage.ServerInfo{Transport: "kcp",
 			ServerID: "map-servers-dotnet-dev-q7bdn-hctpd",
 			Addr:     "127.0.0.1:7002",
 			Capacity: 100,
@@ -320,7 +324,7 @@ func TestGateway_UnservableMapDoesNotLeakAllocationsAcrossRetries(t *testing.T) 
 }
 
 func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
-	allocated := storage.ServerInfo{
+	allocated := storage.ServerInfo{Transport: "kcp",
 		ServerID: "map-servers-dev-xjh7p-6ndtl", // == GameServer/pod name
 		Addr:     "192.168.65.3:9000",           // the allocation response's guess
 		Capacity: 100,
@@ -368,9 +372,24 @@ func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 			mapID:         "map_forest",
 			alloc:         &countingAllocator{info: allocated},
 			wantAddr:      "10.0.0.1:9000",
-			wantTransport: "",
+			wantTransport: "kcp",
 			wantSID:       "srv1",
 			wantHits:      0,
+		},
+		{
+			// KCP-only: a pod that registers any other transport (here a
+			// pre-migration "tcp" server) is refused before a join token is
+			// minted. The client gets a named terminal error, never an address
+			// it would have to dial over TCP.
+			name:  "allocated pod advertising tcp is refused, not announced",
+			mapID: "map_desert",
+			alloc: &countingAllocator{
+				info:          allocated,
+				registerAfter: 20 * time.Millisecond,
+				selfTransport: "tcp",
+			},
+			wantHits:  1,
+			wantError: msgServerTransport,
 		},
 		{
 			// ADR-2: a full map must NOT gain a second live server. Refusing the

@@ -17,6 +17,7 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/sealed"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // Sealed-session end-to-end coverage against a server configured the way a stock
@@ -43,7 +44,9 @@ type sealedTestClient struct {
 }
 
 func dialSealedTestClient(addr string) (*sealedTestClient, error) {
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	// The gameplay hop is KCP/UDP only.
+	conn, err := transport.DialGameplay(transport.Gameplay, addr, 2*time.Second,
+		transport.WithKey(os.Getenv(transport.KeyEnvVar)))
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +166,7 @@ func joinSealedServer(t *testing.T, extraArgs []string) (*sealedTestClient, stri
 	gwAddr, gwCleanup := startGatewayForDotnet(t, gsAddr)
 	t.Cleanup(gwCleanup)
 
-	gw, err := NewMockClient(gwAddr)
+	gw, err := NewGatewayClient(gwAddr)
 	if err != nil {
 		t.Fatalf("connect to gateway: %v", err)
 	}
@@ -305,7 +308,7 @@ func TestSealedSession_RequireServerRefusesJSONClient(t *testing.T) {
 	gwAddr, gwCleanup := startGatewayForDotnet(t, gsAddr)
 	defer gwCleanup()
 
-	gw, err := NewMockClient(gwAddr)
+	gw, err := NewGatewayClient(gwAddr)
 	if err != nil {
 		t.Fatalf("connect to gateway: %v", err)
 	}
@@ -337,7 +340,7 @@ func TestSealedSession_RequireServerRefusesJSONClient(t *testing.T) {
 	}
 	gw.Close()
 
-	gs, err := NewMockClient(enterResp.ServerAddr)
+	gs, err := NewGameClientFor(enterResp)
 	if err != nil {
 		t.Fatalf("connect to game server: %v", err)
 	}
@@ -370,17 +373,14 @@ func TestSealedSession_RequireServerRefusesJSONClient(t *testing.T) {
 
 	// And nothing follows it. A snapshot, or any other frame, would mean the server
 	// served a client that cannot encrypt -- the failure the `require` default exists
-	// to prevent.
-	env, err := gs.Receive()
-	if err == nil {
+	// to prevent. The gameplay hop is KCP/UDP, which has no FIN: the end of the
+	// session is the server sending nothing more, so the assertion is silence
+	// rather than EOF (the refusal itself is the explicit signal, asserted above).
+	if env, err := gs.Receive(); err == nil {
 		t.Fatalf("server sent a type-%d frame to a JSON client on a require server; "+
-			"expected the connection to be closed", env.Type)
-	}
-	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		// A read deadline would also end the stream, but for the wrong reason: it
-		// would mean the server kept the connection open and simply said nothing,
-		// leaving a client hanging rather than refused.
-		t.Fatalf("want EOF (connection closed), got %v", err)
+			"expected the session to be closed", env.Type)
+	} else if !isTimeout(err) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("want silence after the refusal, got %v", err)
 	}
 	t.Log("PASS: JSON client refused in the join reply, naming the encoding")
 }
@@ -438,11 +438,13 @@ func TestSealedSession_RequireServerRefusesNonSealingProtoClient(t *testing.T) {
 		t.Fatalf("kick reason %q, want %q", kick.Reason, "no_sealed_session")
 	}
 
-	// And then the connection ends. The kick is a refusal, not a warning.
+	// And then the session ends. The kick is a refusal, not a warning. Over KCP/UDP
+	// there is no FIN, so "ends" means nothing more arrives: a server that kept
+	// serving would stream snapshots well inside this window.
 	if next, _, err := gs.recv(5 * time.Second); err == nil {
 		t.Fatalf("server sent a type-%d frame after the kick", next.Type)
-	} else if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("want EOF after the kick, got %v", err)
+	} else if !isTimeout(err) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("want silence after the kick, got %v", err)
 	}
 	t.Log("PASS: non-sealing protobuf client was kicked with a reason, then closed")
 }

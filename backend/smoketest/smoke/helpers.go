@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // Config holds every endpoint and knob the smoke test needs. All values can be
@@ -21,7 +19,7 @@ type Config struct {
 	NakamaTLSCert string // NAKAMA_TLS_CERT — PEM of Nakama's certificate, required when NakamaURL is https (ADR-24)
 	ServerKey     string // NAKAMA_SERVER_KEY — Nakama socket server key
 	GatewayAddr   string // GATEWAY_ADDR    — gateway listen addr
-	Transport     string // TRANSPORT       — gateway hop transport: tcp or kcp
+	TransportKey  string // TRANSPORT_KEY   — pre-shared KCP key of the game servers (empty = plaintext)
 
 	// Encoding is the wire encoding every frame this run sends is marshaled in.
 	// Configuration on BOTH ends is not needed — the server answers in whatever
@@ -111,10 +109,6 @@ const (
 	// Changing this default silently changes what CD proves, so it is a flag.
 	DefaultEncoding = "json"
 
-	// DefaultTransport keeps the CD smoke test on TCP unless TRANSPORT says
-	// otherwise. The game server hop is not configured here: it always follows
-	// EnterWorldResponse.Transport.
-	DefaultTransport     = "tcp"
 	DefaultMapID         = "map_01"
 	DefaultTimeout       = 10 * time.Second
 	DefaultInputs        = 10
@@ -166,7 +160,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		NakamaTLSCert: EnvOr(getenv, "NAKAMA_TLS_CERT", ""),
 		ServerKey:     EnvOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
 		GatewayAddr:   EnvOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
-		Transport:     EnvOr(getenv, "TRANSPORT", DefaultTransport),
+		TransportKey:  getenv("TRANSPORT_KEY"),
 		Encoding:      EnvOr(getenv, "SMOKE_ENCODING", DefaultEncoding),
 		JWTSecret:     getenv("JWT_SECRET"),
 		MapID:         EnvOr(getenv, "SMOKE_MAP_ID", DefaultMapID),
@@ -220,7 +214,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		"PEM of Nakama's certificate; required when -nakama-url is https (ADR-24)")
 	fs.StringVar(&cfg.ServerKey, "server-key", cfg.ServerKey, "Nakama server key")
 	fs.StringVar(&cfg.GatewayAddr, "gateway-addr", cfg.GatewayAddr, "Gateway address")
-	fs.StringVar(&cfg.Transport, "transport", cfg.Transport, "Transport for the gateway hop: tcp or kcp")
+	fs.StringVar(&cfg.TransportKey, "transport-key", cfg.TransportKey, "Pre-shared KCP key of the game servers (env TRANSPORT_KEY; empty = plaintext). The gateway hop is TCP and the game-server hop KCP; neither is selectable")
 	fs.BoolVar(&cfg.Sealed, "sealed", cfg.Sealed, "Run the sealed-session handshake on the gameplay hop and encrypt every frame after it (requires -encoding proto; must match the server's GAMESERVER_SEALED)")
 	fs.StringVar(&cfg.Encoding, "encoding", cfg.Encoding, "Wire encoding for every frame sent: json (default, the legacy arm) or proto (what the shipped client speaks, and the only one a sealed session can use)")
 	fs.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "Shared JWT secret for local verification")
@@ -289,9 +283,6 @@ func (c Config) Validate() error {
 		return fmt.Errorf(
 			"sealed runs require -encoding proto, got %q: a JSON client cannot carry a sealed frame",
 			c.Encoding)
-	}
-	if err := transport.Validate(c.Transport); err != nil {
-		return fmt.Errorf("transport: %w", err)
 	}
 	if c.ExpectMigration <= 0 {
 		return fmt.Errorf("expect-migration-version must be > 0, got %d", c.ExpectMigration)

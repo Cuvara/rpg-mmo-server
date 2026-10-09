@@ -16,8 +16,13 @@ Custom Go binary — the **entry point** for Unity clients. Standalone process, 
 > `backend/docs/ARCHITECTURE-DECISIONS.md`, ADR-3, for why, and for the tradeoffs
 > of switching to proxy mode later.
 
-### 1. TCP / KCP Transport (Drawio Pages 2, 3)
-- Listen for client connections (TCP default, KCP/UDP via `--transport=kcp`)
+### 1. Client Listener (Drawio Pages 2, 3)
+- Listen for client connections over **TCP only** (optionally TLS, ADR-23). There
+  is no transport flag: `--transport`, `--allocator-transport`, `--transport-key`
+  and `ALLOCATOR_TRANSPORT` are removed; `GATEWAY_TRANSPORT` other than `tcp` is
+  fatal at startup, `tcp`/`ALLOCATOR_TRANSPORT`/`TRANSPORT_KEY` warn and are ignored
+- Gameplay is **KCP/UDP only** (ADR-32), client <-> game server; it never touches
+  this process
 - Session management (connection, disconnection, timeout)
 - Route each client to the right *game server address* — an assignment, not packet forwarding
 
@@ -25,7 +30,7 @@ Custom Go binary — the **entry point** for Unity clients. Standalone process, 
 - Accept client connection with Session Token (JWT)
 - JWT verify LOCAL using shared secret — NO roundtrip to Nakama
 - Store session in Redis: `session:{user_id}` = connection info (with TTL)
-- Heartbeat: refresh session TTL on KCP ping
+- Heartbeat: refresh session TTL on `MsgPong` (gateway TCP connection)
 - Handle disconnect: cleanup session from Redis
 
 ### 3. Server Registry (Drawio Page 3)
@@ -39,9 +44,13 @@ Custom Go binary — the **entry point** for Unity clients. Standalone process, 
 - Health tracking via heartbeat from Game Servers
 
 ### 4. Map Assignment (Drawio Page 3)
-- Client sends `EnterWorld(map_id)` via KCP
+- Client sends `EnterWorld(map_id)` over the gateway TCP connection
 - Lookup server with capacity for that map
 - If available: reserve slot, issue `join_token`, redirect client
+  (`EnterWorldResponse.Transport` is always `kcp`)
+- If the selected server's registry `transport` is not `kcp` (empty/`tcp`/unknown):
+  refuse with `server_transport_unsupported`, log the server id, mint no token —
+  never fall back to TCP
 - If the map has **no** live server: request Agones allocation, then wait (bounded
   by `--allocation-wait-timeout`) for that pod to register **itself**, and issue
   the `join_token` from its own entry. Timeout → `server is starting, retry
@@ -82,7 +91,7 @@ Custom Go binary — the **entry point** for Unity clients. Standalone process, 
 - Startup time: < 2s
 
 ## Integration Points
-- **With Clients**: TCP/KCP, handshake with JWT, then `EnterWorld` → `{ServerAddr, JoinToken}`
+- **With Clients**: TCP (optionally TLS), handshake with JWT, then `EnterWorld` → `{ServerAddr, JoinToken, Transport="kcp"}`; the client then dials the game server over KCP/UDP
 - **With Game Servers (C# .NET 10)**: **no runtime connection.** The gateway mints a join token naming a server (`sid` claim); the client dials that server itself
 - **With Redis**: Session store, server registry, event-stream (Streams) consumer
 - **With Agones**: Allocation requests for new Game Server pods
@@ -90,7 +99,7 @@ Custom Go binary — the **entry point** for Unity clients. Standalone process, 
 
 ## Documentation Requirements
 - `docs/README.md` — Module overview, network architecture, how to run
-- `docs/API.md` — All KCP message types, handshake protocol, join_token format
+- `docs/API.md` — All gateway-hop message types, handshake protocol, join_token format
 - `docs/DESIGN.md` — Stateless design, scaling strategy, connection lifecycle
 - `docs/RUNBOOK.md` — Deploy, scale, debug connection issues, monitor metrics
 - `CHANGELOG.md` — Every change logged

@@ -123,6 +123,10 @@ type ClientStats struct {
 	// DropOldest, so a client the writer cannot keep up with loses snapshots
 	// silently rather than blocking the tick.
 	SnapshotsReceivedRatio float64 `json:"snapshots_received_ratio,omitempty"`
+
+	// KCP is the gameplay transport as the clients saw it: segments,
+	// retransmissions, inferred loss and queue depth (see KCPStats).
+	KCP KCPStats `json:"kcp"`
 }
 
 // ServerStats is what /metrics reported, differenced across the window.

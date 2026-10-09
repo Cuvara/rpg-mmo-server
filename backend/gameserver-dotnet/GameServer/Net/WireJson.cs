@@ -142,6 +142,11 @@ internal static class JsonWriter
                 w.WriteEndArray();
             }
 
+            // Last, as in the Go struct (`ack_applied_tick,omitempty`). Omitted when zero, which
+            // is its "not sent" value: the encoder leaves it zero for a protocol 2 peer, so a
+            // protocol 2 JSON frame is unchanged.
+            if (m.AckAppliedTick != 0) w.WriteNumber("ack_applied_tick"u8, m.AckAppliedTick);
+
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -480,10 +485,12 @@ internal static class JsonReader
             bool entities = r.ValueTextEquals("entities"u8);
             bool removed = r.ValueTextEquals("removed"u8);
             bool events = r.ValueTextEquals("events"u8);
+            bool ackAppliedTick = r.ValueTextEquals("ack_applied_tick"u8);
             if (!r.Read()) break;
 
             if (tick) m.Tick = r.GetUInt64();
             else if (ackTick) m.AckTick = r.GetUInt64();
+            else if (ackAppliedTick) m.AckAppliedTick = r.GetUInt64();
             else if (full) m.Full = r.TokenType == JsonTokenType.True;
             else if (entities) ReadEntities(ref r, m);
             else if (removed) ReadRemoved(ref r, m);

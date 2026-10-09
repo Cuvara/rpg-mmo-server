@@ -55,7 +55,7 @@ internal sealed class V3ServerHarness : IAsyncDisposable
             ServerId = ServerId,
             MapId = MapId,
             Mode = "map",
-            Transport = TransportKind.Tcp,
+            Transport = TransportKind.Kcp,
             TickRate = 20,
             MinProtocolVersion = minProtocolVersion,
             JwtSecret = Secret,
@@ -80,8 +80,8 @@ internal sealed class V3ServerHarness : IAsyncDisposable
 
     public sealed class Client : IDisposable
     {
-        public required TcpClient Tcp { get; init; }
-        public required NetworkStream Stream { get; init; }
+        public required KcpTestClient Tcp { get; init; }
+        public required Stream Stream { get; init; }
         public required WireEncoding Encoding { get; init; }
         public required JoinTokenResponse Join { get; init; }
         private uint _seq;
@@ -134,7 +134,7 @@ internal sealed class V3ServerHarness : IAsyncDisposable
     public async Task<Client> JoinAsync(string userId, uint protocolVersion, WireEncoding encoding,
         string? characterId = null, bool requireOk = true)
     {
-        var tcp = new TcpClient();
+        var tcp = new KcpTestClient();
         for (int attempt = 0; ; attempt++)
         {
             try
@@ -148,7 +148,7 @@ internal sealed class V3ServerHarness : IAsyncDisposable
             }
         }
 
-        NetworkStream stream = tcp.GetStream();
+        Stream stream = tcp.GetStream();
         await stream.WriteAsync(WireProtocol.Encode(WireProtocol.NewEnvelope(MsgType.JoinToken,
             new JoinTokenRequest
             {

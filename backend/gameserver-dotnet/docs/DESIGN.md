@@ -437,7 +437,7 @@ Measured on the same scene, 100 ticks: **126.6 B/tick/client, a 78.6% reduction*
 saving grows with the number of *stationary* entities in AOI, which is the normal
 case — most of a map is not moving in any given 66 ms.
 
-Correctness rests on the transport being ordered and reliable (TCP today), so the
+Correctness rests on the transport being ordered and reliable (KCP stream mode), so the
 server may treat "last sent" as "last received". That assumption is stated, not
 hidden: the periodic keyframe bounds how long any violation can persist, `resync`
 lets the client force recovery immediately, and `--keyframe-interval 0` turns delta
@@ -493,7 +493,8 @@ All validation is server-authoritative:
 
 ## Disconnect and Reconnect
 
-- On TCP disconnect, the server holds the player entity for a grace period:
+- On disconnect (the session closing for any reason — `disconnect`, kick, idle
+  timeout, dead link), the server holds the player entity for a grace period:
   **30 seconds** on map servers, **60 seconds** on dungeon servers. The window is
   `ServerOptions.HoldTtl` and nothing else — the composition root derives it from
   `--mode`, so there is one place to read it and one place to change it.
@@ -801,10 +802,14 @@ it would change nothing for real traffic and is left alone rather than risking a
 behaviour change on the join path.
 
 Coverage: `GameServer.Tests/Server/JwtKeyringTests.cs` (keyring semantics) and
-`GameServer.Tests/Server/JoinTokenSecretTests.cs` (the real TCP handshake for
+`GameServer.Tests/Server/JoinTokenSecretTests.cs` (the real handshake for
 split-active, fallback, rotation, post-rotation, fail-closed and expiry).
 
 ## KCP Transport for the Gameplay Hop (2026-08-07)
+
+> Since 2026-10-08 KCP is the **only** gameplay transport — see "KCP-only gameplay
+> transport and listener hardening" at the end of this file. The port described here
+> is unchanged; the TCP alternative it was written beside is gone.
 
 Until now `--transport=kcp` only ever covered the client→gateway hop. The
 gateway advertised a transport to clients through `EnterWorldResponse.Transport`,
@@ -2562,3 +2567,74 @@ the close.
 - No inventory capacity rule (`inventory_full` is never produced); no `not_owner` path (an
   instance of another character is `not_found`).
 - The v2 sizing over-measurement above stays until protocol 2 is retired.
+
+## KCP-only gameplay transport and listener hardening (2026-10-08, ADR-32)
+
+The gameplay hop is KCP over UDP and nothing else. `TcpTransportListener`,
+`TcpTransportConnection` and `TransportKind.Tcp` are gone; `TransportFactory.Listen`
+builds only the KCP listener and throws for any other kind, `""` included.
+`--transport` / `GAMESERVER_TRANSPORT` unset or `kcp` resolves to `kcp`
+(`TransportKind.ResolveConfigured`); anything else is fatal before migrations,
+registration or Agones Ready, with the contract message
+`GAMESERVER_TRANSPORT=<v> is not supported: realtime gameplay is KCP/UDP only`.
+`RegistrationService` refuses a non-`kcp` transport, so the registry always says
+`kcp`. The empty string no longer means TCP anywhere (`TransportKind.Normalize`
+leaves it empty and `IsValid("")` is false).
+
+Making KCP the only transport made five latent defects in the listener and session
+the server's front door, so they were fixed together:
+
+| Defect | Fix |
+|---|---|
+| `KcpSession.Write` ignored `Kcp.Send`'s return code; a frame needing more than 255 fragments vanished silently, and in stream mode a `-2` could leave a prefix of it queued | Writes are split into 64 KiB `Send` calls the way kcp-go's `UDPSession.Write` splits by MSS, so a legitimate frame never hits the fragment limit. A write larger than one maximum wire frame (`4 + WireProtocol.MaxMessageSize`) is refused **before** anything is queued, logged, counted (`writes_rejected`) and closes the session with an `IOException`; so does any negative `Send` result |
+| Unbounded send queue: nothing looked at `WaitSnd`, and `KcpStream.WriteAsync` never waited, so the connection's drop-the-oldest snapshot lane could never engage and a non-acknowledging peer grew KCP's queue without bound | `KcpStream.WriteAsync` waits in `WaitForSendSpaceAsync` while `WaitSnd` ≥ the soft limit (2 × send window = 256 segments) — the equivalent of a full TCP send buffer, kcp-go's own `Write` behaviour — and ACK processing releases it. Past the hard limit (1024 segments, above soft + one maximum frame) the session is closed as a slow consumer (`sessions_closed{reason=slow_consumer}`); only a writer that ignores the soft limit can get there |
+| Unbounded receive queue (`Channel.CreateUnbounded`) | The session stops draining the ARQ once 256 KiB of reassembled input wait for the reader; KCP's receive queue then fills, the advertised window drops to zero and the **peer** stops sending. Draining resumes when the reader consumes, and KCP's window-reopen probe restarts the peer. Nothing is ever dropped from the reliable stream |
+| The receive buffer was exactly `MtuLimit` (1500), so a larger datagram was truncated by the OS and its prefix parsed | 64 KiB receive buffer; datagrams over 1500 bytes are dropped unparsed and counted (`oversize`) |
+| Any datagram from an unknown endpoint created a session | A session opens only for a datagram whose first segment is `PUSH sn=0`, and only if the opener parses. Admission then checks a global cap (4096), a per-source-IP cap (16, loopback exempt), and a listener-wide token bucket on new sessions (200/s, burst 400); a per-session token bucket on inbound datagrams (500/s, burst 1000) drops excess datagrams without closing the session. Every refusal is counted |
+
+Pre-authentication sessions remain bounded by `GAMESERVER_HANDSHAKE_TIMEOUT_MS` and
+the pending pool; closing the handshake now provably removes the session from the
+listener's table (`KcpGameplayTests.SessionThatNeverSendsAJoinToken_...`), and the
+listener-wide caps bound the table itself. Counters live on `KcpListenerStats`
+(`GameServerHost.TransportStats`) and are exported as `gameserver_kcp_*`
+(`METRICS.md`).
+
+**Why the defaults.** 4096 sessions is ~20x a map server's capacity, so it never
+binds on real load but bounds what a spoofing host can make the process hold. 16 per
+IP admits a household or small NAT; carrier-grade NAT needs it raised. 200 new
+sessions/s re-admits a full map within a second after a restart. 500 datagrams/s per
+session is ~2.5x the worst legitimate rate (inputs at up to 60 Hz plus one ACK per
+snapshot at up to 60 Hz) with room for a retransmission burst. 256 KiB of buffered
+input is above one maximum KCP message. The four rate/cap values are configurable
+(`GAMESERVER_KCP_*`, RUNBOOK); the rest are fixed.
+
+**Dedicated threads.** The listener's UDP receive loop and its ARQ update loop (10 ms)
+run on two dedicated `AboveNormal` threads, like the tick loop, rather than as
+thread-pool tasks. Over TCP the kernel did this work; over UDP it is ours, and a thread
+pool starved by unrelated blocking work would otherwise delay every session's input and
+retransmissions at once.
+
+**Shutdown ordering.** Every session shares the listener's one UDP socket, so the
+listener used to be disposed *before* `DrainClientsAsync` sent
+`disconnect{server_shutdown}` — which then went nowhere. The listener is now closed
+after the drain and `CloseAll`.
+
+**Dead link and blackouts.** KCP closes a session after 20 unacknowledged
+transmissions of a segment. With nodelay the RTO grows linearly from ~30 ms on a link
+that had RTT samples, so a peer that goes silent is detected in ~3.5 s while data is
+in flight, and the 60 s idle timeout covers a peer with nothing in flight. The same
+bound means a full outage longer than ~3.5 s ends the session; the reconnect hold
+(`HoldTtl`) is what makes that survivable.
+
+**Tests.** Every gameplay test now dials KCP through
+`GameServer.Tests/Infrastructure/KcpTestClient` (a real UDP client built on the
+server's `Kcp`/`KcpTuning`/`KcpCrypto`). KCP has no handshake, FIN or RST, so the
+client models the three socket behaviours the suite relied on explicitly: connect
+sends a zero-length `PUSH sn=0` and waits for its ACK; EOF is read once the
+server's session for the conversation is gone (looked up in-process through an
+index `KcpListener` keeps only when `TrackSessionsByConv` is set, which production
+never does); and `Dispose` delivers a FIN-equivalent (`KcpSession.PeerFinished`)
+after its data is acknowledged, while `Abort` just goes silent. `AdversityProxy`
+became a UDP datagram impairment proxy (seeded loss, delay + jitter, reordering,
+duplication, blackout, cut). Unit tests that only needed a stream under a
+`Connection` use `KcpPair` (listener + client + accepted session).

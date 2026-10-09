@@ -325,10 +325,11 @@ func startGatewayForDotnet(t *testing.T, gsAddr string) (gwAddr string, cleanup 
 
 	// Pre-register the C# gameserver in the registry so the gateway can find it
 	err := reg.Register(context.Background(), storage.ServerInfo{
-		ServerID: dotnetServerID,
-		MapID:    dotnetMapID,
-		Addr:     gsAddr,
-		Capacity: 100,
+		ServerID:  dotnetServerID,
+		MapID:     dotnetMapID,
+		Addr:      gsAddr,
+		Transport: "kcp",
+		Capacity:  100,
 	})
 	if err != nil {
 		t.Fatalf("register dotnet gameserver: %v", err)
@@ -387,7 +388,7 @@ func runDotnetFullFlow(t *testing.T, enc messages.Encoding) {
 	defer gwCleanup()
 
 	// --- Step a/b: Client -> Gateway: MsgAuth { JWT } ---
-	gwClient, err := NewMockClient(gwAddr)
+	gwClient, err := NewGatewayClient(gwAddr)
 	if err != nil {
 		t.Fatalf("connect to gateway: %v", err)
 	}
@@ -450,7 +451,7 @@ func runDotnetFullFlow(t *testing.T, enc messages.Encoding) {
 	gwClient.Close()
 
 	// --- Step e/f: Client -> C# GameServer: MsgJoinToken { Token } ---
-	gsClient, err := NewMockClient(enterResp.ServerAddr)
+	gsClient, err := NewGameClientFor(enterResp)
 	if err != nil {
 		t.Fatalf("connect to C# game server: %v", err)
 	}
@@ -541,7 +542,7 @@ func TestDotnetInterop_InvalidJWT(t *testing.T) {
 	gsAddr, gsCleanup := startDotnetGameServer(t)
 	defer gsCleanup()
 
-	client, err := NewMockClient(gsAddr)
+	client, err := NewGameClient(gsAddr)
 	if err != nil {
 		t.Fatalf("connect to C# game server: %v", err)
 	}
@@ -585,7 +586,7 @@ func TestDotnetInterop_WrongServerID(t *testing.T) {
 	gsAddr, gsCleanup := startDotnetGameServer(t)
 	defer gsCleanup()
 
-	client, err := NewMockClient(gsAddr)
+	client, err := NewGameClient(gsAddr)
 	if err != nil {
 		t.Fatalf("connect to C# game server: %v", err)
 	}
@@ -634,7 +635,7 @@ func TestDotnetInterop_MultipleClients(t *testing.T) {
 	// Connect two clients
 	connectAndJoin := func(playerID string) *MockClient {
 		t.Helper()
-		client, err := NewMockClient(gsAddr)
+		client, err := NewGameClient(gsAddr)
 		if err != nil {
 			t.Fatalf("connect client %s: %v", playerID, err)
 		}
@@ -707,7 +708,7 @@ func TestDotnetInterop_ClientDisconnect(t *testing.T) {
 	defer gsCleanup()
 
 	// Connect, join, then immediately disconnect
-	client, err := NewMockClient(gsAddr)
+	client, err := NewGameClient(gsAddr)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -738,7 +739,7 @@ func TestDotnetInterop_ClientDisconnect(t *testing.T) {
 	// Wait briefly, then verify the server is still accepting connections
 	time.Sleep(500 * time.Millisecond)
 
-	client2, err := NewMockClient(gsAddr)
+	client2, err := NewGameClient(gsAddr)
 	if err != nil {
 		t.Fatalf("server stopped accepting connections after client disconnect: %v", err)
 	}
@@ -779,7 +780,7 @@ func TestDotnetInterop_GatewayInvalidJWT(t *testing.T) {
 	gwAddr, gwCleanup := startGatewayForDotnet(t, gsAddr)
 	defer gwCleanup()
 
-	gwClient, err := NewMockClient(gwAddr)
+	gwClient, err := NewGatewayClient(gwAddr)
 	if err != nil {
 		t.Fatalf("connect to gateway: %v", err)
 	}
@@ -841,7 +842,7 @@ func TestDotnetInterop_WireProtocolCompat(t *testing.T) {
 	gsAddr, gsCleanup := startDotnetGameServer(t)
 	defer gsCleanup()
 
-	client, err := NewMockClient(gsAddr)
+	client, err := NewGameClient(gsAddr)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -935,7 +936,7 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 	var userIDForInterning string
 
 	for _, enc := range []messages.Encoding{messages.EncodingJSON, messages.EncodingProto} {
-		client, err := NewMockClient(gsAddr)
+		client, err := NewGameClient(gsAddr)
 		if err != nil {
 			t.Fatalf("%s: connect: %v", enc, err)
 		}

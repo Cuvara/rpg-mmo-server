@@ -323,7 +323,7 @@ func (r *Runner) stepGatewayToken() (string, error) {
 // ---------------------------------------------------------------- steps d+e
 
 func (r *Runner) stepGatewayAuthEnter() (string, error) {
-	conn, err := r.dial(r.cfg.Transport, r.cfg.GatewayAddr)
+	conn, err := r.dial(r.cfg.GatewayAddr)
 	if err != nil {
 		return "", err
 	}
@@ -365,10 +365,10 @@ func (r *Runner) stepGatewayAuthEnter() (string, error) {
 	// require identity, and an empty key against an older backend must leave the
 	// run green rather than refuse the join.
 	r.serverPublicKey = enterResp.ServerPublicKey
-	// The gateway tells us which transport the target game server speaks; an
-	// omitted field means TCP (servers registered before the field existed).
-	r.serverTrans = transport.Normalize(enterResp.Transport)
-	return "transport=" + transport.Normalize(r.cfg.Transport) +
+	// The gateway names the game server's transport; dialServer refuses
+	// anything but kcp, so a stale server fails this step by name.
+	r.serverTrans = enterResp.Transport
+	return "gateway=tcp" +
 		" map=" + r.cfg.MapID +
 		" server=" + enterResp.ServerAddr + " (" + r.serverTrans + ")", nil
 }
@@ -547,20 +547,19 @@ drain:
 
 // ---------------------------------------------------------------- wire utils
 
-// dial connects over the given transport kind (empty means tcp), rewriting
-// listen-style addresses into dialable loopback ones. Used for the gateway hop,
-// whose address is operator-supplied local config (GATEWAY_ADDR, ":8000" by
-// default) rather than something a server advertised — strict address mode
-// therefore does not apply to it.
-// dial connects to the GATEWAY, wrapping the socket in TLS when a pin is
+// dial connects to the GATEWAY over TCP (the gateway hop is always TCP),
+// rewriting listen-style addresses into dialable loopback ones. The address is
+// operator-supplied local config (GATEWAY_ADDR, ":8000" by default) rather
+// than something a server advertised, so strict address mode does not apply.
+// It also wraps the socket in TLSwhen a pin is
 // configured (ADR-23). Only this path does so: dialServer below reaches the game
 // server, whose hop is protected by the sealed session instead, and wrapping
 // that one in TLS as well would be two mechanisms claiming the same job.
-func (r *Runner) dial(kind, addr string) (net.Conn, error) {
+func (r *Runner) dial(addr string) (net.Conn, error) {
 	target := NormalizeDialAddr(addr)
-	conn, err := r.dialTarget(kind, target)
+	conn, err := transport.Dial(transport.KindTCP, target, r.cfg.Timeout)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial gateway %s: %w", target, err)
 	}
 	if r.cfg.GatewayTLSCertPath == "" {
 		return conn, nil
@@ -578,20 +577,19 @@ func (r *Runner) dial(kind, addr string) (net.Conn, error) {
 	return tlsConn, nil
 }
 
-// dialServer connects to a game server address the gateway advertised. Under
-// --strict-addr a listen-style address fails here instead of being rewritten.
-func (r *Runner) dialServer(kind, addr string) (net.Conn, error) {
+// dialServer connects to a game server address the gateway advertised, over
+// the transport the gateway advertised. Anything but kcp is refused before a
+// packet is sent: the gameplay hop is KCP/UDP only and there is no fallback.
+// Under --strict-addr a listen-style address fails here instead of being
+// rewritten.
+func (r *Runner) dialServer(advertised, addr string) (net.Conn, error) {
 	target, err := ResolveServerDialAddr(addr, r.cfg.StrictAddr)
 	if err != nil {
 		return nil, err
 	}
-	return r.dialTarget(kind, target)
-}
-
-func (r *Runner) dialTarget(kind, target string) (net.Conn, error) {
-	conn, err := transport.Dial(kind, target, r.cfg.Timeout)
+	conn, err := transport.DialGameplay(advertised, target, r.cfg.Timeout, transport.WithKey(r.cfg.TransportKey))
 	if err != nil {
-		return nil, fmt.Errorf("dial %s over %s: %w", target, transport.Normalize(kind), err)
+		return nil, fmt.Errorf("dial game server %s: %w", target, err)
 	}
 	return conn, nil
 }

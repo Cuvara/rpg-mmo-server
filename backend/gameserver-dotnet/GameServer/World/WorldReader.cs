@@ -47,6 +47,28 @@ public sealed class WorldReader
     }
 
     /// <summary>
+    /// <see cref="TryGetSnapshotAnchor(string, out Vec2, out ulong)"/> plus the base tick that
+    /// applied the acknowledged input (<c>ack_applied_tick</c>). Both ticks are read from the
+    /// one cursor in the one lookup, so they always describe the same input.
+    /// </summary>
+    public bool TryGetSnapshotAnchor(
+        string userId, out Vec2 position, out ulong lastInputTick, out ulong lastInputAppliedTick)
+    {
+        position = default;
+        lastInputTick = 0;
+        lastInputAppliedTick = 0;
+
+        EntityHandle handle = _world.ResolveLocked(userId);
+        if (!handle.IsValid) return false;
+
+        position = _world.ArchInternal.Get<Position>(handle.Value).Value;
+        ref readonly InputCursor cursor = ref _world.ArchInternal.Get<InputCursor>(handle.Value);
+        lastInputTick = cursor.LastInputTick;
+        lastInputAppliedTick = cursor.LastInputAppliedTick;
+        return true;
+    }
+
+    /// <summary>
     /// The world-stable key of <paramref name="userId"/>'s entity, if it has one.
     /// </summary>
     /// <remarks>

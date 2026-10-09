@@ -2,19 +2,22 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/sealed"
 	"github.com/duycuong/rpg-mmo/shared/storage"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // AssignResult holds the result of a map assignment.
 //
 // Transport is the realtime transport the target game server speaks, taken
-// from its registry entry. Empty means TCP (backward compatible with entries
-// written before the transport field existed).
+// from its registry entry. It is always transport.Gameplay (kcp): an entry
+// advertising anything else is refused with ErrServerTransport before a join
+// token is minted (see checkGameplayTransport).
 type AssignResult struct {
 	ServerID   string
 	ServerAddr string
@@ -48,6 +51,23 @@ type AssignResult struct {
 // failed join, and a client that cares refuses one hop later with a message
 // that actually names encryption. The gateway logs the absence on the
 // enter-world line, so it is visible without being fatal.
+// ErrServerTransport is returned when the selected game server's registry
+// entry advertises a transport other than transport.Gameplay — empty (a stale
+// or hand-written entry) or "tcp" (a server from before the KCP-only
+// migration). The assignment fails instead of sending the client to dial a
+// protocol it will not speak; there is no fallback.
+var ErrServerTransport = errors.New("game server does not advertise the gameplay transport")
+
+// checkGameplayTransport refuses a registry entry whose transport is not the
+// gameplay transport. It runs before the join token is minted, so a refused
+// server never consumes a single-use token.
+func checkGameplayTransport(info storage.ServerInfo) error {
+	if err := transport.ValidateGameplay(info.Transport); err != nil {
+		return fmt.Errorf("%w: server %s (%s): %v", ErrServerTransport, info.ServerID, info.Addr, err)
+	}
+	return nil
+}
+
 func identityKeyOf(info storage.ServerInfo) []byte {
 	key, err := sealed.DecodeIdentityKey(info.IdentityKey)
 	if err != nil {
@@ -88,6 +108,9 @@ func AssignMapKeyring(ctx context.Context, userID, mapID string, reg *registry.R
 func AssignMapCharacter(ctx context.Context, userID, characterID, mapID string, reg *registry.RegistryService, joinKeys jwt.Keyring) (AssignResult, error) {
 	srv, err := reg.FindServer(ctx, mapID)
 	if err != nil {
+		return AssignResult{}, fmt.Errorf("assign map: %w", err)
+	}
+	if err := checkGameplayTransport(srv); err != nil {
 		return AssignResult{}, fmt.Errorf("assign map: %w", err)
 	}
 

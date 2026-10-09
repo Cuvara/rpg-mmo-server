@@ -65,6 +65,11 @@ fi
 : "${VERIFY_NAKAMA_SERVER_KEY:=defaultkey}"
 : "${VERIFY_GATEWAY_ADDR:=127.0.0.1:8000}"
 : "${VERIFY_JWT_SECRET:=${JWT_SECRET:-}}"
+# KCP datagram pre-shared key the game server runs with (its TRANSPORT_KEY).
+# Handed to the smoketest and the probe as TRANSPORT_KEY so their KCP join
+# decrypts; empty = plaintext datagrams (dev). A mismatch shows up as a join
+# timeout, never as a named error -- UDP has no handshake to refuse with.
+: "${VERIFY_TRANSPORT_KEY:=${TRANSPORT_KEY:-}}"
 : "${VERIFY_GAME_MIGRATION:=2}"
 : "${VERIFY_UNITY_GATEWAY_HOST:=${VERIFY_GATEWAY_ADDR%:*}}"
 : "${VERIFY_UNITY_GATEWAY_PORT:=${VERIFY_GATEWAY_ADDR##*:}}"
@@ -100,6 +105,7 @@ run_probe() {
   NAKAMA_URL="$VERIFY_NAKAMA_URL" NAKAMA_SERVER_KEY="$VERIFY_NAKAMA_SERVER_KEY" \
   NAKAMA_TLS_CERT="${VERIFY_NAKAMA_TLS_CERT:-}" \
   GATEWAY_ADDR="$VERIFY_GATEWAY_ADDR" JWT_SECRET="$VERIFY_JWT_SECRET" \
+  TRANSPORT_KEY="$VERIFY_TRANSPORT_KEY" \
     "$PROBE_BIN" "$@"
 }
 

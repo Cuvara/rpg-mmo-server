@@ -32,9 +32,11 @@ type PlayerState struct {
 
 // ServerInfo describes a registered game server.
 //
-// Transport is the realtime transport the server listens with ("tcp" or
-// "kcp"). Empty means "tcp" so entries written by older game servers stay
-// valid; the gateway forwards this value to clients in EnterWorldResponse.
+// Transport is the realtime gameplay transport the server listens with. Game
+// servers always register "kcp" (transport.Gameplay); the gateway refuses to
+// assign an entry with any other value, including empty (an entry from before
+// the KCP-only migration), and forwards the value to clients in
+// EnterWorldResponse.
 type ServerInfo struct {
 	ServerID    string `json:"server_id"`
 	MapID       string `json:"map_id"`

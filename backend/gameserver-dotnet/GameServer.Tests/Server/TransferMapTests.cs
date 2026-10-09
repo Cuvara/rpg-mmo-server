@@ -6,6 +6,7 @@ using GameServer.Net.Transport;
 using GameServer.Observability;
 using GameServer.Server;
 using RpgMmo.Wire.V1;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -214,7 +215,7 @@ public class TransferMapTests
                 ServerId = ServerId,
                 MapId = MapId,
                 Mode = "map",
-                Transport = TransportKind.Tcp,
+                Transport = TransportKind.Kcp,
                 TickRate = 20,
                 Capacity = 100,
                 JwtSecret = JwtSecret,
@@ -237,9 +238,9 @@ public class TransferMapTests
             return new Harness { Server = server, Metrics = metrics, Port = port, Cts = cts, RunTask = runTask };
         }
 
-        public async Task<TcpClient> JoinAsync(string userId)
+        public async Task<KcpTestClient> JoinAsync(string userId)
         {
-            var client = new TcpClient();
+            var client = new KcpTestClient();
             // No retry loop: StartAsync only returns once the listener is bound, so a
             // connection now either lands in the accept backlog or fails for a real reason.
             await client.ConnectAsync(IPAddress.Loopback, Port);

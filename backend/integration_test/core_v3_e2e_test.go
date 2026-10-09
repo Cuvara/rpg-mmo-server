@@ -27,7 +27,7 @@ func joinVersioned(t *testing.T, gsAddr, playerID string, protocolVersion uint32
 	enc messages.Encoding, characterID string) (*MockClient, messages.JoinTokenResponse) {
 	t.Helper()
 
-	client, err := NewMockClient(gsAddr)
+	client, err := NewGameClient(gsAddr)
 	if err != nil {
 		t.Fatalf("connect %s: %v", playerID, err)
 	}
@@ -282,7 +282,7 @@ func TestCoreV3_CharacterIDEchoedThroughTheGateway(t *testing.T) {
 
 			for _, cid := range []string{"char-slot-2", ""} {
 				userID := "v3-cid-" + enc.String() + "-" + cid
-				gw, err := NewMockClient(gwAddr)
+				gw, err := NewGatewayClient(gwAddr)
 				if err != nil {
 					t.Fatalf("connect gateway: %v", err)
 				}
@@ -318,7 +318,7 @@ func TestCoreV3_CharacterIDEchoedThroughTheGateway(t *testing.T) {
 					t.Fatalf("enter world failed: %q", enterResp.Error)
 				}
 
-				gs, err := NewMockClient(enterResp.ServerAddr)
+				gs, err := NewGameClientFor(enterResp)
 				if err != nil {
 					t.Fatalf("connect game server: %v", err)
 				}

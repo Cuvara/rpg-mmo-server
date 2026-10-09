@@ -25,7 +25,7 @@ namespace GameServer.Snapshot;
 /// <c>keyframeInterval</c> snapshots thereafter. Everything in between is a delta.
 /// </para>
 /// <para>
-/// Correctness rests on the transport being ordered and reliable (TCP today): the
+/// Correctness rests on the transport being ordered and reliable (KCP stream mode): the
 /// server treats "last sent" as "last received". The periodic keyframe is the recovery
 /// path if that ever stops holding (KCP in unreliable mode, a client that joined late,
 /// a client that lost its local state).
@@ -425,6 +425,12 @@ public sealed class SnapshotDeltaState
 
     /// <summary>Latched per encode: <see cref="PeerProtocolVersion"/> &gt;= 3.</summary>
     private bool _v3;
+
+    /// <summary>
+    /// <c>ack_applied_tick</c> of the encode in progress: the base tick that applied the input
+    /// <c>ack_tick</c> acknowledges. Always zero below protocol 3.
+    /// </summary>
+    private ulong _ackAppliedTick;
 
     /// <summary>Protocol 3 variable-length data of the encode in progress; null = none gathered.</summary>
     private SnapshotV3Gather? _gather;
@@ -903,10 +909,16 @@ public sealed class SnapshotDeltaState
     public SnapshotMessage Encode(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby, int keyframeInterval,
         bool intern = false, Vec2 observer = default,
         ReadOnlySpan<PendingGameEvent> events = default, int observerKey = PendingGameEvent.NoKey,
-        SnapshotV3Gather? v3 = null)
+        SnapshotV3Gather? v3 = null, ulong ackAppliedTick = 0)
     {
         _intern = intern;
         _v3 = PeerProtocolVersion >= 3;
+        // ack_applied_tick is protocol 3 only. It is additive and a protocol 2 receiver would
+        // skip it, but V2WireIdentityTests pins the protocol 2 bytes against the pre-v3
+        // encoder, and a field nobody below 3 reads is not worth breaking that pin for. Latched
+        // per encode and written by BeginMessage, so every path (keyframe, delta, budgeted)
+        // carries it and the pooled message never keeps a previous encode's value.
+        _ackAppliedTick = _v3 ? ackAppliedTick : 0;
         // Only meaningful when it describes THIS span; a gather of another size is ignored
         // rather than indexed out of step with the entities.
         _gather = _v3 && v3 != null && v3.EntityCount == nearby.Length ? v3 : null;
@@ -1117,6 +1129,7 @@ public sealed class SnapshotDeltaState
         _statusPoolUsed = 0;
         _message.Tick = tick;
         _message.AckTick = ackTick;
+        _message.AckAppliedTick = _ackAppliedTick;
         _message.Full = full;
         _poolUsed = 0;
         return _message;
@@ -1260,7 +1273,7 @@ public sealed class SnapshotDeltaState
         }
         _pendingRemovals.Clear(); // a keyframe carries no despawn list by definition
 
-        return EncodeBudgeted(msg, nearby, HeaderBytes(tick, ackTick, full: true));
+        return EncodeBudgeted(msg, nearby, HeaderBytes(tick, ackTick, _ackAppliedTick, full: true));
     }
 
     private SnapshotMessage EncodeDelta(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby)
@@ -1407,7 +1420,7 @@ public sealed class SnapshotDeltaState
             }
         }
 
-        return EncodeBudgeted(msg, nearby, HeaderBytes(tick, ackTick, full: false));
+        return EncodeBudgeted(msg, nearby, HeaderBytes(tick, ackTick, _ackAppliedTick, full: false));
     }
 
     /// <summary>
@@ -1826,9 +1839,10 @@ public sealed class SnapshotDeltaState
     /// tick 0 and ack 0 cost nothing and <c>full=false</c> costs nothing — the same rule
     /// the generated writer applies, which is why this is exact rather than an estimate.
     /// </summary>
-    private static int HeaderBytes(ulong tick, ulong ackTick, bool full)
+    private static int HeaderBytes(ulong tick, ulong ackTick, ulong ackAppliedTick, bool full)
         => (tick != 0 ? 1 + CodedOutputStream.ComputeUInt64Size(tick) : 0)
          + (ackTick != 0 ? 1 + CodedOutputStream.ComputeUInt64Size(ackTick) : 0)
+         + (ackAppliedTick != 0 ? 1 + CodedOutputStream.ComputeUInt64Size(ackAppliedTick) : 0)
          + (full ? 2 : 0);
 
     /// <summary>

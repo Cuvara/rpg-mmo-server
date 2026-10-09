@@ -3,8 +3,16 @@
 Custom Go binary — the entry point for Unity clients. Stateless (all state lives in
 the configured stores), horizontally scalable.
 
-Transport today is **TCP + length-prefixed JSON** (`shared/messages`); KCP/UDP is
-available with `--transport=kcp` and swaps in behind the same handler code.
+The gateway always listens on **TCP** (optionally TLS, ADR-23) with the
+4-byte length-prefixed Protobuf/JSON framing from `shared/messages`. There is no
+transport choice on the gateway: realtime **gameplay is KCP/UDP only** (ADR-32)
+and runs between the client and the game server, never through this process.
+
+| Hop | Transport | Purpose |
+|-----|-----------|---------|
+| Client → Nakama | HTTP/RPC | Meta: login, `gateway_token` RPC, economy. Nakama's WebSocket is not used for gameplay |
+| Client → Gateway | TCP (+ optional TLS) | Auth + redirect only: `MsgAuth`, `MsgEnterWorld` → `{ServerAddr, JoinToken, Transport="kcp"}` |
+| Client → Game server | KCP over UDP | Gameplay (join, input, snapshots). No TCP fallback |
 
 **The gateway is a redirector, not a proxy.** It answers "who am I?" and "which
 server serves this map?", then gets out of the way — the client opens a second,
@@ -14,7 +22,7 @@ Rationale and tradeoffs: `backend/docs/ARCHITECTURE-DECISIONS.md`, ADR-3.
 ## Architecture
 
 ```
-Unity Client --[TCP|KCP]--> Gateway          (auth, map assignment)
+Unity Client --[TCP/TLS]--> Gateway          (auth, map assignment)
      |                         |
      |                         +--> SessionStore   (memory | Redis)
      |                         +--> ServerRegistry (memory | Redis)
@@ -22,14 +30,14 @@ Unity Client --[TCP|KCP]--> Gateway          (auth, map assignment)
      |
      |   returns {ServerAddr, JoinToken}; client then dials the server itself:
      |
-     +---[TCP|KCP]----------> Game Server (C# .NET 10)   <-- gameplay lives here
+     +---[KCP/UDP]----------> Game Server (C# .NET 10)   <-- gameplay lives here
 ```
 
 ## Features
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| TCP transport | Length-prefixed JSON envelopes; KCP planned | ✅ |
+| TCP listener | Length-prefixed Protobuf/JSON envelopes, optional TLS. Gameplay is not carried here (KCP/UDP to the game server) | ✅ |
 | Session Manager | Local JWT verify, create / validate / refresh / destroy | ✅ |
 | Server Registry | Live servers per map, capacity-checked pick: least-loaded normally, **lowest `ServerID`** when a map has more than one live server (ADR-2 violated — #203) | ✅ |
 | Map Assignment | `MsgEnterWorld` → server addr + 30s join token | ✅ |
@@ -43,9 +51,6 @@ Unity Client --[TCP|KCP]--> Gateway          (auth, map assignment)
 # In-memory backend (default — single process, dev/tests)
 go run ./cmd/gateway/ --addr=:8000
 
-# KCP/UDP instead of TCP for the realtime path (opt-in)
-go run ./cmd/gateway/ --addr=:8000 --transport=kcp
-
 # Redis backend (multi-instance; shared sessions, registry, event stream)
 REDIS_ADDR=127.0.0.1:6379 go run ./cmd/gateway/
 # or explicitly
@@ -57,22 +62,30 @@ go run ./cmd/gateway/ --backend=redis --instance-id=gw-1
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--addr` | `GATEWAY_ADDR` (`:8000`) | Listen address; overrides the env value |
-| `--transport` | `GATEWAY_TRANSPORT` (`tcp`) | Realtime transport: `tcp` or `kcp` (KCP/UDP). Overrides the env value |
 | `--backend` | auto (see below) | `memory` or `redis` |
 | `--instance-id` | hostname | Consumer name inside the `gateway` event-stream consumer group |
 | `--allocator` | `ALLOCATOR` (`none`) | `none` or `agones` — allocate a GameServer when **no** live server serves a map. A map whose servers are all full is refused, not expanded |
 | `--allocator-namespace` | `rpg-realtime` | Namespace holding the Agones fleets |
 | `--allocator-fleet-map` | `map-servers-dotnet-dev` | Fleet used for map allocations. Must name a fleet that exists — the allocator does not validate it, so a wrong value fails at the first allocation, not at start-up |
 | `--allocator-fleet-dungeon` | *(none)* | Fleet used for dungeon allocations. No default: no dungeon fleet is deployed, so a dungeon allocation fails immediately with `no fleet configured for allocation kind` instead of a Kubernetes 404 |
-| `--allocator-transport` | `ALLOCATOR_TRANSPORT` → `--transport` | Transport stamped on the allocation response. **Inert since 2026-08-17**: the transport announced to a client always comes from the pod's own registry entry |
 | `--allocation-wait-timeout` | `ALLOCATION_WAIT_TIMEOUT` (`15s`) | How long to wait for an allocated pod to register itself before failing the join as retryable (`server is starting, retry shortly`). **Hard ceiling 20s** (`pongTimeout - pingInterval`): the wait blocks the connection's read loop, which is what records `MsgPong`, so a larger value lets the heartbeat disconnect the client mid-allocation — the gateway refuses to start above it |
 | `--allocation-poll-interval` | `ALLOCATION_POLL_INTERVAL` (`250ms`) | Registry re-check interval during that wait |
 | `--allocator-kubeconfig` | in-cluster → `$KUBECONFIG` → `~/.kube/config` | Credential source for the allocation API |
-| `--transport-key` | `TRANSPORT_KEY` (empty) | Pre-shared key encrypting the KCP listener (32-byte hex recommended). Empty = plaintext, and a KCP listener logs a WARN |
-| `--tls-cert` / `--tls-key` | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` (empty) | PEM paths making the gateway **terminate TLS itself** (ADR-23). Both empty = plaintext, the default. **Exactly one set is a startup error**, never a fall back to plaintext. TCP only — a certificate on a KCP listener is refused at startup |
+| `--tls-cert` / `--tls-key` | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` (empty) | PEM paths making the gateway **terminate TLS itself** (ADR-23). Both empty = plaintext, the default. **Exactly one set is a startup error**, never a fall back to plaintext |
 | `--join-token-secret` | `JOIN_TOKEN_SECRET` → `JWT_SECRET` | HS256 secret for gateway→gameserver join tokens. Comma-separated to rotate |
 | `--conn-rate-per-min` | `GATEWAY_CONN_RATE_PER_MIN` (`10`) | Accepted connections per minute per source IP. `0` disables |
 | `--msg-rate-per-sec` | `GATEWAY_MSG_RATE_PER_SEC` (`60`) | Inbound frames per second per connection. `0` disables |
+
+**Removed transport settings.** `--transport` / `GATEWAY_TRANSPORT`,
+`--allocator-transport` / `ALLOCATOR_TRANSPORT` and `--transport-key` no longer
+exist. A stale environment is handled at startup:
+
+| Setting | Behaviour |
+|---------|-----------|
+| `GATEWAY_TRANSPORT=kcp` (or any value but `tcp`) | **Fatal**: the gateway hop is TCP; gameplay KCP is not configured on the gateway |
+| `GATEWAY_TRANSPORT=tcp` | WARN "obsolete and ignored" — delete it |
+| `ALLOCATOR_TRANSPORT` (any value) | WARN "obsolete and ignored" — game servers register their own transport, always `kcp` |
+| `TRANSPORT_KEY` set on the gateway | WARN "does nothing" — the key belongs to the game servers and clients (KCP) |
 
 ### Agones allocator
 
@@ -93,14 +106,18 @@ See `docs/API.md` for the wire flow and `docs/DESIGN.md` for the rationale.
 
 ### Security
 
-Three independent secrets, each with a dev-friendly default that is logged loudly:
+Two shared secrets plus the listener certificate, each with a dev-friendly
+default that is logged loudly:
 
 ```bash
 # Production shape:
 export JWT_SECRET="$(openssl rand -hex 32)"          # Nakama -> client -> gateway
 export JOIN_TOKEN_SECRET="$(openssl rand -hex 32)"   # gateway -> game server
-export TRANSPORT_KEY="$(openssl rand -hex 32)"       # KCP wire encryption
+# GATEWAY_TLS_CERT / GATEWAY_TLS_KEY                 # TLS on this hop (below)
 ```
+
+`TRANSPORT_KEY` (the KCP datagram key) is a **game-server and client** setting,
+not a gateway one; the gateway warns if it is set here.
 
 **Secret rotation.** `JWT_SECRET` and `JOIN_TOKEN_SECRET` accept a
 comma-separated list. The first entry signs, every entry verifies:
@@ -111,17 +128,17 @@ export JWT_SECRET="new-secret,old-secret"   # 1. deploy — nobody is logged out
 export JWT_SECRET="new-secret"              # 3. deploy — old tokens now rejected
 ```
 
-`TRANSPORT_KEY` has **no** rotation window — KCP block crypto does not
-negotiate, so both peers must be rolled together.
-
 **Rate limiting.** Per-IP on accepts and per-connection on frames, both token
 buckets. A connection that trips the message limit receives one
 `{"ok":false,"error":"rate limited"}` frame and is then closed. Rejections
 increment `gateway_rate_limited_total{reason}`. Both limiters are per process:
 N replicas admit N x the limit (ADR-8).
 
-⚠️ **KCP is not reachable end to end.** `gameserver-dotnet` is TCP-only, so
-`--transport=kcp` and `TRANSPORT_KEY` cover the client→gateway hop only.
+**Game-server assignment requires KCP.** A registry entry whose `transport` is
+not `kcp` (empty, `tcp`, unknown — a stale or pre-migration server) is refused
+before a join token is minted; the client receives the error
+`server_transport_unsupported` and the gateway logs the server id. There is no
+fallback. `EnterWorldResponse.Transport` is therefore always `kcp`.
 
 ### Gateway-hop TLS (ADR-23)
 
@@ -144,8 +161,9 @@ GATEWAY_TLS_CERT=$PWD/gateway-cert.pem GATEWAY_TLS_KEY=$PWD/gateway-key.pem \
 The boot line changes from `encrypted=false authenticated=false cipher=none` to
 `tls=true encrypted=true authenticated=true cipher=tls`, and
 `gateway_transport_authenticated{cipher="tls"}` goes to 1. TLS is the only
-configuration that makes `authenticated` true: the KCP path is AES-256-CFB with a
-CRC32, and a CRC is not a MAC.
+configuration that makes `authenticated` true on this hop. (The gameplay hop's
+optional `TRANSPORT_KEY` is AES-256-CFB with a CRC32, and a CRC is not a MAC;
+authenticated confidentiality there is the sealed session.)
 
 **Terminated in this process, not at an edge.** TLS terminated *in front of* the
 gateway is confidential to the terminator and plaintext from there on. On the
@@ -192,13 +210,12 @@ All three Redis stores share one client/pool.
 | `GATEWAY_ADDR` | `:8000` | Listen address |
 | `JWT_SECRET` | `dev-secret-change-me` | Client auth-token verification (shared with Nakama). Comma-separated list to rotate: `new,old` — first signs, all verify |
 | `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | Join-token signing (shared with gameserver-dotnet). Also rotatable. Unset logs a warning |
-| `TRANSPORT_KEY` | *(empty)* | Pre-shared AES-256 key for the KCP listener. Empty = plaintext |
 | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` | *(empty)* | TLS on the gateway listener (ADR-23). Both empty = plaintext. Setting one is fatal |
 | `GATEWAY_CONN_RATE_PER_MIN` | `10` | Per-IP connection rate limit (`0` disables) |
 | `GATEWAY_CONN_BURST` | `10` | Per-IP burst |
 | `GATEWAY_MSG_RATE_PER_SEC` | `60` | Per-connection inbound message rate (`0` disables) |
 | `GATEWAY_MSG_BURST` | `120` | Per-connection burst |
-| `GATEWAY_TRANSPORT` | `tcp` | Realtime transport (`tcp` or `kcp`) |
+| `GATEWAY_TRANSPORT` / `ALLOCATOR_TRANSPORT` | *(removed)* | See "Removed transport settings" above: `GATEWAY_TRANSPORT` other than `tcp` is fatal, the rest warn and are ignored |
 | `REDIS_ADDR` | `localhost:6379` | Redis endpoint (also the auto backend switch) |
 | `REDIS_PASSWORD` | — | Redis auth |
 | `GATEWAY_BACKEND` | — | `memory` \| `redis` |
@@ -217,7 +234,7 @@ every event worth a line happens once per *session*, not once per message:
 
 ```json
 {"level":"INFO","msg":"auth ok","conn":1,"user":"85330f00-…","ip":"127.0.0.1","dur_ms":2}
-{"level":"INFO","msg":"enter world assigned","conn":1,"user":"85330f00-…","map":"map_01","server":"gs-dotnet-map_01","server_addr":"127.0.0.1:9200","transport":"tcp","dur_ms":0}
+{"level":"INFO","msg":"enter world assigned","conn":1,"user":"85330f00-…","map":"map_01","server":"gs-dotnet-map_01","server_addr":"127.0.0.1:9200","transport":"kcp","dur_ms":0}
 {"level":"INFO","msg":"client disconnected","conn":1,"user":"85330f00-…","ip":"127.0.0.1","dur_ms":6}
 ```
 
@@ -284,8 +301,8 @@ curl localhost:9102/readyz      # 200 "ready", or 503 "not ready: redis"
 | `gateway_allocations_total` | counter | `result=ok\|fail` |
 | `gateway_relay_events_total` | counter | — |
 | `gateway_rate_limited_total` | counter | `reason=connection\|message` |
-| `gateway_transport_encrypted` | gauge | `transport`, `cipher` | 1 when packets leave the gateway as ciphertext, 0 when cleartext. **0 is the default** (`tcp` has no packet encryption; `TRANSPORT_KEY` defaults to empty). A gauge, not a counter, so it is present when it reads 0 — a security question must never be answered by a missing field |
-| `gateway_transport_authenticated` | gauge | `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. **Currently 0 on every supported configuration**: the KCP path is AES-CFB with a CRC32, which is linear, not a MAC. Separate from `transport_encrypted` so encryption cannot be read as integrity |
+| `gateway_transport_encrypted` | gauge | `transport`, `cipher` | 1 when packets leave the gateway as ciphertext, 0 when cleartext. **0 is the default** (the listener is `tcp`, which has no packet encryption; only TLS sets it to 1). A gauge, not a counter, so it is present when it reads 0 — a security question must never be answered by a missing field |
+| `gateway_transport_authenticated` | gauge | `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. 1 only with gateway TLS (`cipher="tls"`); plaintext TCP is 0. Separate from `transport_encrypted` so encryption cannot be read as integrity |
 | `gateway_redis_up` | gauge | — |
 | `gateway_relay_up` | gauge | — |
 | `gateway_session_checks_total` | counter | `result=ok\|expired\|store_error` |
@@ -346,4 +363,4 @@ go vet ./...
 - `github.com/duycuong/rpg-mmo/shared`
 - `github.com/redis/go-redis/v9` (via `shared/storage/redisstore`)
 - `github.com/alicebob/miniredis/v2` (tests)
-- KCP-Go library (planned)
+- `github.com/xtaci/kcp-go/v5` (via `shared/transport`; the gateway listener itself is TCP)

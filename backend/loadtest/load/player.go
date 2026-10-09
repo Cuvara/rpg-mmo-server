@@ -197,11 +197,11 @@ func (p *player) gatewayHandshake() error {
 		}
 		p.joinToken = tok
 		p.srvAddr = p.cfg.GameServerAddr
-		p.srvTrans = transport.Normalize(p.cfg.Transport)
+		p.srvTrans = transport.Gameplay
 		return nil
 	}
 
-	conn, err := p.dial(p.cfg.Transport, p.cfg.GatewayAddr)
+	conn, err := p.dialGateway(p.cfg.GatewayAddr)
 	if err != nil {
 		return fmt.Errorf("dial gateway: %w", err)
 	}
@@ -231,7 +231,8 @@ func (p *player) gatewayHandshake() error {
 	}
 	p.srvAddr = enterResp.ServerAddr
 	p.joinToken = enterResp.JoinToken
-	p.srvTrans = transport.Normalize(enterResp.Transport)
+	// Whatever the gateway advertised; dialGameServer refuses anything but kcp.
+	p.srvTrans = enterResp.Transport
 
 	if !p.cfg.HoldGateway {
 		_ = conn.Close()
@@ -244,7 +245,7 @@ func (p *player) gatewayHandshake() error {
 // ---------------------------------------------------------------- game server
 
 func (p *player) gameServerJoin() error {
-	conn, err := p.dial(p.srvTrans, p.srvAddr)
+	conn, err := p.dialGameServer(p.srvTrans, p.srvAddr)
 	if err != nil {
 		return fmt.Errorf("dial gameserver: %w", err)
 	}
@@ -647,11 +648,24 @@ func maxInt(a, b int) int {
 
 // ---------------------------------------------------------------- wire utils
 
-func (p *player) dial(kind, addr string) (net.Conn, error) {
+// dialGateway opens the client<->gateway hop, which is always TCP.
+func (p *player) dialGateway(addr string) (net.Conn, error) {
 	target := NormalizeDialAddr(addr)
-	conn, err := transport.Dial(kind, target, p.cfg.Timeout)
+	conn, err := transport.Dial(transport.KindTCP, target, p.cfg.Timeout)
 	if err != nil {
-		return nil, fmt.Errorf("dial %s over %s: %w", target, transport.Normalize(kind), err)
+		return nil, fmt.Errorf("dial gateway %s: %w", target, err)
+	}
+	return conn, nil
+}
+
+// dialGameServer opens the gameplay hop. advertised is what the gateway put
+// in EnterWorldResponse.Transport; anything but kcp fails the player instead
+// of falling back, exactly as a real client does.
+func (p *player) dialGameServer(advertised, addr string) (net.Conn, error) {
+	target := NormalizeDialAddr(addr)
+	conn, err := transport.DialGameplay(advertised, target, p.cfg.Timeout, transport.WithKey(p.cfg.TransportKey))
+	if err != nil {
+		return nil, fmt.Errorf("dial game server %s: %w", target, err)
 	}
 	return conn, nil
 }

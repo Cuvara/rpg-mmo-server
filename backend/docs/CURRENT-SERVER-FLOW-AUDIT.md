@@ -14,8 +14,8 @@ named in §9.
 | Process | Language | Entry point | Listens | Role |
 |---|---|---|---|---|
 | Nakama | Go plugin on `heroiclabs/nakama:3.40.0` | `nakama/main.go` | 7349/7350/7351, metrics 9100 | Meta: device/email auth, `gateway_token` RPC, economy/leaderboard |
-| Gateway | Go | `gateway/cmd/gateway/main.go` | `:8000` (TCP default, KCP opt-in), metrics `:9102` | Auth + map assignment **only**. Redirector, never a data-path proxy |
-| Game server | C# .NET 10 (NativeAOT) | `gameserver-dotnet/GameServer/Program.cs` | `:9000` (TCP; KCP implemented), metrics `:9101` | Simulation, snapshots, persistence, self-registration |
+| Gateway | Go | `gateway/cmd/gateway/main.go` | `:8000` TCP (optional TLS; ADR-32 removed the KCP option), metrics `:9102` | Auth + map assignment **only**. Redirector, never a data-path proxy |
+| Game server | C# .NET 10 (NativeAOT) | `gameserver-dotnet/GameServer/Program.cs` | `:9000` **UDP, KCP only** (ADR-32), metrics `:9101` (TCP) | Simulation, snapshots, persistence, self-registration |
 | Redis | 7.4-alpine | — | 6379 | Sessions, server registry, event stream |
 | Postgres (meta) | 16.4 | — | 5432 | Nakama-owned |
 | Postgres (game) | 16.4 | — | 5433 | `player_states`, written only by the game server |
@@ -55,8 +55,9 @@ intended path.
 
 ### 2.2 Client → Gateway: `MsgAuth`
 
-- Transport: `transport.Listen(kind, addr)` — TCP default, KCP with
-  `--transport=kcp` and PSK from `TRANSPORT_KEY` (`gateway/server/server.go:303`).
+- Transport: TCP (optionally TLS, ADR-23). *(Updated for ADR-32: the gateway's
+  `--transport` / `GATEWAY_TRANSPORT` switch and its KCP listener option are removed; the
+  gateway always listens TCP and no longer reads `TRANSPORT_KEY`.)*
 - Admission control happens **before** any allocation: per-source-IP token bucket
   right after `Accept` (`server.go:333`); rejected connections cost one map lookup
   and a `Close`.
@@ -490,7 +491,7 @@ Unity client
   │ 2. HTTP  RPC gateway_token  → {token,user_id}           └──────────┘
   │◄────────────────────────────────────────────────────────
   │
-  │ 3. TCP/KCP :8000   MsgAuth{JWT}                          ┌──────────┐
+  │ 3. TCP :8000       MsgAuth{JWT}                          ┌──────────┐
   ├─────────────────────────────────────────────────────────►│ Gateway  │
   │◄─── MsgAuthResp{OK,UserID}       session:{uid} SETEX 1h  │  (Go)    │──┐
   │ 4. MsgEnterWorld{MapID}                                  └──────────┘  │ Redis
@@ -499,7 +500,7 @@ Unity client
   │           mint join token (JOIN_TOKEN_SECRET, 30s, sid, jti)           │ session:{uid}
   │◄─── MsgEnterWorldResp{ServerAddr, JoinToken, Transport}                │ events:game
   │                                                                        │
-  │ 5. TCP/KCP :9000  MsgJoinToken{token}    ┌────────────────────┐        │
+  │ 5. KCP/UDP :9000  MsgJoinToken{token}    ┌────────────────────┐        │
   ├─────────────────────────────────────────►│  Game server (C#)  │────────┘ self-register
   │◄─── MsgJoinTokenResp{Ok,UserId,TickRate} │  60Hz critical     │          + heartbeat 5s/TTL 15s
   │                                          │  15Hz world+snap   │

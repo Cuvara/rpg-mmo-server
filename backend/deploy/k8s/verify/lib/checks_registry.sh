@@ -44,7 +44,7 @@ collect_registry() {
     if [ -z "$mid" ]; then REG_STALE+=("$id"); continue; fi
     addr=$(redis_cli HGET "servers:id:$id" addr </dev/null)
     trans=$(redis_cli HGET "servers:id:$id" transport </dev/null)
-    REG_LIVE+=("$id $addr ${trans:-tcp} $mid")
+    REG_LIVE+=("$id $addr ${trans:-<empty>} $mid")
   done
 }
 
@@ -114,24 +114,32 @@ check_registry_addr_qualified() {
   pass "host-qualified: $(printf '%s ' "${REG_LIVE[@]}" | awk '{print $2}')"
 }
 
-# A registered address that nothing is listening on is the other half of the
-# same defect: the registry can be perfectly formed and still point nowhere.
-check_registry_addr_dialable() {
+# Realtime gameplay is KCP/UDP only: the registry must say "kcp", and the gateway
+# refuses to hand out a server whose registration says anything else (empty
+# included -- empty no longer means TCP). This used to be a TCP connect to the
+# advertised address; on a UDP game port that connect is refused even when the
+# server is healthy, and a UDP "probe" (nc -u) proves nothing because UDP has no
+# handshake. Reachability of the advertised UDP address is proven by
+# registry.addr_kcp_join below and by flow.smoke (both perform a real KCP join on
+# the address the gateway hands out).
+check_registry_transport_kcp() {
   if [ ${#REG_LIVE[@]} -eq 0 ]; then
-    skip "no live registration to dial -- reachability UNVERIFIED"
+    skip "no live registration to inspect -- registered transport UNVERIFIED"
     return
   fi
-  local addr host port
-  addr=$(echo "${REG_LIVE[0]}" | awk '{print $2}')
-  host="${addr%:*}"; port="${addr##*:}"
-  [ -z "$host" ] && host=127.0.0.1
-  if ! timeout 5 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
-    fail "nothing accepts a TCP connection on the advertised address" \
-      "a listener on $addr" "connection refused/timed out" \
-      "the game server pod's port mapping (Agones hostPort vs containerPort), and any node firewall"
+  local entry addr trans bad=()
+  for entry in "${REG_LIVE[@]}"; do
+    addr=$(echo "$entry" | awk '{print $2}')
+    trans=$(echo "$entry" | awk '{print $3}')
+    [ "$trans" = "kcp" ] || bad+=("$addr=$trans")
+  done
+  if [ ${#bad[@]} -gt 0 ]; then
+    fail "registered transport is not kcp -- the gateway will refuse to assign this server" \
+      "transport=kcp on every live servers:id:* hash" "${bad[*]}" \
+      "the game server image: it must be a KCP-only build (an older TCP build registers tcp or nothing)"
     return
   fi
-  pass "TCP connect to $addr succeeded"
+  pass "transport=kcp: $(printf '%s ' "${REG_LIVE[@]}" | awk '{print $2}') (UDP reachability: registry.addr_kcp_join)"
 }
 
 register registry.one_server    3 "exactly one live server for the map (ADR-2)" \
@@ -142,10 +150,37 @@ register registry.addr_qualified 3 "advertised address is host-qualified" \
   "the address clients are handed carries a real host, not a listen address like :9000" \
   "it does not prove the host is reachable from the CLIENT's network -- only that an address was formed" \
   check_registry_addr_qualified
-register registry.addr_dialable 3 "advertised address accepts a connection" \
-  "something is listening on the advertised host:port from where the suite runs" \
-  "not that it speaks the game protocol -- flow.smoke proves that" \
-  check_registry_addr_dialable
+# The replacement for the old TCP connect: a REAL KCP join on the address the
+# gateway hands out. probe enterworld authenticates (Nakama -> gateway over TCP),
+# then dials the advertised game server over KCP/UDP and completes MsgJoinToken,
+# printing kcp_join=ok. A failed join exits non-zero and names the usual causes
+# (UDP blocked, port published as TCP, wrong advertised host, TRANSPORT_KEY
+# mismatch). Nothing short of this proves a UDP port is reachable.
+check_registry_addr_kcp_join() {
+  if [ ${#REG_LIVE[@]} -eq 0 ]; then
+    skip "no live registration -- KCP reachability UNVERIFIED"
+    return
+  fi
+  local out rc
+  out=$(PROBE_KCP_JOIN=1 run_probe enterworld --map-id "$VERIFY_MAP_ID" 2>&1); rc=$?
+  if [ $rc -ne 0 ] || [[ "$out" != *"kcp_join=ok"* ]]; then
+    fail "no KCP join on the advertised game-server address" \
+      "RESULT=ok ... transport=kcp ... kcp_join=ok" \
+      "exit=$rc; $(echo "$out" | grep -E 'RESULT=|kcp' | head -2 | tr '\n' ' ')" \
+      "UDP reachability of the advertised host:port: k3d serverlb publishes the Agones range /udp? fleet port protocol: UDP? advertise-host reachable from here? VERIFY_TRANSPORT_KEY == the Secret's transport-key?"
+    return
+  fi
+  pass "$(echo "$out" | grep -o 'server_addr=[^ ]*') kcp_join=ok"
+}
+
+register registry.transport_kcp 3 "registered transport is kcp" \
+  "every live registration for the map says transport=kcp, the only gameplay transport" \
+  "not that the advertised UDP address is reachable -- registry.addr_kcp_join proves that" \
+  check_registry_transport_kcp
+register registry.addr_kcp_join 3 "advertised address completes a KCP join" \
+  "the verify probe, given the address by the gateway, completed MsgJoinToken over KCP/UDP from where the suite runs" \
+  "not reachability from the CLIENT's network, and not the gameplay loop -- flow.smoke covers the loop" \
+  check_registry_addr_kcp_join
 
 # The trap this exists for: on a box where the OLD stack is still running, the
 # usual addresses (127.0.0.1:8000, :7350) belong to it, not to the deployment

@@ -1,6 +1,5 @@
-using System.Net;
-using System.Net.Sockets;
 using GameServer.Net;
+using GameServer.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using RpgMmo.Wire.V1;
 using Envelope = GameServer.Net.Envelope;
@@ -14,19 +13,15 @@ namespace GameServer.Tests.Net;
 /// </summary>
 public class ControlLaneTests
 {
-    private static async Task<(Connection conn, TcpClient client, TcpClient serverSide, TcpListener listener)> PairAsync()
+    /// <summary>A Connection over a real loopback KCP session, and the client on the other end.</summary>
+    private static async Task<(Connection conn, KcpTestClient client, KcpPair pair, KcpPair listener)> PairAsync()
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var client = new TcpClient();
-        Task connect = client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
-        TcpClient serverSide = await listener.AcceptTcpClientAsync();
-        await connect;
-        var conn = new Connection("lane-user", serverSide, NullLogger.Instance, WireEncoding.Proto)
+        var pair = await KcpPair.CreateAsync();
+        var conn = new Connection("lane-user", pair.ServerSide, NullLogger.Instance, WireEncoding.Proto)
         {
             PeerProtocolVersion = 3,
         };
-        return (conn, client, serverSide, listener);
+        return (conn, pair.Client, pair, pair);
     }
 
     private static Envelope Ping(long ts) =>
@@ -70,7 +65,7 @@ public class ControlLaneTests
         {
             conn.Dispose();
             client.Dispose();
-            listener.Stop();
+            listener.Dispose();
         }
     }
 
@@ -102,7 +97,7 @@ public class ControlLaneTests
         {
             conn.Dispose();
             client.Dispose();
-            listener.Stop();
+            listener.Dispose();
         }
     }
 
@@ -130,7 +125,7 @@ public class ControlLaneTests
         {
             conn.Dispose();
             client.Dispose();
-            listener.Stop();
+            listener.Dispose();
         }
     }
 }

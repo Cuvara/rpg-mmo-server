@@ -397,7 +397,8 @@ memory:
   `--flag value` and `--flag=value`), but one channel is easier to read than two,
   and the env block is the one that matches `docker-compose.yml`. `--agones`
   became `AGONES_ENABLED=true` for the same reason.
-- **Port `9000`** matches `GAMESERVER_ADDR`, and `EXPOSE 9000` in the Dockerfile.
+- **Port `9000`** matches `GAMESERVER_ADDR`, and `EXPOSE 9000/udp` in the
+  Dockerfile. The port is `protocol: UDP` — gameplay is KCP/UDP only.
   `portPolicy: Dynamic`: Agones assigns the *host* port and publishes it on
   `GameServer.status.ports[]`; the container always binds `:9000`.
 - **`ports[].name: game` is a contract.** The gateway's allocator picks the
@@ -719,7 +720,7 @@ shape; it is a **template with published dev placeholders**, and its
 | `jwt-secret` | `JWT_SECRET` | HS256, client auth tokens. Server only *warns* when unset, so a wrong value reads as "all tokens rejected" |
 | `join-token-secret` | `JOIN_TOKEN_SECRET` | HS256, gateway→gameserver join tokens. **Mandatory** — the server exits 2 without it. Never the same value as `jwt-secret`: it is on every pod, so a compromised pod must not be able to forge auth tokens. Rotate as `new,old` |
 | `redis-password` | `REDIS_PASSWORD` | Empty unless redis runs `--requirepass`. `optional` in the fleet |
-| `transport-key` | `TRANSPORT_KEY` | Pre-shared AES-256 key for KCP. **Unused today** (the fleet is TCP, and the server warns that the key is ignored on TCP). Carried anyway so enabling KCP is a manifest change, not a new secret-distribution problem |
+| `transport-key` | `TRANSPORT_KEY` | Optional pre-shared AES-256 key for the KCP/UDP game port (gameplay is KCP only). `optional` in the fleet. 32-byte hex; clients need the same value (`-cuvara-transport-key` / `CUVARA_TRANSPORT_KEY`). Empty = plaintext datagrams + a startup WARN (dev only). The gateway does not read it |
 | `game-db-url` | `GAME_DB_URL` | DSN for the game-state postgres, *containing a password*, which is why it is here and not in the ConfigMap. Written by `setup-dev.sh` with the host translated for a pod (see [Persistence](#persistence-game-db-url)). Blank is legal and means the in-memory store; the fleet reads it `optional`. A set-but-unreachable DSN makes the server **exit 1** rather than fall back to memory |
 
 **Keeping them in sync with the gateway is the whole game.** The gateway runs in
@@ -974,7 +975,9 @@ At 80 players the compose path still reports tick p99 **3.06ms** and **0% of
 ticks over budget**, so the simulation is not the constraint in either row.
 
 **Cause.** The Agones dynamic port range 7000-7100 is published by the
-`k3d-<cluster>-serverlb` container, which is an **nginx TCP proxy** — the same
+`k3d-<cluster>-serverlb` container, which is an **nginx proxy** (TCP when this
+was measured; since gameplay became KCP/UDP only the game range is published
+`/udp` and proxied as UDP, which has not been re-measured) — the same
 mechanism documented in [Cluster options](#cluster-options) and
 [The address the client is given](#the-address-the-client-is-given) as the reason
 k3d works here where Docker Desktop does not. So every gameplay packet to an
@@ -1069,9 +1072,9 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 cd backend/deploy && ./k3s/setup-dev.sh --prod-fleets
 ```
 
-Agones needs the game ports reachable: open **UDP/TCP 7000–8000** (the default
-`gameservers.minPort`–`maxPort` range) in the VPS firewall, plus whatever the
-gateway listens on.
+Agones needs the game ports reachable: open **UDP 7000–8000** (the default
+`gameservers.minPort`–`maxPort` range; gameplay is KCP/UDP only, no TCP needed)
+in the VPS firewall, plus the gateway's **TCP** port.
 
 ### CD wiring (sketch — not implemented)
 

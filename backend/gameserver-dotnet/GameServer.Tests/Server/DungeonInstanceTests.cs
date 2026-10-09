@@ -482,7 +482,7 @@ public class DungeonInstanceTests
                 ServerId = ServerId,
                 MapId = effectiveMapId,
                 Mode = mode,
-                Transport = TransportKind.Tcp,
+                Transport = TransportKind.Kcp,
                 TickRate = 20,
                 Capacity = 8,
                 JwtSecret = JwtSecret,
@@ -509,9 +509,9 @@ public class DungeonInstanceTests
         }
 
         /// <summary>Join and wait until the server accepts the player.</summary>
-        public async Task<TcpClient> JoinAsync(string userId)
+        public async Task<KcpTestClient> JoinAsync(string userId)
         {
-            var client = new TcpClient();
+            var client = new KcpTestClient();
             for (int attempt = 0; attempt < 60; attempt++)
             {
                 try { await client.ConnectAsync(IPAddress.Loopback, Port); break; }

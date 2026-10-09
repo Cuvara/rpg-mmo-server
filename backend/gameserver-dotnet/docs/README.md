@@ -121,8 +121,8 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--migrate-only` | `GAMESERVER_MIGRATE_ONLY=true` | off | Apply pending migrations, then exit — see below |
 | `--agones` | `AGONES_ENABLED=true` | off | Report Ready / Health / Allocate / Shutdown to the Agones sidecar, and take the **advertised address** from the GameServer status instead of `--public-addr` — see below |
 | *(none)* | `AGONES_SDK_HTTP_PORT` | `9358` | Agones sidecar HTTP port. Only read when Agones is enabled; an unparsable value warns and falls back |
-| `--transport` | `GAMESERVER_TRANSPORT` | `tcp` | Realtime transport: `tcp` or `kcp` — see below |
-| *(none)* | `TRANSPORT_KEY` | *(empty)* | Pre-shared AES-256 key for KCP. Empty = cleartext (start-up WARNING). Ignored for TCP |
+| `--transport` | `GAMESERVER_TRANSPORT` | `kcp` | Realtime gameplay transport. **KCP/UDP is the only one** (ADR-32): unset or `kcp` is accepted, anything else (including `tcp`) is fatal at startup — see below |
+| *(none)* | `TRANSPORT_KEY` | *(empty)* | Pre-shared AES-256 key for KCP datagrams. Empty = cleartext (start-up WARNING). Clients need the same value (`-cuvara-transport-key`) |
 | `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Full `host:port` advertised to clients through the registry. Used **only when Agones is off** — with Agones on and the status read working, the port comes from Agones and the host from `GAMESERVER_ADVERTISE_HOST`; see the Agones section |
 | `--advertise-host` | `GAMESERVER_ADVERTISE_HOST` | *(unset → Agones `status.address`)* | **Host only, no port.** Replaces the host of the address read from the Agones GameServer status; the port always stays the Agones-assigned one. Ignored (with a warning) when Agones is off or the status read fails. Needed because `status.address` is the *node* address, which a client outside the cluster network cannot dial |
 | `--register-on-allocated` | `GAMESERVER_REGISTER_ON_ALLOCATED=true` | off | Hold the registry entry back until Agones reports this GameServer **Allocated**, instead of publishing it right after Ready. Agones-only; ignored (with a warning) when Agones is off — see below |
@@ -262,8 +262,8 @@ Unlike the compose gate, the fleet gate's exclusions are not and cannot be empty
 not a machine with a config file. `GAMESERVER_ID` is **forbidden** there (it beats
 `POD_NAME`, and every pod would then register under one id and reject every join),
 `GAMESERVER_PUBLIC_ADDR` cannot carry a port only known at scheduling time, and
-`GAMESERVER_TRANSPORT` is coupled to the port's `protocol:`, which no environment variable
-can change. Two more are per-fleet rather than global: `GAMESERVER_JOIN_DEADLINE_SECONDS` is
+`GAMESERVER_TRANSPORT` is deliberately absent: the server is KCP-only and the port is
+`protocol: UDP`. Two more are per-fleet rather than global: `GAMESERVER_JOIN_DEADLINE_SECONDS` is
 excluded on the two *map* fleets and **required** on the dungeon one, and `GAMESERVER_MAP_ID`
 is the reverse — which is why those exclusions are keyed by manifest. A single global entry
 would have excused the one deployment where the knob does something.
@@ -297,15 +297,15 @@ writes a player row for one.
 > **The server tells you what it is actually doing, on every boot.** "Is this deployment
 > encrypted" is not answerable from one variable, and — since `GAMESERVER_SEALED` began
 > defaulting to `require` — **not answerable from the `transport_*` fields at all**. Those
-> describe the transport only. On the default configuration the transport is TCP with no
-> packet-crypt layer, so `transport_encrypted` is `false`, while every gameplay frame is
+> describe the transport only. On the default configuration the transport is KCP with no
+> `TRANSPORT_KEY`, so `transport_encrypted` is `false`, while every gameplay frame is
 > encrypted and authenticated a layer above it by the sealed session. Read
 > `sealed_required` before concluding anything from `transport_encrypted`. The posture is logged at startup (at **Warning** whenever
 > traffic is in cleartext, Information when it is not) and published on `/status`:
 >
 > | field | meaning |
 > |---|---|
-> | `transport` | `tcp` or `kcp` |
+> | `transport` | always `kcp` |
 > | `transport_key_configured` | `TRANSPORT_KEY` holds a value — **not** the same as encryption being on |
 > | `transport_encrypted` | packets leave as ciphertext |
 > | `transport_authenticated` | tampering is detectable — **`false` on every configuration this server supports today** |
@@ -319,13 +319,11 @@ writes a player row for one.
 > `0` (a never-incremented counter is absent from `/metrics` entirely — see
 > `docs/METRICS.md`).
 >
-> The four combinations, all reported:
+> The two combinations, both reported:
 >
 > | transport | key | result |
 > |---|---|---|
-> | `tcp` (default) | unset | **plaintext** — the default, and it used to log nothing at all |
-> | `tcp` | set | **plaintext**, and the key is *ignored* — the configuration most easily mistaken for working encryption |
-> | `kcp` | unset | **plaintext** |
+> | `kcp` | unset | **plaintext** datagrams (the sealed session, when required, still encrypts and authenticates every gameplay frame) |
 > | `kcp` | set | **encrypted**, `aes-256-cfb`, and **not authenticated** |
 >
 > **Encrypted is not authenticated.** The KCP path is AES-CFB with a CRC32, and a CRC32 is
@@ -335,8 +333,8 @@ writes a player row for one.
 > so that its becoming true is a visible event. See ADR-21 and
 > `docs/ROADMAP-SECURITY.md` §2.
 
-The gameplay hop (client ↔ this server) speaks **TCP** by default and **KCP over
-UDP** with `--transport kcp`. KCP is reliable and ordered like TCP, but its ARQ
+The gameplay hop (client ↔ this server) speaks **KCP over UDP only** (ADR-32; there is
+no TCP listener and no fallback). KCP is reliable and ordered, but its ARQ
 is tuned for latency instead of throughput: a lost packet recovers in roughly one
 RTT instead of a TCP RTO backoff, which is what a 10-15Hz authoritative tick loop
 wants on a mobile network.
@@ -350,7 +348,7 @@ see `docs/DESIGN.md`.
 
 ```bash
 export TRANSPORT_KEY="$(openssl rand -hex 32)"   # same value on every peer
-dotnet run --project GameServer -- --transport kcp --addr :9000
+dotnet run --project GameServer -- --addr :9000   # KCP on udp/9000
 ```
 
 **Encryption.** `TRANSPORT_KEY` turns on AES-256 on every datagram, below the
@@ -369,16 +367,11 @@ forms — "encrypted server + plaintext client" fails closed, silently, as a rea
 timeout on the client. Leaving the key unset logs a start-up WARNING; that is
 fine for local dev and not for a port reachable from the internet.
 
-`TRANSPORT_KEY` is ignored with `--transport tcp` (and warned about): TCP has no
-packet encryption here, so TLS termination or the cluster network is the answer.
-
-**Advertisement.** The transport is published into the registry alongside the
-address, and the gateway hands it to clients in `EnterWorldResponse.Transport`.
-Running this server with `--transport kcp` therefore also tells clients to dial
-KCP — but only if it self-registers (`REDIS_ADDR` set). Under Agones the gateway
-announces allocated servers before their own registration lands and falls back to
-its own listen transport, so set `ALLOCATOR_TRANSPORT=kcp` on the gateway when the
-fleet speaks KCP and the gateway does not.
+**Advertisement.** The transport (`kcp`) is published into the registry alongside the
+address, and the gateway hands it to clients in `EnterWorldResponse.Transport`. The
+gateway refuses to assign a server whose entry says anything else
+(`server_transport_unsupported`). The advertised address must be reachable **over UDP**
+from the client — see `backend/docs/NETWORKING.md` (WSL2 NAT, k3d, Agones, firewall).
 
 #### Agones (`--agones`, `AGONES_SDK_HTTP_PORT`)
 
@@ -826,7 +819,8 @@ public static class MathAdapter
 
 ## Wire Protocol
 
-The game server communicates over TCP using a length-prefixed JSON protocol,
+The game server communicates over KCP/UDP (stream mode) using a length-prefixed protocol
+(Protobuf, legacy JSON told apart by the first body byte),
 identical to the Go game server:
 
 ```

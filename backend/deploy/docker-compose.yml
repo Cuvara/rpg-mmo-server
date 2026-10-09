@@ -331,11 +331,9 @@ services:
       # is obviously wrong if anything ever asks for one, rather than pointing
       # at a plausible name that is equally absent.
       ALLOCATOR_FLEET_DUNGEON: ${ALLOCATOR_FLEET_DUNGEON:-}
-      # What the FLEET's servers listen with, not what this gateway listens
-      # with. It is stamped onto the allocated ServerInfo and announced to the
-      # client BEFORE the pod's own registration lands, so a mismatch tells the
-      # client to speak the wrong protocol. The fleet is TCP today.
-      ALLOCATOR_TRANSPORT: ${ALLOCATOR_TRANSPORT:-tcp}
+      # ALLOCATOR_TRANSPORT was REMOVED: every game server is KCP/UDP, so the
+      # gateway stamps "kcp" on allocated servers unconditionally (setting it
+      # now only logs a WARN). The gateway's own listener stays TCP.
       # Path INSIDE the container. The kubeconfig itself is mounted by the
       # docker-compose.agones.yml overlay, NOT here: a bind mount of a file
       # that does not exist makes compose create a DIRECTORY in its place, so
@@ -516,14 +514,25 @@ services:
       GAMESERVER_CAPACITY: ${GAMESERVER_CAPACITY:-}
       GAMESERVER_MAX_PENDING_HANDSHAKES: ${GAMESERVER_MAX_PENDING_HANDSHAKES:-}
       GAMESERVER_HANDSHAKE_TIMEOUT_MS: ${GAMESERVER_HANDSHAKE_TIMEOUT_MS:-}
+      # KCP/UDP listener flood limits (sessions, per-IP, accept rate, datagram rate).
+      # Empty = compiled-in defaults. Raise MAX_SESSIONS_PER_IP behind carrier NAT.
+      GAMESERVER_KCP_MAX_SESSIONS: ${GAMESERVER_KCP_MAX_SESSIONS:-}
+      # Every client of a local stack arrives from this one host (and through
+      # docker-proxy, from one bridge address), so the per-IP cap that protects a
+      # public server would refuse the 17th local player or load-test bot.
+      GAMESERVER_KCP_MAX_SESSIONS_PER_IP: ${GAMESERVER_KCP_MAX_SESSIONS_PER_IP:-4096}
+      GAMESERVER_KCP_NEW_SESSIONS_PER_SEC: ${GAMESERVER_KCP_NEW_SESSIONS_PER_SEC:-}
+      GAMESERVER_KCP_DATAGRAMS_PER_SEC: ${GAMESERVER_KCP_DATAGRAMS_PER_SEC:-}
       GAMESERVER_MIN_PROTOCOL_VERSION: ${GAMESERVER_MIN_PROTOCOL_VERSION:-}
       GAMESERVER_MAX_INPUTS_PER_TICK: ${GAMESERVER_MAX_INPUTS_PER_TICK:-}
       GAMESERVER_MAX_PENDING_INPUTS: ${GAMESERVER_MAX_PENDING_INPUTS:-}
       GAMESERVER_GATHER_WORKERS: ${GAMESERVER_GATHER_WORKERS:-}
-      # tcp (default) or kcp. The value is advertised to clients through the registry,
-      # so it must describe what the listener actually speaks. The KCP pre-shared key
-      # is TRANSPORT_KEY, which carries no GAMESERVER_ prefix and is not gated here.
-      GAMESERVER_TRANSPORT: ${GAMESERVER_TRANSPORT:-}
+      # GAMESERVER_TRANSPORT is NOT forwarded: realtime gameplay is KCP/UDP only and
+      # the server refuses to start with any value other than "kcp". The optional
+      # KCP datagram pre-shared key (32-byte hex; empty = plaintext + WARN, dev only)
+      # carries no GAMESERVER_ prefix. Clients need the same value
+      # (-cuvara-transport-key / CUVARA_TRANSPORT_KEY).
+      TRANSPORT_KEY: ${TRANSPORT_KEY:-}
       GAMESERVER_ENEMIES: ${GAMESERVER_ENEMIES:-true}
       GAMESERVER_ENEMY_CHASE: ${GAMESERVER_ENEMY_CHASE:-}
       GAMESERVER_ENEMY_MAX: ${GAMESERVER_ENEMY_MAX:-}
@@ -582,8 +591,8 @@ services:
       # In a container with a published port that means HOST-QUALIFIED:
       # <host>:<published-port> — 127.0.0.1:9200 for a local stack,
       # <public-host>:<published-port> on a VPS. A bare ":9200" is NOT correct
-      # here: clients receive it verbatim and cannot dial it (a C# TcpClient
-      # throws; only clients that rewrite it to loopback themselves connect).
+      # here: clients receive it verbatim and cannot dial it (the client's KCP
+      # transport cannot resolve a hostless address). The port is UDP.
       # A bare ":port" is correct ONLY for host-mode deploys, where the listen
       # address already is the address clients reach.
       #
@@ -616,7 +625,9 @@ services:
     # volumes:
     #   - ./tls/tls.crt:/nakama/tls/tls.crt:ro
     ports:
-      - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"
+      # Game port: KCP over UDP only. Publishing it without /udp publishes TCP,
+      # and every client join then times out. Metrics/status stay TCP.
+      - "${GAMESERVER_CONTAINER_PORT:-9200}:9000/udp"
       - "${GAMESERVER_METRICS_PORT:-9101}:9101"
 
   # ----------------------------------------------------------- monitoring

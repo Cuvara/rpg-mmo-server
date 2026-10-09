@@ -10,6 +10,7 @@ Foundation module for RPG MMO backend. Contains all shared definitions, types, a
 | `config/` | Shared configuration and env loading |
 | `models/` | Database models (PostgreSQL) (planned) |
 | `messages/` | Wire protocol — Envelope, message types, length-prefixed codec |
+| `transport/` | Listen/dial per hop: gateway hop TCP (optionally TLS), gameplay hop **KCP/UDP only** (`Gameplay`, `ValidateGameplay`, `DialGameplay` — no TCP fallback); KCP profile + optional `TRANSPORT_KEY` datagram crypto |
 | `storage/` | Storage interfaces (player, session, registry, events) + in-memory impls |
 | `storage/redisstore/` | Redis impls: session store, server registry (heartbeat TTL), event stream (Redis Streams + consumer group ACK) |
 | `jwt/` | JWT sign/verify with shared secret (HS256 only, header-validated) |

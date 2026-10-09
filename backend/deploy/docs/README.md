@@ -142,8 +142,9 @@ Size: **gateway ~ 16.1 MB**.
 | builder | `mcr.microsoft.com/dotnet/sdk:10.0` | `dotnet publish -c Release -r linux-x64 /p:PublishAot=true` |
 | runtime | `gcr.io/distroless/static-debian12:nonroot` | NativeAOT self-contained binary; runs as uid 65532 |
 
-`EXPOSE 8000` (gateway) / `9000` (gameserver, matching `containerPort` in the
-fleet manifests).
+`EXPOSE 8000/tcp` (gateway) / `9000/udp` (gameserver, KCP only, matching the
+`protocol: UDP` `containerPort` in the fleet manifests) / `9101/tcp` (gameserver
+metrics + `/healthz`).
 
 The gateway build **context must be `backend/`** — `go.mod` carries
 `replace github.com/duycuong/rpg-mmo/shared => ../shared`, so `shared/` has to be
@@ -215,8 +216,10 @@ cd backend/deploy && docker compose --profile realtime up -d
 They join the compose network (`REDIS_ADDR=redis:6379`,
 `GAME_DB_URL=…@postgres-game:5432/gamestate`) and publish on host ports
 **8100 / 9300** so a host-run gateway (:8000) and gameserver (:9000) can run
-alongside. No compose healthcheck: distroless has no `nc`/`curl` — probe with
-`nc -z localhost 8100` from the host, or a `tcpSocket` probe in k8s.
+alongside. No compose healthcheck: distroless has no `nc`/`curl` — probe the
+gateway with `nc -z localhost 8100` from the host (TCP). Probe the game server
+with `curl -fsS localhost:9101/healthz`, **not** its game port: that port is
+KCP/UDP only, a TCP probe is always refused and a UDP probe proves nothing.
 
 ## Build & deploy automation
 

@@ -193,6 +193,51 @@ GAME_PORT=${GAMESERVER_CONTAINER_PORT:-9200}
 NAKAMA_PORT=${NAKAMA_HTTP_PORT:-7350}
 MAP_ID=${GAMESERVER_MAP_ID:-map_01}
 
+# ------------------------------------------------- advertised gameplay address
+# The game server's port is KCP over UDP (ADR-32), and GAMESERVER_PUBLIC_ADDR is
+# what the gateway hands the client in EnterWorldResponse.ServerAddr.
+#
+# Under WSL2 in NAT networking mode, Windows' localhost forwarding carries TCP
+# only. A Windows client sending UDP to 127.0.0.1:<game port> reaches nothing
+# (measured 2026-10-08: timeout via 127.0.0.1, echo via the WSL VM address),
+# while the gateway on 127.0.0.1 still answers because it is TCP. The symptom is
+# a successful login followed by a KCP/UDP connect timeout.
+#
+# So when this stack runs inside WSL2 NAT and the advertised host is loopback
+# (or empty), advertise the WSL VM's own address instead: Docker publishes the
+# UDP port on every WSL interface, and that address is reachable from Windows.
+# STACK_ADVERTISE_HOST overrides the detected address (for example a LAN IP for
+# a phone on the same network); STACK_ADVERTISE_HOST=keep leaves .env alone.
+wsl_nat() {
+	grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || return 1
+	mode=$(wslinfo --networking-mode 2>/dev/null || echo nat)
+	[ "$mode" = nat ]
+}
+advertise_gameplay_addr() {
+	if [ "${STACK_ADVERTISE_HOST:-}" = keep ]; then
+		return
+	fi
+	_adv=${STACK_ADVERTISE_HOST:-}
+	if [ -z "$_adv" ] && wsl_nat; then
+		_adv=$(hostname -I 2>/dev/null | awk '{print $1}')
+		[ -n "$_adv" ] || return
+		echo "stack: WSL2 NAT detected; advertising gameplay at $_adv (UDP)" \
+			"because Windows localhost forwarding is TCP-only. STACK_ADVERTISE_HOST=keep to disable."
+	fi
+	[ -n "$_adv" ] || return
+	# docker-compose.override.yml builds each local game server's address
+	# from this host and its own published port.
+	export LOCAL_ADVERTISE_HOST="$_adv"
+	# The base compose file reads GAMESERVER_PUBLIC_ADDR; move only a
+	# loopback or host-less value, never an operator's explicit public host.
+	_addr=${GAMESERVER_PUBLIC_ADDR:-:$GAME_PORT}
+	_host=${_addr%:*}
+	case "$_host" in
+	"" | 127.0.0.1 | localhost) export GAMESERVER_PUBLIC_ADDR="$_adv:${_addr##*:}" ;;
+	esac
+}
+advertise_gameplay_addr
+
 # Relative --env-file/-f paths only: the docker.exe shim cannot resolve absolute
 # WSL paths (docs/CICD.md §4a), which is why this script cd's to its own dir.
 dc() { $COMPOSE -p "$PROJECT" --env-file "$ENV_FILE" --profile realtime "$@"; }
@@ -263,7 +308,13 @@ do_up() {
 	echo
 	echo "stack up."
 	echo "   gateway     tcp  localhost:$GATEWAY_PORT   <- point the Unity client here"
-	echo "   game server tcp  localhost:$GAME_PORT   (dialed after MsgEnterWorldResp)"
+	echo "   game server udp  localhost:$GAME_PORT   (KCP; dialed after MsgEnterWorldResp)"
+	if [ -n "${TRANSPORT_KEY:-}" ]; then
+		echo "   kcp key     TRANSPORT_KEY is set — launch the client with the same value"
+		echo "               (-cuvara-transport-key <hex> / CUVARA_TRANSPORT_KEY)"
+	else
+		echo "   kcp key     none (plaintext datagrams, dev only)"
+	fi
 	echo "   nakama      http localhost:$NAKAMA_PORT   console http://localhost:${NAKAMA_CONSOLE_PORT:-7351}"
 	echo "   secrets     JWT_SECRET / JOIN_TOKEN_SECRET — read them from ./.env"
 	echo

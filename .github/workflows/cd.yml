@@ -650,6 +650,10 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           NAKAMA_CONSOLE_PASSWORD: ${{ secrets.NAKAMA_CONSOLE_PASSWORD }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          # Optional KCP datagram pre-shared key for the game server's UDP port
+          # (32-byte hex). Empty = plaintext + a startup WARN; set it for staging
+          # and production, and give clients the same value.
+          TRANSPORT_KEY: ${{ secrets.TRANSPORT_KEY }}
           NAKAMA_SERVER_KEY: ${{ secrets.NAKAMA_SERVER_KEY }}
           # NAKAMA_HTTP_KEY was NEVER PLUMBED HERE UNTIL ADR-24, and the effect was
           # not cosmetic: deploy/.env is regenerated WHOLESALE, so the name was
@@ -684,7 +688,6 @@ jobs:
           ALLOCATOR: ${{ vars.ALLOCATOR || 'none' }}
           ALLOCATOR_NAMESPACE: ${{ vars.ALLOCATOR_NAMESPACE }}
           ALLOCATOR_FLEET_MAP: ${{ vars.ALLOCATOR_FLEET_MAP }}
-          ALLOCATOR_TRANSPORT: ${{ vars.ALLOCATOR_TRANSPORT }}
           ALLOCATOR_KUBECONFIG: ${{ vars.ALLOCATOR_KUBECONFIG }}
           KUBECONFIG_HOST: ${{ vars.KUBECONFIG_HOST }}
           K3D_NETWORK: ${{ vars.K3D_NETWORK }}
@@ -926,6 +929,7 @@ jobs:
             echo "REDIS_ADDR=${REDIS_ADDR}"
             echo "JWT_SECRET=${JWT_SECRET}"
             echo "JOIN_TOKEN_SECRET=${JOIN_TOKEN_SECRET}"
+            echo "TRANSPORT_KEY=${TRANSPORT_KEY}"
             echo "NAKAMA_CONSOLE_USER=${NAKAMA_CONSOLE_USER}"
             echo "NAKAMA_CONSOLE_PASSWORD=${NAKAMA_CONSOLE_PASSWORD}"
             # No `:-defaultkey` fallback any more — the gate above already refused
@@ -1013,7 +1017,6 @@ jobs:
             echo "ALLOCATOR=${ALLOCATOR:-none}"
             echo "ALLOCATOR_NAMESPACE=${ALLOCATOR_NAMESPACE:-rpg-realtime}"
             echo "ALLOCATOR_FLEET_MAP=${ALLOCATOR_FLEET_MAP:-map-servers-dotnet-dev}"
-            echo "ALLOCATOR_TRANSPORT=${ALLOCATOR_TRANSPORT:-tcp}"
             echo "ALLOCATOR_KUBECONFIG=${ALLOCATOR_KUBECONFIG:-/etc/rpg/kubeconfig}"
             echo "KUBECONFIG_HOST=${KUBECONFIG_HOST:-./kubeconfig.local}"
             echo "K3D_NETWORK=${K3D_NETWORK:-k3d-rpg-dev}"
@@ -1520,14 +1523,24 @@ jobs:
               rc=1
             else
               echo "map '${gs_map}' is served from ${gs_addr} (Agones fleet)"
-              tcp gameserver "${gs_addr##*:}" || rc=1
+              # The game port is KCP/UDP only: a TCP connect to it is refused even
+              # when the server is healthy, and a UDP "probe" proves nothing (no
+              # handshake). Assert the registered transport instead; that the UDP
+              # port really answers is proven by the post-deploy smoke job, which
+              # performs a real KCP join.
+              gs_transport=$(docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli hget "$key" transport 2>/dev/null | tr -d '\r')
+              if [ "$gs_transport" != "kcp" ]; then
+                echo "::error::game server for map '${gs_map}' registered transport '${gs_transport}', expected 'kcp'. The gateway refuses to hand out a non-KCP server."
+                rc=1
+              fi
             fi
           else
             # No Host header: the C# metrics listener binds the wildcard, so a
             # plain request from the host matches. If this ever 404s again, the
             # wildcard bind has regressed — do NOT paper over it with a header.
             probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" || rc=1
-            tcp   gameserver "${GAMESERVER_CONTAINER_PORT:-9200}"                        || rc=1
+            # No TCP connect to GAMESERVER_CONTAINER_PORT: it is published /udp
+            # (KCP only). UDP reachability is proven by the smoke job's KCP join.
           fi
           # Prefix comes from the sourced .env. A literal "rpg-" here is not just
           # untidy: as a docker SUBSTRING filter it also matches rpg-prod-* and

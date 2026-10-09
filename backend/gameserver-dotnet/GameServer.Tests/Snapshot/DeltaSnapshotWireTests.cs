@@ -1,6 +1,5 @@
-using System.Net;
-using System.Net.Sockets;
 using System.Text.Json;
+using GameServer.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using GameServer.Input;
 using GameServer.Net;
@@ -32,20 +31,14 @@ public class DeltaSnapshotWireTests : IDisposable
         }
     }
 
-    /// <summary>Server-side Connection plus the client socket on the other end of loopback.</summary>
-    private (Connection conn, NetworkStream clientStream) ConnectedPair(string userId)
+    /// <summary>Server-side Connection plus the client end of a loopback KCP session.</summary>
+    private (Connection conn, Stream clientStream) ConnectedPair(string userId)
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var client = new TcpClient();
-        client.Connect((IPEndPoint)listener.LocalEndpoint);
-        var serverSide = listener.AcceptTcpClient();
-        listener.Stop();
-
-        var conn = new Connection(userId, serverSide, NullLogger.Instance);
+        var pair = KcpPair.Create();
+        var conn = new Connection(userId, pair.ServerSide, NullLogger.Instance);
+        _cleanup.Add(pair);
         _cleanup.Add(conn);
-        _cleanup.Add(client);
-        return (conn, client.GetStream());
+        return (conn, pair.ClientStream);
     }
 
     private static (TickLoop loop, EcsWorld world, ConnectionManager connections) BuildLoop(
@@ -60,7 +53,7 @@ public class DeltaSnapshotWireTests : IDisposable
     }
 
     private static async Task<List<(SnapshotMessage msg, int payloadBytes)>> ReadSnapshotsAsync(
-        NetworkStream stream, int count)
+        Stream stream, int count)
     {
         var result = new List<(SnapshotMessage, int)>(count);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));

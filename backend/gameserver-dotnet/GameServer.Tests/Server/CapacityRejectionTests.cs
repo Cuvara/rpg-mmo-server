@@ -35,13 +35,13 @@ public class CapacityRejectionTests
         await using var h = await Harness.StartAsync(metrics, captured, capacity: 1);
 
         // Fill the one slot.
-        using var first = new TcpClient();
+        using var first = new KcpTestClient();
         await first.ConnectAsync("127.0.0.1", h.Port);
         var firstResp = await JoinAsync(first, "user-in");
         Assert.True(firstResp.Ok, firstResp.Error);
 
         // The next join must be refused...
-        using var second = new TcpClient();
+        using var second = new KcpTestClient();
         await second.ConnectAsync("127.0.0.1", h.Port);
         var secondResp = await JoinAsync(second, "user-out");
         Assert.False(secondResp.Ok);
@@ -72,7 +72,7 @@ public class CapacityRejectionTests
         using var metrics = new GameMetrics("map_capacity", $"test.{Guid.NewGuid():N}");
         await using var h = await Harness.StartAsync(metrics, captured, capacity: 4);
 
-        using var client = new TcpClient();
+        using var client = new KcpTestClient();
         await client.ConnectAsync("127.0.0.1", h.Port);
         var resp = await JoinAsync(client, "user-fits");
         Assert.True(resp.Ok, resp.Error);
@@ -84,7 +84,7 @@ public class CapacityRejectionTests
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
-    private static async Task<JoinTokenResponse> JoinAsync(TcpClient client, string userId)
+    private static async Task<JoinTokenResponse> JoinAsync(KcpTestClient client, string userId)
     {
         var stream = client.GetStream();
         // Built here rather than reused from EntityLifecycleTests: that helper bakes in its
@@ -166,7 +166,7 @@ public class CapacityRejectionTests
                 ServerId = ServerId,
                 MapId = "map_capacity",
                 Mode = "map",
-                Transport = TransportKind.Tcp,
+                Transport = TransportKind.Kcp,
                 TickRate = 20,
                 Capacity = capacity,
                 JwtSecret = JwtSecret,

@@ -57,7 +57,9 @@ type tapSegment struct {
 	Bytes []byte
 }
 
-// byteTap is a transparent TCP relay that records everything crossing it.
+// byteTap is a transparent TCP relay that records everything crossing it. It
+// taps the gateway hop (TCP); the gameplay hop is KCP/UDP and is tapped by
+// datagramTap (datagram_tap_test.go).
 //
 // It is deliberately a relay rather than a pcap: it needs no privileges, it
 // works identically on WSL and CI, and — the point — it observes exactly what a
@@ -286,7 +288,7 @@ func TestHopConfidentiality_Tap(t *testing.T) {
 	// session and reporting it as sealed.
 	gsAddr, gsCleanup := startDotnetGameServerSealedDefault(t, nil, nil)
 	t.Cleanup(gsCleanup)
-	gsTap := startByteTap(t, "gameplay-hop", gsAddr)
+	gsTap := startDatagramTap(t, "gameplay-hop", gsAddr)
 
 	// --- hop 1 (gateway): the gateway is told to hand out the TAP's address ---
 	// so the client's second connection walks through the gameplay tap.
@@ -295,7 +297,7 @@ func TestHopConfidentiality_Tap(t *testing.T) {
 	gwTap := startByteTap(t, "gateway-hop", gwAddr)
 
 	// --- the client, through both taps ---------------------------------------
-	gw, err := NewMockClient(gwTap.addr())
+	gw, err := NewGatewayClient(gwTap.addr())
 	if err != nil {
 		t.Fatalf("connect to gateway tap: %v", err)
 	}
@@ -503,7 +505,7 @@ func TestHopConfidentiality_CapturedCredentialReuse(t *testing.T) {
 	// credential is reusable and its value to an observer is its full lifetime.
 	var joinToken string
 	for attempt := 1; attempt <= 2; attempt++ {
-		gw, err := NewMockClient(gwAddr)
+		gw, err := NewGatewayClient(gwAddr)
 		if err != nil {
 			t.Fatalf("attempt %d: connect to gateway: %v", attempt, err)
 		}

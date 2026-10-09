@@ -7,6 +7,12 @@
 > (notably #2 Redis registry, #3 `sid` enforcement, #4 `alg` validation, #6
 > reconnect holds, #7 event wiring) — each is annotated inline below.
 >
+>
+> **Transport is stale throughout this file.** Every "TCP today, KCP planned" statement
+> below is superseded by ADR-32: realtime gameplay is **KCP/UDP only** (client → game
+> server), the gateway hop is TCP (optionally TLS), and the game port is UDP in every
+> deployment. See [`NETWORKING.md`](NETWORKING.md).
+>
 > **For architecture decisions and current limitations, read
 > [`ARCHITECTURE-DECISIONS.md`](ARCHITECTURE-DECISIONS.md) first.** Where the two
 > documents disagree, that one is newer and wins.
@@ -205,7 +211,7 @@ the party → gameplay → loot/fail → final save → transfer back to origin 
 
 ## 4. Deployment topology per tier
 
-Common to all tiers: two channels — meta over HTTPS/WS to Nakama, realtime over TCP (→KCP)
+Common to all tiers: two channels — meta over HTTPS/WS to Nakama, realtime over KCP/UDP to the game server (TCP only for the gateway auth hop)
 to Gateway/GameServers. All components are open source, $0 license.
 
 > **⚠️ ESTIMATES — UNBENCHMARKED.** See ARCHITECTURE-DECISIONS.md ADR-7.

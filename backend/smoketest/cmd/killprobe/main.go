@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 	"io"
 	"math"
 	"net"
@@ -31,9 +32,9 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/jwt"
-	"github.com/duycuong/rpg-mmo/smoketest/smoke"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/sealed"
+	"github.com/duycuong/rpg-mmo/smoketest/smoke"
 )
 
 // The sealed session for the one connection this probe opens. dev and staging run
@@ -66,15 +67,15 @@ func main() {
 	// the same "set together or not at all" rule the game server enforces at
 	// startup, refused here for the same reason rather than warned about.
 	if *nakamaTLSCert != "" && !strings.HasPrefix(*nakamaURL, "https://") {
-		fail("-nakama-tls-cert was given but -nakama is not https: a pin on a plaintext "+
+		fail("-nakama-tls-cert was given but -nakama is not https: a pin on a plaintext " +
 			"hop protects nothing. Either drop the pin or point -nakama at https.")
 	}
 	if strings.HasPrefix(*nakamaURL, "https://") && *nakamaTLSCert == "" {
 		// Falling through would hand the default trust store a self-signed
 		// certificate and fail deep inside the first request with a message about
 		// x509, several steps from the cause.
-		fail("-nakama is https but no -nakama-tls-cert was given. Nakama's meta-hop "+
-			"certificate is self-signed by design (ADR-24 decision 4) and is PINNED, "+
+		fail("-nakama is https but no -nakama-tls-cert was given. Nakama's meta-hop " +
+			"certificate is self-signed by design (ADR-24 decision 4) and is PINNED, " +
 			"never trusted through a CA. Pass the same PEM the game server mounts.")
 	}
 
@@ -113,11 +114,14 @@ func main() {
 	walletBefore := wallet(hc, *nakamaURL, sessionToken)
 
 	// ---- gateway: auth + enter world -----------------------------------------
-	serverAddr, joinToken := enterWorld(*gatewayAddr, jwt, *mapID, *gatewayTLSCert)
-	say("enter world ok, server=%s", serverAddr)
+	serverAddr, joinToken, serverTransport := enterWorld(*gatewayAddr, jwt, *mapID, *gatewayTLSCert)
+	say("enter world ok, server=%s transport=%s", serverAddr, serverTransport)
 
 	// ---- game server: join ----------------------------------------------------
-	conn, err := net.DialTimeout("tcp", dialable(serverAddr), 10*time.Second)
+	// The gameplay hop is KCP/UDP only: anything else the gateway advertised is
+	// refused here rather than dialled over another protocol.
+	conn, err := transport.DialGameplay(serverTransport, dialable(serverAddr), 10*time.Second,
+		transport.WithKey(os.Getenv(transport.KeyEnvVar)))
 	if err != nil {
 		fail("dial game server %s: %v", serverAddr, err)
 	}
@@ -373,7 +377,7 @@ func gatewayToken(hc *http.Client, nakamaURL, sessionToken string) (string, stri
 	return out.Token, out.UserID
 }
 
-func enterWorld(gatewayAddr, jwt, mapID, tlsCertPath string) (string, string) {
+func enterWorld(gatewayAddr, jwt, mapID, tlsCertPath string) (string, string, string) {
 	conn, err := net.DialTimeout("tcp", gatewayAddr, 10*time.Second)
 	if err != nil {
 		fail("dial gateway %s: %v", gatewayAddr, err)
@@ -413,7 +417,7 @@ func enterWorld(gatewayAddr, jwt, mapID, tlsCertPath string) (string, string) {
 	if enterResp.Error != "" {
 		fail("enter world rejected: %s", enterResp.Error)
 	}
-	return enterResp.ServerAddr, enterResp.JoinToken
+	return enterResp.ServerAddr, enterResp.JoinToken, enterResp.Transport
 }
 
 // sealSession runs the client half of ADR-22's handshake and installs the two

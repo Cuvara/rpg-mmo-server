@@ -62,52 +62,53 @@ namespace RpgMmo.Wire.V1 {
             "ASgOMh0ucnBnbW1vLndpcmUudjEuR2FtZUV2ZW50VHlwZRIOCgZzb3VyY2UY",
             "AiABKA0SDgoGdGFyZ2V0GAMgASgNEg4KBmFtb3VudBgEIAEoERISCgphYmls",
             "aXR5X2lkGAUgASgNEg0KBWZsYWdzGAYgASgNEhEKCXNvdXJjZV9pZBgHIAEo",
-            "CRIRCgl0YXJnZXRfaWQYCCABKAkSEQoJZWZmZWN0X2lkGAkgASgNIq0BCg9T",
+            "CRIRCgl0YXJnZXRfaWQYCCABKAkSEQoJZWZmZWN0X2lkGAkgASgNIscBCg9T",
             "bmFwc2hvdE1lc3NhZ2USDAoEdGljaxgBIAEoBBIQCghhY2tfdGljaxgCIAEo",
             "BBIMCgRmdWxsGAMgASgIEjAKCGVudGl0aWVzGAQgAygLMh4ucnBnbW1vLndp",
             "cmUudjEuRW50aXR5U25hcHNob3QSDwoHcmVtb3ZlZBgFIAMoCRIpCgZldmVu",
-            "dHMYBiADKAsyGS5ycGdtbW8ud2lyZS52MS5HYW1lRXZlbnQiIwoRRGlzY29u",
-            "bmVjdE1lc3NhZ2USDgoGcmVhc29uGAEgASgJIg8KDVJlc3luY1JlcXVlc3Qi",
-            "PgoOQ29tbWFuZFJlcXVlc3QSCwoDc2VxGAEgASgNEg4KBm9wY29kZRgCIAEo",
-            "DRIPCgdwYXlsb2FkGAMgASgMIkgKDUNvbW1hbmRSZXN1bHQSCwoDc2VxGAEg",
-            "ASgNEgoKAm9rGAIgASgIEg0KBWVycm9yGAMgASgJEg8KB3BheWxvYWQYBCAB",
-            "KAwiLQoKU2VydmVyUHVzaBIOCgZvcGNvZGUYASABKA0SDwoHcGF5bG9hZBgC",
-            "IAEoDCIkChJUcmFuc2Zlck1hcFJlcXVlc3QSDgoGbWFwX2lkGAEgASgJIjAK",
-            "E1RyYW5zZmVyTWFwUmVzcG9uc2USCgoCb2sYASABKAgSDQoFZXJyb3IYAiAB",
-            "KAkiIAoLUGluZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDIjUKC1BvbmdN",
-            "ZXNzYWdlEhEKCXRpbWVzdGFtcBgBIAEoAxITCgtzZXJ2ZXJfdGltZRgCIAEo",
-            "AyIdCgtLaWNrTWVzc2FnZRIOCgZyZWFzb24YASABKAkiJwoRU2VhbGVkQ2xp",
-            "ZW50SGVsbG8SEgoKcHVibGljX2tleRgBIAEoDCJhChFTZWFsZWRTZXJ2ZXJI",
-            "ZWxsbxISCgpwdWJsaWNfa2V5GAEgASgMEg8KB2JpbmRpbmcYAiABKAwSDQoF",
-            "ZXJyb3IYAyABKAkSGAoQc2VydmVyX3NpZ25hdHVyZRgEIAEoDCqcBAoHTXNn",
-            "VHlwZRIYChRNU0dfVFlQRV9VTlNQRUNJRklFRBAAEhEKDU1TR19UWVBFX0FV",
-            "VEgQARIWChJNU0dfVFlQRV9BVVRIX1JFU1AQAhIYChRNU0dfVFlQRV9FTlRF",
-            "Ul9XT1JMRBADEh0KGU1TR19UWVBFX0VOVEVSX1dPUkxEX1JFU1AQBBIXChNN",
-            "U0dfVFlQRV9KT0lOX1RPS0VOEAUSHAoYTVNHX1RZUEVfSk9JTl9UT0tFTl9S",
-            "RVNQEAYSEgoOTVNHX1RZUEVfSU5QVVQQBxIVChFNU0dfVFlQRV9TTkFQU0hP",
-            "VBAIEhcKE01TR19UWVBFX0RJU0NPTk5FQ1QQCRITCg9NU0dfVFlQRV9SRVNZ",
-            "TkMQChIZChVNU0dfVFlQRV9UUkFOU0ZFUl9NQVAQDRIeChpNU0dfVFlQRV9U",
-            "UkFOU0ZFUl9NQVBfUkVTUBAOEhEKDU1TR19UWVBFX1BJTkcQCxIRCg1NU0df",
-            "VFlQRV9QT05HEAwSEQoNTVNHX1RZUEVfS0lDSxAPEiAKHE1TR19UWVBFX1NF",
-            "QUxFRF9DTElFTlRfSEVMTE8QEBIgChxNU0dfVFlQRV9TRUFMRURfU0VSVkVS",
-            "X0hFTExPEBESFAoQTVNHX1RZUEVfQ09NTUFORBAgEhsKF01TR19UWVBFX0NP",
-            "TU1BTkRfUkVTVUxUECESGAoUTVNHX1RZUEVfU0VSVkVSX1BVU0gQIiqdAQoK",
-            "RW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVO",
-            "VElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VO",
-            "VElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJ",
-            "VFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJ",
-            "VFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExF",
-            "EAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9O",
-            "X0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVBRBAEKsoCCg1HYW1l",
-            "RXZlbnRUeXBlEh8KG0dBTUVfRVZFTlRfVFlQRV9VTlNQRUNJRklFRBAAEhoK",
-            "FkdBTUVfRVZFTlRfVFlQRV9EQU1BR0UQARIYChRHQU1FX0VWRU5UX1RZUEVf",
-            "SEVBTBACEhkKFUdBTUVfRVZFTlRfVFlQRV9ERUFUSBADEiAKHEdBTUVfRVZF",
-            "TlRfVFlQRV9BQklMSVRZX0NBU1QQBBIbChdHQU1FX0VWRU5UX1RZUEVfWFBf",
-            "R0FJThAFEhwKGEdBTUVfRVZFTlRfVFlQRV9MRVZFTF9VUBAGEiIKHkdBTUVf",
-            "RVZFTlRfVFlQRV9TVEFUVVNfQVBQTElFRBAHEiIKHkdBTUVfRVZFTlRfVFlQ",
-            "RV9TVEFUVVNfUkVNT1ZFRBAIEiIKHkdBTUVfRVZFTlRfVFlQRV9QUk9KRUNU",
-            "SUxFX0hJVBAJQkZaM2dpdGh1Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFy",
-            "ZWQvcHJvdG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
+            "dHMYBiADKAsyGS5ycGdtbW8ud2lyZS52MS5HYW1lRXZlbnQSGAoQYWNrX2Fw",
+            "cGxpZWRfdGljaxgHIAEoBCIjChFEaXNjb25uZWN0TWVzc2FnZRIOCgZyZWFz",
+            "b24YASABKAkiDwoNUmVzeW5jUmVxdWVzdCI+Cg5Db21tYW5kUmVxdWVzdBIL",
+            "CgNzZXEYASABKA0SDgoGb3Bjb2RlGAIgASgNEg8KB3BheWxvYWQYAyABKAwi",
+            "SAoNQ29tbWFuZFJlc3VsdBILCgNzZXEYASABKA0SCgoCb2sYAiABKAgSDQoF",
+            "ZXJyb3IYAyABKAkSDwoHcGF5bG9hZBgEIAEoDCItCgpTZXJ2ZXJQdXNoEg4K",
+            "Bm9wY29kZRgBIAEoDRIPCgdwYXlsb2FkGAIgASgMIiQKElRyYW5zZmVyTWFw",
+            "UmVxdWVzdBIOCgZtYXBfaWQYASABKAkiMAoTVHJhbnNmZXJNYXBSZXNwb25z",
+            "ZRIKCgJvaxgBIAEoCBINCgVlcnJvchgCIAEoCSIgCgtQaW5nTWVzc2FnZRIR",
+            "Cgl0aW1lc3RhbXAYASABKAMiNQoLUG9uZ01lc3NhZ2USEQoJdGltZXN0YW1w",
+            "GAEgASgDEhMKC3NlcnZlcl90aW1lGAIgASgDIh0KC0tpY2tNZXNzYWdlEg4K",
+            "BnJlYXNvbhgBIAEoCSInChFTZWFsZWRDbGllbnRIZWxsbxISCgpwdWJsaWNf",
+            "a2V5GAEgASgMImEKEVNlYWxlZFNlcnZlckhlbGxvEhIKCnB1YmxpY19rZXkY",
+            "ASABKAwSDwoHYmluZGluZxgCIAEoDBINCgVlcnJvchgDIAEoCRIYChBzZXJ2",
+            "ZXJfc2lnbmF0dXJlGAQgASgMKpwECgdNc2dUeXBlEhgKFE1TR19UWVBFX1VO",
+            "U1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVUSBABEhYKEk1TR19UWVBFX0FV",
+            "VEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVSX1dPUkxEEAMSHQoZTVNHX1RZ",
+            "UEVfRU5URVJfV09STERfUkVTUBAEEhcKE01TR19UWVBFX0pPSU5fVE9LRU4Q",
+            "BRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JFU1AQBhISCg5NU0dfVFlQRV9J",
+            "TlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9UEAgSFwoTTVNHX1RZUEVfRElT",
+            "Q09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lOQxAKEhkKFU1TR19UWVBFX1RS",
+            "QU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RSQU5TRkVSX01BUF9SRVNQEA4S",
+            "EQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19UWVBFX1BPTkcQDBIRCg1NU0df",
+            "VFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VBTEVEX0NMSUVOVF9IRUxMTxAQ",
+            "EiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJfSEVMTE8QERIUChBNU0dfVFlQ",
+            "RV9DT01NQU5EECASGwoXTVNHX1RZUEVfQ09NTUFORF9SRVNVTFQQIRIYChRN",
+            "U0dfVFlQRV9TRVJWRVJfUFVTSBAiKp0BCgpFbnRpdHlUeXBlEhsKF0VOVElU",
+            "WV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX1RZUEVfUExBWUVSEAES",
+            "EwoPRU5USVRZX1RZUEVfTU9CEAISEwoPRU5USVRZX1RZUEVfTlBDEAMSFAoQ",
+            "RU5USVRZX1RZUEVfSVRFTRAEEhoKFkVOVElUWV9UWVBFX1BST0pFQ1RJTEUQ",
+            "BSqUAQoMRW50aXR5QWN0aW9uEh0KGUVOVElUWV9BQ1RJT05fVU5TUEVDSUZJ",
+            "RUQQABIWChJFTlRJVFlfQUNUSU9OX0lETEUQARIYChRFTlRJVFlfQUNUSU9O",
+            "X01PVklORxACEhsKF0VOVElUWV9BQ1RJT05fQVRUQUNLSU5HEAMSFgoSRU5U",
+            "SVRZX0FDVElPTl9ERUFEEAQqygIKDUdhbWVFdmVudFR5cGUSHwobR0FNRV9F",
+            "VkVOVF9UWVBFX1VOU1BFQ0lGSUVEEAASGgoWR0FNRV9FVkVOVF9UWVBFX0RB",
+            "TUFHRRABEhgKFEdBTUVfRVZFTlRfVFlQRV9IRUFMEAISGQoVR0FNRV9FVkVO",
+            "VF9UWVBFX0RFQVRIEAMSIAocR0FNRV9FVkVOVF9UWVBFX0FCSUxJVFlfQ0FT",
+            "VBAEEhsKF0dBTUVfRVZFTlRfVFlQRV9YUF9HQUlOEAUSHAoYR0FNRV9FVkVO",
+            "VF9UWVBFX0xFVkVMX1VQEAYSIgoeR0FNRV9FVkVOVF9UWVBFX1NUQVRVU19B",
+            "UFBMSUVEEAcSIgoeR0FNRV9FVkVOVF9UWVBFX1NUQVRVU19SRU1PVkVEEAgS",
+            "IgoeR0FNRV9FVkVOVF9UWVBFX1BST0pFQ1RJTEVfSElUEAlCRlozZ2l0aHVi",
+            "LmNvbS9kdXljdW9uZy9ycGctbW1vL3NoYXJlZC9wcm90by9nZW47d2lyZXBi",
+            "qgIOUnBnTW1vLldpcmUuVjFiBnByb3RvMw=="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), typeof(global::RpgMmo.Wire.V1.GameEventType), }, null, new pbr::GeneratedClrTypeInfo[] {
@@ -123,7 +124,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.StatValue), global::RpgMmo.Wire.V1.StatValue.Parser, new[]{ "StatId", "Value" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.StatusEffect), global::RpgMmo.Wire.V1.StatusEffect.Parser, new[]{ "EffectId", "Stacks", "ExpiresTick", "Source" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.GameEvent), global::RpgMmo.Wire.V1.GameEvent.Parser, new[]{ "Type", "Source", "Target", "Amount", "AbilityId", "Flags", "SourceId", "TargetId", "EffectId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed", "Events" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed", "Events", "AckAppliedTick" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.DisconnectMessage), global::RpgMmo.Wire.V1.DisconnectMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.ResyncRequest), global::RpgMmo.Wire.V1.ResyncRequest.Parser, null, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.CommandRequest), global::RpgMmo.Wire.V1.CommandRequest.Parser, new[]{ "Seq", "Opcode", "Payload" }, null, null, null, null),
@@ -1501,8 +1502,11 @@ namespace RpgMmo.Wire.V1 {
   /// <summary>
   /// EnterWorldResponse contains the game server address and join token.
   ///
-  /// `transport` tells the client which realtime transport the target game server
-  /// speaks ("tcp" or "kcp"). Empty means "tcp".
+  /// `transport` names the realtime gameplay transport the target game server
+  /// speaks. It is always "kcp" (KCP over UDP, the only gameplay transport): the
+  /// gateway refuses to assign a server advertising anything else, and a client
+  /// must treat any other value, including empty, as a failed join and never
+  /// fall back to another transport. Set on success only.
   /// </summary>
   [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
   public sealed partial class EnterWorldResponse : pb::IMessage<EnterWorldResponse>
@@ -5710,6 +5714,7 @@ namespace RpgMmo.Wire.V1 {
       entities_ = other.entities_.Clone();
       removed_ = other.removed_.Clone();
       events_ = other.events_.Clone();
+      ackAppliedTick_ = other.ackAppliedTick_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -5805,6 +5810,37 @@ namespace RpgMmo.Wire.V1 {
       get { return events_; }
     }
 
+    /// <summary>Field number for the "ack_applied_tick" field.</summary>
+    public const int AckAppliedTickFieldNumber = 7;
+    private ulong ackAppliedTick_;
+    /// <summary>
+    /// Server base tick on which the input acknowledged by `ack_tick` was APPLIED, i.e.
+    /// the tick whose input drain accepted it. Zero means "not sent": no input accepted
+    /// yet, a protocol 2 peer, or an older server. Receivers then fall back to the
+    /// previous behaviour.
+    ///
+    /// WHY THE CLIENT NEEDS IT. `ack_tick` is a CLIENT tick; `tick` is a SERVER tick.
+    /// The server does not apply an input on the tick number the client stamped on it
+    /// but on the tick that drains it, so the two tick lines are offset by
+    /// (ack_tick - ack_applied_tick) - roughly the client's input lead minus one, plus
+    /// clock skew. A client that compares this snapshot with its own prediction history
+    /// at client tick `tick` compares two different moments of the same motion, and
+    /// every tick of that offset is a reconciliation error (a fraction of a step on a
+    /// curve, a whole step at a start or a stop). With this field the client compares
+    /// against its history at `tick + (ack_tick - ack_applied_tick)` instead.
+    ///
+    /// Additive and value-only: sent only to protocol 3 peers (protocol 2 bytes stay
+    /// pinned), and ignoring it is always safe. No protocol version bump.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public ulong AckAppliedTick {
+      get { return ackAppliedTick_; }
+      set {
+        ackAppliedTick_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -5826,6 +5862,7 @@ namespace RpgMmo.Wire.V1 {
       if(!entities_.Equals(other.entities_)) return false;
       if(!removed_.Equals(other.removed_)) return false;
       if(!events_.Equals(other.events_)) return false;
+      if (AckAppliedTick != other.AckAppliedTick) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -5839,6 +5876,7 @@ namespace RpgMmo.Wire.V1 {
       hash ^= entities_.GetHashCode();
       hash ^= removed_.GetHashCode();
       hash ^= events_.GetHashCode();
+      if (AckAppliedTick != 0UL) hash ^= AckAppliedTick.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -5872,6 +5910,10 @@ namespace RpgMmo.Wire.V1 {
       entities_.WriteTo(output, _repeated_entities_codec);
       removed_.WriteTo(output, _repeated_removed_codec);
       events_.WriteTo(output, _repeated_events_codec);
+      if (AckAppliedTick != 0UL) {
+        output.WriteRawTag(56);
+        output.WriteUInt64(AckAppliedTick);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -5897,6 +5939,10 @@ namespace RpgMmo.Wire.V1 {
       entities_.WriteTo(ref output, _repeated_entities_codec);
       removed_.WriteTo(ref output, _repeated_removed_codec);
       events_.WriteTo(ref output, _repeated_events_codec);
+      if (AckAppliedTick != 0UL) {
+        output.WriteRawTag(56);
+        output.WriteUInt64(AckAppliedTick);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -5919,6 +5965,9 @@ namespace RpgMmo.Wire.V1 {
       size += entities_.CalculateSize(_repeated_entities_codec);
       size += removed_.CalculateSize(_repeated_removed_codec);
       size += events_.CalculateSize(_repeated_events_codec);
+      if (AckAppliedTick != 0UL) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt64Size(AckAppliedTick);
+      }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
       }
@@ -5943,6 +5992,9 @@ namespace RpgMmo.Wire.V1 {
       entities_.Add(other.entities_);
       removed_.Add(other.removed_);
       events_.Add(other.events_);
+      if (other.AckAppliedTick != 0UL) {
+        AckAppliedTick = other.AckAppliedTick;
+      }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
 
@@ -5986,6 +6038,10 @@ namespace RpgMmo.Wire.V1 {
             events_.AddEntriesFrom(input, _repeated_events_codec);
             break;
           }
+          case 56: {
+            AckAppliedTick = input.ReadUInt64();
+            break;
+          }
         }
       }
     #endif
@@ -6027,6 +6083,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 50: {
             events_.AddEntriesFrom(ref input, _repeated_events_codec);
+            break;
+          }
+          case 56: {
+            AckAppliedTick = input.ReadUInt64();
             break;
           }
         }

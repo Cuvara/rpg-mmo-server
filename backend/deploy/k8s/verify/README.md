@@ -164,7 +164,8 @@ with the secret the gateway verifies with".
 |----|--------|--------------|
 | `registry.one_server` | exactly one non-expired `servers:id:*` hash carries `map_id = $VERIFY_MAP_ID` (**ADR-2**) | nothing about an in-memory registry (`--backend=memory` is invisible from outside), nothing about other maps |
 | `registry.addr_qualified` | the advertised address carries a real host — a hostless `:9000`, `0.0.0.0:…` or `[::]:…` fails | it does not prove the host is reachable from the *client's* network |
-| `registry.addr_dialable` | something accepts TCP on that address from where the suite runs | not that it speaks the game protocol |
+| `registry.transport_kcp` | every live registration says `transport = kcp`, the only gameplay transport (the gateway refuses to assign anything else; empty no longer means TCP) | not that the advertised **UDP** address is reachable -- `registry.addr_kcp_join` proves that. Replaces `registry.addr_dialable`, a TCP connect that is meaningless on a UDP port |
+| `registry.addr_kcp_join` | `probe enterworld` (gateway over TCP, then the advertised game server over **KCP/UDP**) completes `MsgJoinToken`: output carries `kcp_join=ok`. Needs `VERIFY_TRANSPORT_KEY` equal to the fleet's `transport-key` | reachability from the *client's* network, and the gameplay loop (`flow.smoke`) |
 
 Liveness is read from the `servers:id:*` hashes, never from the
 `servers:map:{map_id}` index — the index has no TTL and outlives dead servers,

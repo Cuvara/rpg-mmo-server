@@ -60,8 +60,8 @@ func TestLoadConfig(t *testing.T) {
 				if c.MapID != DefaultMapID {
 					t.Errorf("MapID = %q", c.MapID)
 				}
-				if c.Transport != DefaultTransport {
-					t.Errorf("Transport = %q, want %q", c.Transport, DefaultTransport)
+				if c.TransportKey != "" {
+					t.Errorf("TransportKey = %q, want empty (plaintext dev default)", c.TransportKey)
 				}
 				if c.Timeout != DefaultTimeout {
 					t.Errorf("Timeout = %s", c.Timeout)
@@ -134,41 +134,41 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_Transport(t *testing.T) {
+func TestLoadConfig_TransportKey(t *testing.T) {
 	tests := []struct {
-		name    string
-		env     map[string]string
-		args    []string
-		want    string
-		wantErr bool
+		name string
+		env  map[string]string
+		args []string
+		want string
 	}{
-		{name: "default is tcp", env: map[string]string{"JWT_SECRET": "s"}, want: "tcp"},
-		{name: "env kcp", env: map[string]string{"JWT_SECRET": "s", "TRANSPORT": "kcp"}, want: "kcp"},
+		{name: "default is plaintext", env: map[string]string{"JWT_SECRET": "s"}, want: ""},
+		{name: "env", env: map[string]string{"JWT_SECRET": "s", "TRANSPORT_KEY": "abc"}, want: "abc"},
 		{
 			name: "flag overrides env",
-			env:  map[string]string{"JWT_SECRET": "s", "TRANSPORT": "tcp"},
-			args: []string{"--transport=kcp"},
-			want: "kcp",
-		},
-		{
-			name:    "unknown transport rejected",
-			env:     map[string]string{"JWT_SECRET": "s", "TRANSPORT": "quic"},
-			wantErr: true,
+			env:  map[string]string{"JWT_SECRET": "s", "TRANSPORT_KEY": "abc"},
+			args: []string{"--transport-key=def"},
+			want: "def",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := LoadConfig(fakeEnv(tt.env), tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("LoadConfig() error = %v, wantErr %v", err, tt.wantErr)
+			if err != nil {
+				t.Fatalf("LoadConfig() error = %v", err)
 			}
-			if tt.wantErr {
-				return
-			}
-			if cfg.Transport != tt.want {
-				t.Errorf("Transport = %q, want %q", cfg.Transport, tt.want)
+			if cfg.TransportKey != tt.want {
+				t.Errorf("TransportKey = %q, want %q", cfg.TransportKey, tt.want)
 			}
 		})
+	}
+}
+
+// TestLoadConfig_NoTransportFlag pins that the gateway-hop transport flag is
+// gone: the gateway is TCP-only and gameplay is KCP-only, so a stale
+// --transport invocation must fail loudly instead of looking honoured.
+func TestLoadConfig_NoTransportFlag(t *testing.T) {
+	if _, err := LoadConfig(fakeEnv(map[string]string{"JWT_SECRET": "s"}), []string{"--transport=kcp"}); err == nil {
+		t.Fatal("LoadConfig accepted --transport; the flag was removed with the KCP-only migration")
 	}
 }
 

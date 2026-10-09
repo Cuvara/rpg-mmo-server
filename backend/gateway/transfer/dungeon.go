@@ -166,6 +166,9 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 }
 
 func mintForServer(info storage.ServerInfo, userID, characterID string, joinKeys jwt.Keyring) (AssignResult, error) {
+	if err := checkGameplayTransport(info); err != nil {
+		return AssignResult{}, fmt.Errorf("assign dungeon: %w", err)
+	}
 	token, err := GenerateJoinTokenCharacter(userID, info.ServerID, characterID, joinKeys)
 	if err != nil {
 		return AssignResult{}, fmt.Errorf("assign dungeon: mint join token: %w", err)

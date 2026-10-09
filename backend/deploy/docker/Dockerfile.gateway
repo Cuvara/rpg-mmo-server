@@ -59,8 +59,9 @@ LABEL org.opencontainers.image.revision="${GIT_REVISION}" \
       org.opencontainers.image.title="rpg-mmo gateway" \
       org.opencontainers.image.source="https://github.com/cuvara/rpg-mmo-server"
 
-# Client realtime TCP port (GATEWAY_ADDR / --addr default :8000).
-EXPOSE 8000
+# Client auth + redirect port, TCP (optionally TLS) — not a gameplay port; gameplay
+# is KCP/UDP straight to the game server (GATEWAY_ADDR / --addr default :8000).
+EXPOSE 8000/tcp
 
 USER nonroot:nonroot
 

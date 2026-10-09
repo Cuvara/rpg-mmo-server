@@ -53,13 +53,13 @@ CI: C# — `.github/workflows/ci-dotnet.yml`: build + test gameserver-dotnet. Tr
 
 ## Repo Structure & Current State
 
-The MVP is intentionally interface-driven: the default wiring is TCP + JSON + in-memory stores, but the production implementations (KCP, PostgreSQL, Redis, Agones allocation, Protobuf) are already written and selected by flag/env. Architecture rationale and known limitations: **`backend/docs/ARCHITECTURE-DECISIONS.md`** (read this before trusting any older diagram; `backend/docs/CORE_FLOW.md` predates the C# migration and is partly stale).
+The MVP is intentionally interface-driven: the default wiring is JSON + in-memory stores, but the production implementations (PostgreSQL, Redis, Agones allocation, Protobuf) are already written and selected by flag/env. The realtime gameplay transport is **not** selectable: it is KCP/UDP only (ADR-32); the gateway hop is TCP (optionally TLS). Architecture rationale and known limitations: **`backend/docs/ARCHITECTURE-DECISIONS.md`** (read this before trusting any older diagram; `backend/docs/CORE_FLOW.md` predates the C# migration and is partly stale).
 
 | Module | Path | Status | Contents |
 |--------|------|--------|----------|
 | shared | `backend/shared/` | ✅ | Foundation, no deps: config, constants (tick rates, TTLs, Redis keys), error codes, JWT (HS256), logger (slog), wire protocol (`messages/` — Envelope + codec), storage interfaces + in-memory impls |
 | gameserver-dotnet | `backend/gameserver-dotnet/` | ✅ | C# .NET 10 game server (primary). `Shared.GameLogic/` (pure C# logic shared with Unity client), `GameServer/` (NativeAOT console app), `GameServer.Tests/` (xUnit). Wire-compatible with Go gateway |
-| gateway | `backend/gateway/` | ✅ | TCP/KCP listener (auth + redirect, **not** a gameplay proxy), JWT auth + session manager (`session/`), server registry + Agones allocator (`registry/`), join-token/map transfer (`transfer/`), Redis Streams event relay (`events/`) |
+| gateway | `backend/gateway/` | ✅ | TCP listener, optional TLS (auth + redirect, **not** a gameplay proxy), JWT auth + session manager (`session/`), server registry + Agones allocator (`registry/`), join-token/map transfer (`transfer/`), Redis Streams event relay (`events/`) |
 | integration_test | `backend/integration_test/` | ✅ | E2E tests: gateway + C# gameserver interop (build tag `integration`) |
 | nakama | `backend/nakama/` | Partial | Nakama Go plugins. **Implemented**: `auth/` (gateway-token issue + validate, JWT keyring, per-user rate limit, profile), `economy/` (leaderboard, reward). **Not started**: social, matchmaking |
 | deploy | `backend/deploy/` | Partial | Agones fleet manifests (`agones/fleet-map.yaml`, `fleet-dungeon.yaml`, autoscaler, allocation) |
@@ -75,6 +75,7 @@ Each module has its own `CLAUDE.md` with detailed role-specific instructions, pl
 ### Connection Flow (wire protocol in `shared/messages/`)
 
 ```
+   (Client → Gateway is TCP, optionally TLS. Client → GameServer is KCP over UDP ONLY.)
 1. Client → Gateway:    MsgAuth { JWT }            (JWT verified locally, shared secret — no Nakama roundtrip)
 2. Gateway → Client:    MsgAuthResp { OK, UserID }
 3. Client → Gateway:    MsgEnterWorld { MapID }
@@ -96,7 +97,7 @@ merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 
 | Layer | MVP (current) | Production |
 |-------|---------------|------------|
-| Transport | TCP (default) — KCP/UDP available opt-in via `shared/transport` + `--transport=kcp` | KCP everywhere, with per-session encryption |
+| Transport | **Gameplay: KCP/UDP only** (ADR-32 — no TCP fallback; `GAMESERVER_TRANSPORT` other than `kcp` is fatal; `GATEWAY_TRANSPORT`/`ALLOCATOR_TRANSPORT` removed). Gateway hop: TCP, optional TLS. Optional `TRANSPORT_KEY` datagram PSK; sealed session for authenticated confidentiality. See `backend/docs/NETWORKING.md` | Same; per-session keys per ADR-22/25 |
 | Encoding | **Protobuf + entity-type enum + entity-id interning** (`shared/proto/wire.proto`, one schema -> Go + C#), **81% smaller than the original JSON**; legacy JSON still accepted and distinguished by the first body byte - ADR-9 | Protobuf only, once no pre-Protobuf client remains |
 | Player store | In-memory default; **PostgreSQL implemented** (C# `PostgresPlayerStore`, set `GAME_DB_URL`) | PostgreSQL everywhere |
 | Session/Registry stores | In-memory default; **Redis implemented** (gateway `--backend=redis`) | Redis everywhere |
@@ -109,7 +110,7 @@ merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 
 ### Two Communication Channels
 - **Meta (HTTPS/WebSocket)**: Unity Client <-> Nakama — auth, economy, social, leaderboard, inventory
-- **Realtime (TCP today, KCP/UDP opt-in)**: Unity Client <-> Gateway for auth + map assignment only, then Unity Client <-> Game Server **directly** for combat, movement and world state. The gateway is not in the gameplay data path (ADR-3)
+- **Realtime**: Unity Client <-> Gateway over TCP (optionally TLS) for auth + map assignment only, then Unity Client <-> Game Server **directly over KCP/UDP (the only gameplay transport, ADR-32)** for combat, movement and world state. The gateway is not in the gameplay data path (ADR-3)
 
 ### Server Stack
 - **Nakama (Go)**: Meta services — authentication (device/email/social), economy + storage, leaderboard, party/chat/friends, notifications + presence, matchmaking queue
@@ -194,7 +195,7 @@ would actually read. It can come back when there is a ceiling worth dividing by.
 | Orchestration | k3s + Agones |
 | Database / Cache | PostgreSQL / Redis |
 | Client | Unity 6 (6000.3.9f1) with DOTS |
-| Realtime Transport | KCP/UDP (custom Gateway) |
+| Realtime Transport | KCP/UDP to game servers (only); TCP (+TLS) to the gateway |
 | Serialization | Protobuf / FlatBuffers (target) |
 | Monitoring | Grafana Cloud free + Prometheus |
 | CI/CD | GitHub Actions |

@@ -161,9 +161,9 @@ public class MapIdReloadIntegrationTests
             Mode = "map",
             // Pinned rather than left to the default: the placement policy runs in the
             // join handler, above the transport, so TCP is chosen here only because this
-            // harness dials with a raw TcpClient. Transport coverage lives in the KCP
+            // harness dials with a raw KcpTestClient. Transport coverage lives in the KCP
             // interop tests; a future change of the default must not silently break this.
-            Transport = TransportKind.Tcp,
+            Transport = TransportKind.Kcp,
             TickRate = 20,
             Capacity = 4,
             JwtSecret = JwtSecret,
@@ -179,7 +179,7 @@ public class MapIdReloadIntegrationTests
 
         try
         {
-            using var client = new TcpClient();
+            using var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, port);
             await using var stream = client.GetStream();
 
@@ -221,7 +221,7 @@ public class MapIdReloadIntegrationTests
     /// so the entity arrives in the join keyframe; later deltas may omit it entirely.
     /// </summary>
     private static async Task<EntitySnapshot> ReadOwnEntityAsync(
-        NetworkStream stream, string userId, CancellationToken ct)
+        Stream stream, string userId, CancellationToken ct)
     {
         for (int frames = 0; frames < 200; frames++)
         {
@@ -254,7 +254,7 @@ public class MapIdReloadIntegrationTests
         await stream.FlushAsync();
     }
 
-    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    private static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int attempt = 0; attempt < 50; attempt++)
         {

@@ -52,8 +52,8 @@ namespace GameServer.Net.Security;
 /// <para>
 /// <b>Limitation, stated here because it is easy to overstate what this buys.</b> The
 /// client cannot derive the key — it has no secret — so the key must travel gateway →
-/// client, and the gateway hop is the SAME transport stack as the gameplay hop, plaintext
-/// TCP by default. In the default configuration an eavesdropper on the gateway hop reads
+/// client over the gateway hop, which is plaintext TCP unless TLS is enabled on it
+/// (ADR-23). In that configuration an eavesdropper on the gateway hop reads
 /// the key and can decrypt that session. This turns "compromise one binary, decrypt
 /// everyone for ever" into "eavesdrop the gateway hop, decrypt one session": strictly
 /// better, and not the end-to-end confidentiality the name suggests.

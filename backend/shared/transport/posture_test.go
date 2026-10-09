@@ -22,7 +22,7 @@ func TestPosture(t *testing.T) {
 		wantInSummary string
 	}{
 		{
-			name: "default tcp no key is plaintext", kind: "", key: "", addr: ":8000",
+			name: "gateway tcp no key is plaintext", kind: KindTCP, key: "", addr: ":8000",
 			encrypted: false, keyConfigured: false, keyIgnored: false,
 			cipher: CipherNone, wantInSummary: "PLAINTEXT",
 		},

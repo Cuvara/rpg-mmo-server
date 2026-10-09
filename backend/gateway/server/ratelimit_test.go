@@ -39,7 +39,7 @@ func startGatewayFull(t *testing.T, secret string, opts ...Option) (*Gateway, *m
 
 	sessionStore := storage.NewMemorySessionStore()
 	serverRegistry := storage.NewMemoryServerRegistry()
-	serverRegistry.Register(nil, storage.ServerInfo{
+	serverRegistry.Register(nil, storage.ServerInfo{Transport: "kcp",
 		ServerID: "srv1", MapID: "map_forest", Addr: "10.0.0.1:9000",
 		Capacity: 100, PlayerCount: 10,
 	})

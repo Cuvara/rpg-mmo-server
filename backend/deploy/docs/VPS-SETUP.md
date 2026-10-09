@@ -83,8 +83,10 @@ Every step is idempotent; re-running is safe.
    service surviving reboot and logout. The token is passed to one command and
    never written to disk.
 4. **ufw** — default deny incoming, allow outgoing; SSH plus the gateway and
-   game server ports on **tcp and udp** (udp is reserved for the KCP transport,
-   opened now so the firewall needs no second visit). Grafana is **denied**;
+   game server ports — gateway **tcp** (auth + redirect hop), game server
+   **udp** (KCP, the only gameplay transport). Re-running it on a box set up
+   before KCP-only removes the old gateway/udp and gameserver/tcp rules.
+   Grafana is **denied**;
    `--admin-ip` switches it to a single-IP allowlist. It also writes the
    matching `DOCKER-USER` iptables rule, because Docker's published ports bypass
    ufw's INPUT chain entirely — a `ufw deny` alone does *not* close a container
@@ -103,8 +105,8 @@ Each has an environment-variable equivalent; the flag wins.
 | `--runner-version` | `RUNNER_VERSION` | `2.321.0` | actions/runner release. |
 | `--deploy-user` | `DEPLOY_USER` | `rpg` | Service account; owns the deploy dir, member of `docker`. |
 | `--deploy-dir` | `RPG_DEPLOY_DIR` | `/opt/rpg-mmo` | Must match the `RPG_DEPLOY_DIR` variable in §2. |
-| `--gateway-port` | `GATEWAY_PORT` | `8000` | Opened tcp + udp. |
-| `--gameserver-port` | `GAMESERVER_PORT` | `9200` | Opened tcp + udp. |
+| `--gateway-port` | `GATEWAY_PORT` | `8000` | Opened tcp. |
+| `--gameserver-port` | `GAMESERVER_PORT` | `9200` | Opened **udp** (KCP). |
 | `--ssh-port` | `SSH_PORT` | `22` | Opened tcp. |
 | `--grafana-port` | `GRAFANA_PORT` | `3000` | **Denied** unless `--admin-ip` is given. |
 | `--admin-ip` | `ADMIN_IP` | *(empty)* | Allow Grafana from this address only. |
@@ -190,6 +192,7 @@ grep -oE 'secrets\.[A-Z_]+' .github/workflows/cd.yml | sort -u
 | `GRAFANA_ADMIN_PASSWORD` | **yes when `MONITORING_ENABLED != false`** | 48 random chars | Grafana admin password. Only applied when Grafana *creates* its admin user, i.e. on an empty `grafana.db` — see `MONITORING.md` for the rotation procedure. |
 | `NAKAMA_SERVER_KEY` | no (defaults to `defaultkey`) | 48 random chars | Server key the game client presents to Nakama. Change it outside dev; the Unity client must use the same value. |
 | `REDIS_PASSWORD` | no (empty = no auth) | 48 random chars | Enables `--requirepass` on Redis. Gateway and game server pick it up from the same generated `.env`. |
+| `TRANSPORT_KEY` | no (empty = plaintext datagrams + a startup WARN) | `openssl rand -hex 32` | Pre-shared AES-256 key for the game server's KCP/UDP port (kcp-go-compatible). Set it for staging/production. Every client must be launched with the same value (`-cuvara-transport-key <hex>` / `CUVARA_TRANSPORT_KEY`); a mismatch is not reported by name, joins just time out. The gateway does not use it. |
 
 `GITHUB_TOKEN` also appears in `cd.yml` — that one is injected by Actions and is
 not something you set.
@@ -455,7 +458,8 @@ machines. Separate machines are the boring, working answer.
 | Run cancelled with *"Canceling since a higher priority waiting request exists"* | `concurrency: cd-<environment>` with `cancel-in-progress` — a newer push/dispatch for the same environment superseded this one | Expected. Dispatch **after** pushing, and watch that exact run id. A `develop` push will cancel your in-flight `dev` dispatch. |
 | `deploy` fails: `environment secret X is not set` | Secret missing or empty on that Environment (not the repo!) | `gh secret list --env <env>`. Repo-level secrets do **not** satisfy an environment-scoped read. |
 | Smoke fails at `enter world`: *no available server for map map_01* | Nothing in the Redis registry. The server self-registers, so this means it could not reach Redis (`REDIS_ADDR` wrong/unset) or it is not running | `docker exec rpg-redis redis-cli HGETALL servers:id:gs-dotnet-map_01` — expect a hash with `TTL` between 1 and 15. Empty? Check the server log for `Registered <id> in Redis` or a registry warning. Do NOT write the key by hand: it will be overwritten or expire. |
-| Smoke passes on the VPS, real clients cannot join | `GAMESERVER_PUBLIC_ADDR` is listen-style (`:9200`). The Go smoketest rewrites a hostless address to its own loopback and so passes; real clients get the value verbatim and cannot dial it (a C# `TcpClient` throws) | Set it to `<public-host>:<port>` and redeploy. The game server warns at startup when the advertised address has no host part. |
+| Smoke passes on the VPS, real clients cannot join | `GAMESERVER_PUBLIC_ADDR` is listen-style (`:9200`). The Go smoketest rewrites a hostless address to its own loopback and so passes; real clients get the value verbatim and cannot dial it | Set it to `<public-host>:<port>` and redeploy. The game server warns at startup when the advertised address has no host part. |
+| Smoke passes on the VPS, real clients time out after `EnterWorld` | The game port is not reachable **over UDP** from the internet: the cloud firewall / security group allows only TCP, the port is published without `/udp`, or the client's `TRANSPORT_KEY` differs from the server's | Allow `<gameserver port>/udp` in every firewall layer (ufw is set by `bootstrap-vps.sh`; mirror it in the provider firewall). Check `docker ps` shows `…->9000/udp`. Compare keys. See `backend/docs/NETWORKING.md`. |
 | `bind: address already in use` | Host-mode processes still hold the ports the containers want (or another service does) | Containers mode stops host services first; if it persists: `ss -tlnp \| grep -E '8000\|9200'`. |
 | Container images pull 404 from `ghcr.io` | GHCR packages are **private by default**, even in a public repo | Make the package public (package → Settings → Change visibility), or add a pull secret. Dev/staging avoid this entirely by building images on the runner. |
 | Grafana password change had no effect | `GF_SECURITY_ADMIN_PASSWORD` is only read when Grafana *creates* the admin user, and `lgtm-data` persists that DB | See `MONITORING.md` § rotation procedure. |

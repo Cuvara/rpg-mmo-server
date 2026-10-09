@@ -83,7 +83,7 @@ func TestDotnetInterop_DeathEventReachesRedisAndRelay(t *testing.T) {
 	enc := messages.EncodingProto
 	userID := "e2e-death-hunter"
 
-	gwClient, err := NewMockClient(gwAddr)
+	gwClient, err := NewGatewayClient(gwAddr)
 	if err != nil {
 		t.Fatalf("connect to gateway: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestDotnetInterop_DeathEventReachesRedisAndRelay(t *testing.T) {
 	}
 	gwClient.Close()
 
-	gsClient, err := NewMockClient(enterResp.ServerAddr)
+	gsClient, err := NewGameClientFor(enterResp)
 	if err != nil {
 		t.Fatalf("connect to game server: %v", err)
 	}

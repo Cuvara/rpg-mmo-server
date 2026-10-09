@@ -61,7 +61,7 @@ public class SnapshotCadenceTests
         var options = new ServerOptions
         {
             ServerAddr = ":0", ServerId = ServerId, MapId = "map_cadence", Mode = "map",
-            Transport = TransportKind.Tcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
+            Transport = TransportKind.Kcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
             Capacity = 8, JwtSecret = JwtSecret, JoinTokenSecret = JwtSecret,
             SaveInterval = TimeSpan.FromSeconds(300), PlayerStore = new MemoryPlayerStore(),
             LoggerFactory = NullLoggerFactory.Instance
@@ -71,14 +71,14 @@ public class SnapshotCadenceTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
-        var socks = new List<TcpClient>();
+        var socks = new List<KcpTestClient>();
         var tasks = new List<Task<Reading>>();
         try
         {
             for (int i = 0; i < clients; i++)
             {
                 string userId = $"cad{i}-{Guid.NewGuid():N}"[..14];
-                var c = new TcpClient(); socks.Add(c);
+                var c = new KcpTestClient(); socks.Add(c);
                 await ConnectWithRetryAsync(c, port);
                 var stream = c.GetStream();
                 await WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.JoinToken,
@@ -136,7 +136,7 @@ public class SnapshotCadenceTests
             $"medIA={MedianInterArrivalMs:F1}ms p99IA={P99InterArrivalMs:F1}ms gaps=[{Gaps}]";
     }
 
-    private static async Task<Reading> ProbeAsync(NetworkStream stream, int idx, CancellationToken ct)
+    private static async Task<Reading> ProbeAsync(Stream stream, int idx, CancellationToken ct)
     {
         // Warm up: skip the first 3 seconds (join keyframe / phase-in).
         var sw = Stopwatch.StartNew();
@@ -213,7 +213,7 @@ public class SnapshotCadenceTests
         await stream.FlushAsync();
     }
 
-    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    private static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int a = 0; a < 50; a++)
         {

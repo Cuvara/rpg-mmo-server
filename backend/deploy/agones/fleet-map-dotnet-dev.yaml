@@ -70,7 +70,10 @@ spec:
         # `no "game" port in allocation status`.
         - name: game
           containerPort: 9000
-          protocol: TCP  # UDP when the fleet moves to KCP; see TRANSPORT_KEY below
+          # UDP: realtime gameplay is KCP/UDP only (ADR-32, "Realtime gameplay
+          # transport is KCP/UDP only"). A TCP port here leaves the game port
+          # unreachable and every client join times out.
+          protocol: UDP
           # Dynamic on purpose — do NOT switch to Static.
           # Agones assigns the host port at scheduling time and reports it on
           # GameServer.status.ports. Static would make containerPort == hostPort
@@ -565,6 +568,31 @@ spec:
                       name: gameserver-config
                       key: handshake-timeout-ms
                       optional: true
+                # KCP/UDP listener flood limits. Absent key = compiled-in default.
+                - name: GAMESERVER_KCP_MAX_SESSIONS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: kcp-max-sessions
+                      optional: true
+                - name: GAMESERVER_KCP_MAX_SESSIONS_PER_IP
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: kcp-max-sessions-per-ip
+                      optional: true
+                - name: GAMESERVER_KCP_NEW_SESSIONS_PER_SEC
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: kcp-new-sessions-per-sec
+                      optional: true
+                - name: GAMESERVER_KCP_DATAGRAMS_PER_SEC
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: kcp-datagrams-per-sec
+                      optional: true
                 - name: GAMESERVER_MIN_PROTOCOL_VERSION
                   valueFrom:
                     configMapKeyRef:
@@ -774,22 +802,21 @@ spec:
                       name: gameserver-config
                       key: bot-speed
                       optional: true
-                # KCP is not enabled on this fleet (protocol: TCP above), so
-                # TRANSPORT_KEY is unused — and the server WARNS if it is set
-                # while the transport is TCP, because the key is then ignored.
-                # It is still carried in the Secret so that turning KCP on is a
-                # two-line change here rather than a new secret-distribution
-                # problem discovered at the wrong moment. To enable:
-                #   protocol: UDP above, GAMESERVER_TRANSPORT=kcp here, the same
-                #   TRANSPORT_KEY on the gateway, and ALLOCATOR_TRANSPORT=kcp so
-                #   the gateway announces the right transport.
-                # - name: GAMESERVER_TRANSPORT
-                #   value: "kcp"
-                # - name: TRANSPORT_KEY
-                #   valueFrom:
-                #     secretKeyRef:
-                #       name: rpg-realtime-secrets
-                #       key: transport-key
+                # The game server always listens KCP/UDP; there is no transport
+                # switch (GAMESERVER_TRANSPORT unset or "kcp" only — any other
+                # value is fatal at startup), so none is set here.
+                # TRANSPORT_KEY is the optional kcp-go-compatible AES-256
+                # datagram pre-shared key (32-byte hex). Every client must be
+                # given the same key (-cuvara-transport-key / CUVARA_TRANSPORT_KEY).
+                # Empty = plaintext datagrams + a startup WARN (dev only);
+                # authenticated confidentiality is the sealed session
+                # (GAMESERVER_SEALED), independent of this key.
+                - name: TRANSPORT_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: transport-key
+                      optional: true
                 # LOG_LEVEL was here and was removed: `grep -rn LOG_LEVEL
                 # backend/gameserver-dotnet/GameServer/` returns nothing. The C#
                 # server pins the console logger to Information in Program.cs and

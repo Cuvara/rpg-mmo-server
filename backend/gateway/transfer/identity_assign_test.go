@@ -28,7 +28,7 @@ func TestAssignMapCarriesTheServersIdentityKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := registered(t, storage.ServerInfo{
+	reg := registered(t, storage.ServerInfo{Transport: "kcp",
 		ServerID:    "srv-identity",
 		MapID:       "map_identity",
 		Addr:        "10.0.0.1:9000",
@@ -55,7 +55,7 @@ func TestAssignMapCarriesTheServersIdentityKey(t *testing.T) {
 // gateway and server ship first, and a gateway that refused to assign an
 // identity-less server would take every un-upgraded map offline at deploy time.
 func TestAssignMapSucceedsWithNoIdentityKey(t *testing.T) {
-	reg := registered(t, storage.ServerInfo{
+	reg := registered(t, storage.ServerInfo{Transport: "kcp",
 		ServerID: "srv-old", MapID: "map_old", Addr: "10.0.0.2:9000", Capacity: 100,
 	})
 
@@ -82,7 +82,7 @@ func TestAssignMapTreatsAMalformedIdentityKeyAsAbsent(t *testing.T) {
 		"empty padding": "====",
 	} {
 		t.Run(name, func(t *testing.T) {
-			reg := registered(t, storage.ServerInfo{
+			reg := registered(t, storage.ServerInfo{Transport: "kcp",
 				ServerID: "srv-bad", MapID: "map_bad", Addr: "10.0.0.3:9000",
 				Capacity: 100, IdentityKey: bad,
 			})

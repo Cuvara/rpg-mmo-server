@@ -1,6 +1,7 @@
 package load
 
 import (
+	"github.com/duycuong/rpg-mmo/shared/transport"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -75,7 +76,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 			Encoding:         r.cfg.Encoding.String(),
 			BaselineEntities: r.cfg.BaselineEntities,
 			MapID:            r.cfg.MapID,
-			Transport:        r.cfg.Transport,
+			Transport:        transport.Gameplay,
 			HoldGateway:       r.cfg.HoldGateway,
 			TickBudgetSec:     budgetSec,
 			SnapshotPeriodSec: rates.SnapshotPeriod().Seconds(),
@@ -141,6 +142,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 	// skew of a few hundred milliseconds at the edges.
 	windowStart := time.Now()
 	measuring.Store(true)
+	kcpBefore := snapshotKCP()
 	beforeGS, errGS := fetchScrape(runCtx, r.hc, r.cfg.GSMetricsURL)
 	beforeGW, errGW := fetchScrape(runCtx, r.hc, r.cfg.GWMetricsURL)
 
@@ -151,6 +153,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 
 	afterGS, errGS2 := fetchScrape(runCtx, r.hc, r.cfg.GSMetricsURL)
 	afterGW, errGW2 := fetchScrape(runCtx, r.hc, r.cfg.GWMetricsURL)
+	kcpAfter := snapshotKCP()
 	measuring.Store(false)
 	windowSec := time.Since(windowStart).Seconds()
 
@@ -170,6 +173,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		serverWindowSec = windowSec
 	}
 	res.Client = aggregateClients(stats, windowSec)
+	res.Client.KCP = kcpDelta(kcpBefore, kcpAfter)
 	res.Server = aggregateServer(beforeGS, afterGS, beforeGW, afterGW, serverWindowSec, budgetSec,
 		firstErr(errGS, errGS2), firstErr(errGW, errGW2))
 	reconcile(&res.Client, &res.Server)

@@ -57,10 +57,10 @@ public class EntityLifecycleTests
         Assert.Equal(1, h.Server.Connections);
         Assert.Equal(1, metrics.PlayersOnline);
 
-        // RST, not FIN: zero linger makes Close abort the connection the way a killed
-        // process does, rather than shutting it down politely.
-        client.Client.LingerState = new System.Net.Sockets.LingerOption(true, 0);
-        client.Close();
+        // Vanish, not a graceful close: the client stops sending and receiving without a
+        // word, the way a killed process does. KCP has no RST, so the server learns of it
+        // only through its idle timeout (shortened for this harness) or dead link.
+        client.Abort();
 
         // Polled here rather than through Harness.WaitForAsync because that helper's
         // failure message names the ENTITY count, and a diagnostic that sends the next
@@ -133,11 +133,10 @@ public class EntityLifecycleTests
         const int vanishers = 8;
         for (int i = 0; i < vanishers; i++)
         {
-            var client = new TcpClient();
+            var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, h.Port);
             await SendJoinAsync(client.GetStream(), $"user-vanisher-{i}", JwtSecret);
-            client.Client.Close(0); // RST, not a graceful FIN
-            client.Dispose();
+            client.Abort(); // vanish, not a graceful close
         }
 
         // At least one join got far enough to attach an entity...
@@ -175,11 +174,10 @@ public class EntityLifecycleTests
 
         for (int i = 0; i < 5; i++)
         {
-            var doomed = new TcpClient();
+            var doomed = new KcpTestClient();
             await ConnectWithRetryAsync(doomed, h.Port);
             await SendJoinAsync(doomed.GetStream(), $"user-doomed-{i}", JwtSecret);
-            doomed.Client.Close(0);
-            doomed.Dispose();
+            doomed.Abort();
         }
 
         // Only the aborted joins' entities go away; the stayer keeps both entity and count.
@@ -199,7 +197,7 @@ public class EntityLifecycleTests
         using var metrics = new GameMetrics("map_lifecycle", $"test.{Guid.NewGuid():N}");
         await using var h = await Harness.StartAsync(metrics, capacity: cohort + 5);
 
-        var clients = new List<TcpClient>();
+        var clients = new List<KcpTestClient>();
         for (int i = 0; i < cohort; i++)
         {
             clients.Add(await h.JoinAsync($"cohort-{i}"));
@@ -262,7 +260,11 @@ public class EntityLifecycleTests
                 ServerId = ServerId,
                 MapId = "map_lifecycle",
                 Mode = "map",
-                Transport = TransportKind.Tcp,
+                Transport = TransportKind.Kcp,
+                // A vanished KCP peer is only ever detected by silence. One second keeps the
+                // abrupt-disconnect cases fast without racing a live client: every joined
+                // client here ACKs a 20Hz snapshot stream.
+                KcpLimits = KcpListenerOptions.Default with { IdleTimeoutMs = 1000 },
                 TickRate = 20,
                 Capacity = capacity,
                 JwtSecret = JwtSecret,
@@ -284,9 +286,9 @@ public class EntityLifecycleTests
         }
 
         /// <summary>Join and wait until the server reports the player as online.</summary>
-        public async Task<TcpClient> JoinAsync(string userId)
+        public async Task<KcpTestClient> JoinAsync(string userId)
         {
-            var client = new TcpClient();
+            var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, Port);
             var stream = client.GetStream();
             await SendJoinAsync(stream, userId, JwtSecret);
@@ -381,7 +383,7 @@ public class EntityLifecycleTests
         await stream.FlushAsync();
     }
 
-    internal static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    internal static async Task ConnectWithRetryAsync(KcpTestClient client, int port)
     {
         for (int attempt = 0; attempt < 60; attempt++)
         {

@@ -1,6 +1,13 @@
 # Local dev override: remap realtime profile containers to canonical ports
-# so Unity client on Windows connects to 127.0.0.1:8000 (gateway) and
-# 127.0.0.1:9000 (gameserver) via WSL2 localhostForwarding.
+# so Unity client on Windows connects to 127.0.0.1:8000 (gateway, TCP) and
+# 127.0.0.1:9000 (gameserver, KCP over UDP).
+#
+# UDP CAVEAT (MEASURED 2026-10-08): WSL2 localhostForwarding in the default NAT
+# networking mode carries TCP only. A Windows client sending UDP to 127.0.0.1
+# times out; the same datagram to the WSL VM address is answered. stack.sh
+# therefore exports LOCAL_ADVERTISE_HOST=<wsl-ip> under WSL2 NAT and the game
+# servers below advertise it (backend/docs/NETWORKING.md). Mirrored networking
+# or a client on the same Linux host does not need this.
 #
 # Default compose ports for realtime containers are offset (8100, 9200)
 # to allow host-run binaries alongside. This override puts them on the
@@ -14,12 +21,15 @@ services:
 
   gameserver-dotnet:
     ports:
-      - "9000:9000"
+      # Game port is KCP/UDP only; metrics stay TCP.
+      - "9000:9000/udp"
       - "9101:9101"
     environment:
-      # Client-dialable address: since the container publishes 9000:9000,
-      # clients reach it at 127.0.0.1:9000 via WSL2 localhost forwarding.
-      GAMESERVER_PUBLIC_ADDR: "127.0.0.1:9000"
+      # Client-dialable address for the published 9000:9000/udp. The host is
+      # LOCAL_ADVERTISE_HOST, which stack.sh sets to the WSL VM address under
+      # WSL2 NAT (Windows localhost forwarding is TCP-only, so 127.0.0.1 does
+      # not carry UDP to a Windows client there); 127.0.0.1 otherwise.
+      GAMESERVER_PUBLIC_ADDR: "${LOCAL_ADVERTISE_HOST:-127.0.0.1}:9000"
 
   # Second game server for map_02. Same image, different map_id + ports.
   # Gateway routes MsgEnterWorld{MapID: "map_02"} to this server via Redis.
@@ -94,18 +104,29 @@ services:
       GAMESERVER_CAPACITY: ${GAMESERVER_CAPACITY:-}
       GAMESERVER_MAX_PENDING_HANDSHAKES: ${GAMESERVER_MAX_PENDING_HANDSHAKES:-}
       GAMESERVER_HANDSHAKE_TIMEOUT_MS: ${GAMESERVER_HANDSHAKE_TIMEOUT_MS:-}
+      # KCP/UDP listener flood limits (sessions, per-IP, accept rate, datagram rate).
+      # Empty = compiled-in defaults. Raise MAX_SESSIONS_PER_IP behind carrier NAT.
+      GAMESERVER_KCP_MAX_SESSIONS: ${GAMESERVER_KCP_MAX_SESSIONS:-}
+      # Every client of a local stack arrives from this one host (and through
+      # docker-proxy, from one bridge address), so the per-IP cap that protects a
+      # public server would refuse the 17th local player or load-test bot.
+      GAMESERVER_KCP_MAX_SESSIONS_PER_IP: ${GAMESERVER_KCP_MAX_SESSIONS_PER_IP:-4096}
+      GAMESERVER_KCP_NEW_SESSIONS_PER_SEC: ${GAMESERVER_KCP_NEW_SESSIONS_PER_SEC:-}
+      GAMESERVER_KCP_DATAGRAMS_PER_SEC: ${GAMESERVER_KCP_DATAGRAMS_PER_SEC:-}
       GAMESERVER_MIN_PROTOCOL_VERSION: ${GAMESERVER_MIN_PROTOCOL_VERSION:-}
       GAMESERVER_MAX_INPUTS_PER_TICK: ${GAMESERVER_MAX_INPUTS_PER_TICK:-}
       GAMESERVER_MAX_PENDING_INPUTS: ${GAMESERVER_MAX_PENDING_INPUTS:-}
       GAMESERVER_GATHER_WORKERS: ${GAMESERVER_GATHER_WORKERS:-}
-      # tcp (default) or kcp. The value is advertised to clients through the registry,
-      # so it must describe what the listener actually speaks. The KCP pre-shared key
-      # is TRANSPORT_KEY, which carries no GAMESERVER_ prefix and is not gated here.
-      GAMESERVER_TRANSPORT: ${GAMESERVER_TRANSPORT:-}
+      # GAMESERVER_TRANSPORT is NOT forwarded: realtime gameplay is KCP/UDP only and
+      # the server refuses to start with any value other than "kcp". The optional
+      # KCP datagram pre-shared key (32-byte hex; empty = plaintext + WARN, dev only)
+      # carries no GAMESERVER_ prefix. Clients need the same value
+      # (-cuvara-transport-key / CUVARA_TRANSPORT_KEY).
+      TRANSPORT_KEY: ${TRANSPORT_KEY:-}
       METRICS_ADDR: ":9101"
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-      GAMESERVER_PUBLIC_ADDR: "127.0.0.1:9002"
+      GAMESERVER_PUBLIC_ADDR: "${LOCAL_ADVERTISE_HOST:-127.0.0.1}:9002"
       # Follows the meta-hop TLS decision (ADR-24) rather than being configured
       # independently. The C# game server is a SECOND consumer of this hop --
       # NakamaClient.cs POSTs /v2/rpc/reward_kills?http_key=... -- so if Nakama
@@ -169,5 +190,5 @@ services:
       GAMESERVER_ENEMY_ATTACK_INTERVAL: ${GAMESERVER_ENEMY_ATTACK_INTERVAL:-}
       GAMESERVER_PLAYER_RESPAWN: ${GAMESERVER_PLAYER_RESPAWN:-}
     ports:
-      - "9002:9000"
+      - "9002:9000/udp"
       - "9103:9101"

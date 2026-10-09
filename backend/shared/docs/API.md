@@ -304,29 +304,41 @@ if err := store.Migrate(ctx); err != nil { return err }
 var players storage.PlayerStore = store
 ```
 
-## `transport` — pluggable realtime transport
+## `transport` — listen/dial for the two framed hops
 
-Listen/dial abstraction for the realtime path. The wire codec in
+Listen/dial abstraction for the two framed hops a client opens. The wire codec in
 `shared/messages` is a 4-byte length prefix over an `io.Reader`/`io.Writer`, so
-it works on any `net.Conn`; this package only decides which `net.Conn` the
-servers get.
+it works on any `net.Conn`; this package only decides which `net.Conn` each hop
+gets, and that answer is fixed per hop:
+
+| Hop | Kind | Notes |
+|-----|------|-------|
+| Client → Gateway (auth + redirect) | `tcp` (`KindTCP`) | optionally wrapped in TLS by the gateway (ADR-23). **Never** a gameplay transport |
+| Client → Game server (gameplay) | `kcp` (`KindKCP` = `Gameplay`) | KCP over UDP, the **only** gameplay transport (ADR-32). No fallback to TCP |
+
+Client → Nakama (meta) is HTTP/RPC and does not go through this package;
+Nakama's WebSocket is not used for gameplay.
 
 | Function | Signature | Notes |
 |----------|-----------|-------|
-| `Listen` | `Listen(kind, addr string, opts ...Option) (net.Listener, error)` | `kind` is `"tcp"`, `"kcp"` or `""` (= tcp) |
+| `Gameplay` | `= "kcp"` | the transport every game server registers, the gateway announces in `EnterWorldResponse.Transport`, and the only value a gameplay dialer accepts |
+| `ValidateGameplay` | `ValidateGameplay(kind string) error` | `nil` only for `kcp` (any case). Empty, `tcp` and unknown values wrap `ErrNotGameplayTransport` |
+| `DialGameplay` | `DialGameplay(advertised, addr string, timeout time.Duration, opts ...Option) (net.Conn, error)` | dial a game server. `advertised` is `EnterWorldResponse.Transport`; anything but `kcp` is refused before a packet is sent — no fallback |
+| `Listen` | `Listen(kind, addr string, opts ...Option) (net.Listener, error)` | `kind` is `"kcp"` or `"tcp"`; empty is an error |
 | `Dial` | `Dial(kind, addr string, timeout time.Duration, opts ...Option) (net.Conn, error)` | `timeout` bounds the TCP handshake only |
 | `WithKey` | `WithKey(key string) Option` | pre-shared KCP encryption key; `""` = plaintext |
 | `WithLogger` | `WithLogger(*slog.Logger) Option` | logger for the unencrypted-listener warning |
 | `Encrypted` | `Encrypted(opts ...Option) bool` | whether a given option set encrypts |
 | `DeriveKey` | `DeriveKey(key string) ([]byte, error)` | 32-byte AES-256 key; validate config at start-up |
 | `KeyEnvVar` | `= "TRANSPORT_KEY"` | env var name |
-| `Normalize` | `Normalize(kind string) string` | lowercases; `""` → `"tcp"` |
-| `Validate` | `Validate(kind string) error` | `""`/`tcp`/`kcp` are valid |
-| `Kinds` | `Kinds() []string` | `["tcp", "kcp"]` |
+| `Normalize` | `Normalize(kind string) string` | lowercases and trims; `""` stays `""` (no longer mapped to `tcp`) |
+| `Validate` | `Validate(kind string) error` | `tcp`/`kcp` are valid; `""` is an **error** |
+| `Kinds` | `Kinds() []string` | `["kcp", "tcp"]` (`tcp` for the gateway hop only) |
 
 ```go
-ln, err := transport.Listen("kcp", ":9000")   // net.Listener
-conn, err := transport.Dial("kcp", addr, 2*time.Second) // net.Conn
+ln, err := transport.Listen(transport.KindTCP, ":8000")          // gateway hop
+conn, err := transport.DialGameplay(resp.Transport, resp.ServerAddr,
+    2*time.Second, transport.WithKey(os.Getenv(transport.KeyEnvVar))) // gameplay hop
 
 // Encrypted (both peers need the SAME key):
 ln, err := transport.Listen("kcp", ":9000", transport.WithKey(os.Getenv("TRANSPORT_KEY")))
@@ -355,7 +367,10 @@ no session is ever established and no error is returned. Verified by
 `TestKCPEncryptionRoundtrip`, which covers matching-key success and all three
 mismatch cases (encrypted↔plaintext both ways, and two different keys).
 
-TCP ignores the key entirely; use TLS or the cluster network there.
+TCP ignores the key entirely; the gateway hop uses TLS instead (ADR-23). The
+key is a game-server and client setting; the gateway warns if it is set there.
+Authenticated confidentiality on the gameplay hop is the sealed session, not
+this key.
 
 KCP is `github.com/xtaci/kcp-go/v5` with a game profile applied to every
 session (exported as constants so callers can log/inspect them):
@@ -382,15 +397,18 @@ send `MsgDisconnect` first.
 | Field | Env | Default |
 |-------|-----|---------|
 | `GameDBURL` | `GAME_DB_URL` | *(empty)* — empty means "no PostgreSQL configured"; services fall back to their in-memory store |
-| `GatewayTransport` | `GATEWAY_TRANSPORT` | `tcp` — realtime transport the gateway listens with (`tcp` or `kcp`) |
-| `GameServerTransport` | `GAMESERVER_TRANSPORT` | `tcp` — realtime transport the game server listens with (`tcp` or `kcp`) |
 | `JWTSecret` | `JWT_SECRET` | `dev-secret-change-me` — client auth token. Comma-separated list to rotate (`new,old`) |
 | `JoinTokenSecret` | `JOIN_TOKEN_SECRET` | *(empty)* — gateway→gameserver join token. Empty means "reuse `JWT_SECRET`" (with a start-up warning) |
-| `TransportKey` | `TRANSPORT_KEY` | *(empty)* — pre-shared KCP encryption key, 32-byte hex recommended. Empty = plaintext |
+| `TransportKey` | `TRANSPORT_KEY` | *(empty)* — pre-shared KCP encryption key for the gameplay hop, 32-byte hex recommended. Empty = plaintext |
 | `GatewayConnRatePerMin` | `GATEWAY_CONN_RATE_PER_MIN` | `10` — accepted connections/min per source IP (`0` disables) |
 | `GatewayConnBurst` | `GATEWAY_CONN_BURST` | `10` |
 | `GatewayMsgRatePerSec` | `GATEWAY_MSG_RATE_PER_SEC` | `60` — inbound frames/s per connection (`0` disables) |
 | `GatewayMsgBurst` | `GATEWAY_MSG_BURST` | `120` |
+
+There is no transport field: `GatewayTransport` / `GameServerTransport` were
+removed when gameplay became KCP-only. The gateway hop is always TCP and the
+gameplay hop always KCP. (The gateway refuses `GATEWAY_TRANSPORT` other than
+`tcp`; the C# game server refuses `GAMESERVER_TRANSPORT` other than unset/`kcp`.)
 
 `Config.EffectiveJoinTokenSecret() (spec string, sharedWithAuth bool)` resolves
 the join-token secret and reports whether the `JWT_SECRET` fallback was taken,

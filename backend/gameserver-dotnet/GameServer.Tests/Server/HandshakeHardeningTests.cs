@@ -4,6 +4,7 @@ using GameServer.Net;
 using GameServer.Observability;
 using RpgMmo.Wire.V1;
 using Xunit;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -51,7 +52,7 @@ public class HandshakeHardeningTests
         await using var h = await HardeningHarness.StartAsync(
             metrics, maxPendingHandshakes: 2, handshakeTimeout: TimeSpan.FromSeconds(1));
 
-        var sockets = new List<TcpClient>();
+        var sockets = new List<KcpTestClient>();
         try
         {
             for (int i = 0; i < 5; i++) sockets.Add(await h.ConnectAsync());
