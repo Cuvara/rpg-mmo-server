@@ -31,6 +31,12 @@ namespace GameServer.Observability;
 /// gameserver.kcp.sessions.closed      -> gameserver_kcp_sessions_closed_total{reason}
 /// gameserver.kcp.datagrams.dropped    -> gameserver_kcp_datagrams_dropped_total{reason}
 /// gameserver.kcp.writes.rejected      -> gameserver_kcp_writes_rejected_total
+/// gameserver.gc.collections          -> gameserver_gc_collections_total{generation}
+/// gameserver.gc.allocated.bytes      -> gameserver_gc_allocated_bytes_total
+/// gameserver.gc.pause.seconds        -> gameserver_gc_pause_seconds_total
+/// gameserver.gc.heap.bytes           -> gameserver_gc_heap_bytes
+/// gameserver.process.cpu.seconds     -> gameserver_process_cpu_seconds_total
+/// gameserver.process.working_set.bytes -> gameserver_process_working_set_bytes
 /// gameserver.player.saves             -> gameserver_player_saves_total
 /// gameserver.events.published         -> gameserver_events_published_total
 /// gameserver.events.dropped           -> gameserver_events_dropped_total
@@ -556,6 +562,53 @@ public sealed class GameMetrics : IDisposable
                          "server has them equal. Deliberately not derived from wall time — " +
                          "a wall-clock rate on a host with a fast CLOCK_REALTIME reports a " +
                          "healthy loop as slow, which is issue #147. 0 = not measured yet.");
+
+        // Runtime cost, read from the GC and the process at scrape time. A load run needs
+        // these beside tick duration: a tick that misses its budget because the collector
+        // paused the process looks identical to one that did too much work, and only the
+        // pause counter tells them apart. All NativeAOT-safe (System.GC / Environment).
+        _meter.CreateObservableCounter(
+            "gameserver.gc.collections",
+            ObserveGcCollections,
+            description: "Garbage collections since process start, labelled by generation (0, 1, 2).");
+        _meter.CreateObservableCounter(
+            "gameserver.gc.allocated.bytes",
+            () => new Measurement<long>(GC.GetTotalAllocatedBytes(false), _mapTagArray),
+            description: "Bytes allocated on the managed heap since process start. Its rate during a " +
+                         "run is the allocation pressure the hot paths are meant to keep near zero.");
+        _meter.CreateObservableCounter(
+            "gameserver.gc.pause.seconds",
+            () => new Measurement<double>(GC.GetTotalPauseDuration().TotalSeconds, _mapTagArray),
+            description: "Total time the runtime paused the process for garbage collection since start. " +
+                         "Every second here is a second the tick thread could not run.");
+        _meter.CreateObservableGauge(
+            "gameserver.gc.heap.bytes",
+            () => new Measurement<long>(GC.GetGCMemoryInfo().HeapSizeBytes, _mapTagArray),
+            description: "Managed heap size after the last collection.");
+        _meter.CreateObservableCounter(
+            "gameserver.process.cpu.seconds",
+            ObserveProcessCpuSeconds,
+            description: "CPU time (user + system) this process has used since start, all threads.");
+        _meter.CreateObservableGauge(
+            "gameserver.process.working_set.bytes",
+            () => new Measurement<long>(Environment.WorkingSet, _mapTagArray),
+            description: "Physical memory mapped to the process (resident set).");
+    }
+
+    private Measurement<double> ObserveProcessCpuSeconds()
+    {
+        using var self = System.Diagnostics.Process.GetCurrentProcess();
+        return new Measurement<double>(self.TotalProcessorTime.TotalSeconds, _mapTagArray);
+    }
+
+    private IEnumerable<Measurement<long>> ObserveGcCollections()
+    {
+        for (int gen = 0; gen <= GC.MaxGeneration; gen++)
+        {
+            yield return new Measurement<long>(GC.CollectionCount(gen),
+                _mapTagArray[0],
+                new KeyValuePair<string, object?>("generation", gen.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        }
     }
 
     /// <summary>

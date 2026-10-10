@@ -72,7 +72,7 @@ func scrapeText(body string, at time.Time) *Scrape {
 		// Keep the outcome dimension too: gateway_auth_total is split by
 		// result="ok"/"fail" and summing them would report every attempt as a
 		// success. Stored as `family|result=ok`.
-		for _, dim := range []string{"result", "reason", "status"} {
+		for _, dim := range []string{"result", "reason", "status", "generation"} {
 			if v, ok := labelValue(labels, dim); ok {
 				s.Values[name+"|"+dim+"="+v] += val
 			}

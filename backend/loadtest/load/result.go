@@ -41,10 +41,10 @@ type ResultConfig struct {
 	// BaselineEntities is the entity count the run was told to expect from an
 	// empty server (-baseline-entities). Recorded because it loosens the
 	// validity gate, and a loosened gate must be visible in the result.
-	BaselineEntities int     `json:"baseline_entities"`
-	MapID            string  `json:"map_id"`
-	Transport        string  `json:"transport"`
-	HoldGateway      bool    `json:"hold_gateway"`
+	BaselineEntities int    `json:"baseline_entities"`
+	MapID            string `json:"map_id"`
+	Transport        string `json:"transport"`
+	HoldGateway      bool   `json:"hold_gateway"`
 	// TickBudgetSec is 1/SIM_CRITICAL_HZ: the budget for ONE BASE TICK, which is
 	// what gameserver_tick_duration_seconds times.
 	TickBudgetSec float64 `json:"tick_budget_sec"`
@@ -167,6 +167,28 @@ type ServerStats struct {
 	// every client sees "server closed the connection" and the run looks like it
 	// found a breaking point when it found a deployment.
 	RestartedMidRun bool `json:"restarted_mid_run,omitempty"`
+
+	// Game-server runtime cost over the window (gameserver_gc_*, gameserver_process_*).
+	// Zero on a server older than those metrics. GCPauseRatio is pause seconds per
+	// second of window: the share of wall time the tick thread could not run at all.
+	CPUCores         float64 `json:"cpu_cores"`
+	WorkingSetBytes  float64 `json:"working_set_bytes"`
+	GCHeapBytes      float64 `json:"gc_heap_bytes"`
+	AllocBytesPerSec float64 `json:"alloc_bytes_per_sec"`
+	GCGen0           float64 `json:"gc_gen0_window"`
+	GCGen1           float64 `json:"gc_gen1_window"`
+	GCGen2           float64 `json:"gc_gen2_window"`
+	GCPauseSec       float64 `json:"gc_pause_sec_window"`
+	GCPauseRatio     float64 `json:"gc_pause_ratio"`
+
+	// Server-side KCP listener counters over the window (gameserver_kcp_*), summed
+	// over their reasons; SessionsLive is the end-of-window gauge.
+	KCPSessionsLive     float64 `json:"kcp_sessions_live"`
+	KCPSessionsCreated  float64 `json:"kcp_sessions_created_window"`
+	KCPSessionsRejected float64 `json:"kcp_sessions_rejected_window"`
+	KCPSessionsClosed   float64 `json:"kcp_sessions_closed_window"`
+	KCPDatagramsDropped float64 `json:"kcp_datagrams_dropped_window"`
+	KCPRejectedPerIPCap float64 `json:"kcp_rejected_per_ip_cap_window"`
 }
 
 // Verdict records which acceptance criteria held. A run is Degraded when any

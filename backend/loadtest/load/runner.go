@@ -1,11 +1,11 @@
 package load
 
 import (
-	"github.com/duycuong/rpg-mmo/shared/transport"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 	"io"
 	"math"
 	"net/http"
@@ -67,16 +67,16 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		RunID:   runID,
 		Started: started,
 		Config: ResultConfig{
-			Players:          r.cfg.Players,
-			RampRate:         r.cfg.RampRate,
-			DurationSec:      r.cfg.Duration.Seconds(),
-			ClientTickHz:     r.cfg.TickRate,
-			AuthMode:         string(r.cfg.AuthMode),
-			Movement:         r.cfg.Movement,
-			Encoding:         r.cfg.Encoding.String(),
-			BaselineEntities: r.cfg.BaselineEntities,
-			MapID:            r.cfg.MapID,
-			Transport:        transport.Gameplay,
+			Players:           r.cfg.Players,
+			RampRate:          r.cfg.RampRate,
+			DurationSec:       r.cfg.Duration.Seconds(),
+			ClientTickHz:      r.cfg.TickRate,
+			AuthMode:          string(r.cfg.AuthMode),
+			Movement:          r.cfg.Movement,
+			Encoding:          r.cfg.Encoding.String(),
+			BaselineEntities:  r.cfg.BaselineEntities,
+			MapID:             r.cfg.MapID,
+			Transport:         transport.Gameplay,
 			HoldGateway:       r.cfg.HoldGateway,
 			TickBudgetSec:     budgetSec,
 			SnapshotPeriodSec: rates.SnapshotPeriod().Seconds(),
@@ -289,6 +289,26 @@ func aggregateServer(beforeGS, afterGS, beforeGW, afterGW *Scrape, windowSec, ti
 		out.Entities = afterGS.Get("gameserver_entities")
 		out.SnapshotsSent = delta(beforeGS, afterGS, "gameserver_snapshots_sent_total")
 		out.ProcessedInputs = delta(beforeGS, afterGS, "gameserver_tick_processed_inputs_total")
+
+		if windowSec > 0 {
+			out.CPUCores = round4(delta(beforeGS, afterGS, "gameserver_process_cpu_seconds_total") / windowSec)
+			out.AllocBytesPerSec = round2(delta(beforeGS, afterGS, "gameserver_gc_allocated_bytes_total") / windowSec)
+		}
+		out.WorkingSetBytes = afterGS.Get("gameserver_process_working_set_bytes")
+		out.GCHeapBytes = afterGS.Get("gameserver_gc_heap_bytes")
+		out.GCGen0 = delta(beforeGS, afterGS, "gameserver_gc_collections_total|generation=0")
+		out.GCGen1 = delta(beforeGS, afterGS, "gameserver_gc_collections_total|generation=1")
+		out.GCGen2 = delta(beforeGS, afterGS, "gameserver_gc_collections_total|generation=2")
+		out.GCPauseSec = round6(delta(beforeGS, afterGS, "gameserver_gc_pause_seconds_total"))
+		if windowSec > 0 {
+			out.GCPauseRatio = round6(out.GCPauseSec / windowSec)
+		}
+		out.KCPSessionsLive = afterGS.Get("gameserver_kcp_sessions")
+		out.KCPSessionsCreated = delta(beforeGS, afterGS, "gameserver_kcp_sessions_created_total")
+		out.KCPSessionsRejected = delta(beforeGS, afterGS, "gameserver_kcp_sessions_rejected_total")
+		out.KCPSessionsClosed = delta(beforeGS, afterGS, "gameserver_kcp_sessions_closed_total")
+		out.KCPDatagramsDropped = delta(beforeGS, afterGS, "gameserver_kcp_datagrams_dropped_total")
+		out.KCPRejectedPerIPCap = delta(beforeGS, afterGS, "gameserver_kcp_sessions_rejected_total|reason=per_ip_cap")
 	}
 	if afterGW != nil {
 		out.GatewayConnsActive = afterGW.Get("gateway_connections_active")
