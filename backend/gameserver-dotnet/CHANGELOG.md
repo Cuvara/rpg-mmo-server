@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **KCP receive-thread observability.** `gameserver_kcp_datagrams_received_total` and
+  `gameserver_kcp_receive_busy_seconds_total` (rate = utilisation of the single receive thread
+  every session shares), and a startup WARNING when the OS caps the 4 MiB UDP socket buffers
+  (`net.core.rmem_max` / `wmem_max`, host-wide). Found in a 95-player load run with AI on: the
+  thread ran 40-55% busy (~40 us per datagram), and in 2 of 4 runs the kernel dropped ~40% of
+  inbound datagrams (`RcvbufErrors`), closing 29-36 sessions as `dead_link`.
+
 ### Changed
 - **KCP output reuses one datagram buffer per session** instead of allocating one array per
   outgoing packet (output runs under the session lock and the listener sends synchronously).

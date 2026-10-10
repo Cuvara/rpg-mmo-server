@@ -99,6 +99,12 @@ is `"kcp"`.
     with the Agones-assigned port. Never the pod IP or the node's private address; `127.0.0.1`
     only on a single-host k3d with the client on that host. Multi-node clusters have no single
     correct value (ADR-16).
+- **Host UDP buffer limits.** Every KCP session on a game server shares one UDP socket, which
+  asks for 4 MiB buffers; Linux silently caps that at `net.core.rmem_max` / `wmem_max`
+  (212992 bytes by default) and a container cannot raise them. Set both to at least 4 MiB
+  **on the host / node** (`scripts/bootstrap-vps.sh` writes `/etc/sysctl.d/90-rpg-kcp.conf`
+  with 8 MiB; on k8s nodes and in WSL2 set them by hand). The game server logs a WARNING
+  naming the cap when it is too small.
 - **VPS firewall.** `scripts/bootstrap-vps.sh` opens the gateway port as TCP and the game port
   as **UDP only**. Mirror both in the provider firewall (security group), which sits in front
   of ufw. Under Agones on a real node, open the Agones range as UDP.
@@ -148,6 +154,7 @@ there is no handshake to refuse, so nothing names the cause.
 | Join timeout, k3d | serverlb publishes the Agones range as TCP | `docker port k3d-<cluster>-serverlb 7010/udp`; `dev-up.sh` reports it |
 | Join timeout, Agones | Fleet port `protocol: TCP` | `kubectl get gs -o yaml` -> `ports[].protocol: UDP` |
 | Join timeout, one network only | Advertised host not reachable from the client's network (loopback, pod IP, private IP) | registry `HGET servers:id:<id> addr`; `GAMESERVER_PUBLIC_ADDR` / `advertise-host` |
+| Mass `dead_link` session closes and KCP retransmits spiking under load, every client at once | Server UDP receive buffer overflowing (host `rmem_max` cap, or the single receive thread saturated) | `cat /proc/net/snmp` in the game-server container: `Udp: ... RcvbufErrors`; `gameserver_kcp_receive_busy_seconds_total` rate near 1; the startup WARNING "KCP socket buffers capped" |
 | Join timeout, works without a key | `TRANSPORT_KEY` mismatch between client and server | compare the server env / Secret with the client flag; datagrams with the wrong key decrypt to noise and are dropped silently |
 | Join timeout, Windows client vs WSL2 stack | WSL2 NAT localhost forwarding not carrying UDP | see Local development |
 | Gateway answers an assignment error | The server registered a transport other than `kcp` (an old image) | registry `HGET servers:id:<id> transport`; redeploy the KCP-only image |

@@ -31,6 +31,8 @@ namespace GameServer.Observability;
 /// gameserver.kcp.sessions.closed      -> gameserver_kcp_sessions_closed_total{reason}
 /// gameserver.kcp.datagrams.dropped    -> gameserver_kcp_datagrams_dropped_total{reason}
 /// gameserver.kcp.writes.rejected      -> gameserver_kcp_writes_rejected_total
+/// gameserver.kcp.datagrams.received   -> gameserver_kcp_datagrams_received_total
+/// gameserver.kcp.receive.busy.seconds -> gameserver_kcp_receive_busy_seconds_total
 /// gameserver.gc.collections          -> gameserver_gc_collections_total{generation}
 /// gameserver.gc.allocated.bytes      -> gameserver_gc_allocated_bytes_total
 /// gameserver.gc.pause.seconds        -> gameserver_gc_pause_seconds_total
@@ -553,6 +555,16 @@ public sealed class GameMetrics : IDisposable
             ObserveKcpWritesRejected,
             description: "Application frames KCP could not carry (larger than the maximum message size); " +
                          "each one closes its session.");
+        _meter.CreateObservableCounter(
+            "gameserver.kcp.datagrams.received",
+            ObserveKcpDatagramsReceived,
+            description: "UDP datagrams the listener's receive thread took off the socket (handled or dropped).");
+        _meter.CreateObservableCounter(
+            "gameserver.kcp.receive.busy.seconds",
+            ObserveKcpReceiveBusySeconds,
+            description: "Time the single KCP receive thread spent handling datagrams. Its rate is that " +
+                         "thread's utilisation; every session shares it, and near 1.0 the kernel drops " +
+                         "datagrams (UDP RcvbufErrors) on every connection at once.");
 
         _meter.CreateObservableGauge(
             "gameserver.achieved_tick_hz",
@@ -878,6 +890,9 @@ public sealed class GameMetrics : IDisposable
     private Measurement<long> ObserveKcpSessionsCreated() => new(KcpStats?.SessionsCreated ?? 0, _mapTags);
 
     private Measurement<long> ObserveKcpWritesRejected() => new(KcpStats?.WritesRejected ?? 0, _mapTags);
+    private Measurement<long> ObserveKcpDatagramsReceived() => new(KcpStats?.DatagramsReceived ?? 0, _mapTags);
+    private Measurement<double> ObserveKcpReceiveBusySeconds() =>
+        new((KcpStats?.ReceiveBusyTicks ?? 0) / (double)System.Diagnostics.Stopwatch.Frequency, _mapTags);
 
     // Scrape-thread callbacks: allocating the measurement array here is fine, nothing
     // on the tick path ever runs them.

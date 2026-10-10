@@ -124,6 +124,7 @@ public sealed class KcpListener : IDisposable
         TrySetBuffer(() => _socket.ReceiveBufferSize = SocketBufferBytes);
         TrySetBuffer(() => _socket.SendBufferSize = SocketBufferBytes);
         LocalEndPoint = (IPEndPoint)_socket.LocalEndPoint!;
+        WarnIfBuffersCapped();
 
         // Dedicated threads, not thread-pool tasks. Every session's input and every ARQ
         // timer runs through these two loops, so a thread pool starved by unrelated
@@ -142,6 +143,31 @@ public sealed class KcpListener : IDisposable
     /// dropped by the kernel. Matches Go's <c>KCPSocketBuffer</c>.
     /// </summary>
     private const int SocketBufferBytes = 4 * 1024 * 1024;
+
+    /// <summary>
+    /// The buffer request above is best effort, and Linux silently caps it at
+    /// <c>net.core.rmem_max</c> / <c>wmem_max</c> (212992 bytes by default; reported back
+    /// doubled). That cap is host-wide - a container cannot raise it - and a capped receive
+    /// buffer is where a burst of datagrams for every session is lost (UDP RcvbufErrors),
+    /// which KCP then sees as loss on every connection at once. Say so at startup.
+    /// </summary>
+    private void WarnIfBuffersCapped()
+    {
+        int rcv = 0, snd = 0;
+        try { rcv = _socket.ReceiveBufferSize; snd = _socket.SendBufferSize; } catch (SocketException) { return; }
+        if (rcv < SocketBufferBytes || snd < SocketBufferBytes)
+        {
+            _logger.LogWarning(
+                "KCP socket buffers capped by the OS: receive={Rcv} send={Snd} bytes (requested {Want}). " +
+                "On Linux raise the HOST sysctls net.core.rmem_max and net.core.wmem_max to at least {Want} " +
+                "(a container cannot); see backend/docs/NETWORKING.md",
+                rcv, snd, SocketBufferBytes, SocketBufferBytes);
+        }
+        else
+        {
+            _logger.LogInformation("KCP socket buffers: receive={Rcv} send={Snd} bytes", rcv, snd);
+        }
+    }
 
     private static void TrySetBuffer(Action set)
     {
@@ -197,6 +223,7 @@ public sealed class KcpListener : IDisposable
                 continue;
             }
 
+            long dt0 = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 HandleDatagram(buffer.AsSpan(0, received), (IPEndPoint)from);
@@ -205,6 +232,8 @@ public sealed class KcpListener : IDisposable
             {
                 _logger.LogWarning(ex, "KCP datagram handling failed for {Remote}", from);
             }
+            Interlocked.Increment(ref Stats._datagramsReceived);
+            Interlocked.Add(ref Stats._receiveBusyTicks, System.Diagnostics.Stopwatch.GetTimestamp() - dt0);
         }
     }
 
