@@ -1,0 +1,20 @@
+[loadtest] run a7ad40dd: ramping 17 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 804ms; settling for 5s
+[loadtest] measuring for 1m0s
+
+--- loadtest results (tick budget 16.67ms @ 60Hz critical, snapshot period 66.67ms @ 15Hz world, rates from server /status, encoding=proto) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    kcp retx  kcp lost  fail  verdict
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+17       17      cluster  0.25ms    0.49ms    0.04ms     0%           61.80    64.7ms    66.6ms    33.2ms   65.0ms   7221      239       100.00%  0%        0%        0     ok     
+
+
+HIGHEST PASSING LEVEL: 17 players on one game server
+
+--- capacity (1 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+17       1/1    0        0.5ms       0.5..0.5ms             0.0..0.0ms             7.0
+
+CEILING: at least 17 — no level swept failed consistently, sweep higher
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to C:/Users/duycu/lt/armA/kcpA-p17.json

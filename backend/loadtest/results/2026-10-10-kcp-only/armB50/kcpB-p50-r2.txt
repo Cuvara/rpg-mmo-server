@@ -1,0 +1,20 @@
+[loadtest] run d899944e: ramping 50 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 2.477s; settling for 5s
+[loadtest] measuring for 1m0s
+
+--- loadtest results (tick budget 16.67ms @ 60Hz critical, snapshot period 66.67ms @ 15Hz world, rates from server /status, encoding=proto) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    kcp retx  kcp lost  fail  verdict
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+50       50      cluster  1.73ms    6.62ms    1.46ms     0.14%        61.21    65.3ms    72.2ms    40.5ms   76.2ms   61451     239       100.00%  0%        0%        0     ok     
+
+
+HIGHEST PASSING LEVEL: 50 players on one game server
+
+--- capacity (1 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+50       1/1    0        6.6ms       6.6..6.6ms             1.5..1.5ms             60.0
+
+CEILING: at least 50 — no level swept failed consistently, sweep higher
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to C:/Users/duycu/lt/armB50/kcpB-p50-r2.json

@@ -1,0 +1,22 @@
+[loadtest] run a8b8920b: ramping 95 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 4.76s; settling for 5s
+[loadtest] measuring for 1m0s
+[loadtest] players=95 DEGRADED: tick p99 24.4ms over the 16.7ms budget (7.31% of ticks above 10ms)
+
+--- loadtest results (tick budget 16.67ms @ 60Hz critical, snapshot period 66.67ms @ 15Hz world, rates from server /status, encoding=proto) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    kcp retx  kcp lost  fail  verdict 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+95       95      cluster  3.63ms    24.39ms   4.30ms     7.31%        61.35    65.2ms    76.3ms    48.3ms   98.0ms   72374     240       100.07%  0.19%     0.19%     0     DEGRADED
+
+  players=95    DEGRADED: tick p99 24.4ms over the 16.7ms budget (7.31% of ticks above 10ms)
+
+HIGHEST PASSING LEVEL: none — every level degraded
+
+--- capacity (1 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+95       0/1    0        24.4ms      24.4..24.4ms           4.3..4.3ms             70.7
+
+CEILING: below 95 — the smallest level swept already fails
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to C:/Users/duycu/lt/armB2/kcpB-p95-r2.json

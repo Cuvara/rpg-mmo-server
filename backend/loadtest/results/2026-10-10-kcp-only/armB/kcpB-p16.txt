@@ -1,0 +1,20 @@
+[loadtest] run 71b33c2c: ramping 16 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 897ms; settling for 5s
+[loadtest] measuring for 1m0s
+
+--- loadtest results (tick budget 16.67ms @ 60Hz critical, snapshot period 66.67ms @ 15Hz world, rates from server /status, encoding=proto) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    kcp retx  kcp lost  fail  verdict
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+16       16      cluster  0.27ms    1.38ms    0.26ms     0.03%        62.13    64.5ms    74.3ms    36.2ms   828.8ms  53225     237       103.77%  0.25%     0.13%     0     ok     
+
+
+HIGHEST PASSING LEVEL: 16 players on one game server
+
+--- capacity (1 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+16       1/1    0        1.4ms       1.4..1.4ms             0.3..0.3ms             52.0
+
+CEILING: at least 16 — no level swept failed consistently, sweep higher
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to C:/Users/duycu/lt/armB/kcpB-p16.json
