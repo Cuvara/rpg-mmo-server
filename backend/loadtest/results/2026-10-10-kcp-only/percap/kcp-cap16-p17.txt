@@ -1,0 +1,23 @@
+[loadtest] run 75d0c394: ramping 17 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 805ms; settling for 5s
+[loadtest] measuring for 1m0s
+[loadtest] players=17 DEGRADED: INVALID: 1/17 players failed, so this level did not run at 17 players — rerun this level
+
+--- loadtest results (tick budget 16.67ms @ 60Hz critical, snapshot period 66.67ms @ 15Hz world, rates from server /status, encoding=proto) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    kcp retx  kcp lost  fail  verdict
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+17       16      cluster  0.25ms    0.49ms    0.03ms     0%           61.43    65.1ms    68.4ms    33.8ms   65.9ms   6774      239       100.00%  0.02%     0.02%     1     INVALID
+
+  players=17    INVALID: 1/17 players failed, so this level did not run at 17 players — rerun this level
+
+HIGHEST PASSING LEVEL: none — every level degraded
+1 level(s) were INVALID and excluded — the sweep above is incomplete, rerun them.
+
+--- capacity (0 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+17       0/0    1        0.0ms       0.0..0.0ms             0.0..0.0ms             0.0
+
+CEILING: undetermined — no level produced a usable verdict
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to C:/Users/duycu/lt/percap/kcp-cap16-p17.json

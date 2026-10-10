@@ -1,0 +1,20 @@
+[loadtest] run e8f7038b: ramping 95 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 4.773s; settling for 5s
+[loadtest] measuring for 1m0s
+
+--- loadtest results (tick budget 16.67ms @ 60Hz critical, snapshot period 66.67ms @ 15Hz world, rates from server /status, encoding=proto) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    kcp retx  kcp lost  fail  verdict
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+95       95      cluster  0.33ms    0.99ms    0.26ms     0%           61.80    64.8ms    80.5ms    43.7ms   78.8ms   39291     240       100.00%  0.02%     0.02%     0     ok     
+
+
+HIGHEST PASSING LEVEL: 95 players on one game server
+
+--- capacity (1 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+95       1/1    0        1.0ms       1.0..1.0ms             0.3..0.3ms             38.4
+
+CEILING: at least 95 — no level swept failed consistently, sweep higher
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to C:/Users/duycu/lt/armA/kcpA-p95.json
