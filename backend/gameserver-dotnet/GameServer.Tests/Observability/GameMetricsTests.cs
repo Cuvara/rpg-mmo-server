@@ -445,4 +445,45 @@ public class GameMetricsTests
         Assert.Equal(1, h.Metrics.NakamaRewardsNotGranted);
     }
 
+    /// <summary>
+    /// The runtime-cost instruments a load run reads beside tick duration: GC collections per
+    /// generation, allocated bytes, GC pause time, heap size, process CPU time and working
+    /// set. Each must be present and plausible on the first observation, so a run can tell a
+    /// tick that missed its budget to a collector pause from one that did too much work.
+    /// </summary>
+    [Fact]
+    public void RuntimeCostInstruments_AreObservable()
+    {
+        var metrics = new GameMetrics("map_gc", $"test.{Guid.NewGuid():N}");
+        var seen = new Dictionary<string, double>();
+        var generations = new HashSet<string>();
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (inst, l) =>
+        {
+            if (inst.Meter.Name == metrics.MeterName &&
+                (inst.Name.StartsWith("gameserver.gc.", StringComparison.Ordinal) ||
+                 inst.Name.StartsWith("gameserver.process.", StringComparison.Ordinal)))
+                l.EnableMeasurementEvents(inst);
+        };
+        listener.SetMeasurementEventCallback<long>((inst, value, tags, _) =>
+        {
+            seen[inst.Name] = value;
+            foreach (var t in tags)
+                if (t.Key == "generation") generations.Add((string)t.Value!);
+        });
+        listener.SetMeasurementEventCallback<double>((inst, value, _, _) => seen[inst.Name] = value);
+        listener.Start();
+
+        _ = new byte[1024]; // something allocated for the counter to have seen
+        listener.RecordObservableInstruments();
+
+        Assert.Contains("gameserver.gc.collections", seen.Keys);
+        Assert.Equal(new[] { "0", "1", "2" }, generations.OrderBy(g => g).ToArray());
+        Assert.True(seen["gameserver.gc.allocated.bytes"] > 0);
+        Assert.True(seen["gameserver.gc.pause.seconds"] >= 0);
+        Assert.Contains("gameserver.gc.heap.bytes", seen.Keys);
+        Assert.True(seen["gameserver.process.cpu.seconds"] > 0);
+        Assert.True(seen["gameserver.process.working_set.bytes"] > 0);
+    }
+
 }

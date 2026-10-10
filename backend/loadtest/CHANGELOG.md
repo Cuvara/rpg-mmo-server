@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Server runtime cost and KCP listener counters in every result** (`server.*`): CPU cores,
+  working set, GC heap, allocation rate, GC collections per generation and GC pause seconds / pause
+  share over the window, and the game server's `gameserver_kcp_*` sessions created / rejected
+  (and per-IP-cap rejections) / closed / datagrams dropped. Read from the new
+  `gameserver_gc_*` / `gameserver_process_*` metrics; zero against an older server.
+
 ### Changed
 - **Game servers are dialled over KCP/UDP only.** The gateway hop is always TCP; the game-server
   hop uses `transport.DialGameplay` with whatever the gateway advertised, so a non-`kcp`

@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Runtime-cost metrics** for load runs: `gameserver_gc_collections_total{generation}`,
+  `gameserver_gc_allocated_bytes_total`, `gameserver_gc_pause_seconds_total`, `gameserver_gc_heap_bytes`,
+  `gameserver_process_cpu_seconds_total`, `gameserver_process_working_set_bytes` (System.GC /
+  Environment, NativeAOT-safe). Lets a run tell a GC pause from tick work when the tick misses its
+  budget. `docs/METRICS.md`.
+
 ### Removed
 - `scripts/admission-probe.py`: it dialled the game server over raw TCP, which no longer
   exists (ADR-32). RUNBOOK §"Probing admission hardening" maps each of its checks to the KCP
