@@ -21,6 +21,8 @@ gameserver_kcp_sessions_created_total{map_id="m"} 5
 gameserver_kcp_sessions_rejected_total{map_id="m",reason="per_ip_cap"} 0
 gameserver_kcp_sessions_rejected_total{map_id="m",reason="rate"} 0
 gameserver_kcp_datagrams_dropped_total{map_id="m",reason="bad_crypto"} 1
+gameserver_kcp_receive_busy_seconds_total{map_id="m"} 1
+gameserver_kcp_datagrams_received_total{map_id="m"} 10000
 `, t0)
 	after := scrapeText(`
 gameserver_gc_collections_total{map_id="m",generation="0"} 40
@@ -35,6 +37,8 @@ gameserver_kcp_sessions_created_total{map_id="m"} 22
 gameserver_kcp_sessions_rejected_total{map_id="m",reason="per_ip_cap"} 3
 gameserver_kcp_sessions_rejected_total{map_id="m",reason="rate"} 1
 gameserver_kcp_datagrams_dropped_total{map_id="m",reason="bad_crypto"} 4
+gameserver_kcp_receive_busy_seconds_total{map_id="m"} 5
+gameserver_kcp_datagrams_received_total{map_id="m"} 30000
 `, t0.Add(10*time.Second))
 
 	s := aggregateServer(before, after, nil, nil, 10, 1.0/60, nil, nil)
@@ -51,5 +55,8 @@ gameserver_kcp_datagrams_dropped_total{map_id="m",reason="bad_crypto"} 4
 	if s.KCPSessionsLive != 17 || s.KCPSessionsCreated != 17 || s.KCPSessionsRejected != 4 ||
 		s.KCPRejectedPerIPCap != 3 || s.KCPDatagramsDropped != 3 {
 		t.Errorf("kcp = %+v", s)
+	}
+	if s.KCPReceiveBusyRatio != 0.4 || s.KCPDatagramsInPerSec != 2000 {
+		t.Errorf("kcp receive busy %v, in %v/s; want 0.4, 2000", s.KCPReceiveBusyRatio, s.KCPDatagramsInPerSec)
 	}
 }

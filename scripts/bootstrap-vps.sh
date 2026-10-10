@@ -298,6 +298,17 @@ install_runner() {
 	info "runner installed as a systemd service (survives reboot and logout)"
 }
 
+# ------------------------------------------------------------- udp buffers
+# Every KCP session on a game server shares one UDP socket. Linux silently caps its
+# 4 MiB buffer request at net.core.rmem_max / wmem_max (212992 by default), and a
+# container cannot raise them, so the host must. A capped receive buffer drops a
+# burst for every player at once (UDP RcvbufErrors). Persisted across reboots.
+configure_udp_buffers() {
+	step "UDP socket buffer limits for the KCP game port"
+	run_sh "printf 'net.core.rmem_max = 8388608\nnet.core.wmem_max = 8388608\n' > /etc/sysctl.d/90-rpg-kcp.conf"
+	run sysctl --system
+}
+
 # ----------------------------------------------------------------- firewall
 configure_firewall() {
 	step "Firewall (ufw)"
@@ -400,6 +411,7 @@ main() {
 	install_docker
 	create_user
 	install_runner
+	configure_udp_buffers
 	configure_firewall
 	print_summary
 	step "bootstrap-vps.sh complete"

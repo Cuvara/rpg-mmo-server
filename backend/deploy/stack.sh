@@ -238,6 +238,14 @@ advertise_gameplay_addr() {
 }
 advertise_gameplay_addr
 
+# The game server asks for 4 MiB UDP socket buffers; Linux caps them at the HOST's
+# net.core.rmem_max (212992 by default) and the container cannot raise it. Warn, with
+# the fix, rather than let a load run lose datagrams for every player at once.
+if [ -r /proc/sys/net/core/rmem_max ] && [ "$(cat /proc/sys/net/core/rmem_max)" -lt 4194304 ]; then
+	echo "stack: WARNING net.core.rmem_max=$(cat /proc/sys/net/core/rmem_max) caps the KCP game socket buffer;" \
+		"run: sudo sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608" >&2
+fi
+
 # Relative --env-file/-f paths only: the docker.exe shim cannot resolve absolute
 # WSL paths (docs/CICD.md §4a), which is why this script cd's to its own dir.
 dc() { $COMPOSE -p "$PROJECT" --env-file "$ENV_FILE" --profile realtime "$@"; }

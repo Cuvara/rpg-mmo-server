@@ -309,6 +309,10 @@ func aggregateServer(beforeGS, afterGS, beforeGW, afterGW *Scrape, windowSec, ti
 		out.KCPSessionsClosed = delta(beforeGS, afterGS, "gameserver_kcp_sessions_closed_total")
 		out.KCPDatagramsDropped = delta(beforeGS, afterGS, "gameserver_kcp_datagrams_dropped_total")
 		out.KCPRejectedPerIPCap = delta(beforeGS, afterGS, "gameserver_kcp_sessions_rejected_total|reason=per_ip_cap")
+		if windowSec > 0 {
+			out.KCPReceiveBusyRatio = round4(delta(beforeGS, afterGS, "gameserver_kcp_receive_busy_seconds_total") / windowSec)
+			out.KCPDatagramsInPerSec = round2(delta(beforeGS, afterGS, "gameserver_kcp_datagrams_received_total") / windowSec)
+		}
 	}
 	if afterGW != nil {
 		out.GatewayConnsActive = afterGW.Get("gateway_connections_active")

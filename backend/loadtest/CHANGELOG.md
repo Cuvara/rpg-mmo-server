@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `server.kcp_receive_busy_ratio` and `server.kcp_datagrams_in_per_sec`: the game server's KCP
+  receive-thread utilisation and inbound datagram rate over the window.
 - **Server runtime cost and KCP listener counters in every result** (`server.*`): CPU cores,
   working set, GC heap, allocation rate, GC collections per generation and GC pause seconds / pause
   share over the window, and the game server's `gameserver_kcp_*` sessions created / rejected

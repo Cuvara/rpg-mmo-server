@@ -96,6 +96,26 @@ public class KcpListenerHardeningTests
         Assert.Equal(1, l.Stats.SessionsCreated); // the marker only
     }
 
+    /// <summary>
+    /// The receive thread's own accounting: every datagram taken off the socket is counted,
+    /// dropped ones included, and the time spent handling them accumulates. Its rate is the
+    /// thread utilisation exported as <c>gameserver_kcp_receive_busy_seconds_total</c>.
+    /// </summary>
+    [Fact]
+    public async Task ReceiveThread_CountsDatagramsAndBusyTime()
+    {
+        using var l = Listen();
+        using var s = RawSocket();
+        long before = l.Stats.DatagramsReceived;
+        Send(s, l, new byte[Kcp.Overhead - 1]);
+        Send(s, l, new byte[1]);
+        await Drain(l);
+
+        Assert.True(l.Stats.DatagramsReceived - before >= 2,
+            $"received {l.Stats.DatagramsReceived - before}, want at least the 2 datagrams sent");
+        Assert.True(l.Stats.ReceiveBusyTicks > 0);
+    }
+
     [Fact]
     public async Task UndersizedDatagram_IsDroppedAndCounted()
     {

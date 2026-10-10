@@ -189,6 +189,11 @@ type ServerStats struct {
 	KCPSessionsClosed   float64 `json:"kcp_sessions_closed_window"`
 	KCPDatagramsDropped float64 `json:"kcp_datagrams_dropped_window"`
 	KCPRejectedPerIPCap float64 `json:"kcp_rejected_per_ip_cap_window"`
+	// KCPReceiveBusyRatio is the server's single KCP receive thread utilisation over
+	// the window (busy seconds per second). Near 1.0 the kernel drops datagrams for
+	// every session at once. KCPDatagramsInPerSec is the inbound datagram rate it served.
+	KCPReceiveBusyRatio  float64 `json:"kcp_receive_busy_ratio"`
+	KCPDatagramsInPerSec float64 `json:"kcp_datagrams_in_per_sec"`
 }
 
 // Verdict records which acceptance criteria held. A run is Degraded when any

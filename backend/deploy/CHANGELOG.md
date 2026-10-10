@@ -6,6 +6,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Host UDP buffer limits for the KCP game socket.** `scripts/bootstrap-vps.sh` writes
+  `/etc/sysctl.d/90-rpg-kcp.conf` (`net.core.rmem_max` / `wmem_max` = 8 MiB); `stack.sh` warns
+  when the host caps them below 4 MiB; `NETWORKING.md` documents the requirement (also for k8s
+  nodes and WSL2) and the `RcvbufErrors` / mass `dead_link` troubleshooting row.
 - **Local stack under WSL2 NAT advertises the WSL VM address for gameplay.** Measured
   2026-10-08: a Windows process sending UDP to `127.0.0.1:<game port>` gets no answer
   (Windows localhost forwarding carries TCP only) while the same datagram to the WSL VM

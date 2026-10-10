@@ -161,6 +161,8 @@ public sealed class KcpListenerStats
     internal long _closedDeadLink;
     internal long _closedSlowConsumer;
     internal long _writesRejected;
+    internal long _datagramsReceived;
+    internal long _receiveBusyTicks;
     private Func<int>? _liveProvider;
 
     internal void SetLiveProvider(Func<int> provider) => _liveProvider = provider;
@@ -203,6 +205,14 @@ public sealed class KcpListenerStats
     public long SessionsClosedSlowConsumer => Interlocked.Read(ref _closedSlowConsumer);
     /// <summary>Application writes refused (frame too large for KCP); each closes its session.</summary>
     public long WritesRejected => Interlocked.Read(ref _writesRejected);
+    /// <summary>Datagrams the receive thread has taken off the socket (handled or dropped).</summary>
+    public long DatagramsReceived => Interlocked.Read(ref _datagramsReceived);
+    /// <summary>
+    /// Time the single receive thread spent handling datagrams, in Stopwatch ticks. Its rate
+    /// is the thread's utilisation: every session shares this thread, and near 1.0 the kernel
+    /// starts dropping datagrams (UDP RcvbufErrors), which KCP sees as loss.
+    /// </summary>
+    public long ReceiveBusyTicks => Interlocked.Read(ref _receiveBusyTicks);
 
     /// <summary>Total new sessions refused for any reason.</summary>
     public long SessionsRejected => SessionsRejectedGlobalCap + SessionsRejectedPerIpCap + SessionsRejectedRate + SessionsRejectedBacklog;

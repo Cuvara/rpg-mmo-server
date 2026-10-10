@@ -114,13 +114,19 @@ public sealed class KcpSession : IDisposable
         _logger = logger;
         _inbound = new TokenBucket(limits.DatagramsPerSecondPerSession, limits.DatagramBurstPerSession);
 
+        // One reusable datagram buffer per session. KCP only calls output from inside
+        // Input/Update/Flush, which all run under _lock, and the listener's SendTo seals and
+        // sends synchronously (Socket.SendTo copies), so the bytes are dead once _send
+        // returns. Allocating a fresh array per datagram cost one allocation per packet for
+        // every player at the snapshot rate.
+        var outBuf = new byte[headerSize + KcpTuning.Mtu + Kcp.Overhead];
         _kcp = new Kcp(conv, (buf, size) =>
         {
             // Reserve room for the crypt header the caller fills in; below the KCP
             // layer the datagram is opaque, which is exactly kcp-go's split.
-            var packet = new byte[headerSize + size];
+            var packet = headerSize + size <= outBuf.Length ? outBuf : new byte[headerSize + size];
             buf.AsSpan(0, size).CopyTo(packet.AsSpan(headerSize));
-            _send(packet);
+            _send(packet.AsMemory(0, headerSize + size));
         });
 
         KcpTuning.Apply(_kcp, headerSize);
