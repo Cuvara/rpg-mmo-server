@@ -493,10 +493,13 @@ reported as a broken deployment.
 
 That fix left one gap, now closed: building the probe in CD made a deploy the
 first place a non-compiling probe could surface, on a change already merged.
-`ci.yml` gates it at PR time as `test-verify-probe`. The module has no test
-files, so that job runs `go vet` and a build and deliberately does **not** run
-`go test` — a green `[no test files]` is the ambiguous "passed while asserting
-nothing" signal this pipeline already refuses elsewhere. The probe links against
+`ci.yml` gates it at PR time as `test-verify-probe`: `go vet`, `go test -race`
+and a build. The tests (`probe/main_test.go`, added with the KCP join in #451)
+drive the join against a loopback KCP listener and pin that `kcp_join=ok` is
+printed only after a received `MsgJoinTokenResp`. Before they existed the job
+deliberately skipped `go test`, because a green `[no test files]` is the
+ambiguous "passed while asserting nothing" signal this pipeline refuses
+elsewhere. The probe links against
 `backend/shared` through a `replace` directive, so a wire-format change can break
 it there and nowhere else in CI.
 

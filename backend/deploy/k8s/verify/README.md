@@ -25,9 +25,13 @@ a check that did not run says so.
 - **The target is configuration.** Namespaces, addresses, map id and the exec
   prefixes used to reach Postgres/Redis all live in `targets/*.env`, so the same
   suite runs against dev-on-Agones today and the in-cluster stack tomorrow.
-- **Read-only.** It starts nothing, restarts nothing, reconfigures nothing and
-  deletes no volume or PVC. The single exception is opt-in and named:
-  `refusal.unknown_map` (`--allow-allocation`).
+- **Read-only, except for named joins.** It starts nothing, restarts nothing,
+  reconfigures nothing and deletes no volume or PVC. It does, however, make real
+  game-server joins: `registry.addr_kcp_join` and `flow.smoke` each join the
+  advertised server, which spawns an entity, saves player state, and reports
+  Agones `Allocate` (a `Ready` GameServer becomes `Allocated`) -- see layer 3.
+  The one opt-in exception beyond those is `refusal.unknown_map`
+  (`--allow-allocation`).
 
 ## Layout
 
@@ -165,7 +169,34 @@ with the secret the gateway verifies with".
 | `registry.one_server` | exactly one non-expired `servers:id:*` hash carries `map_id = $VERIFY_MAP_ID` (**ADR-2**) | nothing about an in-memory registry (`--backend=memory` is invisible from outside), nothing about other maps |
 | `registry.addr_qualified` | the advertised address carries a real host — a hostless `:9000`, `0.0.0.0:…` or `[::]:…` fails | it does not prove the host is reachable from the *client's* network |
 | `registry.transport_kcp` | every live registration says `transport = kcp`, the only gameplay transport (the gateway refuses to assign anything else; empty no longer means TCP) | not that the advertised **UDP** address is reachable -- `registry.addr_kcp_join` proves that. Replaces `registry.addr_dialable`, a TCP connect that is meaningless on a UDP port |
-| `registry.addr_kcp_join` | `probe enterworld` (gateway over TCP, then the advertised game server over **KCP/UDP**) completes `MsgJoinToken`: output carries `kcp_join=ok`. Needs `VERIFY_TRANSPORT_KEY` equal to the fleet's `transport-key`. The probe joins in legacy JSON, so a `GAMESERVER_SEALED=require` server answers `encoding_cannot_seal` (`join_reply=refused_encoding_cannot_seal`) -- decided after the token is verified, so it proves the same path; a wrong key or unreachable port reads `kcp_join=timeout` | reachability from the *client's* network, and the gameplay loop (`flow.smoke`) |
+| `registry.addr_kcp_join` | `probe enterworld` (gateway over TCP, then the advertised game server over **KCP/UDP**) completes `MsgJoinToken`: output carries `kcp_join=ok`. Needs `VERIFY_TRANSPORT_KEY` equal to the fleet's `transport-key`. The probe joins in legacy JSON, so a `GAMESERVER_SEALED=require` server answers `encoding_cannot_seal` (`join_reply=refused_encoding_cannot_seal`) -- decided after the token is verified, so it proves the same path; a wrong key or unreachable port reads `kcp_join=timeout`, any other refusal `kcp_join=rejected`. **This is a real join with server-side side effects** (see below) | reachability from the *client's* network, and the gameplay loop (`flow.smoke`) |
+
+**`registry.addr_kcp_join` is not read-only.** The game server decides the
+`encoding_cannot_seal` refusal only *after* it has admitted the player
+(`GameServer.cs`, the join handler: `_admission.Commit`, then
+`PlayerJoined`, `NotifyPlayerCountChanged`, `NotifyAgonesAllocatedOnce` and the
+`_everHadPlayer` latch, then the refusal). So even on a
+`GAMESERVER_SEALED=require` server one probe run:
+
+- spawns an entity for the probe's fresh `verify-*` user and holds an admission
+  slot until the connection is torn down; the teardown then puts the entity in
+  the normal reconnect hold (30 s map / 60 s dungeon), and hold expiry saves its
+  player state (a `player_states` row when the server has `GAME_DB_URL`);
+- counts a `PlayerJoined`/`PlayerLeft` pair in the metrics and refreshes the
+  registry player count;
+- reports **Agones `Allocate`** once per process: a `Ready` GameServer becomes
+  `Allocated` and stays so (there is no un-allocate);
+- latches "ever had a player", which on a **dungeon** instance lets the pod shut
+  itself down once it empties (ADR-26).
+
+On a server that is **not** in `require` mode the join is simply accepted: the
+probe really enters the world, then drops the connection (it never sends an
+input), with the same consequences. Do not point it at a `Ready` server you do
+not want allocated; `flow.smoke` already makes a real join of its own, so the
+CD post-deploy run makes two. Running the suite against production needs
+explicit authorization, as for any action with side effects; set
+`PROBE_KCP_JOIN=0` to stop the probe at the gateway hop (the check then fails,
+since it requires `kcp_join=ok`).
 
 Liveness is read from the `servers:id:*` hashes, never from the
 `servers:map:{map_id}` index — the index has no TTL and outlives dead servers,

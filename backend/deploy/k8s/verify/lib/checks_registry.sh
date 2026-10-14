@@ -153,9 +153,17 @@ register registry.addr_qualified 3 "advertised address is host-qualified" \
 # The replacement for the old TCP connect: a REAL KCP join on the address the
 # gateway hands out. probe enterworld authenticates (Nakama -> gateway over TCP),
 # then dials the advertised game server over KCP/UDP and completes MsgJoinToken,
-# printing kcp_join=ok. A failed join exits non-zero and names the usual causes
-# (UDP blocked, port published as TCP, wrong advertised host, TRANSPORT_KEY
-# mismatch). Nothing short of this proves a UDP port is reachable.
+# printing kcp_join=ok. The probe exits 0 whenever it made the observation, so
+# the check fails on anything but kcp_join=ok (timeout / rejected / error) or a
+# non-zero exit, and names the usual causes (UDP blocked, port published as TCP,
+# wrong advertised host, TRANSPORT_KEY mismatch). Nothing short of this proves a
+# UDP port is reachable.
+#
+# NOT read-only: the game server admits the player before it decides the
+# encoding_cannot_seal refusal, so even a refused probe join spawns an entity,
+# saves player state on hold expiry and reports Agones Allocate (a Ready
+# GameServer becomes Allocated); a server not in GAMESERVER_SEALED=require mode
+# accepts the probe into the world. See k8s/verify/README.md, layer 3.
 check_registry_addr_kcp_join() {
   if [ ${#REG_LIVE[@]} -eq 0 ]; then
     skip "no live registration -- KCP reachability UNVERIFIED"
