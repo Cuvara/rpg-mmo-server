@@ -1,0 +1,22 @@
+[loadtest] run 0e869e0b: ramping 95 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 4.746s; settling for 5s
+[loadtest] measuring for 1m0s
+[loadtest] players=95 DEGRADED: tick p99 45.0ms over the 16.7ms budget (8.65% of ticks above 10ms)
+
+--- loadtest results (tick budget 16.67ms @ 60Hz critical, snapshot period 66.67ms @ 15Hz world, rates from server /status, encoding=proto) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    kcp retx  kcp lost  fail  verdict 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+95       95      cluster  3.64ms    44.97ms   5.20ms     8.65%        58.95    67.9ms    79.7ms    43.4ms   91.5ms   71373     240       100.00%  0.01%     0.01%     0     DEGRADED
+
+  players=95    DEGRADED: tick p99 45.0ms over the 16.7ms budget (8.65% of ticks above 10ms)
+
+HIGHEST PASSING LEVEL: none — every level degraded
+
+--- capacity (1 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+95       0/1    0        45.0ms      45.0..45.0ms           5.2..5.2ms             69.7
+
+CEILING: below 95 — the smallest level swept already fails
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to C:/Users/duycu/lt/ab449/x-1-cfb449-p95-aitrue.json

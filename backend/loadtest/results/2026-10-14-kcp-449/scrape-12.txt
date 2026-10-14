@@ -1,0 +1,80 @@
+t=1791990961
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 44267
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 38537
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 19447
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16384
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 2.7377242399999999
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 23.414420593999999
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 0.72148467800000005
+t=1791990967
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 88138
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 82372
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 29822
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16384
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 5.4242731649999998
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 47.780902763999997
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 1.4588947459999999
+t=1791990974
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 131739
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 125571
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 38100
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16384
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 8.0930747400000005
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 71.867074926000001
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 2.175662403
+t=1791990980
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 176792
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 169628
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 44269
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16384
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 10.616320983
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 95.659173010000004
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 2.8553890530000001
+t=1791990986
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 227899
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 221852
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 52124
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16385
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 13.090720744
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 119.344646967
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 3.6275929310000001
+t=1791990992
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 275541
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 271461
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 52124
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16385
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 13.998648627
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 125.944703972
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 4.105289709
+t=1791990998
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 302992
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 298912
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 52124
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16385
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 14.652861296999999
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 129.29265473500001
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 4.4500462430000001
+t=1791991004
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 330287
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 326207
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 52124
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16385
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 15.294957275
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 132.55667515100001
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 4.7949303729999997
+t=1791991011
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 357548
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 353468
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 52124
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16385
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 16.053224239999999
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 135.95193473099999
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 5.2042173749999998
+t=1791991017
+gameserver_kcp_datagrams_received_total{map_id="map_01"} 384561
+gameserver_kcp_datagrams_sent_total{map_id="map_01"} 380481
+gameserver_kcp_outbound_dropped_total{map_id="map_01"} 52124
+gameserver_kcp_outbound_queue_max{map_id="map_01"} 16385
+gameserver_kcp_receive_busy_seconds_total{map_id="map_01"} 16.858880339999999
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="seal"} 139.524292006
+gameserver_kcp_send_busy_seconds_total{map_id="map_01",phase="socket"} 5.6942064849999996

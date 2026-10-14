@@ -63,6 +63,7 @@ export KEY_FILE=... GS_ADDR=<wsl-ip>:9000 LOADTEST_BIN=./loadtest.exe
   - deferring the full flush;
   - Server GC;
   - none of these removed it.
+  - Update 2026-10-14: the cause was per-block AES in `KcpCrypto`, sealing under the session lock. Fixed and re-measured in [`../2026-10-14-kcp-449/`](../2026-10-14-kcp-449/README.md): 5 of 5 clean runs at 95 players with AI on. The tick-budget overrun above is unchanged, and the separate-hardware re-measurement below is still outstanding.
 
 **Do not quote more than 50 players per game server with AI enemies on until #449 is fixed and re-measured with the load generator on separate hardware (ADR-7).**
 
