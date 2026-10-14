@@ -64,7 +64,7 @@ public sealed class KcpCrypto : IDisposable
     {
         _aes = Aes.Create();
         _aes.Key = key;
-        _aes.Mode = CipherMode.ECB;      // raw block primitive; CFB is done by hand below
+        _aes.Mode = CipherMode.ECB;      // one-shot calls below pick their own mode
         _aes.Padding = PaddingMode.None;
     }
 
@@ -133,43 +133,58 @@ public sealed class KcpCrypto : IDisposable
         return Crc32.Compute(body) == want ? body : default;
     }
 
+    /// <summary>
+    /// Largest datagram sealed or opened on the stack. Datagrams are capped at the MTU
+    /// (1500 bytes); anything bigger takes the pooled path.
+    /// </summary>
+    private const int StackLimit = 2048;
+
     /// <summary>CFB-128 encryption with kcp-go's fixed IV, trailing bytes unpadded.</summary>
+    /// <remarks>
+    /// The full blocks go through one bulk <see cref="SymmetricAlgorithm.EncryptCfb(ReadOnlySpan{byte}, ReadOnlySpan{byte}, Span{byte}, PaddingMode, int)"/>
+    /// call. The first version called <c>EncryptEcb</c> once per 16-byte block - about 90
+    /// one-shot cipher setups per MTU datagram, ~340 us each datagram under load - and at 95
+    /// players sealing alone took about two cores, under the session lock (#449). The trailing partial block is XORed against
+    /// E(last ciphertext block), which is what CFB would produce for it, so the bytes are
+    /// identical to the per-block form and to kcp-go.
+    /// </remarks>
     private void CfbEncrypt(Span<byte> buf)
     {
-        Span<byte> tbl = stackalloc byte[16];
-        Span<byte> tmp = stackalloc byte[16];
-        _aes.EncryptEcb(InitialVector, tbl, PaddingMode.None);
-
-        int i = 0;
-        for (; i + 16 <= buf.Length; i += 16)
+        int full = buf.Length & ~15;
+        Span<byte> keystream = stackalloc byte[16];
+        if (full > 0)
         {
-            var blk = buf.Slice(i, 16);
-            for (int j = 0; j < 16; j++) blk[j] ^= tbl[j];
-            _aes.EncryptEcb(blk, tmp, PaddingMode.None);
-            tmp.CopyTo(tbl);
+            byte[]? rented = null;
+            Span<byte> tmp = full <= StackLimit ? stackalloc byte[full] : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent(full)).AsSpan(0, full);
+            _aes.EncryptCfb(buf[..full], InitialVector, tmp, PaddingMode.None, 128);
+            tmp.CopyTo(buf);
+            if (rented != null) System.Buffers.ArrayPool<byte>.Shared.Return(rented);
         }
-        // Trailing partial block: XOR against the live keystream block, no padding.
-        for (int j = 0; i + j < buf.Length; j++) buf[i + j] ^= tbl[j];
+        if (full == buf.Length) return;
+        _aes.EncryptEcb(full > 0 ? buf.Slice(full - 16, 16) : InitialVector, keystream, PaddingMode.None);
+        for (int j = 0; full + j < buf.Length; j++) buf[full + j] ^= keystream[j];
     }
 
     /// <summary>CFB-128 decryption, the exact inverse of <see cref="CfbEncrypt"/>.</summary>
     private void CfbDecrypt(Span<byte> buf)
     {
-        Span<byte> tbl = stackalloc byte[16];
-        Span<byte> next = stackalloc byte[16];
-        _aes.EncryptEcb(InitialVector, tbl, PaddingMode.None);
-
-        int i = 0;
-        for (; i + 16 <= buf.Length; i += 16)
+        int full = buf.Length & ~15;
+        Span<byte> keystream = stackalloc byte[16];
+        // The trailing keystream comes from the last full CIPHERTEXT block, so take it
+        // before the bulk decryption overwrites that block.
+        if (full != buf.Length)
         {
-            var blk = buf.Slice(i, 16);
-            // The ciphertext block is the next keystream input, so capture it before
-            // the in-place XOR destroys it.
-            _aes.EncryptEcb(blk, next, PaddingMode.None);
-            for (int j = 0; j < 16; j++) blk[j] ^= tbl[j];
-            next.CopyTo(tbl);
+            _aes.EncryptEcb(full > 0 ? buf.Slice(full - 16, 16) : InitialVector, keystream, PaddingMode.None);
         }
-        for (int j = 0; i + j < buf.Length; j++) buf[i + j] ^= tbl[j];
+        if (full > 0)
+        {
+            byte[]? rented = null;
+            Span<byte> tmp = full <= StackLimit ? stackalloc byte[full] : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent(full)).AsSpan(0, full);
+            _aes.DecryptCfb(buf[..full], InitialVector, tmp, PaddingMode.None, 128);
+            tmp.CopyTo(buf);
+            if (rented != null) System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+        for (int j = 0; full + j < buf.Length; j++) buf[full + j] ^= keystream[j];
     }
 
     public void Dispose() => _aes.Dispose();

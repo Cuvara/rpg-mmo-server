@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse
+  (#449).** `KcpCrypto` ran CFB-128 by hand with one `EncryptEcb` call per 16-byte block, about
+  90 one-shot cipher setups per MTU datagram. Measured at 95 players with AI on: ~340 us to seal
+  one datagram (about 2 cores of sealing alone), ~34 us after this change. Sealing ran inside KCP output, under the session
+  lock, so at 95 players with AI on it held session locks long enough to stall the single
+  receive thread: the kernel receive buffer overflowed (UDP `RcvbufErrors`), ACKs were lost and
+  sessions closed as `dead_link`. The full blocks now go through one bulk `EncryptCfb` /
+  `DecryptCfb` call and only the trailing partial block uses `EncryptEcb`. The bytes are
+  unchanged (same fixed IV, same unpadded tail, wire-compatible with kcp-go);
+  `KcpCryptoCfbTests` pins them to the per-block form at every length from 0 to 52 bytes and at
+  1356-3000 bytes, in both directions. Local load runs, 95 players, AI on, same harness, interleaved:
+  develop collapsed in 3 of 3 runs (29-41 clients failed, 168k-242k `RcvbufErrors`) and the fix
+  ran clean in 5 of 5 (0 failed, 0 `RcvbufErrors`, ACK p99 83-92 ms, 1.4-1.75 cores). Server CPU at
+  95 players with AI off fell from 2.1-2.2 to 0.35 cores. Results and commands:
+  `backend/loadtest/results/2026-10-14-kcp-449/`.
+
 ### Added
 - **KCP receive-thread observability.** `gameserver_kcp_datagrams_received_total` and
   `gameserver_kcp_receive_busy_seconds_total` (rate = utilisation of the single receive thread

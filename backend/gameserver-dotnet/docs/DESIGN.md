@@ -2638,3 +2638,66 @@ after its data is acknowledged, while `Abort` just goes silent. `AdversityProxy`
 became a UDP datagram impairment proxy (seeded loss, delay + jitter, reordering,
 duplication, blackout, cut). Unit tests that only needed a stream under a
 `Connection` use `KcpPair` (listener + client + accepted session).
+
+## KCP datagram encryption cost and the 95-player receive collapse (2026-10-14, #449)
+
+**Symptom.** At 95 players with AI on, most local load runs collapsed: the game-server
+container counted 135k-360k UDP `RcvbufErrors`, KCP retransmissions climbed to 20-40%, and
+20-55 clients failed as their sessions closed `dead_link`. At 50 players, and at 95 with AI
+off, the same build ran clean.
+
+**Cause.** `KcpCrypto` implemented kcp-go's AES-CFB-128 by hand, calling
+`Aes.EncryptEcb` once per 16-byte block - about 90 one-shot cipher setups for an MTU
+datagram. `Seal` runs inside KCP output, which runs under the session lock (`Write`,
+`Flush` from `Input` with ack-nodelay, and `Update`). Counters added during the
+investigation measured about 340 us to seal one datagram at 95 players with AI on,
+roughly two cores of sealing alone. While a flush of tens of segments sealed under the
+lock, the single `kcp-recv` thread waited on that lock to process the peer's ACKs, the
+kernel receive buffer overflowed, ACKs were lost, retransmissions added load, and the
+loop ended in mass `dead_link` closes. GC, `rmem_max`, Server GC and deferring the
+in-input flush had already been ruled out (#449).
+
+**Fix.** The full blocks go through one bulk `EncryptCfb` / `DecryptCfb` call (one
+cipher setup per datagram); the trailing partial block is XORed with
+`E(last ciphertext block)`, or `E(IV)` when the datagram is shorter than one block, which
+is exactly what the per-block form produced. Decryption takes that trailing keystream from
+the ciphertext before the bulk call overwrites it. Bodies up to 2048 bytes use a stack
+buffer; larger ones rent from `ArrayPool`. The wire format is unchanged and stays
+compatible with kcp-go; `KcpCryptoCfbTests` compares against the per-block reference at
+every length from 0 to 52 bytes and at 1356, 1376, 1400, 1480 and 3000 bytes, in both
+directions, plus a wrong-key round trip that must fail the CRC. Sealing now measures
+about 34 us per datagram.
+
+**Rejected alternative: move sends off the lock.** The first fix moved `Seal` and
+`sendto` onto dedicated send threads behind a bounded queue. With the slow cipher it only
+moved the cost: the queue sat at its bound and ACK p99 rose to 3.6-14 s, because an
+unpaced queue in front of no-congestion KCP turns into bufferbloat and spurious RTO
+retransmissions (sending synchronously under the lock had been acting as pacing). With
+the bulk cipher it worked, but no better than the bulk cipher alone: at 95 players with
+AI on, 4 send threads gave ACK p99 86-775 ms over five runs at 1.8-2.3 cores, and 1 send
+thread 96-125 ms over two runs, against 83-92 ms at 1.4-1.75 cores for the bulk cipher
+with synchronous sends. A queue adds a thread hop, a drop policy and a second source of
+latency for no measured gain, so it is not shipped. Revisit it only if a profile shows
+`sendto` itself, not the cipher, holding session locks.
+
+**Measured** (local compose stack in WSL2, 20 vCPU, load generator on the same host,
+`run-level.sh`, 60 s at 20 joins/s, cluster movement, `TRANSPORT_KEY` set; full table and
+commands in `backend/loadtest/results/2026-10-14-kcp-449/`):
+
+| Load | Build | Runs | Failed clients | `RcvbufErrors` | ACK p50 / p99 | Server CPU |
+|---|---|---|---|---|---|---|
+| 95 players, AI on | develop 4de2292 | 3 | 29-41 per run | 168k-242k | 44-47 ms / 90 ms-16.1 s | 2.6 cores |
+| 95 players, AI on | this fix | 5 | 0 | 0 | 42.5-43.4 / 83.5-91.5 ms | 1.40-1.75 |
+| 95 players, AI off | develop 4de2292 | 2 | 0 | 0 | 40.7-41.5 / 74.2-75.8 ms | 2.10-2.18 |
+| 95 players, AI off | this fix | 2 | 0 | 0 | 35.1-35.2 / 68.1-68.4 ms | 0.35 |
+| 50 players, AI on | develop 4de2292 | 2 | 0 | 0 | 41.5-42.4 / 79.4-83.0 ms | 1.75-2.18 |
+| 50 players, AI on | this fix | 2 | 0 | 0 | 37.6-37.8 / 71.4-71.9 ms | 0.48-0.54 |
+
+**Limits that remain.**
+- Tick budget at 95 players with AI on is unchanged: tick p99 25-45 ms against the
+  16.7 ms budget, 7-9% of ticks over, in every run. That is AI cost (about 4,300 enemies),
+  measured before this fix too, and the loadtest verdict for those runs stays `degraded`.
+- One `kcp-recv` thread still serves every session; it now runs 10-12% busy at 95
+  players with AI on (`gameserver_kcp_receive_busy_seconds_total`).
+- Every bot shares one source IP and the generator shares the host (ADR-7), runs last
+  60 s, and there is no soak run. These are local numbers, not a capacity rating.

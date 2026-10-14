@@ -1,0 +1,16 @@
+ab-1-fix449 img=33e5654a141a failed=0 rcvbufErr=0 retx=0.04862431747337482 lost=0.04862431747337482 ackp99=9994.29 tickp99=0.057142 overbudget=0.231725 recvBusy=0.1627 closed=0 cpu=2.7494
+ab-2-dev-pre449 img=145ac94be4d5 failed=20 rcvbufErr=318909 retx=0.23965212697263003 lost=0.22241563686183133 ackp99=20221.83 tickp99=0.024536 overbudget=0.157719 recvBusy=0.3878 closed=17 cpu=3.9918
+ab-3-fix449 img=33e5654a141a failed=0 rcvbufErr=0 retx=0.013485797769224286 lost=0.013485797769224286 ackp99=3996.28 tickp99=0.024579 overbudget=0.076795 recvBusy=0.1295 closed=0 cpu=1.8841
+ab-4-dev-pre449 img=145ac94be4d5 failed=0 rcvbufErr=0 retx=0.0017986548598793496 lost=0.0017986548598793496 ackp99=99.09 tickp99=0.030533 overbudget=0.075749 recvBusy=0.2492 closed=0 cpu=4.005
+ab-5-fix449 img=33e5654a141a failed=0 rcvbufErr=0 retx=0.011341055793309154 lost=0.011341055793309154 ackp99=3696.25 tickp99=0.024099 overbudget=0.079489 recvBusy=0.1164 closed=0 cpu=1.834
+ab-6-dev-pre449 img=145ac94be4d5 failed=55 rcvbufErr=360136 retx=0.19066539278846964 lost=0.1704622300729913 ackp99=16461.86 tickp99=0.024997 overbudget=0.063263 recvBusy=0.3411 closed=45 cpu=3.8159
+ab-7-fix449 img=33e5654a141a failed=0 rcvbufErr=0 retx=0.012723210006454265 lost=0.012723210006454265 ackp99=3942.83 tickp99=0.024494 overbudget=0.081644 recvBusy=0.1256 closed=0 cpu=1.9034
+ab-8-fix449 img=33e5654a141a failed=0 rcvbufErr=0 retx=0.009915323966546197 lost=0.009915323966546197 ackp99=3623.42 tickp99=0.02388 overbudget=0.078867 recvBusy=0.1264 closed=0 cpu=1.8944
+ab-9-fix449-thr img=33e5654a141a failed=0 rcvbufErr=0 retx=0.011801551979201226 lost=0.011801551979201226 ackp99=3887.11 tickp99=0.024362 overbudget=0.078845 recvBusy=0.1223 closed=0 cpu=1.8382
+ab-10-fix449-thr img=33e5654a141a failed=0 rcvbufErr=0 retx=0.010473198728477483 lost=0.010473198728477483 ackp99=3759.31 tickp99=0.024695 overbudget=0.077158 recvBusy=0.128 closed=0 cpu=1.8847
+ab-11-fix449b img=2f6fc9b47678 failed=1 rcvbufErr=0 retx=0.032385065510327785 lost=0.032385065510327785 ackp99=14028.77 tickp99=0.024238 overbudget=0.07242 recvBusy=0.3611 closed=0 cpu=2.9052
+ab-12-fix449c img=0bd0a960ff00 failed=0 rcvbufErr=0 retx=0.02331853730712323 lost=0.02331853730712323 ackp99=10899.22 tickp99=0.02363 overbudget=0.076346 recvBusy=0.2369 closed=0 cpu=2.3523
+ab-13-fix449d img=1c71c7210ce6 failed=0 rcvbufErr=0 retx=0.000023302038695365456 lost=0.000023302038695365456 ackp99=89.32 tickp99=0.04441 overbudget=0.093476 recvBusy=0.1285 closed=0 cpu=1.9248
+ab-14-fix449e img=c98f909ebd8c failed=0 rcvbufErr=0 retx=0.002171487859408786 lost=0.002171487859408786 ackp99=124.85 tickp99=0.047761 overbudget=0.122466 recvBusy=0.2243 closed=0 cpu=2.2969
+ab-15-fix449d img=1c71c7210ce6 failed=0 rcvbufErr=0 retx=0.0006516168678330841 lost=0.0006516168678330841 ackp99=109.19 tickp99=0.048077 overbudget=0.100169 recvBusy=0.1706 closed=0 cpu=2.1951
+ab-16-fix449e img=c98f909ebd8c failed=0 rcvbufErr=0 retx=0 lost=0 ackp99=95.88 tickp99=0.044732 overbudget=0.090986 recvBusy=0.1039 closed=0 cpu=1.8795
