@@ -5,6 +5,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`registry.addr_kcp_join` could never pass: the verify probe did not perform the KCP join.**
+  `k8s/verify/probe` declared `-kcp-join` / `PROBE_KCP_JOIN` and read `TRANSPORT_KEY`, but
+  `probe enterworld` stopped at the gateway hop and never printed `kcp_join=`, so the check
+  failed on every target. Found recreating `k3d-rpg-stg` (2026-10-14): `flow.smoke` passed a
+  sealed KCP join while `registry.addr_kcp_join` reported "no KCP join". The probe now dials
+  the advertised address over KCP/UDP with `TRANSPORT_KEY` and sends `MsgJoinToken`;
+  `kcp_join=ok` when a join reply arrives (accepted, or the `encoding_cannot_seal` refusal a
+  `require` server gives a JSON client after verifying the token). Measured on `k3d-rpg-stg`:
+  staging key -> `kcp_join=ok join_reply=refused_encoding_cannot_seal` (from WSL and from
+  Windows); random key -> `kcp_join=timeout`; `verify.sh --target k8s-stg` 23 PASS, 0 FAIL,
+  2 SKIP (Unity results, allocation opt-in).
+
 ### Changed
 - **Host UDP buffer limits for the KCP game socket.** `scripts/bootstrap-vps.sh` writes
   `/etc/sysctl.d/90-rpg-kcp.conf` (`net.core.rmem_max` / `wmem_max` = 8 MiB); `stack.sh` warns
