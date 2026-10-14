@@ -6,10 +6,33 @@
 //	                     Proves the Nakama Go plugin is LOADED and signing with the
 //	                     same secret the gateway verifies with. A process that is
 //	                     merely up cannot pass this.
-//	probe enterworld  -- the gateway hop only: MsgAuth then MsgEnterWorld for a map,
-//	                     printing either the advertised address or the exact refusal
-//	                     string. It never dials the game server, so it neither joins
-//	                     a world nor writes player state.
+//	probe enterworld  -- MsgAuth then MsgEnterWorld for a map, printing either the
+//	                     advertised address or the exact refusal string. With
+//	                     -kcp-join (default on; PROBE_KCP_JOIN=0 turns it off) it
+//	                     then dials the advertised address over KCP/UDP with
+//	                     TRANSPORT_KEY and sends MsgJoinToken, printing
+//	                     kcp_join=ok once a MsgJoinTokenResp comes back. The join
+//	                     is sent in the legacy JSON encoding, so a server running
+//	                     GAMESERVER_SEALED=require answers it with the
+//	                     encoding_cannot_seal refusal: that reply still proves the
+//	                     UDP path, the datagram key and the join token.
+//
+//	                     The KCP join is NOT side-effect free. The game server
+//	                     makes the encoding_cannot_seal decision only after it
+//	                     has admitted the player: by the time the refusal is
+//	                     sent it has spawned the probe user's entity, committed
+//	                     an admission slot, counted a PlayerJoined, refreshed the
+//	                     registry player count, reported Agones Allocate (a Ready
+//	                     GameServer becomes Allocated and stays so) and latched
+//	                     "ever had a player" (which lets an emptied dungeon
+//	                     instance shut itself down). The refusal then tears the
+//	                     connection down into the normal reconnect hold, and the
+//	                     hold expiry saves player state. On a server that is not
+//	                     in require mode the join is simply accepted: the probe
+//	                     really enters the world, then drops the connection.
+//	                     It never sends an input. Point it only at a server you
+//	                     are willing to have allocated; set PROBE_KCP_JOIN=0 to
+//	                     stop at the gateway hop.
 //
 // Exit code 0 means "the observation was made"; it does NOT mean the deployment
 // is healthy. Only a transport/config failure exits non-zero. verify.sh decides
@@ -23,9 +46,11 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -221,8 +246,63 @@ func enterWorld(cfg config, token string) {
 		fmt.Printf("RESULT=refused map=%s message=%q\n", cfg.mapID, enter.Error)
 		return
 	}
-	fmt.Printf("RESULT=ok map=%s server_addr=%s transport=%s join_token_len=%d\n",
-		cfg.mapID, enter.ServerAddr, transport.Normalize(enter.Transport), len(enter.JoinToken))
+	if !cfg.kcpJoin {
+		fmt.Printf("RESULT=ok map=%s server_addr=%s transport=%s join_token_len=%d\n",
+			cfg.mapID, enter.ServerAddr, transport.Normalize(enter.Transport), len(enter.JoinToken))
+		return
+	}
+	fmt.Printf("RESULT=ok map=%s server_addr=%s transport=%s join_token_len=%d %s\n",
+		cfg.mapID, enter.ServerAddr, transport.Normalize(enter.Transport), len(enter.JoinToken),
+		kcpJoin(cfg, enter))
+}
+
+// sealedRefusal is the game server's join refusal for a client whose encoding
+// cannot seal (GameServer SealedRefusalReason.EncodingCannotSeal). It is decided
+// after the join token has been verified, so receiving it proves the same thing
+// an accepted join does about reachability, key and token. It is also decided
+// after the player was admitted, so it carries the same server-side side effects
+// as an accepted join (see the package comment).
+const sealedRefusal = "encoding_cannot_seal"
+
+// kcpJoin dials the advertised game-server address over KCP/UDP and sends
+// MsgJoinToken. It returns the key=value fields verify.sh classifies; see
+// joinOutcome for which replies count as kcp_join=ok.
+func kcpJoin(cfg config, enter messages.EnterWorldResponse) string {
+	conn, err := transport.DialGameplay(enter.Transport, enter.ServerAddr, cfg.timeout,
+		transport.WithKey(cfg.transportKey))
+	if err != nil {
+		return fmt.Sprintf("kcp_join=error kcp_error=%q", err.Error())
+	}
+	defer conn.Close()
+	var resp messages.JoinTokenResponse
+	err = roundTrip(conn, cfg.timeout, messages.MsgJoinToken,
+		messages.JoinTokenRequest{Token: enter.JoinToken}, messages.MsgJoinTokenResp, &resp)
+	return joinOutcome(resp, err)
+}
+
+// joinOutcome classifies the MsgJoinToken round trip. kcp_join=ok ONLY when a
+// MsgJoinTokenResp was received and decoded (err == nil) and it was either
+// accepted or refused for the sealed-encoding reason. KCP has no handshake, so
+// an unreachable UDP port or a mismatched TRANSPORT_KEY both surface as the read
+// deadline expiring: kcp_join=timeout. Any other receive failure (a closed
+// session, an undecodable reply) is kcp_join=error, and any other refusal is
+// kcp_join=rejected.
+func joinOutcome(resp messages.JoinTokenResponse, err error) string {
+	if err != nil {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return fmt.Sprintf("kcp_join=timeout kcp_error=%q", err.Error())
+		}
+		return fmt.Sprintf("kcp_join=error kcp_error=%q", err.Error())
+	}
+	switch {
+	case resp.OK:
+		return "kcp_join=ok join_reply=accepted"
+	case resp.Error == sealedRefusal:
+		return "kcp_join=ok join_reply=refused_" + sealedRefusal
+	default:
+		return fmt.Sprintf("kcp_join=rejected kcp_error=%q", resp.Error)
+	}
 }
 
 func roundTrip(conn interface {

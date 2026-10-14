@@ -168,12 +168,12 @@ jobs:
       # merged. It links against backend/shared via a replace directive, so a
       # wire-format change can break it here and nowhere else in CI.
       #
-      # run_tests is false because this module has NO test files. `go test ./...`
-      # would report a green `[no test files]`, which is the same ambiguous
-      # signal test-integration's comment above exists to stamp out: a job that
-      # says "tests passed" while asserting nothing. go vet still runs (it is
-      # unconditional in the reusable workflow), and run_build proves it links.
-      run_tests: false
+      # main_test.go drives the KCP join against a loopback KCP listener and pins
+      # that kcp_join=ok is printed only after a received MsgJoinTokenResp
+      # (registry.addr_kcp_join greps for exactly that). Loopback UDP only, no
+      # live stack. go vet runs unconditionally, and run_build proves it links.
+      run_tests: true
+      test_flags: '-v -race -timeout 60s'
       run_build: go build -o /dev/null .
 
   test-integration:
