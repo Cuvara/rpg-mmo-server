@@ -53,7 +53,7 @@ CI: C# — `.github/workflows/ci-dotnet.yml`: build + test gameserver-dotnet. Tr
 
 ## Repo Structure & Current State
 
-The MVP is intentionally interface-driven: the default wiring is JSON + in-memory stores, but the production implementations (PostgreSQL, Redis, Agones allocation, Protobuf) are already written and selected by flag/env. The realtime gameplay transport is **not** selectable: it is KCP/UDP only (ADR-32); the gateway hop is TCP (optionally TLS). Architecture rationale and known limitations: **`backend/docs/ARCHITECTURE-DECISIONS.md`** (read this before trusting any older diagram; `backend/docs/CORE_FLOW.md` predates the C# migration and is partly stale).
+The MVP is intentionally interface-driven: the default wiring is JSON + in-memory stores, but the production implementations (PostgreSQL, Redis, Agones allocation, Protobuf) are already written and selected by flag/env. The realtime gameplay transport is **not** selectable: it is KCP/UDP only (ADR-32); the gateway hop is TCP (optionally TLS). Architecture rationale and known limitations: **`backend/docs/ARCHITECTURE-DECISIONS.md`** (read this before trusting any older diagram; `backend/docs/CORE_FLOW.md` predates the C# migration and is partly stale). Before implementing a core gameplay feature (ability, enemy type, item effect, movement mode), read **`backend/docs/GAMEPLAY-CONTRACT.md`**: what the server owns, the input and tick contract, replication and lifecycle rules, and the tests a gameplay PR must run.
 
 | Module | Path | Status | Contents |
 |--------|------|--------|----------|
