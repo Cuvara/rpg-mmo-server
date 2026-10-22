@@ -35,7 +35,13 @@ namespace GameServer.Tests.Server;
 /// reporting a low rate will otherwise repeat all of it. It is the reference the server is
 /// measured against, and it fails if the server ever stops emitting on the world tick.
 /// </para>
+/// <para>
+/// Runs in <see cref="WallClockCollection"/>: its rate and tick assertions are wall-clock
+/// figures, and beside the rest of the suite it read 11.4-14.8/s on an unchanged server
+/// (base 11f0140, two full-suite runs) while reading 15.0/s with every gap 4 in isolation.
+/// </para>
 /// </remarks>
+[Collection(WallClockCollection.Name)]
 public class SnapshotCadenceTests
 {
     private const string JwtSecret = "cadence-probe-secret-32-bytes-aaa";
