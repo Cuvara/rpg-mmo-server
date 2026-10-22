@@ -64,6 +64,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   excludes it with the reason), because it exposes the whole world state. It exists for the
   rpg-factory testlab, which compares what each rendered client drew with where the server
   says every entity was. Strict parse (`on/off/true/false/1/0`, anything else exits 2).
+- **`POST /debug/kill` - deterministic player death for the test lab.** Same switch as
+  `/debug/entities` (`GAMESERVER_DEBUG_ENTITIES=on`; no new knob, off by default, never set by a
+  fleet manifest), and the listener does not exist when it is off. Body `{"id":"<user id>"}`
+  (a player's entity id is its user id; `user_id`/`entity_id` and `?id=` are accepted). The
+  HTTP thread only queues the request; `Scaffolding.DebugKillPhase`, composed last in the
+  simulation phase, applies it on the tick thread through `CombatResolver.ApplyDamage` for
+  exactly the HP held, so the `Damage` and `Death` events, the `Dead` action, the death
+  callback and `AfterDeath` run as in play and nothing is despawned. The ordinary respawn rule
+  (`player.respawn`, `GAMESERVER_PLAYER_RESPAWN`, enemy phase) revives the player within one
+  world interval. Answers `200 killed`, `404 not_found`, `400 not_a_player`/`missing_id`,
+  `409 already_dead`, `405` for anything but POST, `503 busy` (64 queued), `504 timeout`
+  (2 s; the request is withdrawn and never applied). Tests: `DebugKillPhaseTests`,
+  `MetricsEndpointTests.DebugSurface_BindsNothingWhenOff_AndBothEndpointsWhenOn`,
+  `MetricsEndpointTests.DebugKill_ParsesTheId_AndMapsEachOutcome`.
+- **`/status` reports `map_id` and `map_bounds`** (`{min_x, min_y, max_x, max_y, source}`),
+  the play-area rectangle the server clamps to. `source` is `map_file` or `configured_size`.
+  This is read-only. A map without a content file (map_01) had bounds that could not be read
+  anywhere, so the test lab could not judge enemy positions against them. Tests:
+  `ServerStatusMapBoundsTests`.
+- **Combat rejection reasons no longer fold into `attack_other`/`ability_other`.** Four reasons
+  the server already enforced get their own `gameserver_inputs_rejected_total{reason}` series,
+  primed at zero: `attack_target_untargetable` (item, projectile or held player),
+  `attack_cannot_act` (stunned attacker), `ability_cannot_cast` (stunned or silenced caster)
+  and `ability_missing_aim`. No rule or number changed; none scores towards the anomaly alert.
+  Tests: `CombatRejectionReasonTests`.
 - **`GAMESERVER_ENEMY_SEED`** seeds the enemy spawner's placement RNG (anchor choice and
   angle). Unset keeps `Random.Shared`, which is today's behaviour. A whole number 0..2^31-1
   makes the placement sequence repeatable for a regression replay. It is shown on the banner
@@ -104,6 +129,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   at the connection's first encode. Regression test:
   `UpdateGapTests.LateJoinDuringShedding_GaugeCountsFromTheJoinNotTickZero` (fails on the old
   code with a 60 003-tick gauge for a join at tick 60 000).
+- **`/debug/kill` refuses oversized and malformed bodies before queueing (review R1-2).**
+  The handler parsed the first 4096 bytes of a larger body, and the parser returned at the
+  first id it found. So `{"id":"p1"}` followed by garbage, or by kilobytes of padding,
+  queued a kill. Now:
+  - a body over `DebugKill.MaxBodyBytes` is refused with 413 `body_too_large`, by
+    `Content-Length` or by reading one byte past the limit for a chunked body;
+  - a non-empty body must be exactly one complete JSON object, else 400 `invalid_body`, with
+    no fallback to the query string.
+  Tests: `MetricsEndpointTests.DebugKill_RefusesOversizedAndTrailingGarbageBodies_WithoutQueueing`
+  and `DebugKill_ParseId_RequiresOneCompleteObject`.
 - **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse
   (#449).** `KcpCrypto` ran CFB-128 by hand with one `EncryptEcb` call per 16-byte block, about
   90 one-shot cipher setups per MTU datagram. Measured at 95 players with AI on: ~340 us to seal

@@ -179,4 +179,210 @@ public class MetricsEndpointTests
         Assert.Equal(200, after);
         Assert.Equal("{\"count\":0}", body);
     }
+
+    private static async Task<(int status, string body)> SendAsync(HttpMethod method, string url, string? json = null,
+        bool chunked = false)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        using var req = new HttpRequestMessage(method, url);
+        if (json != null && chunked)
+        {
+            // A stream that cannot report its length makes HttpClient send the body chunked, with
+            // no Content-Length: the server must find the size by reading, not from a header.
+            req.Content = new StreamContent(new UnknownLengthStream(System.Text.Encoding.UTF8.GetBytes(json)));
+            req.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+        }
+        else if (json != null)
+        {
+            req.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        }
+        var resp = await http.SendAsync(req);
+        return ((int)resp.StatusCode, await resp.Content.ReadAsStringAsync());
+    }
+
+    private static MetricsEndpoint StartEndpoint(GameMetrics metrics, out string baseUrl)
+    {
+        int port = 0;
+        var endpoint = TestPorts.BindWithRetry(leased =>
+        {
+            port = leased;
+            return MetricsEndpoint.TryStart($"localhost:{leased}", metrics, "gs-test", NullLogger.Instance);
+        });
+        Assert.NotNull(endpoint);
+        baseUrl = $"http://{new Uri(endpoint!.UriPrefix).Host}:{port}";
+        return endpoint;
+    }
+
+    /// <summary>
+    /// The debug switch off binds neither debug endpoint, even with a kill submitter in hand;
+    /// on binds both. The control arm is the same call with the switch flipped.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DebugSurface_BindsNothingWhenOff_AndBothEndpointsWhenOn(bool enabled)
+    {
+        using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.debugsurface.{Guid.NewGuid():N}");
+        await using var endpoint = StartEndpoint(metrics, out string baseUrl);
+        int submitted = 0;
+
+        DebugSurface.Enable(endpoint, enabled,
+            () => System.Text.Encoding.UTF8.GetBytes("{\"count\":0}"),
+            (id, _) =>
+            {
+                Interlocked.Increment(ref submitted);
+                return Task.FromResult(new DebugKillResult(DebugKillOutcome.Killed, 7, 42));
+            });
+
+        var (entities, _) = await SendAsync(HttpMethod.Get, baseUrl + "/debug/entities");
+        var (kill, _) = await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{\"id\":\"p1\"}");
+
+        if (enabled)
+        {
+            Assert.Equal(200, entities);
+            Assert.Equal(200, kill);
+            Assert.Equal(1, submitted);
+        }
+        else
+        {
+            Assert.Equal(404, entities);
+            Assert.Equal(404, kill);
+            Assert.Equal(0, submitted);
+        }
+    }
+
+    /// <summary>
+    /// <c>POST /debug/kill</c>: the id reaches the submitter (body or query), the outcome maps to
+    /// a status and a JSON body, GET is refused, and a request naming nobody never reaches the
+    /// submitter.
+    /// </summary>
+    [Fact]
+    public async Task DebugKill_ParsesTheId_AndMapsEachOutcome()
+    {
+        using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.debugkill.{Guid.NewGuid():N}");
+        await using var endpoint = StartEndpoint(metrics, out string baseUrl);
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        Assert.True(endpoint.EnableDebugKill((id, _) =>
+        {
+            seen.Enqueue(id);
+            DebugKillOutcome outcome = id switch
+            {
+                "p1" => DebugKillOutcome.Killed,
+                "dead" => DebugKillOutcome.AlreadyDead,
+                "m1" => DebugKillOutcome.NotAPlayer,
+                _ => DebugKillOutcome.NotFound,
+            };
+            return Task.FromResult(new DebugKillResult(outcome, 99, outcome == DebugKillOutcome.Killed ? 80 : 0));
+        }));
+
+        var (ok, okBody) = await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{\"id\":\"p1\"}");
+        Assert.Equal(200, ok);
+        using (var doc = System.Text.Json.JsonDocument.Parse(okBody))
+        {
+            Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("p1", doc.RootElement.GetProperty("id").GetString());
+            Assert.Equal("killed", doc.RootElement.GetProperty("outcome").GetString());
+            Assert.Equal(99UL, doc.RootElement.GetProperty("tick").GetUInt64());
+            Assert.Equal(80, doc.RootElement.GetProperty("hp_before").GetInt32());
+        }
+
+        Assert.Equal(409, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{\"user_id\":\"dead\"}")).status);
+        Assert.Equal(400, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{\"entity_id\":\"m1\"}")).status);
+        Assert.Equal(404, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill?id=ghost")).status);
+
+        int before = seen.Count;
+        Assert.Equal(405, (await SendAsync(HttpMethod.Get, baseUrl + "/debug/kill?id=p1")).status);
+        Assert.Equal(400, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{}")).status);
+        Assert.Equal(400, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "not json")).status);
+        Assert.Equal(before, seen.Count);
+
+        Assert.Equal(new[] { "p1", "dead", "m1", "ghost" }, seen.ToArray());
+    }
+
+    /// <summary>
+    /// Review R1-2: a body over the limit, or one that is not exactly one complete JSON object,
+    /// is refused and queues nothing, even when it starts with a valid id. Before the fix each of
+    /// these reached the submitter with id "p1": the handler parsed the first 4096 bytes of an
+    /// oversized body, and the parser returned at the first id it saw.
+    /// </summary>
+    [Fact]
+    public async Task DebugKill_RefusesOversizedAndTrailingGarbageBodies_WithoutQueueing()
+    {
+        using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.debugkill.{Guid.NewGuid():N}");
+        await using var endpoint = StartEndpoint(metrics, out string baseUrl);
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        Assert.True(endpoint.EnableDebugKill((id, _) =>
+        {
+            seen.Enqueue(id);
+            return Task.FromResult(new DebugKillResult(DebugKillOutcome.Killed, 1, 100));
+        }));
+
+        string valid = "{\"id\":\"p1\"}";
+        // Exactly at the limit (padded with whitespace) is still accepted.
+        string atLimit = valid + new string(' ', DebugKill.MaxBodyBytes - valid.Length);
+        Assert.Equal(200, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", atLimit)).status);
+        Assert.Single(seen);
+
+        var (tooLarge, tooLargeBody) = await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", atLimit + " ");
+        Assert.Equal(413, tooLarge);
+        Assert.Contains(DebugKill.BodyTooLarge, tooLargeBody);
+        Assert.Equal(413, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", valid + new string('x', 10_000))).status);
+        // Chunked, so no Content-Length to refuse on: the extra byte read past the limit decides.
+        Assert.Equal(413, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", atLimit + " ", chunked: true)).status);
+        Assert.Equal(200, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", atLimit, chunked: true)).status);
+        Assert.Equal(2, seen.Count);
+
+        foreach (string bad in new[]
+                 {
+                     valid + "garbage",
+                     valid + "{\"id\":\"p2\"}",
+                     valid + " ,",
+                     "{\"id\":\"p1\"",
+                     "{\"id\":\"p1\",\"x\":",
+                     "[\"p1\"]",
+                 })
+        {
+            var (status, body) = await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill?id=p1", bad);
+            Assert.True(status == 400, $"{bad} -> {status}");
+            Assert.Contains(DebugKill.InvalidBody, body);
+        }
+
+        Assert.Equal(2, seen.Count);
+    }
+
+    /// <summary>A read-only stream that cannot seek, so it has no length to declare.</summary>
+    private sealed class UnknownLengthStream(byte[] data) : Stream
+    {
+        private readonly MemoryStream _inner = new(data);
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Theory]
+    [InlineData("{\"id\":\"p1\"}", null, "p1", null)]
+    [InlineData("  {\"user_id\":\"u\",\"other\":[1,{\"id\":\"x\"}]}\n", null, "u", null)]
+    [InlineData("{\"id\":\"p1\",\"id\":\"p2\"}", null, "p1", null)]
+    [InlineData("{}", "q", "q", null)]
+    [InlineData("", "q", "q", null)]
+    [InlineData("{}", null, null, DebugKill.MissingId)]
+    [InlineData("{\"id\":\"p1\"}x", "q", null, DebugKill.InvalidBody)]
+    [InlineData("{\"id\":\"p1\"}{}", null, null, DebugKill.InvalidBody)]
+    [InlineData("{\"id\":\"p1\"", null, null, DebugKill.InvalidBody)]
+    [InlineData("not json", "q", null, DebugKill.InvalidBody)]
+    [InlineData("\"p1\"", null, null, DebugKill.InvalidBody)]
+    public void DebugKill_ParseId_RequiresOneCompleteObject(string body, string? query, string? expectedId, string? expectedError)
+    {
+        string? id = DebugKill.ParseId(System.Text.Encoding.UTF8.GetBytes(body), query, out string? error);
+        Assert.Equal(expectedId, id);
+        Assert.Equal(expectedError, error);
+    }
 }

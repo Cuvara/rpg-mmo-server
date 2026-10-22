@@ -158,7 +158,10 @@ internal static class ServerEnv
     /// <c>on</c> serves <c>/debug/entities</c> on the metrics port: every entity's id, type,
     /// position, HP and dead flag, read under the world's read lock off the tick thread. For
     /// automated test runs (rpg-factory testlab) that need server-authoritative positions.
-    /// Off by default and never set by a fleet manifest: it exposes the whole world state.
+    /// The same switch serves <c>POST /debug/kill</c>, which takes a player's HP to 0 on the tick
+    /// thread through the normal death path (<c>Scaffolding.DebugKillPhase</c>).
+    /// Off by default and never set by a fleet manifest: it exposes the whole world state and
+    /// lets anyone reaching the metrics port kill any player.
     /// </summary>
     public const string DebugEntities = "GAMESERVER_DEBUG_ENTITIES";
 
