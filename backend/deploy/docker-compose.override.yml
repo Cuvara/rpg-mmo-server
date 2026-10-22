@@ -150,6 +150,8 @@ services:
       # entities vanish on the client and reappear on the next delta. That is the
       # "enemies disappear and come back" the owner reported.
       GAMESERVER_MAX_SNAPSHOT_BYTES: ${GAMESERVER_MAX_SNAPSHOT_BYTES:-}
+      # Dev/test only: serves /debug/entities (whole world state). Never set on a fleet.
+      GAMESERVER_DEBUG_ENTITIES: ${GAMESERVER_DEBUG_ENTITIES:-}
       GAMESERVER_KEYFRAME_INTERVAL: ${GAMESERVER_KEYFRAME_INTERVAL:-}
       GAMESERVER_ENEMIES: ${GAMESERVER_ENEMIES:-true}
       GAMESERVER_ENEMY_CHASE: ${GAMESERVER_ENEMY_CHASE:-}
@@ -189,6 +191,7 @@ services:
       # damage per second, i.e. 6/s and ~17s to die at these defaults.
       GAMESERVER_ENEMY_ATTACK_INTERVAL: ${GAMESERVER_ENEMY_ATTACK_INTERVAL:-}
       GAMESERVER_PLAYER_RESPAWN: ${GAMESERVER_PLAYER_RESPAWN:-}
+      GAMESERVER_ENEMY_SEED: ${GAMESERVER_ENEMY_SEED:-}
     ports:
       - "9002:9000/udp"
       - "9103:9101"
