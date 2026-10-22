@@ -75,41 +75,81 @@ internal static class DebugKill
     /// The target id from a JSON body <c>{"id":"..."}</c> (or <c>user_id</c> / <c>entity_id</c>),
     /// falling back to the <c>id</c> query parameter. Null when neither names a non-empty id.
     /// </summary>
-    public static string? ParseId(ReadOnlySpan<byte> body, string? queryId)
+    /// <remarks>
+    /// A non-empty body must be exactly one complete JSON object (whitespace around it allowed).
+    /// Anything else is refused with <paramref name="error"/> = <c>invalid_body</c> and names
+    /// nobody, even if a valid id appears in it: a body such as
+    /// <c>{"id":"target"}garbage</c>, or a truncated object, is not a request this endpoint
+    /// understood, and a state change must not be made on a guess (review finding R1-2). With
+    /// several id fields the first non-empty one wins, as before.
+    /// </remarks>
+    public static string? ParseId(ReadOnlySpan<byte> body, string? queryId, out string? error)
     {
+        error = null;
         if (!body.IsEmpty)
         {
+            string? found = null;
             try
             {
+                // isFinalBlock (the default): a truncated document throws rather than stopping.
                 var reader = new Utf8JsonReader(body);
-                if (reader.Read() && reader.TokenType == JsonTokenType.StartObject)
+                if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
                 {
-                    while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+                    error = InvalidBody;
+                    return null;
+                }
+
+                while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+                {
+                    bool wanted = reader.ValueTextEquals("id")
+                        || reader.ValueTextEquals("user_id")
+                        || reader.ValueTextEquals("entity_id");
+                    if (!reader.Read()) break;
+                    if (wanted && found == null && reader.TokenType == JsonTokenType.String)
                     {
-                        bool wanted = reader.ValueTextEquals("id")
-                            || reader.ValueTextEquals("user_id")
-                            || reader.ValueTextEquals("entity_id");
-                        if (!reader.Read()) break;
-                        if (wanted && reader.TokenType == JsonTokenType.String)
-                        {
-                            string? id = reader.GetString();
-                            if (!string.IsNullOrWhiteSpace(id)) return id;
-                        }
-                        else
-                        {
-                            reader.Skip();
-                        }
+                        string? id = reader.GetString();
+                        if (!string.IsNullOrWhiteSpace(id)) found = id;
                     }
+                    else
+                    {
+                        reader.Skip();
+                    }
+                }
+
+                // The whole object, and nothing after it: a second value or trailing bytes throw
+                // here (single-value reader), trailing whitespace reads as the end.
+                if (reader.TokenType != JsonTokenType.EndObject || reader.CurrentDepth != 0 || reader.Read())
+                {
+                    error = InvalidBody;
+                    return null;
                 }
             }
             catch (JsonException)
             {
-                // Falls through to the query string; a body that is not JSON names nothing.
+                error = InvalidBody;
+                return null;
             }
+
+            if (found != null) return found;
         }
 
-        return string.IsNullOrWhiteSpace(queryId) ? null : queryId;
+        if (string.IsNullOrWhiteSpace(queryId))
+        {
+            error = MissingId;
+            return null;
+        }
+
+        return queryId;
     }
+
+    /// <summary>Error code: the body is not exactly one complete JSON object.</summary>
+    public const string InvalidBody = "invalid_body";
+
+    /// <summary>Error code: neither the body nor the query names an id.</summary>
+    public const string MissingId = "missing_id";
+
+    /// <summary>Error code: the body is larger than <see cref="MaxBodyBytes"/>.</summary>
+    public const string BodyTooLarge = "body_too_large";
 
     /// <summary>Response body for a resolved (or refused) request.</summary>
     public static byte[] ResultBody(string id, in DebugKillResult result)
