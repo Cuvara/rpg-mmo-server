@@ -645,6 +645,60 @@ public sealed class ServerStatus
     public int SnapshotMaxShedAge { get; set; }
 
     /// <summary>
+    /// Deepest per-connection data lane (snapshot markers and heartbeats waiting for the write
+    /// task) over live connections, now. Bounded by the lane's capacity, 64 (#473).
+    /// </summary>
+    [JsonPropertyName("snapshot_send_queue_depth_max")]
+    public int SnapshotSendQueueDepthMax { get; set; }
+
+    /// <summary>
+    /// Items the drop-oldest data lanes discarded, summed over LIVE connections (a closed
+    /// connection's drops leave the sum). A dropped snapshot marker loses nothing; a dropped
+    /// heartbeat is a lost ping reply (#473).
+    /// </summary>
+    [JsonPropertyName("snapshot_send_dropped_oldest")]
+    public long SnapshotSendDroppedOldest { get; set; }
+
+    /// <summary>
+    /// Largest KCP <c>WaitSnd</c> (segments queued or sent and not yet acknowledged) over live
+    /// sessions, now. The writer waits at 256 and the session closes past 1024 (#473).
+    /// </summary>
+    [JsonPropertyName("kcp_wait_snd_max")]
+    public int KcpWaitSndMax { get; set; }
+
+    /// <summary>Largest current KCP retransmission timeout over live sessions, in ms (#473).</summary>
+    [JsonPropertyName("kcp_rto_max_ms")]
+    public int KcpRtoMaxMs { get; set; }
+
+    /// <summary>
+    /// Smallest receive window, in segments, any peer last advertised; 0 means a client stopped
+    /// reading and the server stopped sending to it. -1 with no live KCP session (#473).
+    /// </summary>
+    [JsonPropertyName("kcp_rmt_wnd_min")]
+    public int KcpRemoteWindowMin { get; set; }
+
+    /// <summary>
+    /// KCP segments sent more than once since start, all sessions, closed ones included. Same
+    /// value as <c>gameserver_kcp_segments_retransmitted_total</c> (#473).
+    /// </summary>
+    [JsonPropertyName("kcp_segments_retransmitted")]
+    public long KcpSegmentsRetransmitted { get; set; }
+
+    /// <summary>
+    /// Rows the snapshot delivery trace (<c>GAMESERVER_SNAPSHOT_TRACE</c>) has written; -1
+    /// when the trace is off.
+    /// </summary>
+    [JsonPropertyName("snapshot_trace_rows_written")]
+    public long SnapshotTraceRowsWritten { get; set; }
+
+    /// <summary>
+    /// Rows the snapshot delivery trace dropped (ring full, or the file failed); -1 when off.
+    /// Non-zero means the trace has holes: do not read a missing row as a missing snapshot.
+    /// </summary>
+    [JsonPropertyName("snapshot_trace_rows_dropped")]
+    public long SnapshotTraceRowsDropped { get; set; }
+
+    /// <summary>
     /// <c>MsgTransferMap</c> requests refused because a transfer was already running on
     /// that connection. Same value as <c>gameserver_transfers_rejected_total</c>.
     /// </summary>

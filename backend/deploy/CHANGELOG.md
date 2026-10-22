@@ -6,6 +6,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `stack.sh up` stamps the gateway and game server images with `STACK_GIT_REVISION=<sha>` (env)
+  as the `org.opencontainers.image.revision` label. Before this change every stack-built image read
+  `unknown`, so a scratch stack could not be traced to a commit. The SHA comes from the caller,
+  because git inside WSL cannot resolve a Windows-created worktree. Unset keeps `unknown`;
+  a value that is not a hex SHA exits 2. Documented in `docs/RUNBOOK-local-dev.md`.
+- Compose passthrough for `GAMESERVER_SNAPSHOT_TRACE` (rpg-mmo-server#473) in
+  `docker-compose.yml` and `docker-compose.override.yml`: the snapshot delivery trace file
+  path, dev and test only. Deliberately **not** declared in the Agones fleet or the k8s fleets
+  (`FleetEnvPassthroughTests` excludes it with the reason: unbounded file growth on the pod
+  and every player's user id). `docs/RUNBOOK-local-dev.md` says how to get the file out.
 - Passthrough for `GAMESERVER_ENEMY_SEPARATION`, `GAMESERVER_ENEMY_BUDGET` and
   `GAMESERVER_SPAWN_SCATTER` (rpg-mmo-server#468, #469) in `docker-compose.yml`,
   `docker-compose.override.yml`, the Agones fleet and both k8s fleets (optional
