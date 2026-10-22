@@ -153,4 +153,12 @@ internal static class ServerEnv
     /// a deployment setting: a long-running service that reads it true never serves.
     /// </summary>
     public const string MigrateOnly = "GAMESERVER_MIGRATE_ONLY";
+
+    /// <summary>
+    /// <c>on</c> serves <c>/debug/entities</c> on the metrics port: every entity's id, type,
+    /// position, HP and dead flag, read under the world's read lock off the tick thread. For
+    /// automated test runs (rpg-factory testlab) that need server-authoritative positions.
+    /// Off by default and never set by a fleet manifest: it exposes the whole world state.
+    /// </summary>
+    public const string DebugEntities = "GAMESERVER_DEBUG_ENTITIES";
 }

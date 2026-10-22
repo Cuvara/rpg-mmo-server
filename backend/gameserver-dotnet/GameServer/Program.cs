@@ -313,6 +313,25 @@ if (!GameServer.Scaffolding.BotSettings.TryCreate(
 
 GameServer.Scaffolding.BotSettings bots = botsParsed!;
 
+// /debug/entities (dev/test only, see ServerEnv.DebugEntities). Strict like every knob above:
+// a typo that silently left it off would make a test run report "no server positions" for a
+// reason that names nothing.
+bool debugEntities;
+switch (Env(ServerEnv.DebugEntities)?.Trim().ToLowerInvariant())
+{
+    case null or "" or "off" or "false" or "0":
+        debugEntities = false;
+        break;
+    case "on" or "true" or "1":
+        debugEntities = true;
+        break;
+    default:
+        logger.LogCritical(
+            "invalid {Name}={Value}: expected on/off (true/false, 1/0)",
+            ServerEnv.DebugEntities, Env(ServerEnv.DebugEntities));
+        return 2;
+}
+
 if (!GameServer.Server.ImportanceSettings.TryCreate(
         GetArg(args, "--importance") ?? Env(GameServer.Server.ImportanceSettings.EnvVar),
         Env,
@@ -1170,6 +1189,12 @@ var uptime = System.Diagnostics.Stopwatch.StartNew();
 // Serve the content set clients need. The canonical bytes are handed over verbatim —
 // see SetContentProvider for why this is not a re-serialisation.
 metricsEndpoint?.SetContentProvider(() => (content.CanonicalBytes, content.Hash));
+
+if (debugEntities)
+{
+    metricsEndpoint?.EnableDebugEntities(() => GameServer.Observability.DebugEntitiesDocument.Write(
+        server.World, server.CurrentTick, uptime.Elapsed.TotalSeconds));
+}
 
 // Wire up the /status JSON endpoint with live server state.
 metricsEndpoint?.SetStatusProvider(() =>

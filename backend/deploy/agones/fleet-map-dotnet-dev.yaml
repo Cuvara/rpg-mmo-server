@@ -753,6 +753,12 @@ spec:
                       name: gameserver-config
                       key: player-respawn
                       optional: true
+                - name: GAMESERVER_ENEMY_SEED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-seed
+                      optional: true
 
                 # ------------------------------------------------------------
                 # BOTS (Scaffolding)
