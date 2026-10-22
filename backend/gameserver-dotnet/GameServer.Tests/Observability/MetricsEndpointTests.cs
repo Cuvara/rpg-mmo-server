@@ -152,4 +152,31 @@ public class MetricsEndpointTests
         Assert.Equal(wantHost, host);
         Assert.Equal(wantPort, port);
     }
+
+    /// <summary>
+    /// <c>/debug/entities</c> exists only after <see cref="MetricsEndpoint.EnableDebugEntities"/>:
+    /// a server that never opted in answers 404 there, and one that did serves the provider's
+    /// bytes verbatim.
+    /// </summary>
+    [Fact]
+    public async Task DebugEntities_IsAbsentUntilEnabled_ThenServesTheProvidersDocument()
+    {
+        using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.debug.{Guid.NewGuid():N}");
+        int port = 0;
+        await using var endpoint = TestPorts.BindWithRetry(leased =>
+        {
+            port = leased;
+            return MetricsEndpoint.TryStart($"localhost:{leased}", metrics, "gs-test", NullLogger.Instance);
+        });
+        Assert.NotNull(endpoint);
+        string host = new Uri(endpoint!.UriPrefix).Host;
+
+        var (before, _) = await GetAsync($"http://{host}:{port}/debug/entities");
+        Assert.Equal(404, before);
+
+        Assert.True(endpoint.EnableDebugEntities(() => System.Text.Encoding.UTF8.GetBytes("{\"count\":0}")));
+        var (after, body) = await GetAsync($"http://{host}:{port}/debug/entities");
+        Assert.Equal(200, after);
+        Assert.Equal("{\"count\":0}", body);
+    }
 }

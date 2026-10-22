@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`GAMESERVER_DEBUG_ENTITIES=on` serves `/debug/entities`** on the metrics port: every
+  entity's id, type, authoritative position, HP, max HP, speed and dead flag, with the
+  server tick and a monotonic timestamp (schema `rpg.debug-entities.v1`). It is read under the
+  world's read lock on the HTTP thread, never on the tick, and written with `Utf8JsonWriter`
+  so NativeAOT needs no reflection metadata. Off by default. The listener does not exist
+  unless the knob is on. The fleet manifests never declare the knob (`FleetEnvPassthroughTests`
+  excludes it with the reason), because it exposes the whole world state. It exists for the
+  rpg-factory testlab, which compares what each rendered client drew with where the server
+  says every entity was. Strict parse (`on/off/true/false/1/0`, anything else exits 2).
+- **`GAMESERVER_ENEMY_SEED`** seeds the enemy spawner's placement RNG (anchor choice and
+  angle). Unset keeps `Random.Shared`, which is today's behaviour. A whole number 0..2^31-1
+  makes the placement sequence repeatable for a regression replay. It is shown on the banner
+  and in `/status` `enemy_ai` as `seed=N`. Passed through compose and all three fleets (optional
+  `gameserver-config` key `enemy-seed`). Tests: `EnemySeedTests` (parse, refusal, same seed ->
+  same placements, different seed -> different).
+
 ### Fixed
 - **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse
   (#449).** `KcpCrypto` ran CFB-128 by hand with one `EncryptEcb` call per 16-byte block, about

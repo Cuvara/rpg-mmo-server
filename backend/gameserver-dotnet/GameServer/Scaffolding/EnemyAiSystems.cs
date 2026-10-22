@@ -49,11 +49,20 @@ internal sealed class EnemySpawnSystem : IEcsSystem
     [SimulationScratch]
     private PlayerTargetBuffer _players = new();
 
+    /// <summary>
+    /// Placement RNG: <see cref="Random.Shared"/> unless <see cref="EnemyAiSettings.Seed"/>
+    /// is set, in which case a private sequence that a replay can reproduce. Only this system
+    /// draws from it, on the tick thread.
+    /// </summary>
+    [SimulationScratch]
+    private readonly Random _rng;
+
     public EnemySpawnSystem(float dt, EnemyAiSettings settings, ILogger logger)
     {
         _dt = dt;
         _settings = settings;
         _logger = logger;
+        _rng = settings.Seed is int seed ? new Random(seed) : Random.Shared;
     }
 
     public string Name => "enemy.spawn";
@@ -158,7 +167,7 @@ internal sealed class EnemySpawnSystem : IEcsSystem
     /// </summary>
     private Vec2 ChoosePosition(int livePlayers)
     {
-        float angle = Random.Shared.NextSingle() * MathF.Tau;
+        float angle = _rng.NextSingle() * MathF.Tau;
 
         if (livePlayers <= 0)
         {
@@ -170,7 +179,7 @@ internal sealed class EnemySpawnSystem : IEcsSystem
         Vec2 candidate = default;
         for (int attempt = 0; attempt < PlacementAttempts; attempt++)
         {
-            Vec2 anchor = _players[Random.Shared.Next(livePlayers)];
+            Vec2 anchor = _players[_rng.Next(livePlayers)];
             candidate = _settings.Bounds.Clamp(new Vec2(
                 anchor.X + (MathF.Cos(angle) * _settings.SpawnDistance),
                 anchor.Y + (MathF.Sin(angle) * _settings.SpawnDistance)));
@@ -183,7 +192,7 @@ internal sealed class EnemySpawnSystem : IEcsSystem
                 return candidate;
             }
 
-            angle = Random.Shared.NextSingle() * MathF.Tau;
+            angle = _rng.NextSingle() * MathF.Tau;
         }
 
         // Exhausted: every sample landed near somebody. Take the last one rather than
