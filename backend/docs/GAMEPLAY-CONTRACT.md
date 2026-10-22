@@ -7,8 +7,9 @@ quoted with its source. Changing one is a gameplay decision for the user, not an
 detail (see [#467](https://github.com/Cuvara/rpg-mmo-server/issues/467): every gameplay number is a
 placeholder).
 
-**Status:** written 2026-10-23. Part of this contract lands only with open pull requests. Each such
-statement says **"after PR #N"**. A statement without that note is true on `develop`.
+**Status:** written 2026-10-23 against the final core-readiness candidate. Part of this contract
+lands only with open pull requests. Each such statement says **"after PR #N"**. A statement
+without that note is true on `develop`.
 
 ## How to read the citations
 
@@ -18,26 +19,31 @@ citation with `git show <sha>:<path> | sed -n '<line>p'` in the named repository
 | Label | Repository | Commit | What it is |
 |---|---|---|---|
 | `develop` | rpg-mmo-server | `e982a6d` | `origin/develop` when this document was written |
-| `#472` | rpg-mmo-server | `11f0140` | PR #472: enemy separation, spawn scatter, enemy budget, testlab support |
-| `#474` | rpg-mmo-server | `1dc89ed` | PR #474 (stacked on #472): snapshot delivery trace, KCP counters, #471 fix |
-| `#475` | rpg-mmo-server | `c7ad277` | PR #475 (stacked on #472): debug kill hook, per-reason combat rejections, map bounds on `/status` |
-| `integ` | rpg-mmo-server | `4b2c1c2` | `integ/testlab/core-readiness`: #472 + #474 + #475 + review fixes. Integration branch, not for merge |
+| `#472` | rpg-mmo-server | `a8c15f6` | PR #472: enemy separation, spawn scatter, enemy budget, testlab support |
+| `#474` | rpg-mmo-server | `d6509d3` | PR #474 (stacked on #472): snapshot delivery trace, KCP counters, #471 fix, image revision label |
+| `#475` | rpg-mmo-server | `f95f772` | PR #475 (stacked on #474): debug kill hook, per-reason combat rejections, map bounds on `/status` |
+| `#482` | rpg-mmo-server | `4388b27` | PR #482 (stacked on #475): a graceful leave releases the player at once |
+| `integ` | rpg-mmo-server | `0b7a51a` | `integ/testlab/core-readiness` = #472 + #474 + #475 + #482. Merging the chain in order gives exactly this tree. Not for merge itself |
 | `nc-0.47.0` | Netcode | tag `v0.47.0` | The Netcode version the Unity client pins today |
-| `nc` | Netcode | `a5d09ce` | Netcode PR #185 head, stacked on PR #184 (`5fa8f37`). `package.json` says 0.48.0, but **no `v0.48.0` tag exists** |
-| `dots` | UnityDots | `bfdfefb` | UnityDots PR #37 head. The client pins `v0.31.0` |
-| `client#154` | IndieRPGMMOAdventure | `2aa4965` | Client PR #154 head (test lab) |
-| `client#155` | IndieRPGMMOAdventure | `22264dc` | Client PR #155 head (draft, stacked on #154; needs Netcode >= 0.48.0) |
-| `lab` | rpg-factory | `26429ce` | rpg-factory PR #17 head (the test lab) |
+| `nc` | Netcode | `9cab51b` | The 0.48.0 candidate: PR #185 head, stacked on PR #184 (`5fa8f37`). `package.json` says 0.48.0, but **no `v0.48.0` tag exists** |
+| `dots` | UnityDots | `286b009` | UnityDots PR #37 head. `package.json` still 0.31.0; it needs a release and a client pin bump. The client pins `v0.31.0` |
+| `client#154` | IndieRPGMMOAdventure | `8c87677` | Client PR #154 head (test lab) |
+| `client#155` | IndieRPGMMOAdventure | `e1d8275` | Client PR #155 head (draft, stacked on #154; needs Netcode >= 0.48.0) |
+| `lab` | rpg-factory | `171c573` | rpg-factory PR #17 head (the test lab) |
 
 Path abbreviations: `GS/` = `backend/gameserver-dotnet/GameServer/`,
 `GST/` = `backend/gameserver-dotnet/GameServer.Tests/`, `SGL/` = `backend/gameserver-dotnet/Shared.GameLogic/`,
 `ADR` = `backend/docs/ARCHITECTURE-DECISIONS.md`.
 
-**Client version caveat.** The shipping client resolves Netcode `v0.47.0`
-(`client#154:Packages/manifest.json:24`). Everything below that cites `nc` reaches the client only
-after Netcode PR #184/#185 merge, `v0.48.0` is tagged, and the client pin moves (client PR #155).
-Test-lab verification players embed an untagged Netcode commit (for example `ba67b94`); that is
-"embedded ba67b94", not a released 0.48.0.
+**Merge order (server).** #472, then #474, then #475, then #482. After each merge, retarget the next
+PR to `develop`.
+
+**Client version caveat.** The shipping client resolves Netcode `v0.47.0` and UnityDots `v0.31.0`
+(`client#154:Packages/manifest.json:23-24`). Everything below that cites `nc` reaches the client
+only after Netcode PR #184/#185 merge, `v0.48.0` is tagged, and the client pin moves (client PR #155).
+Everything that cites `dots` needs a UnityDots release and a pin bump. Tags are the user's action.
+Test-lab verification players embed an untagged Netcode commit; that is, for example, "embedded
+9cab51b", not a released 0.48.0.
 
 ---
 
@@ -52,7 +58,7 @@ Test-lab verification players embed an untagged Netcode commit (for example `ba6
 | Spawn on join | `PlayerSpawn.Resolve` | `develop:GS/Server/GameServer.cs:1673`, `:1713` |
 | Respawn: dead for at most one world tick, then full HP at the spawn point | `PlayerRespawnSystem` (World group) | `develop:GS/Scaffolding/EnemyCombatSystems.cs:291-298`, `:330-334`, `:363-373` |
 | Respawn point scatter | `ScatterSpawn` | after PR #472: `#472:GS/Scaffolding/EnemyCombatSystems.cs:376` |
-| Enemy AI: spawn, move, reap | Enemy AI phase, before broadcast | `develop:GS/Server/TickLoop.cs:589-594` |
+| Enemy AI: spawn, move, attack, reap | Enemy AI phase, before broadcast | `develop:GS/Server/TickLoop.cs:589-594` |
 | Hits of projectiles, lag-compensated by at most 200 ms; the server never trusts a client origin | ADR-29 | `ADR` heading `develop:…:4113`; `:4137-4141` |
 
 A client result is a hint only (`develop:SGL/Systems/AbilityLogic.cs:20-24`).
@@ -119,8 +125,9 @@ new system, and do not move it in passing (that is an architecture change with a
 One user owns one entity. A newer login of the same user kicks the older session; the newer login
 owns the user (`develop:GS/Server/GameServer.cs:2040-2043`). A player entity's id is its user id
 (`develop:GS/Persistence/CharacterSessions.cs:9`). On the client, one scene has one input source and
-one predicted local entity (UnityDots selects exactly one: after PR UnityDots#37,
-`dots:Runtime.Netcode.Prediction/LocalPredictionSystem.cs:94` queries the `LocalNetworkEntity` tag).
+one predicted local entity. After PR UnityDots#37 the prediction system queries only the
+`LocalNetworkEntity` tag and predicts exactly one entity
+(`dots:Runtime.Netcode.Prediction/LocalPredictionSystem.cs:94`).
 
 ### Rejections
 
@@ -133,8 +140,8 @@ Every refused input has a typed reason (`develop:GS/Input/InputRejection.cs:37`,
 `ability_target_dead`, `ability_caster_dead`, `ability_other`.
 
 After PR #475 four more reasons split `attack_other` and `ability_other`
-(`#475:GS/Input/InputRejection.cs:187`, `:195`, `:203`, `:215`): `attack_target_untargetable`,
-`attack_cannot_act`, `ability_cannot_cast`, `ability_missing_aim`.
+(`#475:GS/Input/InputRejection.cs:187`, `:195`, `:203`, `:215`; labels `:314-317`):
+`attack_target_untargetable`, `attack_cannot_act`, `ability_cannot_cast`, `ability_missing_aim`.
 
 Each reason has a `RejectionWeight`: `Benign`, `LatencyExplicable` or `Forged`
 (`develop:GS/Input/InputRejection.cs:197-220`; table at `:274-312`). Only `invalid_direction` is
@@ -215,21 +222,20 @@ bandwidth budget (section 6).
   same value is on `/status` (`develop:GS/Observability/ServerStatus.cs:793`). A client that sees 0
   must refuse to predict (`develop:backend/shared/proto/wire.proto:325-331`).
 - Netcode `LocalMovePredictor.UseServerTickRate(uint)` adopts it: a different rate re-derives the
-  timestep and the catch-up budget and resets the predictor (`nc:Runtime/Prediction/LocalMovePredictor.cs:731`,
-  remarks `:710-716`). **It does not exist in `nc-0.47.0`.** The client calls it only after client
-  PR #155 (`client#155:Assets/Scripts/DI/Dots/DotsWorldBridge.cs:643`), which needs a Netcode
-  `>= 0.48.0` pin.
+  timestep and the catch-up budget and resets the predictor
+  (`nc:Runtime/Prediction/LocalMovePredictor.cs:731`). **It does not exist in `nc-0.47.0`.** The
+  client calls it only after client PR #155 (`client#155:Assets/Scripts/DI/Dots/DotsWorldBridge.cs:643`),
+  which needs a Netcode `>= 0.48.0` pin.
 - Until then the shipping client predicts at its configured rate. A server started with a
   non-default critical rate is therefore not supported by the shipping client.
 
 ### Prediction, reconciliation and replay
 
 - History ring: 256 ticks (`nc:Runtime/Prediction/LocalMovePredictor.cs:309`; the same in
-  `nc-0.47.0`). A replay longer than the ring keeps the newest 256 ticks exact
-  (`StageReplayedHistory`, `nc:…/LocalMovePredictor.cs:365`; test
+  `nc-0.47.0`). A replay longer than the ring keeps the newest 256 ticks exact (test
   `ReplayHistoryStagingTests.AReplayLongerThanTheHistoryRing_KeepsTheNewestTicksExact`).
 - Corrections up to `SmoothingThreshold = 0.5` units are smoothed; a larger correction snaps and
-  increments `Snaps` (`nc:…/LocalMovePredictor.cs:226`, `:1758`, `:1770`).
+  increments `Snaps` (`nc:…/LocalMovePredictor.cs:226`).
 - The server reports which input it applied last (`AckTick`, `AckAppliedTick`;
   `develop:GS/Snapshot/SnapshotDeltaState.cs:1130-1132`). Normative reference:
   `backend/gameserver-dotnet/docs/API.md` "Reconciliation" and "Which history entry a snapshot
@@ -237,26 +243,44 @@ bandwidth budget (section 6).
 
 ### Clock steering and stalls
 
+All of this is Netcode 0.48.0 candidate behaviour (`nc`); the shipping 0.47.0 client lacks it.
+
 - The predictor steers its clock onto the server's tick line. A clock error above
-  `HardResyncTicks` (2 s of ticks) forces a hard resync (`nc:…/LocalMovePredictor.cs:2031`).
-- **Client stall (D1, after Netcode PR #185).** After a frame clamp, an error outside the 8-tick
-  steering band (`SteerIntegralBandTicks`, `:2318`), or a clock that is behind by more than the
-  catch-up budget, jumps the clock onto the line (`JumpClock`, counted in `StallResyncs`;
-  `nc:…/LocalMovePredictor.cs:2096-2112`, `:952`, `:976`). Before this fix a 2 s stall cost up to 80
-  whole-step corrections. The defect dates from Netcode v0.20.0; it is not a 0.48.0 regression.
+  `HardResyncTicks` (2 s of ticks) forces a hard resync (`nc:…/LocalMovePredictor.cs:2081`). The
+  integral steering band is 8 ticks (`SteerIntegralBandTicks`, `:2368`).
+- **Client stall (D1).** After a stall the predictor jumps its clock onto the line once
+  (`JumpClock`, `nc:…/LocalMovePredictor.cs:976`; counted in `StallResyncs`, `:952`).
+- **Client stall, live backlog (F2).** After a stall the queued snapshots arrive oldest first,
+  bunched. `PredictionClockSteering.OnSnapshot` classifies each snapshot against the arrival
+  cadence (`nc:Runtime/Prediction/PredictionClockSteering.cs:269`):
+  - **late** (arrival gap above 2x the expected interval): steer to the snapshot tick plus its
+    delivery delay at the advertised rate (`:310-319`);
+  - **bunched behind a late one** (below 0.5x): no steering, and the reconcile is skipped
+    (`:299-308`; `SkipReconcileForBunchedSnapshot`, `nc:…/LocalMovePredictor.cs:2065`);
+  - otherwise unchanged.
+- **Interpolation clock (F1).** A rate sample is accepted only within `[0.5x, 2x]` of the current
+  seconds-per-tick and only for an on-cadence arrival; after 5 s of continuous rejection the new
+  rate is relearned (`nc:Runtime/Interpolation/InterpolationClock.cs:101-115`, `:280-291`). After an
+  off-cadence episode, the first on-cadence arrival sets the clock forward once when it is more than
+  0.5 s behind (`:129`, `:341-351`). A clock too far ahead of the newest snapshot holds
+  (`:358-373`). Counters: `RejectedIntervalSamples`, `ClockResyncs`, `AheadHoldFrames` (`:135-146`).
 - **Server stall.** One second without snapshots followed by a burst corrects nothing
   (`ServerStallRecoveryTests.NoSnapshotsForASecondThenABurst_CorrectsNothing`, Netcode headless suite).
 - `PredictionClockSteering.Reset()` forgets the tick-rate, staleness and ack-latency estimators
-  (`nc:Runtime/Prediction/PredictionClockSteering.cs:560-567`). Before `a5d09ce` it kept
-  `AckLatency` across sessions.
+  and the advertised rate (`nc:Runtime/Prediction/PredictionClockSteering.cs:701-712`).
+- **What remains:** one correction per stall, from the input recorded in the stall-end frame on the
+  old tick line; and a separate ~2-step correction when `AckLatencyEstimator` flaps between
+  refusing and accepting its floor (`ConservativeFloorTicks`,
+  `nc:Runtime/Prediction/AckLatencyEstimator.cs:964`; fit at `:625`). Section 8.
 
 ### Lab caveat: the WSL VM clock
 
-On the shared development host the WSL VM's monotonic clock ran about 7% slow against Windows
-(ratio 0.927 over 60 s; evidence `.testlab-runs/t06/clock-drift-check.txt` in the workspace). A
-server in WSL configured at 60/15 Hz then runs at about 55/13.8 Hz of Windows time. This is a
-property of that lab host, not of the game. Do not quote a rate or a latency measured across the
-Windows/WSL boundary without this caveat, and do not "fix" the game for it.
+On the shared development host the WSL VM's monotonic clock runs about 7-11% slow against Windows
+(direct measurement: ratio 0.927 over 60 s, `.testlab-runs/t06/clock-drift-check.txt` in the
+workspace; trace fits: 1.082-1.110). A server in WSL configured at 60/15 Hz then runs at about
+55/13.8 Hz of Windows time, and its rate wanders within an hour. This is a property of that lab
+host, not of the game. Do not quote a rate or a latency measured across the Windows/WSL boundary
+without this caveat, and do not "fix" the game for it.
 
 ---
 
@@ -277,7 +301,8 @@ Windows/WSL boundary without this caveat, and do not "fix" the game for it.
 ### Area of interest
 
 - AOI radius `GAMESERVER_AOI_RADIUS`, default 50 units (`develop:GS/Server/AoiSettings.cs:21`;
-  `develop:SGL/Components/GameConstants.cs:132`).
+  `develop:SGL/Components/GameConstants.cs:132`). An entity that leaves the radius is sent as a
+  removal and re-added when it comes back.
 - The spatial grid answers a query only when the population occupies at least 96 cells; below that
   a brute-force scan is faster (`develop:GS/World/SpatialGrid.cs:152-156`). Read
   `backend/docs/BENCHMARK.md` Part XI before any AOI change.
@@ -297,7 +322,7 @@ Windows/WSL boundary without this caveat, and do not "fix" the game for it.
   (`develop:GS/Observability/GameMetrics.cs:23`, `:231`, `:496`).
   On `develop`, an entity shed from the join keyframe charges the server's whole uptime to
   `snapshot_max_update_gap_ms` ([#471](https://github.com/Cuvara/rpg-mmo-server/issues/471)).
-  After PR #474 the gap counts from the join (`#474:GS/Snapshot/SnapshotDeltaState.cs:605-615`).
+  After PR #474 the gap counts from the join (`#474:GS/Snapshot/SnapshotDeltaState.cs:604-615`).
   Until then, do not read that gauge under shedding.
 - **Coalescing per connection.** The server stages one snapshot per connection. A newer gather
   replaces an unclaimed one and is counted in `gameserver_snapshots_coalesced_total`
@@ -305,19 +330,20 @@ Windows/WSL boundary without this caveat, and do not "fix" the game for it.
 
 ### Ordering and freshness on the client
 
-- KCP delivers in order, but the client still rejects old data:
+- KCP delivers in order, but the client still rejects old data (Netcode 0.48.0 candidate):
   - `WorldState.Apply` drops a snapshot older than the current tick, and a second snapshot at the
-    same tick, and counts it in `StaleSnapshotsDropped` (after Netcode PR #185;
-    `nc:Runtime/World/WorldState.cs:204-206`, `:334`). Netcode `ba67b94` dropped only older ticks;
-    `nc-0.47.0` and `5fa8f37` merged an older snapshot (defect D2).
+    same tick once one has been merged, and counts it in `StaleSnapshotsDropped`
+    (`nc:Runtime/World/WorldState.cs:204-206`, `:334`). The server sends at most one snapshot per
+    world tick per connection, so this guard never drops a legitimate snapshot. `nc-0.47.0` merged an
+    older snapshot (defect D2).
   - The interpolation clock ignores a tick at or before its newest one
-    (`nc:Runtime/Interpolation/InterpolationClock.cs:108`). The sample ring rejects a duplicate or
-    reordered tick (`nc:Runtime/Interpolation/InterpolationRing.cs:21-23`).
+    (`nc:Runtime/Interpolation/InterpolationClock.cs:206`). The sample ring rejects a duplicate or
+    reordered tick (`nc:Runtime/Interpolation/InterpolationRing.cs:23`).
 - A new gameplay field must survive this: never rely on applying a snapshot twice.
 
 ### Interpolation and extrapolation (remote entities)
 
-Defaults from `nc:Runtime/Interpolation/InterpolationConfig.cs:189-203`:
+Defaults from `nc:Runtime/Interpolation/InterpolationConfig.cs:189-208`:
 
 | Field | Default | In `nc-0.47.0` |
 |---|---|---|
@@ -328,22 +354,23 @@ Defaults from `nc:Runtime/Interpolation/InterpolationConfig.cs:189-203`:
 | `MaxExtrapolationSpan` | 0.250 s | no |
 | `MaxExtrapolationSpeed` | 0 (off) | no |
 
-Semantics of hold and settle: `nc:Documentation~/INTERPOLATION.md:49-68`. `default(InterpolationConfig)`
+Semantics of hold and settle: `nc:Documentation~/INTERPOLATION.md:47-61`. `default(InterpolationConfig)`
 normalises hold, settle and span to these defaults, but `MaxExtrapolation` stays 0, which means
-"never extrapolate" (`nc:Runtime/Interpolation/InterpolationConfig.cs:232-257`). Client PR #155 uses
+"never extrapolate" (`nc:Runtime/Interpolation/InterpolationConfig.cs:232-258`). Client PR #155 uses
 `InterpolationConfig.Default` with `MaxExtrapolationSpeed = 15` units/s
-(`client#155:Assets/Scripts/DI/Dots/DotsWorldBridge.cs:93`, `:346-348`).
+(`client#155:Assets/Scripts/DI/Dots/DotsWorldBridge.cs:93`, `:346-347`).
 
 ### Teleports, including respawn
 
-- **Local player: a respawn is a snap, by design.** A respawn moves the authoritative position
-  further than `SmoothingThreshold`, so the predictor snaps once and does not re-apply it. Test-lab
-  runs on 2026-10-22 matched client snaps to server respawns one to one (543 snaps = 543 respawns
-  over a 1 h soak). An idle player near enemies is killed and respawned about every 18.5 s at the
-  current enemy defaults, so "snaps at idle" are respawns, not a prediction defect.
+- **Local player: a respawn that moves the player is a snap, by design.** It moves the
+  authoritative position further than `SmoothingThreshold`, so the predictor snaps once and does
+  not re-apply it. In the 2026-10-22 test-lab soaks, client snaps equalled the server respawns that
+  moved the player, one to one (for example 544 snaps against 543 such respawns plus the join). An
+  idle player under attack dies about every 18.1 s at the current enemy defaults (section 5), so
+  "snaps at idle" are respawns, not a prediction defect.
 - **Remote entities.** A last segment faster than `MaxExtrapolationSpeed` or longer than
   `MaxExtrapolationSpan` is held at its destination, not carried past it
-  (`nc:Runtime/Interpolation/InterpolationConfig.cs:86-109`; `nc:Documentation~/INTERPOLATION.md:116`).
+  (`nc:Runtime/Interpolation/InterpolationConfig.cs:86-109`; `nc:Documentation~/INTERPOLATION.md:139`).
   Both guards need Netcode `>= 0.48.0`.
 - A new movement mode that moves an entity discontinuously (dash, blink, portal) is a teleport for
   both rules. Test it against both.
@@ -358,16 +385,33 @@ normalises hold, settle and span to these defaults, but `MaxExtrapolation` stays
   id is its user id.
 - **Despawn.** A despawn reaches clients in the snapshot's `Removed` list
   (`develop:GS/Snapshot/SnapshotDeltaState.cs:1334`). A deferred despawn is offered again (`:294`).
-- **Disconnect hold.** The server holds a disconnected player for 30 s on a map and 60 s in a
-  dungeon (`develop:GS/Program.cs:1042`). There is no knob for this window.
+- **Drop: 30 s / 60 s hold.** A connection that drops (dead link, timeout, process kill) keeps its
+  entity for 30 s on a map and 60 s in a dungeon, so a reconnect reattaches to it
+  (`develop:GS/Program.cs:1042`; `#482:GS/Program.cs:1112`). A held entity is linkdead and out of
+  reach. There is no knob for this window.
+- **Graceful leave: immediate release (after PR #482).** A client `disconnect` frame marks the
+  connection `Left` before it closes (`#482:GS/Server/GameServer.cs:2227-2235`;
+  `#482:GS/Net/Connection.cs:123-132`). The teardown then runs the same hold path with a zero
+  window: `holdTtl = graceful ? TimeSpan.Zero : _options.HoldTtl` (`#482:GS/Server/GameServer.cs:2711`).
+  The player is saved before the entity is removed (`:2755`, `:2764`). Contract:
+  `#482:backend/gameserver-dotnet/docs/API.md:82`, `:1155-1159`. On `develop` the `disconnect`
+  frame only closes the connection (`develop:GS/Server/GameServer.cs:2159-2161`), so a polite leave
+  is held like a drop.
+- **Combat logout is the user's decision.** Immediate release also lets a player leave in the
+  middle of combat. No combat-logout rule (for example, keeping the entity while it is in combat)
+  exists. Adding one is a gameplay rule, not an implementation detail.
 - **Respawn.** `GAMESERVER_PLAYER_RESPAWN` is on by default
   (`develop:GS/Scaffolding/EnemyAiSettings.cs:63`). Respawn lives in the enemy phase: with
-  `GAMESERVER_ENEMIES` off, a killed player stays dead.
+  `GAMESERVER_ENEMIES` off, a killed player stays dead. There is no invulnerability window after a
+  respawn.
 - **Spawn scatter** (after PR #472): `GAMESERVER_SPAWN_SCATTER`, default 3 units
   (`#472:GS/ServerEnv.cs:171`; `#472:GS/Server/ServerDefaults.cs:28`). Spawns and respawns land on a
   scattered point instead of one shared spawn ([#469](https://github.com/Cuvara/rpg-mmo-server/issues/469)).
+  Without scatter, idle players respawn on the same point; every enemy then picks the same nearest
+  player (the nearest-player search keeps the first on a tie, `#472:GS/Scaffolding/PlayerTargetBuffer.cs:166`),
+  so the other players are shielded by accident.
 
-### Enemy population
+### Enemy population and damage
 
 | Knob | Default | On develop? | Source |
 |---|---|---|---|
@@ -376,40 +420,59 @@ normalises hold, settle and span to these defaults, but `MaxExtrapolation` stays
 | `GAMESERVER_ENEMY_BUDGET` | 300 | after PR #472 | `#472:GS/Scaffolding/EnemyAiTuning.cs:170` |
 | `GAMESERVER_ENEMY_SEPARATION` | 0.8 units | after PR #472 | `#472:GS/Scaffolding/EnemyAiTuning.cs:154` |
 | `GAMESERVER_ENEMY_SEED` | (unset) | after PR #472 | `#472:GS/Scaffolding/EnemyAiSettings.cs:71` |
+| `GAMESERVER_ENEMY_ATTACK` | 5 | yes | `develop:GS/Scaffolding/EnemyAiTuning.cs:87` |
+| `GAMESERVER_ENEMY_ATTACK_INTERVAL` | 0.5 s | yes | `develop:GS/Scaffolding/EnemyAiTuning.cs:124` |
+| `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` | 3 | yes | `develop:GS/Scaffolding/EnemyAiTuning.cs:145` |
+
+Knob names: `develop:GS/Scaffolding/EnemyAiSettings.cs:44`, `:50`, `:53`, `:56` (`GAMESERVER_ENEMY_ATTACKS`
+turns attacks off).
 
 - **Cap.** `cap = MAX + MAX_PER_PLAYER * live players`, clamped to `BUDGET` after PR #472
   (`#472:GS/Scaffolding/EnemyAiSettings.cs:292-303`). At 3 players the cap is 165, so the budget
   binds only above 6 players ([#468](https://github.com/Cuvara/rpg-mmo-server/issues/468)).
+- **Damage to an idle player.** At most `ATTACKERS_PER_TARGET` attacks per player per window of
+  `ceil(ATTACK_INTERVAL * world Hz)` world ticks (`#472:GS/Scaffolding/EnemyCombatSystems.cs:141-142`,
+  `:191`). Each hit deals `max(attack - defense, MinDamage)` (`#472:SGL/Systems/CombatLogic.cs:31-35`);
+  enemy attack 5 against player defense 5 gives 1. With 100 HP (`#472:GS/Server/ServerDefaults.cs:10`,
+  defense `:20`) an idle player in range of at least 3 enemies dies about every 18 s. Separation and
+  the budget do not change that rate.
 - **Confirm the values in force on `/status`:** `enemy_ai` (after PR #472 it includes `budget=` and
-  `separation=`; `#472:GS/Scaffolding/EnemyAiSettings.cs:438-440`), `enemy_ai_max_now`,
+  `separation=`; `#472:GS/Scaffolding/EnemyAiSettings.cs:439-440`), `enemy_ai_max_now`,
   `enemies_alive`, `player_respawns` (`develop:GS/Observability/ServerStatus.cs:139`, `:459`, `:480`,
   `:521`).
-- **Separation** keeps enemies chasing one player from stacking on one point. The review finding
-  that its neighbour bound could be exceeded through hash-chain collisions is fixed on `integ`
-  (`22d6359`) and not yet on PR #472.
+- **Separation** keeps enemies chasing one player from stacking on one point. Every hash-chain
+  entry a query steps over counts against `MaxVisited = 256`, so a crowd of colliding cells cannot
+  make a query walk the whole chain (`#472:GS/Scaffolding/EnemySeparationSystem.cs:58`).
 
 ### Client: sessions, generations, reconnect
 
 - **Generation.** Every connect increments the client's session generation
-  (`nc:Runtime/Client/NetworkClient.cs:305`). Commands from an older generation are dropped by
+  (`nc:Runtime/Client/NetworkClient.cs:448`). Commands from an older generation are dropped by
   the DOTS view.
 - **World reset.** `NetworkClient.RunConnectAsync` calls `World.Reset()` on every connect and
   reconnect (`nc:Runtime/Client/NetworkClient.cs:469`).
-- **Reconnect resets.** On `Reconnected` the client must reset, in this order: the view generation,
-  the binder, the predictor and the projectile predictor
-  (`client#155:Assets/Scripts/DI/Dots/DotsWorldBridge.cs:510-536`; on `client#154` at `:499-524`).
-  The binder reset (defect F2) matters when the new server's ticks are lower than the old one's
-  (reconnect to a restarted or different pod).
+- **Reconnect resets.** On `Reconnected` the client resets the view generation, the binder, the
+  predictor and the projectile predictor (`client#154:Assets/Scripts/DI/Dots/DotsWorldBridge.cs:499-529`;
+  `client#155:…:510-540`). The binder reset matters when the new server's ticks are lower than the
+  old one's (reconnect to a restarted or different pod).
 - **Fallbacks for a missed reset:**
   - The binder restarts its tick line when the world tick goes backwards and counts it in
-    `TickLineRestarts` (after Netcode PR #185; `nc:Runtime/View/WorldViewBinder.cs:512-516`, `:928-942`).
+    `TickLineRestarts` (`nc:Runtime/View/WorldViewBinder.cs:513-515`, `:928-943`).
   - The UnityDots timed path resets its timeline clock on the `Reset` command (after PR UnityDots#37;
     `dots:Runtime.Netcode/NetworkViewCommandSystem.cs:190-200`).
-  - `LocalPredictionSystem` resets its ack/anchor memory and the steering on a new generation or a
-    backwards tick, **but not the predictor**. Resetting the predictor stays the host's job
-    (`dots:Runtime.Netcode.Prediction/LocalPredictionSystem.cs:121-129`;
-    `dots:Documentation~/NETCODE-INTEGRATION.md:120-124`).
-- **Reconnect policy.** Which close reasons reconnect: `nc:Runtime/Client/ReconnectPolicy.cs:60-112`
+  - After PR UnityDots#37, `LocalPredictionSystem` resets its ack/anchor memory, the steering **and
+    the predictor** on a new generation or a backwards world tick, before that update's reconcile
+    (`dots:Runtime.Netcode.Prediction/LocalPredictionSystem.cs:111-140`, `predictor.Reset()` at
+    `:139`; `dots:Documentation~/NETCODE-INTEGRATION.md:120-128`). A second reset by the host is
+    harmless.
+- **Graceful leave on the client (Netcode 0.48.0 candidate).** `WireConnection.LeaveAsync` writes
+  the `disconnect` frame, waits up to `LeaveWriteTimeoutMs = 500` for the write, then flushes KCP
+  until the frame is acknowledged or the close-flush budget runs out, then closes
+  (`nc:Runtime/Connection/WireConnection.cs:306`, `:349`, `:364`). Budget:
+  `min(max(2 x RTO, 100 ms), 500 ms)` (`nc:Runtime/Transport/KcpClientSession.cs:144-179`). With
+  `nc-0.47.0` the frame never reaches the wire and the server sees a dead link, so even after PR
+  #482 the leave is held like a drop. S08G passes only with both fixes.
+- **Reconnect policy.** Which close reasons reconnect: `nc:Runtime/Client/ReconnectPolicy.cs:60-113`
   (`PeerClosed`, `HeartbeatTimeout`, `TransportError` reconnect; `ServerDisconnect` reconnects after
   a delay only for `server_shutdown`; local close, protocol error and most kicks do not).
 - **Handle reuse.** Snapshot entity ids are interned to handles. A despawned entity's view must not
@@ -427,10 +490,16 @@ normalises hold, settle and span to these defaults, but `MaxExtrapolation` stays
   `develop:GS/Net/Transport/Transport.cs:18`; ADR-8). Sealed session `GAMESERVER_SEALED`, default
   `require` (`develop:GS/ServerEnv.cs:149`; ADR-22, ADR-25). Changing framing, handshake or crypto
   bytes is wire-contract work.
-- **KCP limits.** Send window 128, writer soft limit 256 queued segments, idle timeout 60 s
+- **KCP limits (server).** Send window 128, writer soft limit 256 queued segments, idle timeout 60 s
   (`develop:GS/Net/Transport/KcpTuning.cs:20`, `:51`; `develop:GS/Net/Transport/KcpLimits.cs:92`).
   KCP is reliable and ordered: one lost datagram holds every later snapshot until it is
   retransmitted.
+- **Receive drain (client, F3, Netcode 0.48.0 candidate).** After each awaited datagram the client
+  reads every queued datagram synchronously, up to 4096
+  (`nc:Runtime/Transport/UdpDatagramDrain.cs:39`, `:50`). Before this, the receive loop continued on
+  the Unity frame context and read one datagram per frame, so a backlog after a stall took hundreds
+  of frames to drain. Counters: `DatagramsRead`, `ReceiveWakeups`, `MaxDatagramsPerWake`
+  (`nc:Runtime/Transport/KcpTransport.cs:105-111`).
 - **Bandwidth budget.** `< 50 KB/s` downstream per client (ADR-7, `develop:ADR:771`). Measured:
   45.9 KB/s per client at 200 players (`develop:backend/docs/BENCHMARK.md:1360`, `:1383`). A feature
   that adds snapshot bytes per entity needs a measurement before it merges. The per-server player
@@ -438,9 +507,9 @@ normalises hold, settle and span to these defaults, but `MaxExtrapolation` stays
   quote one.
 - **Delivery trace for diagnosis** (after PR #474). `GAMESERVER_SNAPSHOT_TRACE=<path>` writes one CSV
   row per sent snapshot. Unset = off. A path that cannot be opened exits 2
-  (`#474:GS/ServerEnv.cs:165-172`; `#474:GS/Program.cs:355-376`). Columns:
+  (`#474:GS/ServerEnv.cs:172`; `#474:GS/Program.cs:355-376`). Columns:
   `conn_id,user_id,world_tick,gather_us,enqueue_us,write_start_us,write_end_us,bytes,queue_depth,dropped_oldest_total,kcp_wait_snd,kcp_snd_wnd,kcp_rmt_wnd,kcp_retrans_total,kcp_rto_ms`
-  (`#474:GS/Observability/SnapshotTrace.cs:109-111`). Compose forwards it
+  (`#474:GS/Observability/SnapshotTrace.cs:108-111`). Compose forwards it
   (`#474:backend/deploy/docker-compose.yml:516`); the fleets deliberately do not. Related `/status`
   fields: `snapshot_send_queue_depth_max`, `snapshot_send_dropped_oldest`, `kcp_wait_snd_max`,
   `kcp_rto_max_ms`, `kcp_rmt_wnd_min`, `kcp_segments_retransmitted`, `snapshot_trace_rows_written`,
@@ -463,7 +532,8 @@ executed tests is not a pass.
       `dotnet test GameServer.Tests --filter "FullyQualifiedName~<Namespace.Class>"`; it never
       replaces the full run.
 - [ ] **Unit tests for the feature:** one rejection test per new reason; the happy path through
-      `TickLoop.TickOnce()`.
+      `TickLoop.TickOnce()`. For connection lifecycle, a socket-level test over real KCP (pattern:
+      `#482:GST/Server/GracefulLeaveTests.cs:44-87`).
 - [ ] **Allocation guards:** `GST/Snapshot/SnapshotAllocationTests.cs` (snapshot path) and
       `GST/CoreV3/GameplayAllocationTests.cs` (0 B over 600 ticks; `develop:…:45`) run in every
       suite. For a change on the combat or input path, also run
@@ -474,17 +544,24 @@ executed tests is not a pass.
 - [ ] **Golden vectors** for an SGL rule: regenerate only for an intended behaviour change (section 1),
       commit the fixtures, explain every changed case. No behaviour change means an unchanged
       `SGL/GoldenVectors/`.
+- [ ] **Randomness in tests:** a test that depends on enemy placement sets `GAMESERVER_ENEMY_SEED`
+      and turns off what it does not test (separation made one characterisation test fail 51 times
+      in 2000).
 - [ ] **Docs:** a new knob is a `const string` in `ServerEnv.cs`, parsed strictly (exit 2), listed in
       `backend/gameserver-dotnet/docs/README.md`, and forwarded by compose and the fleets (or
       excluded with a reason). A new metric or `/status` field is in `docs/METRICS.md`.
 
-### Netcode (when the change touches prediction, interpolation or the snapshot merge)
+### Netcode (when the change touches prediction, interpolation, transport or the snapshot merge)
 
 - [ ] **Headless suite:** `dotnet test Tests~/Headless/Cuvara.Netcode.Tests.Headless.csproj -p:SglDir=<Shared.GameLogic path>`
-      (`nc:Tests~/Headless/Cuvara.Netcode.Tests.Headless.csproj:87`; CI job "Headless tests (dotnet)",
-      `nc:.github/workflows/ci.yml:80-111`). From an Orca worktree, the rpg-factory script
-      `scripts/checks/netcode-headless.sh --server <rpg-mmo-server dir>` picks the SGL tag. Check
-      the `dotnet test` exit code yourself (section 8).
+      (`nc:Tests~/Headless/Cuvara.Netcode.Tests.Headless.csproj:90`; CI job "Headless tests (dotnet)",
+      `nc:.github/workflows/ci.yml:79-159`). From an Orca worktree, the rpg-factory script
+      `scripts/checks/netcode-headless.sh --server <rpg-mmo-server dir>` (rpg-factory PR #17) picks
+      the SGL tag; it fails on a non-zero or timed-out `dotnet test` and on zero executed tests.
+- [ ] **Stall and backlog shape.** A change to the clock, steering or transport must keep the
+      paced-backlog tests green (`ClientHitchRecoveryTests`, `ClientStallInterpolationTests`,
+      `TransportReceivePacingTests`). A harness that delivers the whole backlog in one frame hid the
+      live defect before 9cab51b.
 - [ ] **Unity EditMode** in the Netcode package CI ("Unity Tests").
 
 ### Client (when the change touches client code)
@@ -493,6 +570,7 @@ executed tests is not a pass.
       Unity 6000.3.9f1. Name the Netcode version that was resolved or embedded.
 - [ ] A Unity-MCP plugin error in the log can fail a test through `LogAssert`. Record it as a FAIL
       caused by the environment, never as a PASS.
+- [ ] Client CI is currently blocked (section 8), so local EditMode evidence is required.
 
 ### Test lab (rpg-factory `testlab/`, PR #17)
 
@@ -500,51 +578,63 @@ The test lab runs real Windows players against the scratch stack (`rpgs-*` conta
 not merged yet; citations are at `lab`. Commands, from the rpg-factory checkout, in Windows Python:
 
 ```
-python3 testlab/testlab.py build-client                 # testlab player (CUVARA_TESTLAB)
-python3 testlab/testlab.py run S01                      # one scenario
-python3 testlab/testlab.py suite readiness              # S11 S12 S13 S08G S14 S15
-python3 testlab/testlab.py run S09 --duration 3600 --snapshot-trace
-python3 testlab/testlab.py analyze --delivery <run_dir> # diagnostic only, never PASS
-python3 testlab/testlab.py leak-check <player build>    # no test code in a shipping player
+python3 testlab/testlab.py build-client                                # testlab player (CUVARA_TESTLAB)
+python3 testlab/testlab.py run S01 --build-server --server-repo <dir>   # first run: build and stamp the server image
+python3 testlab/testlab.py suite readiness                             # S11 S12 S13 S08G S14 S15
+python3 testlab/testlab.py sweep S07 --levels 0,10,25                   # load levels; reports the first failing level
+python3 testlab/testlab.py run S09 --duration 3600 --snapshot-trace     # 1 h soak with the server delivery trace
+python3 testlab/testlab.py analyze <run_dir>                           # re-grade stored evidence
+python3 testlab/testlab.py analyze --delivery <run_dir>                # diagnostic only, never PASS
+python3 testlab/testlab.py thresholds --write                          # regenerate docs/THRESHOLDS.md
+python3 testlab/testlab.py leak-check <player build>                   # no test code in a shipping player
 ```
 
-Sources: `lab:testlab/README.md:13-16`, `:66-75`, `:82-86`, `:206-212`; `lab:testlab/testlab.py:322-330`;
-suites in `lab:testlab/suites.json`. `run`, `suite`, `sweep`, `stack` and the builds work only in
-Windows Python; `analyze`, `leak-check` and the unit tests also run in WSL (`lab:testlab/README.md:25-31`).
-`--snapshot-trace` refuses to start unless the server's compose file forwards
-`GAMESERVER_SNAPSHOT_TRACE`, which is true only after PR #474 (`lab:testlab/README.md:210`).
-`--build-server` builds the scratch images from `--server-repo` and stamps the server SHA into the
-image label.
+Sources: `lab:testlab/README.md:12-23`, `:211-226`; `lab:testlab/testlab.py:331-359`; suites in
+`lab:testlab/suites.json`. `run`, `suite`, `sweep`, `stack` and the builds work only in Windows
+Python; `analyze`, `leak-check` and the unit tests also run in WSL (`lab:testlab/README.md:25-31`).
 
-**Which scenario covers what** (`lab:testlab/docs/COVERAGE.md:21-41`; "unrun" = scenario and checks
-exist and are unit-tested, but no lab run has used them yet):
+- `--build-server` builds the scratch images from `--server-repo` and stamps the server SHA into the
+  image label; provenance then checks the label (`lab:testlab/README.md:200`). Without it, a server
+  worktree with no built Nakama module fails preflight (`:158`).
+- `--snapshot-trace` refuses to start unless the server's compose file forwards
+  `GAMESERVER_SNAPSHOT_TRACE`, which is true only after PR #474 (`lab:testlab/README.md:218`).
+- A sweep writes `sweeps/<stamp>-<id>.json` with `first_failing_level`; that is the first failing
+  level on this host, not a server ceiling (`lab:testlab/testlab.py:132-155`; `README.md:247`).
+- S09 v4 repeats its 300 s cycle for the whole `--duration` (`repeat_cycle_s`). Soaks before v4 were
+  5 minutes active and 55 minutes idle and are not comparable (`lab:testlab/README.md:133`).
+
+**Which scenario covers what** (`lab:testlab/docs/COVERAGE.md:21-41`; "unrun" there means the
+scenario had not run when COVERAGE.md was written. Every scenario below has since run at least once on
+the candidate, so this table drops that mark; the statuses are otherwise COVERAGE.md's):
 
 | Area | Status | Scenarios |
 |---|---|---|
-| Tick-rate handling | COVERED (unrun) | S12 (+S11, S13, S01, S02, S04, S05, S07, S09) |
+| Tick-rate handling | COVERED | S12 (+S11, S13, S01, S02, S04, S05, S07, S09) |
 | Reconciliation / replay | PARTIAL | S02-S06, S08-S10, S12 |
-| Snaps after stalls | COVERED (unrun) | S13 |
+| Snaps after stalls | COVERED | S13 |
 | Interpolation at rest | COVERED | S02, S05 |
 | Interpolation in motion | COVERED | S03, S06, S10 |
-| Interpolation after respawn | COVERED (unrun) | S14 (+S02, S05, S09) |
+| Interpolation after respawn | COVERED | S14 (+S02, S05, S09) |
 | Snapshot ordering / freshness | COVERED | all (`snapshot_order`); S11, S12 (`render_freshness`) |
-| Entity spawn / despawn / id reuse | COVERED (unrun) | S04, S09, S08G, S02 |
+| Entity spawn / despawn / id reuse | COVERED | S04, S09, S08G, S02 |
 | Join | COVERED | S01, all |
-| Disconnect / reconnect | COVERED | S08; S08G, S11 (unrun) |
-| Resync after server restart | COVERED (unrun) | S11 |
-| Multi-client convergence | COVERED (unrun) | S06, S09, S11, S12, S03, S10 |
+| Disconnect / reconnect | COVERED | S08 (drop), S08G (graceful leave), S11 |
+| Resync after server restart | COVERED | S11 |
+| Multi-client convergence | COVERED | S06, S09, S11, S12, S03, S10 |
 | Player spawn distribution | COVERED | S01, S04, S05, S10 |
-| Player respawn | COVERED (unrun) | S14 |
+| Player respawn | COVERED | S14 |
 | Enemy target acquisition | COVERED | S02, S05, S10 |
 | Enemy separation | COVERED | S02, S05, S10 |
 | Enemy bounded movement | PARTIAL | S11, S02, S05, S10 |
 | Enemy budget / overload | PARTIAL | S02, S04, S05, S07, S09, S10 |
-| Combat authority | COVERED (unrun) | S15, S04 |
+| Combat authority | COVERED | S15, S04 |
 
 S14 and S15 need PR #475: S14 kills players through `POST /debug/kill`
-(`GAMESERVER_DEBUG_ENTITIES=on`), and S15 grades the per-reason rejection series. Against `develop`
-S14's kill-dependent assertions are INCONCLUSIVE by design. COVERAGE.md at `lab` still lists the
-delivery trace (F8/S3) as open; it is implemented by PR #474.
+(`GAMESERVER_DEBUG_ENTITIES=on`), and S15 grades the per-reason rejection series. S15 grades
+**cooldown and reach**: casts faster than the cooldown must be refused as `ability_on_cooldown`, and
+a cast aimed beyond range must not damage anything beyond reach
+(`lab:testlab/scenarios/S15-combat-negative.json:6`). COVERAGE.md at `lab` still lists the delivery
+trace (F8/S3) as open; it is implemented by PR #474 and was used in the 2026-10-22 soaks.
 
 **Pick scenarios for your change:**
 
@@ -553,68 +643,117 @@ delivery trace (F8/S3) as open; it is implemented by PR #474.
 | Movement or a movement mode | S03, S06, S10, S12 |
 | Combat, an ability, a projectile | S04, S15 |
 | Death, respawn, a teleport | S14, S02 |
-| Enemy AI or an enemy type | S02, S05, S10; S07 for load |
-| Spawn, despawn, lifecycle, reconnect | S04, S08, S08G, S11 |
-| Prediction, interpolation, clock | S13, S12, S06, then S09 |
+| Enemy AI or an enemy type | S02, S05, S10; `sweep S07` for load |
+| Spawn, despawn, lifecycle, reconnect, leave | S04, S08, S08G, S11 |
+| Prediction, interpolation, clock, transport | S13, S12, S06, then a 1 h S09 |
 
 **Reading a verdict.** Each assertion is PASS, FAIL, INCONCLUSIVE or INFO. INFO never decides a
-run. Missing evidence is INCONCLUSIVE, never PASS (`lab:testlab/lab/analyze.py:1-8`). A run is FAIL
-if any assertion fails; otherwise INCONCLUSIVE if any assertion is inconclusive or there are no
-results; otherwise PASS (`:1426-1434`). Exit codes: 0 PASS, 1 FAIL, 2 INCONCLUSIVE, 3 harness error
-(`lab:testlab/README.md:19`).
+run on its own. Missing evidence is INCONCLUSIVE, never PASS. A run is (`lab:testlab/lab/analyze.py:1442-1453`):
+
+1. INCONCLUSIVE on a harness error;
+2. otherwise FAIL if any assertion fails;
+3. otherwise INCONCLUSIVE if any assertion is inconclusive or there are no results;
+4. otherwise **PASS_WITH_WARNINGS** if an informational assertion would have failed (`:1450-1451`,
+   `:1456-1459`);
+5. otherwise PASS.
+
+Exit codes: 0 PASS, 1 FAIL, 2 INCONCLUSIVE, 3 harness or usage error, **4 PASS_WITH_WARNINGS**
+(`lab:testlab/README.md:19`). Exit 4 is never a clean PASS; a script that checks for 0 must treat it
+as a warning.
+
+**Qualifications.** Host-wide stalls in the run, or CPU load of 50% or more at start or end, are
+listed under **Qualified by** next to the verdict (`lab:testlab/lab/analyze.py:1461-1480`;
+`HOST_LOAD_WARN_PCT` `:25`; `README.md:21`). They do not change the outcome, because the checks a
+stall explains are already INCONCLUSIVE. Read them before treating a PASS as representative.
+
+**Thresholds.** Every limit a check uses is listed in `lab:testlab/docs/THRESHOLDS.md`, generated by
+`testlab.py thresholds --write`, with its derivation or the mark **"policy, unvalidated"**
+(`:1-6`). A test fails when the file is out of date. Change a limit there, with its reason; never
+loosen one to make a run pass.
 
 **Provenance is required.** Every run records the factory, server and client SHAs, the server image
-id (and, after the stack revision commit on PR #474, its revision label), the player hashes, the
-embedded Netcode commit, the scenario hash, host load, and a hash manifest of the evidence
-(`lab:testlab/lab/provenance.py:148-164`). Any missing or mismatched item makes the `provenance`
-assertion INCONCLUSIVE (`:176-223`), so the run cannot PASS.
+id and revision label, the player hashes, the embedded Netcode commit, the scenario hash, host load,
+and a hash manifest of the evidence (`lab:testlab/lab/provenance.py:170-186`). The manifest must
+match an expected inventory for the scenario (`:43-57`). A missing, changed, added or omitted item
+makes the `provenance` assertion INCONCLUSIVE (`:198-256`), so the run cannot PASS.
 
 **A contaminated run is INCONCLUSIVE, not PASS.** The lab enforces this for host stalls: a stall
 shared by separate processes is the host, and checks it explains are INCONCLUSIVE until a rerun on a
-quiet host (`lab:testlab/lab/analyze.py:1357-1358`, `:588-589`, `:1730-1731`). Apply the same rule
-by hand to contamination the lab cannot see: test instrumentation that costs frame time, a second
-workload on the host, or a stale image. Example: the 2026-10-22 1 h soak's snapshot FAIL was traced
-to the test overlay's frame cost on the clients and is not evidence of server lateness. Record host
-load with every run, and label any number from this host "shared-host".
+quiet host (`lab:testlab/lab/analyze.py:1373-1374`). Apply the same rule by hand to contamination the
+lab cannot see: test instrumentation that costs frame time, a second workload on the host, or a
+stale image. Record host load with every run, and label any number from this host "shared-host".
+
+**`analyze --delivery` and the clock.** It joins the C1 server trace with the client receive log
+and classifies each receive gap over 250 ms as QUEUE, SERVER_LATE, CLIENT, KCP, PATH or UNKNOWN,
+scoped ALL-CLIENTS or SINGLE-CLIENT (`lab:testlab/README.md:220-222`). It fits
+`receive = a + rate x write` per client; with fewer than 5 bins or a residual p90 above 50 ms,
+one-way delay is reported as unavailable, never as a number (`:224`;
+`lab:testlab/lab/delivery.py:191`, `:220-221`). On the WSL host every 1 h soak so far gave an
+unusable fit (skew +8% to +11%, residual p90 1-2 s), so read the gap classes and the server trace,
+not a one-way delay.
 
 ---
 
 ## 8. Known limitations at the time of writing
 
-1. **One-step corrections at a start or stop.** Some direction changes cost exactly one smoothed
+1. **WSL clock about 8% slow** on the lab host (section 3). Server rates in Windows time are about
+   55/13.8 Hz, the rate wanders, and one-way delay across the boundary is not measurable. Changing
+   the WSL clock source is the user's decision.
+2. **Host-wide freezes of unknown cause.** In every 1 h soak all players froze together for
+   280-700 ms, 2 to 4 times an hour. No Windows event was logged at those times. The lab grades the
+   affected timing checks INCONCLUSIVE.
+3. **One correction per stall remains**, from the input recorded in the stall-end frame on the old
+   tick line (0.33-1.75 units in the paced harness). Separately, `AckLatencyEstimator` can flap
+   between refusing and accepting its floor, which moves the lead target by about 4 ticks and costs
+   a ~2-step correction, also with no stall (section 3).
+4. **One-step corrections at a start or stop.** Some direction changes cost exactly one smoothed
    step (0.083 units at the defaults), never a snap. Cause: when an input arrives relative to the
    server's 60 Hz drain decides which tick applies it, and the predictor anchors on one stable
-   offset. The predictor documents it as "a genuine, bounded disagreement of at most one step at a
-   start or stop" (`nc:Runtime/Prediction/LocalMovePredictor.cs:2975`). Classified as inherent
-   quantisation, not a defect. A phase-locked send cadence could remove it; that is a later design
-   decision. Related: [Netcode#183](https://github.com/Cuvara/Netcode/issues/183).
-2. **UnityDots default `MaxExtrapolation`.** `DotsNetcodeBootstrap.Install(world, view)` passes
+   offset (`nc:Runtime/Prediction/LocalMovePredictor.cs:3026`). Classified as inherent quantisation,
+   not a defect. Related: [Netcode#183](https://github.com/Cuvara/Netcode/issues/183).
+5. **`ability_out_of_range` cannot be produced from the client.** The client casts only a
+   projectile ability, and a projectile's aim point has no range check by design
+   (`develop:SGL/Systems/AbilityLogic.cs:137-142`; ADR-29 d5). S15 therefore grades cooldown and
+   reach, not the out-of-range rejection. Testing it needs an entity- or ground-targeted cast path
+   on the client, or a server-side bot.
+6. **UnityDots fallback path draws (0,0) while unseeded.** When the local entity is not in
+   `WorldState`, `LocalPredictionSystem` still writes `predictor.Position`, which is (0,0) until the
+   predictor is seeded (`dots:Runtime.Netcode.Prediction/LocalPredictionSystem.cs:248-279`). After
+   PR UnityDots#37 a reconnect can expose this for a frame or more on that path only.
+7. **UnityDots default `MaxExtrapolation`.** `DotsNetcodeBootstrap.Install(world, view)` passes
    `default(InterpolationConfig)` through `Normalized()`, so the ECS timed path gets
    `MaxExtrapolation = 0` (never extrapolate), while the binder uses 0.050 s
-   (`dots:Runtime.Netcode/DotsNetcodeBootstrap.cs:30-36`; `nc:Runtime/Interpolation/InterpolationConfig.cs:232-257`).
-   The shipping client feeds the untimed path, so this does not change what it draws today. Pass a
-   configured value when you use the timed path.
-3. **`ability_out_of_range` cannot be produced from the client.** The client casts only a
-   projectile ability, and a projectile's aim point has no range check by design
-   (`develop:SGL/Systems/AbilityLogic.cs:137-142`; ADR-29 d5). Testing that rejection needs an
-   entity- or ground-targeted cast path on the client, or a server-side bot.
-4. **Snapshot delivery gaps in the 1 h soak** ([#473](https://github.com/Cuvara/rpg-mmo-server/issues/473)).
-   TODO (Lead): fill in the status and root cause after the soak analysis with the PR #474 delivery
-   trace.
-5. **`snapshot_max_update_gap_ms` reads the server's uptime under shedding** on `develop`
-   ([#471](https://github.com/Cuvara/rpg-mmo-server/issues/471)); fixed after PR #474.
-6. **The shipping client does not adopt the server's tick rate**, and lacks the D1, D2 and binder
-   tick-line fixes, until Netcode `v0.48.0` is tagged and the client pin moves (client PR #155).
-7. **Respawn requires the enemy phase.** With `GAMESERVER_ENEMIES` off a killed player stays dead
-   (section 5).
-8. **Anti-cheat only records** ([#457](https://github.com/Cuvara/rpg-mmo-server/issues/457)).
-9. **Test-lab tooling caveats** (review of rpg-factory PR #17 at `lab`):
-   - `analyze --delivery` derives a relative one-way delay that is invalid under the WSL clock drift
-     (section 3). Read its gap classes, not its delay trend.
-   - `netcode-headless.sh` can report success after `dotnet test` fails or times out. Check the
-     exit code and the TRX counts yourself.
-   - S07/S07P report memory growth as INFO, so a memory regression does not fail those runs.
-   - The provenance manifest does not yet hash `disruptions.ndjson`.
-10. **A client that quits does not close its KCP session**
-    ([Netcode#182](https://github.com/Cuvara/Netcode/issues/182)); the server sees the session time
-    out instead.
+   (`dots:Runtime.Netcode/DotsNetcodeBootstrap.cs:36`, `:77`). The shipping client feeds the untimed
+   path, so this does not change what it draws today. Pass a configured value for the timed path.
+8. **Client CI is blocked.** The client repository variable `UNITY_VERSION` is 6000.0.26f1 while
+   `ProjectSettings/ProjectVersion.txt` is 6000.3.9f1, so every client CI run fails at "Resolve
+   Build Config" and executes 0 tests. Fixing the variable is the user's action.
+9. **Releases pending.** The shipping client lacks every `nc` and `dots` behaviour above until
+   Netcode `v0.48.0` is tagged (#184 + #185), UnityDots #37 is released, and the client pins move
+   (client PR #155). The leave flush also depends on the player loop: at application quit the leave
+   may not finish.
+10. **Respawn requires the enemy phase**, and there is no respawn grace period (section 5).
+11. **Anti-cheat only records** ([#457](https://github.com/Cuvara/rpg-mmo-server/issues/457)).
+12. **Snapshot delivery gaps in the 1 h soak** ([#473](https://github.com/Cuvara/rpg-mmo-server/issues/473)).
+    - **Not reproduced** in three later 1 h soaks on the shared host: `20261022T163744Z-S09-sfj5`
+      (#472 + trace), `20261022T175111Z-S09-y6vg` (develop + trace) and `20261022T200348Z-S09-uc3e`
+      (integration candidate, S09 v4). This is not a claim that #473 is fixed.
+    - **The original eeoa gaps were instrumentation stalls:** the test overlay's frame cost on the
+      clients, since fixed in the test lab. They are not evidence of server lateness.
+    - **The tools exist:** the server delivery trace (PR #474) and `analyze --delivery`.
+    - **Hypotheses H1-H8**, read against the traces: blocking `SendTo` under the session lock (H2),
+      the send-queue soft limit (H3), a closed remote window (H4), growing per-send work (H7) and
+      larger snapshots (H8) are **refuted** (server write p99 at most 0.15 ms, queue depth at most 1,
+      remote window never below 127, flat bytes). A path outage with KCP head-of-line blocking (H1)
+      is **not the cause** of the all-client gaps: KCP retransmissions rise after each freeze, not
+      before. An update-thread stall (H5) is **undetermined**, with no evidence for it. Delay above
+      the client's KCP layer (H6) is **confirmed** for 31 of the 32 gaps over 250 ms: client frame
+      stalls, mostly host-wide freezes. One single-connection KCP retransmit episode (sfj5, s 738)
+      is unexplained.
+    - RC soak: see PR comment.
+13. **COVERAGE.md is behind the trace.** It still lists the server delivery trace (F8/S3) as open
+    (section 7).
+14. **A client that quits did not close its KCP session**
+    ([Netcode#182](https://github.com/Cuvara/Netcode/issues/182)) before the Netcode 0.48.0
+    candidate's leave flush (section 5). Live verification of the flush with PR #482 is part of the
+    release-candidate run.
