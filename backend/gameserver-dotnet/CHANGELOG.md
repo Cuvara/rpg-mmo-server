@@ -65,6 +65,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   arithmetic with separation 0.
 
 ### Fixed
+- **Enemy separation's work bound now holds under hash collisions (review R1-1).** The
+  12-neighbour cap counted only entries in the queried cell, so hash-chain entries from other
+  cells were stepped over uncounted. Enemies placed in many distinct cells that hash to one
+  bucket made every query walk the whole chain, quadratic in total. Every chain step now counts
+  against `EnemySeparationSystem.MaxVisited` (256) in the push pass, the queue query and the
+  free-spot query. The free-spot query reports "taken" where this budget bites, as it already
+  did for the neighbour cap. Ordinary crowds never reach the budget, and their pushes and query
+  answers are bit-identical with and without it
+  (`EnemySeparationVisitBudgetTests.OrdinaryCrowds_AreBitIdenticalWithAndWithoutTheBudget`).
+  The adversarial layout is in `CollidingCells_DoNotMakeAQueryWalkTheWholeChain`: an
+  unbounded query visits 2001 entries, a bounded one at most 256. An offline model of the
+  walk put the worst ordinary crowd at 58 entries per push and 92 per query, which is why the
+  budget is 256 and not 64.
 - **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse
   (#449).** `KcpCrypto` ran CFB-128 by hand with one `EncryptEcb` call per 16-byte block, about
   90 one-shot cipher setups per MTU datagram. Measured at 95 players with AI on: ~340 us to seal

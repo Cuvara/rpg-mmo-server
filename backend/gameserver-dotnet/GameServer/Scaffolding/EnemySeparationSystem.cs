@@ -13,7 +13,8 @@ namespace GameServer.Scaffolding;
 /// <remarks>
 /// <para><b>Bounded.</b> Neighbours are found through a spatial hash with a cell the size of
 /// the radius, and each enemy examines at most <see cref="MaxNeighbours"/> candidates from its
-/// 3x3 cells, so the cost is O(n x K) whatever the density. A crowd of n enemies on one exact
+/// 3x3 cells, stepping over at most <see cref="MaxVisited"/> hash-chain entries to find them,
+/// so the cost is O(n x K) whatever the density or the hash collisions. A crowd of n enemies on one exact
 /// point would otherwise be n^2 pairs, and that pile is the state this system exists to undo.</para>
 ///
 /// <para><b>Deterministic.</b> Every push is computed from one snapshot of the positions
@@ -40,6 +41,30 @@ internal sealed class EnemySeparationSystem : IEcsSystem
     /// </summary>
     public const int MaxNeighbours = 12;
 
+    /// <summary>
+    /// Hash-chain entries one query may step over, across its nine buckets: every entry counts,
+    /// matches, the enemy itself and hash collisions from foreign cells alike. Without this,
+    /// <see cref="MaxNeighbours"/> alone bounded nothing: entries from colliding cells were
+    /// skipped uncounted, so enemies spread over many distinct cells that hash to one bucket
+    /// made every query walk the whole chain, quadratic in total (R1-1). The table is sized
+    /// above 2n, so an ordinary crowd visits its matches, itself and the occasional colliding
+    /// cell. 256 is set from measurement, not guessed. An offline model of this walk over dense
+    /// crowds of up to 5000 enemies peaked at 58 entries for a push and 92 for a query, and a
+    /// query reaches 92 when one neighbour bucket collides with a crowded cell. A budget of 64
+    /// would therefore have changed answers in a crowd. At 256 the budget never decides anything
+    /// there: <c>EnemySeparationVisitBudgetTests</c> checks that pushes and query answers are
+    /// bit-identical with and without it.
+    /// </summary>
+    public const int MaxVisited = 256;
+
+    /// <summary>Visit budget in force: <see cref="MaxVisited"/>, except in tests that remove it.</summary>
+    private readonly int _visitBudget;
+
+    /// <summary>Most chain entries any single query of the last <see cref="ComputePushes"/> stepped over. Tests.</summary>
+    internal int LastMaxVisited => _lastMaxVisited;
+
+    [SimulationScratch] private int _lastMaxVisited;
+
     private readonly float _dt;
     private readonly EnemyAiSettings _settings;
 
@@ -55,7 +80,14 @@ internal sealed class EnemySeparationSystem : IEcsSystem
     [SimulationScratch] private float _gridInv;
 
     public EnemySeparationSystem(float dt, EnemyAiSettings settings)
+        : this(dt, settings, MaxVisited)
     {
+    }
+
+    /// <summary>As the public constructor, with a different visit budget. Tests only.</summary>
+    internal EnemySeparationSystem(float dt, EnemyAiSettings settings, int visitBudget)
+    {
+        _visitBudget = visitBudget;
         _dt = dt;
         _settings = settings;
     }
@@ -129,21 +161,25 @@ internal sealed class EnemySeparationSystem : IEcsSystem
             _dy[i] = 0f;
         }
 
+        int budget = _visitBudget;
+        int maxVisited = 0;
         for (int i = 0; i < n; i++)
         {
             int cx = Cell(_x[i], inv);
             int cy = Cell(_y[i], inv);
             int examined = 0;
+            int visited = 0;
             float px = 0f, py = 0f;
 
-            for (int ox = -1; ox <= 1 && examined < MaxNeighbours; ox++)
+            for (int ox = -1; ox <= 1 && examined < MaxNeighbours && visited < budget; ox++)
             {
-                for (int oy = -1; oy <= 1 && examined < MaxNeighbours; oy++)
+                for (int oy = -1; oy <= 1 && examined < MaxNeighbours && visited < budget; oy++)
                 {
                     for (int j = _heads[Hash(cx + ox, cy + oy) & mask];
-                         j >= 0 && examined < MaxNeighbours;
+                         j >= 0 && examined < MaxNeighbours && visited < budget;
                          j = _next[j])
                     {
+                        visited++;
                         if (j == i) continue;
 
                         // Hash collisions put foreign cells in the bucket; the distance test
@@ -188,6 +224,7 @@ internal sealed class EnemySeparationSystem : IEcsSystem
                 }
             }
 
+            if (visited > maxVisited) maxVisited = visited;
             float m2 = (px * px) + (py * py);
             if (m2 > maxStep * maxStep)
             {
@@ -199,6 +236,8 @@ internal sealed class EnemySeparationSystem : IEcsSystem
             _dx[i] = px;
             _dy[i] = py;
         }
+
+        _lastMaxVisited = maxVisited;
     }
 
     /// <summary>
@@ -234,14 +273,17 @@ internal sealed class EnemySeparationSystem : IEcsSystem
         float myDist2 = (tx * tx) + (ty * ty);
         int cx = Cell(x, _gridInv), cy = Cell(y, _gridInv);
         int examined = 0;
-        for (int ox = -1; ox <= 1 && examined < MaxNeighbours; ox++)
+        int visited = 0;
+        int budget = _visitBudget;
+        for (int ox = -1; ox <= 1 && examined < MaxNeighbours && visited < budget; ox++)
         {
-            for (int oy = -1; oy <= 1 && examined < MaxNeighbours; oy++)
+            for (int oy = -1; oy <= 1 && examined < MaxNeighbours && visited < budget; oy++)
             {
                 for (int j = _heads[Hash(cx + ox, cy + oy) & _gridMask];
-                     j >= 0 && examined < MaxNeighbours;
+                     j >= 0 && examined < MaxNeighbours && visited < budget;
                      j = _next[j])
                 {
+                    visited++;
                     if (j >= _gridCount) continue;
                     float jx = _x[j] + _dx[j], jy = _y[j] + _dy[j];
                     if (Cell(_x[j], _gridInv) != cx + ox || Cell(_y[j], _gridInv) != cy + oy) continue;
@@ -269,9 +311,10 @@ internal sealed class EnemySeparationSystem : IEcsSystem
     /// <summary>
     /// True when no enemy of the last separation step stands within the spacing of (x, y),
     /// ignoring one at the exact point <paramref name="selfX"/>, <paramref name="selfY"/> (the
-    /// asking enemy itself). Bounded like the other queries, and conservative where the bound
-    /// bites: a query that reaches <see cref="MaxNeighbours"/> candidates reports the spot taken,
-    /// because an unexamined enemy may stand on it.
+    /// asking enemy itself). Bounded like the other queries, and conservative where a bound
+    /// bites: a query that reaches <see cref="MaxNeighbours"/> candidates or
+    /// <see cref="MaxVisited"/> chain entries reports the spot taken, because an unexamined enemy
+    /// may stand on it.
     /// </summary>
     internal bool IsFree(float x, float y, float selfX, float selfY)
     {
@@ -280,14 +323,17 @@ internal sealed class EnemySeparationSystem : IEcsSystem
         float r2 = radius * radius;
         int cx = Cell(x, _gridInv), cy = Cell(y, _gridInv);
         int examined = 0;
-        for (int ox = -1; ox <= 1 && examined < MaxNeighbours; ox++)
+        int visited = 0;
+        int budget = _visitBudget;
+        for (int ox = -1; ox <= 1 && examined < MaxNeighbours && visited < budget; ox++)
         {
-            for (int oy = -1; oy <= 1 && examined < MaxNeighbours; oy++)
+            for (int oy = -1; oy <= 1 && examined < MaxNeighbours && visited < budget; oy++)
             {
                 for (int j = _heads[Hash(cx + ox, cy + oy) & _gridMask];
-                     j >= 0 && examined < MaxNeighbours;
+                     j >= 0 && examined < MaxNeighbours && visited < budget;
                      j = _next[j])
                 {
+                    visited++;
                     if (j >= _gridCount) continue;
                     if (Cell(_x[j], _gridInv) != cx + ox || Cell(_y[j], _gridInv) != cy + oy) continue;
                     examined++;
@@ -300,7 +346,8 @@ internal sealed class EnemySeparationSystem : IEcsSystem
             }
         }
 
-        return examined < MaxNeighbours;
+        // Conservative where either bound bites: an unexamined enemy may stand on the spot.
+        return examined < MaxNeighbours && visited < budget;
     }
 
     internal void SetSnapshot(ReadOnlySpan<Vec2> positions)
@@ -329,9 +376,9 @@ internal sealed class EnemySeparationSystem : IEcsSystem
         Array.Resize(ref _next, size);
     }
 
-    private static int Cell(float v, float inv) => (int)MathF.Floor(v * inv);
+    internal static int Cell(float v, float inv) => (int)MathF.Floor(v * inv);
 
-    private static int Hash(int x, int y) => unchecked((x * 73856093) ^ (y * 19349663));
+    internal static int Hash(int x, int y) => unchecked((x * 73856093) ^ (y * 19349663));
 
     private static float PairAngle(int a, int b) =>
         (float)(unchecked((uint)((a * 2654435761u) ^ (b * 40503u))) % 3600u) * (MathF.Tau / 3600f);
