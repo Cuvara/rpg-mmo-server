@@ -31,8 +31,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cap in force is `min(MAX + MAX_PER_PLAYER x players, BUDGET)`, so the per-player formula
   can no longer grow the population, and with it every player's replication load, without
   bound. It is shown on `/status` as `budget=N` in `enemy_ai`, and `enemy_ai_max_now` is the
-  clamped value. The value is a placeholder chosen inside the replication envelope the
-  testlab sweep showed fresh. It is not a capacity claim.
+  clamped value. The value is a placeholder. Measured with the rpg-factory testlab on one host,
+  at 13 and 28 players: worst replication gap 200 ms (the target) with the budget, 266 ms and
+  533 ms with it lifted. The binding cost is snapshot bytes (shedding past the 8 KiB cap), not
+  tick time. It is not a capacity claim.
 - **`GAMESERVER_SPAWN_SCATTER` - spread fresh player placements (#469).** The default is 3
   world units; `0` keeps the spawn point itself. Before this change every new or respawned
   player started on the same point. Placements follow a 16-slot spiral in arrival order, are

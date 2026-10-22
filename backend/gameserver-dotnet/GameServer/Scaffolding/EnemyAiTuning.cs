@@ -155,12 +155,17 @@ internal static class EnemyAiTuning
 
     /// <summary>
     /// Hard per-map enemy population ceiling (<c>GAMESERVER_ENEMY_BUDGET</c>). PLACEHOLDER pending
-    /// encounter design. Chosen from the testlab load sweep (rpg-mmo-server#468): every enemy
-    /// chases into the players' area of interest and is replicated to all of them, and the
-    /// worst per-entity replication gap stayed at two world ticks with 165 enemies and three
-    /// players, but grew to 266 ms at 615 enemies and to 11 s at 2,415. 300 keeps the
-    /// population inside the envelope the sweep showed fresh, and still grows with players up to
-    /// six of them at the per-player rate (30 + 45 x 6 = 300).
+    /// encounter design (rpg-mmo-server#468). Every enemy chases into the players' area of
+    /// interest and is replicated to all of them, so the cost that grows with the population is
+    /// snapshot bytes: past the 8 KiB snapshot cap entities are shed and wait for a later
+    /// snapshot. Tick time is not what binds (p99 under 5 ms in every run below).
+    /// <para>Measured with the rpg-factory testlab, one host, 3 rendered players plus bots, worst
+    /// per-entity replication gap (<c>snapshot_max_update_gap_ms</c>) against the 200 ms target:
+    /// 165 enemies 133 ms; at 13 players the budget holds 300 enemies (the formula alone gives
+    /// 615) at 200 ms, and lifting it gives 266 ms; at 28 players 300 enemies again 200 ms,
+    /// lifted (1,290) 533 ms (runs 20261022T0913-0918Z, S07 and its no-budget control). 300 is
+    /// therefore AT the target on that host, not inside it with margin, and the number is
+    /// host-bound (ADR-7): it is not a capacity claim.</para>
     /// </summary>
     public const int EnemyBudget = 300;
 
