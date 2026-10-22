@@ -410,6 +410,24 @@ public sealed class ServerStatus
     [JsonPropertyName("aoi_covers_whole_map")]
     public bool AoiCoversWholeMap { get; set; }
 
+    /// <summary>The map this server simulates (<c>--map-id</c> / <c>GAMESERVER_MAP_ID</c>).</summary>
+    [JsonPropertyName("map_id")]
+    public string MapId { get; set; } = "";
+
+    /// <summary>
+    /// The play-area rectangle in force: what player movement is clamped to and what enemies
+    /// and bots are placed inside. From <c>content/maps/&lt;map_id&gt;.json</c> when that file
+    /// exists, otherwise the configured map size (<see cref="MapBoundsStatus.Source"/>).
+    /// </summary>
+    /// <remarks>
+    /// Published because a map without a content file (map_01 today) has bounds nobody can
+    /// read anywhere else: they are <c>GAMESERVER_MAP_WIDTH</c>/<c>_HEIGHT</c> centred on the
+    /// origin, and the test lab's enemy-bounds check needs the rectangle the server actually
+    /// clamped to, not one it reconstructs from a manifest.
+    /// </remarks>
+    [JsonPropertyName("map_bounds")]
+    public MapBoundsStatus MapBounds { get; set; } = new();
+
     /// <summary>
     /// Replication-importance profile in force (<c>GAMESERVER_IMPORTANCE</c>):
     /// <c>legacy</c>, <c>balanced</c>, or <c>custom</c> when a weight was overridden.
@@ -828,6 +846,42 @@ public sealed class AnomalousAccount
     /// <summary>Refused inputs by reason, keyed by the metric label.</summary>
     [JsonPropertyName("by_reason")]
     public Dictionary<string, long> ByReason { get; set; } = new();
+}
+
+/// <summary>The play-area rectangle on <c>/status</c> (<see cref="ServerStatus.MapBounds"/>).</summary>
+public sealed class MapBoundsStatus
+{
+    /// <summary><see cref="Source"/> when the bounds come from the map's content file.</summary>
+    public const string SourceMapFile = "map_file";
+
+    /// <summary><see cref="Source"/> when no map file exists and the configured size is used.</summary>
+    public const string SourceConfiguredSize = "configured_size";
+
+    [JsonPropertyName("min_x")]
+    public float MinX { get; set; }
+
+    [JsonPropertyName("min_y")]
+    public float MinY { get; set; }
+
+    [JsonPropertyName("max_x")]
+    public float MaxX { get; set; }
+
+    [JsonPropertyName("max_y")]
+    public float MaxY { get; set; }
+
+    /// <summary><c>map_file</c> or <c>configured_size</c>.</summary>
+    [JsonPropertyName("source")]
+    public string Source { get; set; } = "";
+
+    /// <summary>Builds the field from the bounds the server was configured with.</summary>
+    public static MapBoundsStatus From(in Shared.GameLogic.Components.MapBounds bounds, bool fromFile) => new()
+    {
+        MinX = bounds.MinX,
+        MinY = bounds.MinY,
+        MaxX = bounds.MaxX,
+        MaxY = bounds.MaxY,
+        Source = fromFile ? SourceMapFile : SourceConfiguredSize,
+    };
 }
 
 /// <summary>

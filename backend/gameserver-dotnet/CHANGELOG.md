@@ -63,6 +63,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (2 s; the request is withdrawn and never applied). Tests: `DebugKillPhaseTests`,
   `MetricsEndpointTests.DebugSurface_BindsNothingWhenOff_AndBothEndpointsWhenOn`,
   `MetricsEndpointTests.DebugKill_ParsesTheId_AndMapsEachOutcome`.
+- **`/status` reports `map_id` and `map_bounds`** (`{min_x, min_y, max_x, max_y, source}`),
+  the play-area rectangle the server clamps to. `source` is `map_file` or `configured_size`.
+  This is read-only. A map without a content file (map_01) had bounds that could not be read
+  anywhere, so the test lab could not judge enemy positions against them. Tests:
+  `ServerStatusMapBoundsTests`.
 - **Combat rejection reasons no longer fold into `attack_other`/`ability_other`.** Four reasons
   the server already enforced get their own `gameserver_inputs_rejected_total{reason}` series,
   primed at zero: `attack_target_untargetable` (item, projectile or held player),

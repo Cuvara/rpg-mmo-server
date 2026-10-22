@@ -1333,6 +1333,10 @@ metricsEndpoint?.SetStatusProvider(() =>
         MaxSnapshotBytes = maxSnapshotBytes,
         AoiRadius = aoi.Radius,
         AoiCoversWholeMap = aoi.CoversWholeMap,
+        MapId = mapId,
+        // The same bounds ServerOptions.MapBounds hands the motor and the enemy/bot settings
+        // were rebuilt against: one rectangle, read from one place.
+        MapBounds = GameServer.Observability.MapBoundsStatus.From(map.Geometry.Bounds, map.FromFile),
         ImportanceProfile = importance.Profile,
         ImportanceWeights = importance.ToString(),
         ReplicationSchedule = replicationSchedule.Describe(worldHz),
