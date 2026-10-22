@@ -179,4 +179,113 @@ public class MetricsEndpointTests
         Assert.Equal(200, after);
         Assert.Equal("{\"count\":0}", body);
     }
+
+    private static async Task<(int status, string body)> SendAsync(HttpMethod method, string url, string? json = null)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        using var req = new HttpRequestMessage(method, url);
+        if (json != null) req.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        var resp = await http.SendAsync(req);
+        return ((int)resp.StatusCode, await resp.Content.ReadAsStringAsync());
+    }
+
+    private static MetricsEndpoint StartEndpoint(GameMetrics metrics, out string baseUrl)
+    {
+        int port = 0;
+        var endpoint = TestPorts.BindWithRetry(leased =>
+        {
+            port = leased;
+            return MetricsEndpoint.TryStart($"localhost:{leased}", metrics, "gs-test", NullLogger.Instance);
+        });
+        Assert.NotNull(endpoint);
+        baseUrl = $"http://{new Uri(endpoint!.UriPrefix).Host}:{port}";
+        return endpoint;
+    }
+
+    /// <summary>
+    /// The debug switch off binds neither debug endpoint, even with a kill submitter in hand;
+    /// on binds both. The control arm is the same call with the switch flipped.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DebugSurface_BindsNothingWhenOff_AndBothEndpointsWhenOn(bool enabled)
+    {
+        using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.debugsurface.{Guid.NewGuid():N}");
+        await using var endpoint = StartEndpoint(metrics, out string baseUrl);
+        int submitted = 0;
+
+        DebugSurface.Enable(endpoint, enabled,
+            () => System.Text.Encoding.UTF8.GetBytes("{\"count\":0}"),
+            (id, _) =>
+            {
+                Interlocked.Increment(ref submitted);
+                return Task.FromResult(new DebugKillResult(DebugKillOutcome.Killed, 7, 42));
+            });
+
+        var (entities, _) = await SendAsync(HttpMethod.Get, baseUrl + "/debug/entities");
+        var (kill, _) = await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{\"id\":\"p1\"}");
+
+        if (enabled)
+        {
+            Assert.Equal(200, entities);
+            Assert.Equal(200, kill);
+            Assert.Equal(1, submitted);
+        }
+        else
+        {
+            Assert.Equal(404, entities);
+            Assert.Equal(404, kill);
+            Assert.Equal(0, submitted);
+        }
+    }
+
+    /// <summary>
+    /// <c>POST /debug/kill</c>: the id reaches the submitter (body or query), the outcome maps to
+    /// a status and a JSON body, GET is refused, and a request naming nobody never reaches the
+    /// submitter.
+    /// </summary>
+    [Fact]
+    public async Task DebugKill_ParsesTheId_AndMapsEachOutcome()
+    {
+        using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.debugkill.{Guid.NewGuid():N}");
+        await using var endpoint = StartEndpoint(metrics, out string baseUrl);
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        Assert.True(endpoint.EnableDebugKill((id, _) =>
+        {
+            seen.Enqueue(id);
+            DebugKillOutcome outcome = id switch
+            {
+                "p1" => DebugKillOutcome.Killed,
+                "dead" => DebugKillOutcome.AlreadyDead,
+                "m1" => DebugKillOutcome.NotAPlayer,
+                _ => DebugKillOutcome.NotFound,
+            };
+            return Task.FromResult(new DebugKillResult(outcome, 99, outcome == DebugKillOutcome.Killed ? 80 : 0));
+        }));
+
+        var (ok, okBody) = await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{\"id\":\"p1\"}");
+        Assert.Equal(200, ok);
+        using (var doc = System.Text.Json.JsonDocument.Parse(okBody))
+        {
+            Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("p1", doc.RootElement.GetProperty("id").GetString());
+            Assert.Equal("killed", doc.RootElement.GetProperty("outcome").GetString());
+            Assert.Equal(99UL, doc.RootElement.GetProperty("tick").GetUInt64());
+            Assert.Equal(80, doc.RootElement.GetProperty("hp_before").GetInt32());
+        }
+
+        Assert.Equal(409, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{\"user_id\":\"dead\"}")).status);
+        Assert.Equal(400, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{\"entity_id\":\"m1\"}")).status);
+        Assert.Equal(404, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill?id=ghost")).status);
+
+        int before = seen.Count;
+        Assert.Equal(405, (await SendAsync(HttpMethod.Get, baseUrl + "/debug/kill?id=p1")).status);
+        Assert.Equal(400, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "{}")).status);
+        Assert.Equal(400, (await SendAsync(HttpMethod.Post, baseUrl + "/debug/kill", "not json")).status);
+        Assert.Equal(before, seen.Count);
+
+        Assert.Equal(new[] { "p1", "dead", "m1", "ghost" }, seen.ToArray());
+    }
 }

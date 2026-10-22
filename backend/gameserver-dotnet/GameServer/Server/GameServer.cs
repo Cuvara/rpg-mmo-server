@@ -779,6 +779,12 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </summary>
     public Input.InputAnomalyTracker Anomalies => _anomalies;
 
+    /// <summary>
+    /// The resolver every damage and death in this world goes through. For the debug kill
+    /// hook (<c>Scaffolding.DebugKillPhase</c>), which must reach death the way play does.
+    /// </summary>
+    internal Gameplay.CombatResolver Combat => _inputHandler.Combat;
+
     /// <summary>The accepted-attack-rate audit (roadmap A4). Observation only.</summary>
     public Input.AttackRateAudit AttackRates => _attackRates;
 

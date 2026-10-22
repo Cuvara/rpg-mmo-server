@@ -314,8 +314,26 @@ Distinct from `gameserver_inputs_dropped_total`, which is ingest backpressure.
 | `attack_out_of_range` | Target outside attack range | **Yes** — target moved in flight; rises with RTT |
 | `attack_on_cooldown` | Cooldown had not expired | **Mostly** — client cooldown prediction drift |
 | `attack_other` | Validator reason this build does not classify | **N/A** — means the classifier is stale, i.e. a bug in `InputRejection` |
+| `attack_target_untargetable` | Target resolved but cannot be attacked: an item, a projectile, or a player held for reconnect | **Yes** — the target's connection dropped in flight |
+| `attack_cannot_act` | Attacker under crowd control that forbids acting (stun) | **Yes** — a stunned client keeps sending until the status reaches it |
+| `ability_unknown` | Ability id not in the content set | **Yes** — stale hotbar, or client and server content disagree |
+| `ability_on_cooldown` | Global ability cooldown had not expired | **Mostly** — client cooldown prediction drift |
+| `ability_out_of_range` | Target or aim point outside the ability's range | **Yes** — target moved in flight |
+| `ability_target_unresolved` | Entity-targeted ability with no target that resolves to a live entity | **Yes** — target despawned in flight |
+| `ability_target_dead` | Target already dead | **Yes** — someone else's blow landed first |
+| `ability_caster_dead` | Caster dead (`AbilityLogic.ValidateCast`) | **Yes** — in practice `dead_entity` catches a dead caster's input first, so this stays near zero |
+| `ability_cannot_cast` | Caster under crowd control that forbids casting (stun or silence) | **Yes** — as `attack_cannot_act` |
+| `ability_missing_aim` | Area or projectile ability without a usable aim point (none, or one with no direction from the caster) | **Unknown** — whether the shipped client can produce it is not established; weighted benign until it is |
+| `ability_other` | Validator reason this build does not classify | **N/A** — a bug in `InputRejection`, as `attack_other` |
 
-**All nine series are primed to zero at startup**, so "no rejections" reads as `0` rather
+**Combat authority at a glance** (the test lab's view): rejected casts and attacks by reason are
+the `attack_*` and `ability_*` series above; a dead caster's or attacker's input is `dead_entity`.
+For example `sum by (reason) (rate(gameserver_inputs_rejected_total{reason=~"attack_.*|ability_.*"}[1m]))`.
+`attack_target_untargetable`, `attack_cannot_act`, `ability_cannot_cast` and
+`ability_missing_aim` were counted under `attack_other` / `ability_other` before they had series
+of their own; a non-zero `*_other` now again means only "the classifier is stale".
+
+**Every series in the table is primed to zero at startup**, so "no rejections" reads as `0` rather
 than as an absent series. That is deliberate and it is why the reasons are a bounded enum
 rather than the validator's free-form strings — which additionally embed
 attacker-controlled values (the rejected vector, the target id) and would be unbounded

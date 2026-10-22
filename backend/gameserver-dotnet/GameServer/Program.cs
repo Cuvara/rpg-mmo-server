@@ -1039,6 +1039,12 @@ IAgonesSdk agonesSdk = useAgones
 // which the status assembly reads as zero rather than as a missing field.
 GameServer.Scaffolding.EnemySpawner? enemyPhase = null;
 
+// The debug kill hook (POST /debug/kill) when GAMESERVER_DEBUG_ENTITIES is on: the queue the
+// HTTP thread fills and the tick drains, and the resolver it kills through, read back from the
+// server once the server exists. Both stay null otherwise.
+GameServer.Scaffolding.DebugKillQueue? debugKills = debugEntities ? new GameServer.Scaffolding.DebugKillQueue() : null;
+GameServer.Gameplay.CombatResolver? debugKillCombat = null;
+
 var options = new ServerOptions
 {
     SpawnScatter = spawnScatter,
@@ -1099,12 +1105,16 @@ var options = new ServerOptions
     // Captured so /status can publish what enemy-side combat has actually done. The phase
     // is built by the factory below, inside the server's constructor, so there is no
     // instance to read until then — and nothing reads this before the server is running.
-    SimulationPhaseFactory = loadTestEntities > 0
-        ? (world, loggerFactory, onGroupRan) => new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan)
-        : (enableEnemySpawner || bots.Enabled)
-            ? (world, loggerFactory, onGroupRan) =>
+    SimulationPhaseFactory = (loadTestEntities > 0 || enableEnemySpawner || bots.Enabled || debugEntities)
+        ? (world, loggerFactory, onGroupRan) =>
+        {
+            var phases = new List<GameServer.Server.ISimulationPhase>(3);
+            if (loadTestEntities > 0)
             {
-                var phases = new List<GameServer.Server.ISimulationPhase>(2);
+                phases.Add(new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan));
+            }
+            else
+            {
                 if (enableEnemySpawner)
                 {
                     enemyPhase = new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan, enemyAi);
@@ -1116,11 +1126,21 @@ var options = new ServerOptions
                     // CompositeSimulationPhase.
                     phases.Add(new GameServer.Scaffolding.BotPlayerSpawner(world, simulationRates, bots, loggerFactory.CreateLogger<GameServer.Scaffolding.BotPlayerSpawner>(), onGroupRan));
                 }
-                return phases.Count == 1
-                    ? phases[0]
-                    : new GameServer.Scaffolding.CompositeSimulationPhase(phases.ToArray());
             }
-            : null,
+            if (debugKills != null)
+            {
+                // Last, so a debug kill lands after this tick's player.respawn run and is
+                // undone by the next one, as an enemy kill is — see DebugKillPhase. The
+                // resolver is read back from the server once it exists (debugKillCombat).
+                phases.Add(new GameServer.Scaffolding.DebugKillPhase(
+                    world, debugKills, () => Volatile.Read(ref debugKillCombat),
+                    loggerFactory.CreateLogger<GameServer.Scaffolding.DebugKillPhase>()));
+            }
+            return phases.Count == 1
+                ? phases[0]
+                : new GameServer.Scaffolding.CompositeSimulationPhase(phases.ToArray());
+        }
+        : null,
     // The composition root is the one place allowed to know what the game is, so it is
     // where the status endpoint's entity count comes from. The JSON field stays
     // `enemies_alive` — the Unity DOTS sample polls /status and reads it.
@@ -1207,11 +1227,18 @@ var uptime = System.Diagnostics.Stopwatch.StartNew();
 // see SetContentProvider for why this is not a re-serialisation.
 metricsEndpoint?.SetContentProvider(() => (content.CanonicalBytes, content.Hash));
 
+// The debug surface (/debug/entities, /debug/kill), one switch. The kill hook exists only
+// where the world is already readable; it is applied on the tick thread by DebugKillPhase,
+// and this only hands that phase the resolver and the port.
 if (debugEntities)
 {
-    metricsEndpoint?.EnableDebugEntities(() => GameServer.Observability.DebugEntitiesDocument.Write(
-        server.World, server.CurrentTick, uptime.Elapsed.TotalSeconds));
+    Volatile.Write(ref debugKillCombat, server.Combat);
 }
+GameServer.Observability.DebugSurface.Enable(
+    metricsEndpoint, debugEntities,
+    () => GameServer.Observability.DebugEntitiesDocument.Write(
+        server.World, server.CurrentTick, uptime.Elapsed.TotalSeconds),
+    debugKills == null ? null : debugKills.Submit);
 
 // Wire up the /status JSON endpoint with live server state.
 metricsEndpoint?.SetStatusProvider(() =>
