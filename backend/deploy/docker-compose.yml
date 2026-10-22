@@ -512,6 +512,8 @@ services:
       GAMESERVER_MAX_SNAPSHOT_BYTES: ${GAMESERVER_MAX_SNAPSHOT_BYTES:-}
       # Dev/test only: serves /debug/entities (whole world state). Never set on a fleet.
       GAMESERVER_DEBUG_ENTITIES: ${GAMESERVER_DEBUG_ENTITIES:-}
+      # Dev/test only: snapshot delivery trace CSV path inside the container (#473). Never set on a fleet.
+      GAMESERVER_SNAPSHOT_TRACE: ${GAMESERVER_SNAPSHOT_TRACE:-}
       GAMESERVER_KEYFRAME_INTERVAL: ${GAMESERVER_KEYFRAME_INTERVAL:-}
       # ── Admission, pre-join and ingestion bounds ──────────────────────────
       # Forwarded from .env rather than written as literals: every one of these is a

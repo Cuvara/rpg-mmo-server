@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Snapshot delivery trace and per-connection delivery counters (#473).**
+  `GAMESERVER_SNAPSHOT_TRACE` (a file path, unset = off) writes one CSV line per (connection,
+  sent snapshot): `conn_id,user_id,world_tick,gather_us,enqueue_us,write_start_us,write_end_us,
+  bytes,queue_depth,dropped_oldest_total,kcp_wait_snd,kcp_snd_wnd,kcp_rmt_wnd,kcp_retrans_total,
+  kcp_rto_ms`, monotonic microseconds since process start (`ProcessClock`). Rows go from each
+  connection's write task into a fixed ring and are flushed by a background thread every
+  250 ms; a full ring drops and counts. Off, the gather path costs one null check and
+  allocates nothing (`SnapshotTraceTests`, which also checks the CSV a real loopback KCP
+  connection writes). KCP now counts retransmitted segments per session
+  (`Kcp.RetransmittedSegments`, `KcpSession.ReadCounters`) and listener-wide
+  (`gameserver_kcp_segments_retransmitted_total`). `/status` adds
+  `snapshot_send_queue_depth_max`, `snapshot_send_dropped_oldest`, `kcp_wait_snd_max`,
+  `kcp_rto_max_ms`, `kcp_rmt_wnd_min`, `kcp_segments_retransmitted` and
+  `snapshot_trace_rows_written` / `_dropped`. Wire bytes are unchanged. The knob is forwarded
+  by compose and excluded from the fleets with a reason (`FleetEnvPassthroughTests`).
 - **`GAMESERVER_DEBUG_ENTITIES=on` serves `/debug/entities`** on the metrics port: every
   entity's id, type, authoritative position, HP, max HP, speed and dead flag, with the
   server tick and a monotonic timestamp (schema `rpg.debug-entities.v1`). It is read under the

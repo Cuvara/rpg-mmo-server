@@ -146,11 +146,66 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `snapshot_max_gather` | Largest single-viewer gather seen on this server. Kept beside the total because an **average hides the case that matters** — one client with an empty view among many full ones, which is the shape an anchor or interest bug makes. |
 | `snapshot_anchor_missing` | Viewer gathers **skipped** because the connection's own entity could not be resolved, so there was no position to centre its area of interest on. Brief non-zero around join and despawn is normal; sustained growth means a connection has outlived its entity and is being sent nothing. Read it as a *correctness* counter rather than a load one: before #385 this case was silent and anchored the AOI at `(0,0)` — the single most populated point on the map, where the mobs spawn — so the client received a busy, plausible view of somewhere it was not, with every other counter clean. |
 | `snapshot_max_update_gap_ms` | Longest wait, in **milliseconds**, between an entity's last send and the send that delivered an update it was owed — **whatever withheld it**: the replication schedule, the byte budget, or both in turn. This is the server's share of the client's 150ms interpolation cover, so read it against `150 − 45` (ADR-27 decisions 11–12). The single-source gauges, `snapshot_max_state_age` and `snapshot_max_shed_age`, each see one source only, in different units, and neither — nor their sum — bounds it: measured at 20Hz `tiered` under byte pressure they summed to 300ms against a 356ms worst gap (BENCHMARK.md Part XX). High-water mark since start, so join-time keyframe truncation is in it too. |
+| `snapshot_send_queue_depth_max` | Deepest per-connection data lane right now: snapshot markers and heartbeats waiting for the connection's write task. Capacity 64; snapshots themselves are coalesced into one staged job, so a deep lane means the write task is not keeping up, not that snapshots are piling up (#473) |
+| `snapshot_send_dropped_oldest` | Items the drop-oldest data lanes discarded, summed over **live** connections. A dropped snapshot marker loses nothing (the job stays staged); a dropped heartbeat is a lost ping reply (#473) |
+| `kcp_wait_snd_max` | Largest KCP `WaitSnd` (segments queued or sent and not yet acknowledged) over live sessions, now. The writer is held at 256 and the session closes as a slow consumer past 1024. Rising on every session at once means acknowledgements stopped arriving: path loss or delay, not the process (#473) |
+| `kcp_rto_max_ms` | Largest current KCP retransmission timeout over live sessions, in ms. Follows the smoothed RTT the server measures from ACKs (minimum 30 ms with `nodelay`) (#473) |
+| `kcp_rmt_wnd_min` | Smallest receive window, in segments, any client last advertised. `0` means that client stopped reading and the server stopped sending to it until a window probe or update. `-1` with no live KCP session (#473) |
+| `kcp_segments_retransmitted` | KCP segments sent more than once since start, every session including closed ones: fast, early and timeout retransmissions together. Same value as `gameserver_kcp_segments_retransmitted_total` (#473) |
+| `snapshot_trace_rows_written` / `snapshot_trace_rows_dropped` | Rows the snapshot delivery trace (`GAMESERVER_SNAPSHOT_TRACE`) wrote and dropped; both `-1` when the trace is off. A non-zero drop count means the trace has holes: a missing row is then not evidence of a missing snapshot. See "Snapshot delivery trace" below |
 | `snapshot_max_state_age` | Longest gap, in **base ticks** (the base rate, `SIM_CRITICAL_HZ`, 60 by default — **not** world ticks; the encoder is handed the base tick), between an entity's state going stale for a client and being re-sent — the cost side of the schedule. **Not the same number as `snapshot_max_shed_age`**: a not-due entity is not a shed entity, so the budget's bookkeeping is blind to schedule deferrals, and reading one for the other reports a healthy zero while entities go seconds without an update. |
 | `inputs_dropped` | Client inputs discarded at ingest since process start (per-connection budget or world-wide queue cap, summed). Same value as `sum(gameserver_inputs_dropped_total)`. Movement coalesced in place is **not** a drop and not counted here |
 | `transfers_rejected` | `MsgTransferMap` requests refused because a transfer was already running on that connection. Same value as `gameserver_transfers_rejected_total` |
 | `commands_received` / `commands_accepted` / `commands_rejected` | Gameplay commands (MsgType 32, ADR-30; `docs/API.md` "Command channel") received, answered `ok = true`, and answered `ok = false`, since start. `received = accepted + rejected` once in-flight commands finish — every command gets exactly one result. The per-reason split of `commands_rejected` is on `gameserver_commands_rejected_total{reason}` |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
+
+### Snapshot delivery trace (`GAMESERVER_SNAPSHOT_TRACE`)
+
+Opt-in, dev/test only (#473). When the variable names a file, the server truncates it at
+startup and writes **one CSV line per (connection, sent snapshot)**. It exists to split a
+client-observed arrival gap into the server's share (gather, queue, encode, KCP send) and the
+path's share. The column set is a contract with the rpg-factory testlab analyzer (C1): change it
+only together with that analyzer.
+
+```
+conn_id,user_id,world_tick,gather_us,enqueue_us,write_start_us,write_end_us,bytes,queue_depth,dropped_oldest_total,kcp_wait_snd,kcp_snd_wnd,kcp_rmt_wnd,kcp_retrans_total,kcp_rto_ms
+```
+
+| Column | Meaning |
+|--------|---------|
+| `conn_id` | Process-unique connection number in creation order. A user id is not unique over a run: a reconnect reuses it |
+| `user_id` | The connection's user id (CSV-quoted only if it contains `,`, `"` or a newline) |
+| `world_tick` | The tick the client sees in this snapshot (`SnapshotMessage.tick`, a base tick) |
+| `gather_us` | When the tick thread began gathering this connection's view |
+| `enqueue_us` | When the gathered view was published and its marker enqueued on the data lane |
+| `write_start_us` | When the write task, having encoded the snapshot, started the transport write |
+| `write_end_us` | When the transport write returned (KCP `Send` + immediate flush to the UDP socket) |
+| `bytes` | Frame bytes, length prefix and envelope included |
+| `queue_depth` | Items already in the data lane when this snapshot's marker was enqueued |
+| `dropped_oldest_total` | Cumulative items this connection's drop-oldest lane discarded |
+| `kcp_wait_snd` | Segments queued or unacknowledged, read at write end |
+| `kcp_snd_wnd` | Local send window in segments (128) |
+| `kcp_rmt_wnd` | Receive window the client last advertised, in segments |
+| `kcp_retrans_total` | Cumulative segments this session sent more than once |
+| `kcp_rto_ms` | Current retransmission timeout, ms |
+
+All `*_us` values are microseconds on the **monotonic** clock (`Stopwatch`) since the process's
+first statement (`ProcessClock`), so they are comparable across connections in one file and
+never with another process's clock. `-1` means "not recorded": a job staged before the trace
+was attached carries no gather or enqueue stamp, and a transport that is not KCP (test doubles
+only) has no `kcp_*` values. No field is ever estimated.
+
+Rows are recorded by each connection's write task into a fixed ring (65 536 rows) and written by
+a background thread every 250 ms; the tick thread only stamps two timestamps per gather. A full
+ring drops the new row and counts it in `snapshot_trace_rows_dropped`. Off (unset or empty), the
+cost is one null check per gather and per write and no allocation
+(`SnapshotTraceTests.TheGatherPath_AllocatesNothing_TraceOnOrOff`). Wire bytes do not change.
+
+How to read it: `enqueue_us - gather_us` is the gather, `write_start_us - enqueue_us` is the
+wait for the write task plus the encode, `write_end_us - write_start_us` is the KCP send under
+the session lock. A client gap with these flat and `kcp_retrans_total` / `kcp_wait_snd` stepping
+up on every connection at once is on the path; with them flat and `kcp_wait_snd` low (ACKs
+arriving on time) it is above the client's KCP layer.
 
 ### Do not compute a rate — read `achieved_tick_hz`
 
@@ -223,6 +278,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_kcp_datagrams_dropped_total` | counter | `map_id`, `reason` | Inbound UDP datagrams dropped by the listener — `reason=oversize` (> 1500 B, never parsed), `undersize`, `rate` (per-session token bucket; KCP retransmits them), `bad_crypto` (wrong or missing `TRANSPORT_KEY`), `fec`, `no_session` (not a session opener from an unknown endpoint), `conv_mismatch`, `malformed`. `bad_crypto` climbing is the signature of a client built with a different key |
 | `gameserver_kcp_writes_rejected_total` | counter | `map_id` | Application frames larger than one maximum wire frame; each one closes its session. Zero forever on a healthy server |
 | `gameserver_kcp_datagrams_received_total` | counter | `map_id` | Datagrams the single KCP receive thread took off the socket (handled or dropped) |
+| `gameserver_kcp_segments_retransmitted_total` | counter | `map_id` | KCP segments sent more than once (fast, early and timeout retransmissions), every session, closed ones included. Rising while `gameserver_kcp_datagrams_dropped_total` stays flat means loss or ACK delay on the **path**, not in the process (#473) |
 | `gameserver_kcp_receive_busy_seconds_total` | counter | `map_id` | Time that receive thread spent handling datagrams. **Its rate is the thread's utilisation**: every session shares it, and near 1.0 the kernel drops datagrams for every player at once (`/proc/net/snmp` `Udp: RcvbufErrors`), seen as mass `dead_link` closes. Measured ~0.4-0.55 at 95 players with AI enemies on the WSL dev box |
 | `gameserver_gc_collections_total` | counter | `map_id`, `generation=0\|1\|2` | Garbage collections since process start. A gen-2 rate during a load run is the first thing to read when tick p99 jumps |
 | `gameserver_gc_allocated_bytes_total` | counter | `map_id` | Managed bytes allocated since start; its rate over a run is the allocation pressure the hot paths are meant to keep near zero |

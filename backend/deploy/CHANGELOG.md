@@ -5,6 +5,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Compose passthrough for `GAMESERVER_SNAPSHOT_TRACE` (rpg-mmo-server#473) in
+  `docker-compose.yml` and `docker-compose.override.yml`: the snapshot delivery trace file
+  path, dev and test only. Deliberately **not** declared in the Agones fleet or the k8s fleets
+  (`FleetEnvPassthroughTests` excludes it with the reason: unbounded file growth on the pod
+  and every player's user id). `docs/RUNBOOK-local-dev.md` says how to get the file out.
+
 ### Fixed
 - **`stack.sh --scratch` collided with the default stack.** Compose loads
   `docker-compose.override.yml` whenever no `-f` is given, and that file publishes the default
