@@ -779,13 +779,13 @@ public sealed class InputHandler
                 // reach for the hold, CORE-BASELINE-V1 §3). Not a thing an attack can land on.
                 Attacks.Rejected++;
                 Attacks.LastRejection = NotTargetableRejection;
-                Reject(userId, InputRejectionReason.AttackOther);
+                Reject(userId, InputRejectionReason.AttackTargetUntargetable);
             }
             else if (CombatResolver.StatusesOf(writer, self) is { CanAct: false })
             {
                 Attacks.Rejected++;
                 Attacks.LastRejection = CannotActRejection;
-                Reject(userId, InputRejectionReason.AttackOther);
+                Reject(userId, InputRejectionReason.AttackCannotAct);
             }
             else
             {
@@ -1186,8 +1186,10 @@ public sealed class InputHandler
         if (ReferenceEquals(reason, AbilityLogic.TargetDeadRejection)) return InputRejectionReason.AbilityTargetDead;
         if (ReferenceEquals(reason, AbilityLogic.CasterDeadRejection)) return InputRejectionReason.AbilityCasterDead;
         if (ReferenceEquals(reason, AbilityLogic.UnknownAbilityRejection)) return InputRejectionReason.AbilityUnknown;
-        // CannotCast (stun/silence) and MissingAim have no reason of their own yet and are
-        // counted under AbilityOther; LastRejection still names them.
+        if (ReferenceEquals(reason, AbilityLogic.CannotCastRejection)) return InputRejectionReason.AbilityCannotCast;
+        if (ReferenceEquals(reason, AbilityLogic.MissingAimRejection)) return InputRejectionReason.AbilityMissingAim;
+        // Anything the validator adds later lands here until it is classified;
+        // LastRejection still names it.
         return InputRejectionReason.AbilityOther;
     }
 }
