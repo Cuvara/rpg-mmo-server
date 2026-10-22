@@ -99,6 +99,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unbounded query visits 2001 entries, a bounded one at most 256. An offline model of the
   walk put the worst ordinary crowd at 58 entries per push and 92 per query, which is why the
   budget is 256 and not 64.
+- `SnapshotCadenceTests` runs in `WallClockCollection`. Its rate and tick assertions are
+  wall-clock figures. Beside the rest of the suite it failed on an unchanged server (base
+  11f0140: 11.38/s and 14.83/s in two full-suite runs, against 15 +/- 0.17), while it reads 15.0/s
+  with every gap 4 in isolation. This is the #426 remedy; no assertion or tolerance changed.
 - **`snapshot_max_update_gap_ms` read about the server's uptime under shedding (#471).** An
   entity left off a connection's first, budget-truncated keyframe had no previous encode and
   no last send, so its wait started at world tick 0 and the delta that introduced it recorded
