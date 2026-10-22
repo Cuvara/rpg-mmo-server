@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Snapshot delivery trace and per-connection delivery counters (#473).**
+  `GAMESERVER_SNAPSHOT_TRACE` (a file path, unset = off) writes one CSV line per (connection,
+  sent snapshot): `conn_id,user_id,world_tick,gather_us,enqueue_us,write_start_us,write_end_us,
+  bytes,queue_depth,dropped_oldest_total,kcp_wait_snd,kcp_snd_wnd,kcp_rmt_wnd,kcp_retrans_total,
+  kcp_rto_ms`, monotonic microseconds since process start (`ProcessClock`). Rows go from each
+  connection's write task into a fixed ring and are flushed by a background thread every
+  250 ms; a full ring drops and counts. Off, the gather path costs one null check and
+  allocates nothing (`SnapshotTraceTests`, which also checks the CSV a real loopback KCP
+  connection writes). KCP now counts retransmitted segments per session
+  (`Kcp.RetransmittedSegments`, `KcpSession.ReadCounters`) and listener-wide
+  (`gameserver_kcp_segments_retransmitted_total`). `/status` adds
+  `snapshot_send_queue_depth_max`, `snapshot_send_dropped_oldest`, `kcp_wait_snd_max`,
+  `kcp_rto_max_ms`, `kcp_rmt_wnd_min`, `kcp_segments_retransmitted` and
+  `snapshot_trace_rows_written` / `_dropped`. Wire bytes are unchanged. The knob is forwarded
+  by compose and excluded from the fleets with a reason (`FleetEnvPassthroughTests`).
 - **Enemy separation and queueing (#469).** `GAMESERVER_ENEMY_SEPARATION` (default 0.8 world
   units, `0` = off, which restores the old movement exactly) keeps living enemies apart. A
   new World-group system `enemy.separate` (`EnemySeparationSystem`, order between move and
@@ -78,6 +93,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unbounded query visits 2001 entries, a bounded one at most 256. An offline model of the
   walk put the worst ordinary crowd at 58 entries per push and 92 per query, which is why the
   budget is 256 and not 64.
+- `SnapshotCadenceTests` runs in `WallClockCollection`. Its rate and tick assertions are
+  wall-clock figures. Beside the rest of the suite it failed on an unchanged server (base
+  11f0140: 11.38/s and 14.83/s in two full-suite runs, against 15 +/- 0.17), while it reads 15.0/s
+  with every gap 4 in isolation. This is the #426 remedy; no assertion or tolerance changed.
+- **`snapshot_max_update_gap_ms` read about the server's uptime under shedding (#471).** An
+  entity left off a connection's first, budget-truncated keyframe had no previous encode and
+  no last send, so its wait started at world tick 0 and the delta that introduced it recorded
+  the whole uptime (17 016 ms beside a one-tick `snapshot_max_shed_age`). The wait now starts
+  at the connection's first encode. Regression test:
+  `UpdateGapTests.LateJoinDuringShedding_GaugeCountsFromTheJoinNotTickZero` (fails on the old
+  code with a 60 003-tick gauge for a join at tick 60 000).
 - **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse
   (#449).** `KcpCrypto` ran CFB-128 by hand with one `EncryptEcb` call per 16-byte block, about
   90 one-shot cipher setups per MTU datagram. Measured at 95 players with AI on: ~340 us to seal

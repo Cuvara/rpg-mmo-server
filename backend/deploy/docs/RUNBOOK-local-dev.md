@@ -148,6 +148,23 @@ game server knobs for a scratch stack, write `KEY=value` lines to a file and pas
 how the rpg-factory testlab configures its runs (`GAMESERVER_DEBUG_ENTITIES=on`,
 `GAMESERVER_ENEMY_SEED`, `GAMESERVER_MAP_ID`, `GATEWAY_CONN_RATE_PER_MIN=0`).
 
+To record which commit a stack runs, pass `STACK_GIT_REVISION=<sha>` to `up`. The SHA is
+stamped into the gateway and game server images as the `org.opencontainers.image.revision`
+label; unset leaves it `unknown`. Pass it from the caller, for example
+`STACK_GIT_REVISION=$(git rev-parse HEAD)` in a shell whose git can read the checkout. Git
+inside WSL cannot resolve a worktree that Windows git created. A value that is not a 7-40
+character hex SHA exits 2. Read it back from the running container:
+
+```bash
+docker inspect rpgs-gameserver --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+`GAMESERVER_SNAPSHOT_TRACE=<path>` turns on the snapshot delivery trace (#473): one CSV line
+per sent snapshot per connection, written to that path **inside the game server container**.
+Pick a path on a writable mount, or copy it out after the run with
+`docker cp <container>:<path> .`. Column set and meaning: `gameserver-dotnet/docs/METRICS.md`,
+"Snapshot delivery trace". Dev and test only; the fleets do not forward it.
+
 > **Trap this protects you from.** Without `--scratch`, running `up` in a
 > directory while another checkout has the same compose project up does not
 > fail — compose **adopts and recreates** the running containers, with your

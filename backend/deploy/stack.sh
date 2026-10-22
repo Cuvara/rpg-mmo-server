@@ -37,6 +37,9 @@
 #                 (KEY=value lines) last, so a caller can set game server knobs.
 #   --no-build    skip the image builds in `up` (use the images already there).
 #
+# STACK_GIT_REVISION=<sha> (env) stamps the gateway and game server images with
+# that commit as org.opencontainers.image.revision; unset leaves it `unknown`.
+#
 # `make` is NOT required and is not installed on every dev box here; the
 # Makefile's flow-* targets are thin wrappers around this script.
 #
@@ -310,11 +313,25 @@ do_up() {
 			echo "==> modules/nakama.so up to date with nakama/ and shared/ sources — skipping plugin build"
 		fi
 
+		# Provenance: STACK_GIT_REVISION=<sha> is stamped into both images as the
+		# org.opencontainers.image.revision label. Taken from the caller rather than
+		# `git rev-parse` here: git inside WSL cannot resolve a worktree created by
+		# Windows git (its .git file names a C:/ path). Unset keeps the Dockerfile
+		# default, `unknown`.
+		REVISION_ARGS=()
+		if [ -n "${STACK_GIT_REVISION:-}" ]; then
+			if ! [[ "$STACK_GIT_REVISION" =~ ^[0-9a-f]{7,40}$ ]]; then
+				echo "STACK_GIT_REVISION=$STACK_GIT_REVISION is not a hex commit SHA (7-40 chars)" >&2
+				exit 2
+			fi
+			REVISION_ARGS=(--build-arg "GIT_REVISION=$STACK_GIT_REVISION")
+			echo "==> stamping images with revision $STACK_GIT_REVISION"
+		fi
 		echo "==> building gateway image"
-		docker build -f docker/Dockerfile.gateway \
+		docker build -f docker/Dockerfile.gateway ${REVISION_ARGS[@]+"${REVISION_ARGS[@]}"} \
 			-t "${GATEWAY_IMAGE:-rpg-mmo/gateway:dev}" ..
 		echo "==> building C# gameserver image (NativeAOT — slow on a cold cache)"
-		docker build -f docker/Dockerfile.gameserver-dotnet \
+		docker build -f docker/Dockerfile.gameserver-dotnet ${REVISION_ARGS[@]+"${REVISION_ARGS[@]}"} \
 			-t "${GAMESERVER_IMAGE:-rpg-mmo/gameserver-dotnet:dev}" ..
 	fi
 
