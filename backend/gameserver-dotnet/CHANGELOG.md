@@ -21,7 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   change every chaser converged on the same point. Tests: `EnemySeparationTests` (a pile
   spreads; a chasing crowd keeps its spacing where the control collapses; a settled crowd is
   still; same seed, same crowd; 20 000 enemies bounded; 0 touches nothing) and
-  `EnemyBattleRoyaleTests.WithSeparation_ChasersSettleInAStableCrowd`. The value is a
+  `EnemyBattleRoyaleTests.WithSeparation_ChasersSettleInAStableCrowd`. The sideways slide is
+  clamped to the map, and its free-spot query reports a spot taken when it reaches the
+  neighbour cap (`FreeSpotQuery_IsConservativeWhereTheNeighbourCapBites`). Known limitation, not
+  new: enemy movement does not test static boxes, so neither do the push and the slide. The value is a
   placeholder pending enemy design. Product decision recorded: overflow enemies queue behind
   the ring and do not circle round to find a gap.
 - **`GAMESERVER_ENEMY_BUDGET` - hard per-map enemy ceiling (#468).** The default is 300. The

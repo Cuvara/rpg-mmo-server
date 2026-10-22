@@ -168,6 +168,31 @@ public class EnemySeparationTests
         Assert.True(sw.ElapsedMilliseconds < 1000, $"{sw.ElapsedMilliseconds} ms for 20,000 coincident enemies");
     }
 
+    /// <summary>
+    /// The side-step's free-spot query is bounded by the neighbour cap, so where the cap bites it
+    /// must say "taken": an enemy it did not examine may stand on the spot. Thirteen enemies
+    /// ringing a point at 1.0 leave the point itself clear but exhaust the cap; a single enemy
+    /// at the same distance does not.
+    /// </summary>
+    [Fact]
+    public void FreeSpotQuery_IsConservativeWhereTheNeighbourCapBites()
+    {
+        var system = new EnemySeparationSystem(Dt, Settings());
+        var centre = new Vec2(0.4f, 0.4f); // middle of a 0.8 cell
+
+        Vec2[] ring = Enumerable.Range(0, 13)
+            .Select(k => new Vec2(centre.X + MathF.Cos(k * MathF.Tau / 13f), centre.Y + MathF.Sin(k * MathF.Tau / 13f)))
+            .ToArray();
+        system.SetSnapshot(ring);
+        system.ComputePushes(ring.Length, 0.8f, 2.5f * Dt);
+        Assert.False(system.IsFree(centre.X, centre.Y, 99f, 99f));
+
+        Vec2[] two = { ring[0], new Vec2(50f, 50f) };
+        system.SetSnapshot(two);
+        system.ComputePushes(two.Length, 0.8f, 2.5f * Dt);
+        Assert.True(system.IsFree(centre.X, centre.Y, 99f, 99f));
+    }
+
     [Fact]
     public void SeparationZero_TouchesNothing()
     {

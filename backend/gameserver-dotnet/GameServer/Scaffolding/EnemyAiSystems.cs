@@ -361,10 +361,11 @@ internal sealed class EnemyMoveSystem : IEcsSystem
                         {
                             float sgn = side > 0f ? -1f : 1f;
                             float tnx = -dy / d0 * sgn, tny = dx / d0 * sgn;
-                            float nx = positions[i].Value.X + (tnx * step), ny = positions[i].Value.Y + (tny * step);
-                            if (_separation.IsFree(nx, ny, positions[i].Value.X, positions[i].Value.Y))
+                            Vec2 slide = _settings.Bounds.Clamp(new Vec2(
+                                positions[i].Value.X + (tnx * step), positions[i].Value.Y + (tny * step)));
+                            if (_separation.IsFree(slide.X, slide.Y, positions[i].Value.X, positions[i].Value.Y))
                             {
-                                positions[i].Value = new Vec2(nx, ny);
+                                positions[i].Value = slide;
                             }
                         }
 

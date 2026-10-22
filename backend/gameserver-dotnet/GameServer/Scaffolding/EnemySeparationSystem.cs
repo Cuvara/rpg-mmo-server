@@ -269,7 +269,9 @@ internal sealed class EnemySeparationSystem : IEcsSystem
     /// <summary>
     /// True when no enemy of the last separation step stands within the spacing of (x, y),
     /// ignoring one at the exact point <paramref name="selfX"/>, <paramref name="selfY"/> (the
-    /// asking enemy itself). Bounded like the other queries.
+    /// asking enemy itself). Bounded like the other queries, and conservative where the bound
+    /// bites: a query that reaches <see cref="MaxNeighbours"/> candidates reports the spot taken,
+    /// because an unexamined enemy may stand on it.
     /// </summary>
     internal bool IsFree(float x, float y, float selfX, float selfY)
     {
@@ -298,7 +300,7 @@ internal sealed class EnemySeparationSystem : IEcsSystem
             }
         }
 
-        return true;
+        return examined < MaxNeighbours;
     }
 
     internal void SetSnapshot(ReadOnlySpan<Vec2> positions)
