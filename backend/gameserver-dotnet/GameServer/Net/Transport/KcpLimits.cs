@@ -163,6 +163,7 @@ public sealed class KcpListenerStats
     internal long _writesRejected;
     internal long _datagramsReceived;
     internal long _receiveBusyTicks;
+    internal long _segmentsRetransmitted;
     private Func<int>? _liveProvider;
 
     internal void SetLiveProvider(Func<int> provider) => _liveProvider = provider;
@@ -171,6 +172,13 @@ public sealed class KcpListenerStats
     public int SessionsLive => _liveProvider?.Invoke() ?? 0;
     /// <summary>Sessions ever created.</summary>
     public long SessionsCreated => Interlocked.Read(ref _sessionsCreated);
+
+    /// <summary>
+    /// KCP segments sent more than once, summed over every session this listener has run,
+    /// closed ones included: fast, early and timeout retransmissions together. Rising with flat
+    /// inbound drops means loss (or an ACK delay past the RTO) on the path, not in the process.
+    /// </summary>
+    public long SegmentsRetransmitted => Interlocked.Read(ref _segmentsRetransmitted);
     /// <summary>Sessions replaced by a new conversation from the same endpoint (peer restart).</summary>
     public long SessionsReplaced => Interlocked.Read(ref _sessionsReplaced);
     /// <summary>New sessions refused because <see cref="KcpListenerOptions.MaxSessions"/> was reached.</summary>

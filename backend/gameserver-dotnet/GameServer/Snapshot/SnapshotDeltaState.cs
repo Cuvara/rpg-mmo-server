@@ -605,7 +605,11 @@ public sealed class SnapshotDeltaState
     private void NoteOwed(int key, ulong tick)
     {
         if (_owedFrom.ContainsKey(key)) return;
-        ulong from = _prevEncodingTick < tick ? _prevEncodingTick : 0;
+        // No previous encode on this connection means the wait starts NOW, at the join
+        // keyframe - not at world tick 0. Falling back to 0 charged an entity shed from the
+        // join keyframe the server's whole uptime, so a bot joining during shedding pushed
+        // the gauge to ~uptime and pinned it there (#471: 17016 ms beside a 1-tick shed age).
+        ulong from = _hasPrevEncoding && _prevEncodingTick < tick ? _prevEncodingTick : tick;
         if (_lastSentTick.TryGetValue(key, out ulong last) && last > from) from = last;
         _owedFrom[key] = from;
     }
@@ -795,6 +799,13 @@ public sealed class SnapshotDeltaState
     /// </summary>
     private ulong _prevEncodingTick;
 
+    /// <summary>
+    /// True once this state has encoded at least one snapshot, so <see cref="_prevEncodingTick"/>
+    /// names a real encode. Tick 0 is a valid tick, so the tick itself cannot be the sentinel.
+    /// </summary>
+    private bool _hasPrevEncoding;
+    private bool _encodedOnce;
+
     /// <summary>Unstaggered state — every keyframe cycle is exactly the full interval.</summary>
     public SnapshotDeltaState() : this(0) { }
 
@@ -929,6 +940,8 @@ public sealed class SnapshotDeltaState
         // flag on a JSON connection still gets the safe (all-fields) path.
         _fieldDelta = intern && FieldDelta;
         _observer = observer;
+        _hasPrevEncoding = _encodedOnce;
+        _encodedOnce = true;
         _prevEncodingTick = _encodingTick;
         _encodingTick = tick;
         // Latched once per encode: MaxSnapshotBytes is a settable property and a change

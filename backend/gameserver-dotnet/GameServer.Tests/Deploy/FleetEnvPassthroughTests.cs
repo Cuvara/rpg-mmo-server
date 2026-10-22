@@ -87,6 +87,12 @@ public class FleetEnvPassthroughTests
                 "ConfigMap edit away from being scrapeable. Compose forwards it for the " +
                 "rpg-factory testlab, which needs server-authoritative positions.",
 
+            ["GAMESERVER_SNAPSHOT_TRACE"] =
+                "Dev and test only. It names a file the server truncates at startup and then " +
+                "appends a CSV line to for every snapshot sent to every connection (#473): " +
+                "unbounded disk growth on a pod's writable layer for the life of the pod, and " +
+                "the user id of every player in it. A fleet has no reader for it. Compose " +
+                "forwards it for the rpg-factory testlab, which analyses the file per run.",
             ["GAMESERVER_ID"] =
                 "FORBIDDEN on a fleet, not merely unnecessary. Program.cs resolves " +
                 "`--server-id ?? GAMESERVER_ID ?? POD_NAME`, so GAMESERVER_ID WINS over the " +
