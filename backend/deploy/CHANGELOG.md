@@ -6,6 +6,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`stack.sh --scratch` collided with the default stack.** Compose loads
+  `docker-compose.override.yml` whenever no `-f` is given, and that file publishes the default
+  stack's fixed host ports (8000, 9101/9102, 9000/udp, 9002/udp, 9103). It also pinned
+  `GAMESERVER_PUBLIC_ADDR` to `:9000`, so a scratch stack bound the default stack's ports and
+  advertised its UDP port. Scratch mode now passes `-f docker-compose.yml` explicitly and
+  uses its own image tags (`:scratch`), so building a scratch stack from a branch no longer
+  retags the `:dev` images the default stack recreates from.
+
 - **`registry.addr_kcp_join` could never pass: the verify probe did not perform the KCP join.**
   `k8s/verify/probe` declared `-kcp-join` / `PROBE_KCP_JOIN` and read `TRANSPORT_KEY`, but
   `probe enterworld` stopped at the gateway hop and never printed `kcp_join=`, so the check
@@ -30,6 +38,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   down once empty. On a server not in `require` mode the probe is accepted into the world.
   Do not aim it at a `Ready` server you do not want allocated; production targets need
   explicit authorization. `PROBE_KCP_JOIN=0` stops the probe at the gateway hop.
+
+### Added
+- `STACK_SCRATCH_EXTRA_ENV=<file>`: KEY=value lines appended last to `.env.scratch`, so a
+  caller (the rpg-factory testlab) can set game server knobs on the scratch stack without
+  editing `.env`.
+- Compose passthroughs: `GAMESERVER_DEBUG_ENTITIES` (both game servers, dev and test only),
+  `GAMESERVER_ENEMY_SEED` (both game servers and all three fleets), and the gateway's
+  `GATEWAY_CONN_RATE_PER_MIN` / `GATEWAY_CONN_BURST` (defaults unchanged at 10). Every local
+  client reaches the gateway from the same docker bridge address, so the 11th join within a
+  minute was refused with `connection rate limited`. A local or scratch stack can now raise
+  the limit.
 
 ### Changed
 - **Host UDP buffer limits for the KCP game socket.** `scripts/bootstrap-vps.sh` writes

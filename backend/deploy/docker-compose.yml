@@ -280,6 +280,13 @@ services:
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # Per-source-IP connection limit (shared/config, default 10/min, 0 disables). Every
+      # local client reaches the gateway from the same docker bridge address, so more than
+      # ten joins a minute (several players, a relaunch, back-to-back test runs) are refused
+      # with "connection rate limited". Forwarded so a local or scratch stack can raise it;
+      # the defaults keep the production value.
+      GATEWAY_CONN_RATE_PER_MIN: ${GATEWAY_CONN_RATE_PER_MIN:-10}
+      GATEWAY_CONN_BURST: ${GATEWAY_CONN_BURST:-10}
       # ---------------------------------------------------------------------
       # Gateway-hop TLS (ADR-23) — OFF, and pinned explicitly.
       # ---------------------------------------------------------------------
@@ -503,6 +510,8 @@ services:
       # entities vanish on the client and reappear on the next delta. That is the
       # "enemies disappear and come back" the owner reported.
       GAMESERVER_MAX_SNAPSHOT_BYTES: ${GAMESERVER_MAX_SNAPSHOT_BYTES:-}
+      # Dev/test only: serves /debug/entities (whole world state). Never set on a fleet.
+      GAMESERVER_DEBUG_ENTITIES: ${GAMESERVER_DEBUG_ENTITIES:-}
       GAMESERVER_KEYFRAME_INTERVAL: ${GAMESERVER_KEYFRAME_INTERVAL:-}
       # ── Admission, pre-join and ingestion bounds ──────────────────────────
       # Forwarded from .env rather than written as literals: every one of these is a
@@ -571,6 +580,7 @@ services:
       # damage per second, i.e. 6/s and ~17s to die at these defaults.
       GAMESERVER_ENEMY_ATTACK_INTERVAL: ${GAMESERVER_ENEMY_ATTACK_INTERVAL:-}
       GAMESERVER_PLAYER_RESPAWN: ${GAMESERVER_PLAYER_RESPAWN:-}
+      GAMESERVER_ENEMY_SEED: ${GAMESERVER_ENEMY_SEED:-}
       # /metrics + /healthz. Binds the wildcard, so it answers on any Host —
       # scraped in-network as gameserver-dotnet:9101 and from the host as
       # 127.0.0.1:9101, with no `Host:` header trickery on either path.
