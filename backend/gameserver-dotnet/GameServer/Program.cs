@@ -12,6 +12,10 @@ using GameServer.Net.Transport;
 using GameServer.Registry;
 using GameServer.Server;
 
+// The monotonic origin every *_us figure (snapshot trace) counts from: touched first, so it
+// is as close to process start as this program gets.
+_ = ProcessClock.Origin;
+
 // ── Parse command-line args and environment variables ──
 
 string mode = GetArg(args, "--mode") ?? Env(ServerEnv.Mode) ?? "map";
@@ -346,6 +350,29 @@ switch (Env(ServerEnv.DebugEntities)?.Trim().ToLowerInvariant())
             "invalid {Name}={Value}: expected on/off (true/false, 1/0)",
             ServerEnv.DebugEntities, Env(ServerEnv.DebugEntities));
         return 2;
+}
+
+// Snapshot delivery trace (dev/test only, see ServerEnv.SnapshotTrace, #473). A path that
+// cannot be opened is fatal rather than a silent "off": a test run that asked for a trace and
+// got none would report a clean server for a reason that names nothing.
+SnapshotTrace? snapshotTrace = null;
+string? snapshotTracePath = Env(ServerEnv.SnapshotTrace)?.Trim();
+if (!string.IsNullOrEmpty(snapshotTracePath))
+{
+    try
+    {
+        snapshotTrace = SnapshotTrace.Open(snapshotTracePath);
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+    {
+        logger.LogCritical("invalid {Name}={Value}: cannot create the trace file: {Error}",
+            ServerEnv.SnapshotTrace, snapshotTracePath, ex.Message);
+        return 2;
+    }
+    logger.LogWarning(
+        "{Name} is set: writing one CSV line per sent snapshot per connection to {Path}. " +
+        "Dev/test diagnostics; leave it unset in production",
+        ServerEnv.SnapshotTrace, snapshotTracePath);
 }
 
 if (!GameServer.Server.ImportanceSettings.TryCreate(
@@ -1067,6 +1094,7 @@ var options = new ServerOptions
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,
     MaxSnapshotBytes = maxSnapshotBytes,
+    SnapshotTrace = snapshotTrace,
     Aoi = aoi,
     Importance = importance,
     ReplicationSchedule = replicationSchedule,
@@ -1220,6 +1248,7 @@ metricsEndpoint?.SetStatusProvider(() =>
     // scalar. `tickRate` is `--tick-rate` / GAMESERVER_TICK_RATE, which no deployment
     // sets, so reading it here reported the compiled-in default forever regardless of
     // what the server was running — #144.
+    var delivery = server.ReadDeliveryStats();
     var status = new ServerStatus
     {
         Ok = true,
@@ -1327,6 +1356,14 @@ metricsEndpoint?.SetStatusProvider(() =>
         SnapshotMaxGather = metrics.MaxGather,
         SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,
         SnapshotMaxShedAge = metrics.MaxShedAge,
+        SnapshotSendQueueDepthMax = delivery.SendQueueDepthMax,
+        SnapshotSendDroppedOldest = delivery.SendDroppedOldest,
+        KcpWaitSndMax = delivery.KcpWaitSndMax,
+        KcpRtoMaxMs = delivery.KcpRtoMaxMs,
+        KcpRemoteWindowMin = delivery.KcpRemoteWindowMin,
+        KcpSegmentsRetransmitted = server.TransportStats?.SegmentsRetransmitted ?? 0,
+        SnapshotTraceRowsWritten = snapshotTrace?.RowsWritten ?? -1,
+        SnapshotTraceRowsDropped = snapshotTrace?.RowsDropped ?? -1,
         TransfersRejected = metrics.TransfersRejected,
         CommandsReceived = metrics.CommandsReceived,
         CommandsAccepted = metrics.CommandsAccepted,
@@ -1365,6 +1402,15 @@ finally
     if (redisEventStream is not null) await redisEventStream.DisposeAsync();
     if (agonesSdk is IDisposable disposableAgones) disposableAgones.Dispose();
     if (postgresStore is not null) await postgresStore.DisposeAsync();
+    if (snapshotTrace is not null)
+    {
+        // After the server: its connections stop recording before the last flush.
+        snapshotTrace.Dispose();
+        logger.LogInformation(
+            "Snapshot trace closed: {Written} rows written, {Dropped} dropped{Failure}",
+            snapshotTrace.RowsWritten, snapshotTrace.RowsDropped,
+            snapshotTrace.Failure is { } f ? $", write failed: {f}" : "");
+    }
 }
 
 logger.LogInformation("GameServer .NET exited");

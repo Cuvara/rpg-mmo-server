@@ -148,6 +148,12 @@ game server knobs for a scratch stack, write `KEY=value` lines to a file and pas
 how the rpg-factory testlab configures its runs (`GAMESERVER_DEBUG_ENTITIES=on`,
 `GAMESERVER_ENEMY_SEED`, `GAMESERVER_MAP_ID`, `GATEWAY_CONN_RATE_PER_MIN=0`).
 
+`GAMESERVER_SNAPSHOT_TRACE=<path>` turns on the snapshot delivery trace (#473): one CSV line
+per sent snapshot per connection, written to that path **inside the game server container**.
+Pick a path on a writable mount, or copy it out after the run with
+`docker cp <container>:<path> .`. Column set and meaning: `gameserver-dotnet/docs/METRICS.md`,
+"Snapshot delivery trace". Dev and test only; the fleets do not forward it.
+
 > **Trap this protects you from.** Without `--scratch`, running `up` in a
 > directory while another checkout has the same compose project up does not
 > fail — compose **adopts and recreates** the running containers, with your

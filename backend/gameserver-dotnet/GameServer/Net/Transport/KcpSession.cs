@@ -88,6 +88,35 @@ public sealed class KcpSession : IDisposable
     /// <summary>Segments queued or in flight (KCP's <c>WaitSnd</c>).</summary>
     public int WaitSnd { get { lock (_lock) return _kcp.WaitSnd; } }
 
+    /// <summary>
+    /// Read the ARQ counters the snapshot delivery trace records (#473), in one locked step so
+    /// the fields describe one instant. Takes the session lock, so it is for the write task and
+    /// the status scrape, never for a loop over every session on a hot path.
+    /// </summary>
+    public KcpSessionCounters ReadCounters()
+    {
+        lock (_lock)
+        {
+            return new KcpSessionCounters(
+                _kcp.WaitSnd, (int)_kcp.SendWindow, (int)_kcp.RemoteWindow,
+                _kcp.RetransmittedSegments, (int)_kcp.RtoMs);
+        }
+    }
+
+    /// <summary>
+    /// Fold this session's new retransmissions into the listener-wide counter. Caller holds
+    /// <see cref="_lock"/>; called after every ARQ step that can transmit.
+    /// </summary>
+    private void PublishRetransmitsLocked()
+    {
+        long r = _kcp.RetransmittedSegments;
+        if (r == _reportedRetransmits) return;
+        if (_stats != null) Interlocked.Add(ref _stats._segmentsRetransmitted, r - _reportedRetransmits);
+        _reportedRetransmits = r;
+    }
+
+    private long _reportedRetransmits;
+
     /// <summary>Reassembled bytes waiting for the reader.</summary>
     public long PendingReceiveBytes => Interlocked.Read(ref _pendingRecvBytes);
 
@@ -147,6 +176,7 @@ public sealed class KcpSession : IDisposable
         lock (_lock)
         {
             if (_kcp.Input(data, ackNoDelay: true) < 0) return false;
+            PublishRetransmitsLocked();
             DrainLocked();
             ReleaseSendWaitersLocked();
         }
@@ -160,6 +190,7 @@ public sealed class KcpSession : IDisposable
         lock (_lock)
         {
             _kcp.Update();
+            PublishRetransmitsLocked();
             dead = _kcp.DeadLinkReached;
             if (!dead) ReleaseSendWaitersLocked();
         }
@@ -276,7 +307,11 @@ public sealed class KcpSession : IDisposable
                 data = data[n..];
             }
             waitSnd = _kcp.WaitSnd;
-            if (rc == 0 && waitSnd <= _limits.SendQueueHardLimit) _kcp.Flush();
+            if (rc == 0 && waitSnd <= _limits.SendQueueHardLimit)
+            {
+                _kcp.Flush();
+                PublishRetransmitsLocked();
+            }
         }
 
         if (rc < 0)
@@ -385,4 +420,19 @@ public sealed class KcpSession : IDisposable
 
         _cts.Dispose();
     }
+}
+
+/// <summary>
+/// One reading of a session's ARQ state (see <see cref="KcpSession.ReadCounters"/>).
+/// </summary>
+/// <param name="WaitSnd">Segments queued or in flight, not yet acknowledged.</param>
+/// <param name="SendWindow">Local send window, in segments.</param>
+/// <param name="RemoteWindow">Receive window the peer last advertised, in segments.</param>
+/// <param name="RetransmittedSegments">Cumulative segments sent more than once.</param>
+/// <param name="RtoMs">Current retransmission timeout, in milliseconds.</param>
+public readonly record struct KcpSessionCounters(
+    int WaitSnd, int SendWindow, int RemoteWindow, long RetransmittedSegments, int RtoMs)
+{
+    /// <summary>Every field -1: the transport is not KCP (an in-process test double).</summary>
+    public static KcpSessionCounters Unavailable => new(-1, -1, -1, -1, -1);
 }

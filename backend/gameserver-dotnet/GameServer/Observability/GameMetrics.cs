@@ -33,6 +33,7 @@ namespace GameServer.Observability;
 /// gameserver.kcp.writes.rejected      -> gameserver_kcp_writes_rejected_total
 /// gameserver.kcp.datagrams.received   -> gameserver_kcp_datagrams_received_total
 /// gameserver.kcp.receive.busy.seconds -> gameserver_kcp_receive_busy_seconds_total
+/// gameserver.kcp.segments.retransmitted -> gameserver_kcp_segments_retransmitted_total
 /// gameserver.gc.collections          -> gameserver_gc_collections_total{generation}
 /// gameserver.gc.allocated.bytes      -> gameserver_gc_allocated_bytes_total
 /// gameserver.gc.pause.seconds        -> gameserver_gc_pause_seconds_total
@@ -565,6 +566,12 @@ public sealed class GameMetrics : IDisposable
             description: "Time the single KCP receive thread spent handling datagrams. Its rate is that " +
                          "thread's utilisation; every session shares it, and near 1.0 the kernel drops " +
                          "datagrams (UDP RcvbufErrors) on every connection at once.");
+        _meter.CreateObservableCounter(
+            "gameserver.kcp.segments.retransmitted",
+            ObserveKcpSegmentsRetransmitted,
+            description: "KCP segments sent more than once (fast, early and timeout retransmissions), " +
+                         "all sessions, closed ones included. Rising while inbound drops stay flat means " +
+                         "loss or ACK delay on the path, not in the process (#473).");
 
         _meter.CreateObservableGauge(
             "gameserver.achieved_tick_hz",
@@ -891,6 +898,7 @@ public sealed class GameMetrics : IDisposable
 
     private Measurement<long> ObserveKcpWritesRejected() => new(KcpStats?.WritesRejected ?? 0, _mapTags);
     private Measurement<long> ObserveKcpDatagramsReceived() => new(KcpStats?.DatagramsReceived ?? 0, _mapTags);
+    private Measurement<long> ObserveKcpSegmentsRetransmitted() => new(KcpStats?.SegmentsRetransmitted ?? 0, _mapTags);
     private Measurement<double> ObserveKcpReceiveBusySeconds() =>
         new((KcpStats?.ReceiveBusyTicks ?? 0) / (double)System.Diagnostics.Stopwatch.Frequency, _mapTags);
 

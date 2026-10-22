@@ -35,6 +35,11 @@ public class ServerOptions
     /// </summary>
     public string TransportKey { get; set; } = "";
     /// <summary>
+    /// Snapshot delivery trace sink (<c>GAMESERVER_SNAPSHOT_TRACE</c>, #473), handed to every
+    /// joined connection. Null = off. Owned (and disposed) by the caller.
+    /// </summary>
+    public Observability.SnapshotTrace? SnapshotTrace { get; set; }
+    /// <summary>
     /// Flood-protection and backpressure limits for the KCP listener (session caps, rate
     /// limits, idle timeout, queue bounds). Defaults are the production values.
     /// </summary>
@@ -687,6 +692,44 @@ public sealed class GameServerHost : IAsyncDisposable
     /// and a source read precisely because this number was not published.
     /// </remarks>
     public int Connections => _connections.Count;
+
+    /// <summary>
+    /// Per-connection delivery state folded over every live connection, for <c>/status</c>
+    /// (#473): the deepest data lane, total DropOldest drops, and the worst KCP session. Takes
+    /// each session's lock once; scrape thread only.
+    /// </summary>
+    public DeliveryStats ReadDeliveryStats()
+    {
+        var stats = new DeliveryStats { KcpRemoteWindowMin = -1 };
+        _connections.ForEach(conn =>
+        {
+            int depth = conn.SendQueueDepth;
+            if (depth > stats.SendQueueDepthMax) stats.SendQueueDepthMax = depth;
+            stats.SendDroppedOldest += conn.SendDroppedOldest;
+            var k = conn.ReadKcpCounters();
+            if (k.WaitSnd < 0) return;
+            if (k.WaitSnd > stats.KcpWaitSndMax) stats.KcpWaitSndMax = k.WaitSnd;
+            if (k.RtoMs > stats.KcpRtoMaxMs) stats.KcpRtoMaxMs = k.RtoMs;
+            if (stats.KcpRemoteWindowMin < 0 || k.RemoteWindow < stats.KcpRemoteWindowMin)
+                stats.KcpRemoteWindowMin = k.RemoteWindow;
+        });
+        return stats;
+    }
+
+    /// <summary>See <see cref="ReadDeliveryStats"/>.</summary>
+    public sealed class DeliveryStats
+    {
+        /// <summary>Deepest drop-oldest data lane over live connections.</summary>
+        public int SendQueueDepthMax;
+        /// <summary>DropOldest drops summed over live connections (closed ones are gone).</summary>
+        public long SendDroppedOldest;
+        /// <summary>Largest KCP WaitSnd (segments queued or unacknowledged) over live sessions.</summary>
+        public int KcpWaitSndMax;
+        /// <summary>Largest current KCP retransmission timeout, in milliseconds.</summary>
+        public int KcpRtoMaxMs;
+        /// <summary>Smallest receive window a peer advertises; -1 with no KCP session.</summary>
+        public int KcpRemoteWindowMin;
+    }
 
     /// <summary>Reconnect holds currently pending. Diagnostics and tests.</summary>
     public int PendingHolds => _holds.Count;
@@ -1822,6 +1865,7 @@ public sealed class GameServerHost : IAsyncDisposable
                 SessionKey = Net.Security.SessionKey.Derive(_options.JoinTokenSecret, claims.Jti),
             };
             conn.DeltaState.MaxSnapshotBytes = _options.MaxSnapshotBytes;
+            conn.SnapshotTrace = _options.SnapshotTrace;
         conn.DeltaState.ImportanceWeights = _options.Importance.Weights;
         // The distance factor normalises by this, so a connection scored against the wrong
         // radius would weight distance wrongly on every candidate -- invisibly, because the
