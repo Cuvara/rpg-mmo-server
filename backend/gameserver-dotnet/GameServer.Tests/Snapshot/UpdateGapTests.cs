@@ -176,4 +176,54 @@ public class UpdateGapTests
             $"schedule interval {interval}");
         Assert.True(state.OwedRecords <= 1, $"owed records leaked: {state.OwedRecords}");
     }
+
+    /// <summary>
+    /// #471: a connection that joins late, while the budget sheds its join keyframe. The
+    /// entities left off that keyframe have never been sent to this client, and the old
+    /// encoder started their wait at world tick 0 (no previous encode, no last send), so the
+    /// first delta that introduced one recorded a "gap" equal to the server's uptime: 17016 ms
+    /// beside a one-tick shed age in the live run.
+    /// </summary>
+    /// <remarks>
+    /// The observed gap here counts the join encode as the start of every visible entity's
+    /// wait, because that is when this client began waiting for it. The gauge must equal that,
+    /// and must be nowhere near the join tick itself.
+    /// </remarks>
+    [Theory]
+    [InlineData(1UL)]
+    [InlineData(4UL)]   // 60/15, the shipped rate
+    public void LateJoinDuringShedding_GaugeCountsFromTheJoinNotTickZero(ulong stride)
+    {
+        const ulong JoinTick = 60_000; // ~1000 s of uptime at 60 Hz
+        SnapshotDeltaState state = State(budget: 512, ReplicationSchedule.Off);
+        List<EntityState> world = Crowd(60);
+
+        var handles = new Dictionary<uint, string>();
+        var lastSeen = new Dictionary<string, ulong>();
+        foreach (EntityState e in world) lastSeen[e.Id] = JoinTick;
+        int observed = 0;
+        for (ulong t = JoinTick; t <= JoinTick + 240 * stride; t += stride)
+        {
+            MoveAll(world);
+            SnapshotMessage msg = state.Encode(t, t, world, LiveKeyframes, intern: true, observer: new Vec2(0f, 0f));
+            if (msg.Full) handles.Clear();
+            foreach (EntitySnapshot e in msg.Entities)
+            {
+                string? id = e.Id;
+                if (!string.IsNullOrEmpty(id)) { if (e.Handle != 0) handles[e.Handle] = id; }
+                else handles.TryGetValue(e.Handle, out id);
+                Assert.False(string.IsNullOrEmpty(id), $"tick {t}: handle {e.Handle} has no binding");
+                if ((int)(t - lastSeen[id!]) > observed) observed = (int)(t - lastSeen[id!]);
+                lastSeen[id!] = t;
+            }
+        }
+
+        _out.WriteLine($"stride={stride} observed={observed} maxUpdateGap={state.MaxUpdateGap} " +
+                       $"maxShedAge={state.MaxShedAge} shed={state.EntitiesShed}");
+
+        Assert.True(state.EntitiesShed > 0, "the budget never bit, so the join keyframe was not truncated");
+        Assert.True(state.MaxUpdateGap < (int)JoinTick / 2,
+            $"the gauge ({state.MaxUpdateGap} ticks) counted from tick 0, not from the join at {JoinTick}");
+        Assert.Equal(observed, state.MaxUpdateGap);
+    }
 }
