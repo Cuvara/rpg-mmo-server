@@ -105,6 +105,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   arithmetic with separation 0.
 
 ### Fixed
+- **A graceful leave now releases the player at once (test lab S08G, T35).** A client `disconnect`
+  frame used to take the drop path, which holds the entity for the whole reconnect window
+  (`HoldTtl`, 30 s on a map). The departed player stayed in every nearby client's world, and
+  the Netcode client's contract ("saves and releases the entity now rather than at the end of
+  its 30 s hold") was not met. A `disconnect` frame now marks the connection `Left`; teardown
+  runs the same path with a zero window: out of reach at once, saved, then removed, and a
+  reconnect that lands during the save keeps its entity. A **drop** (dead link, timeout, kill)
+  keeps the hold, unchanged. Releasing at once also means a player can leave mid-combat without
+  staying in the world; restricting that is a gameplay decision this does not make. Tests:
+  `GracefulLeaveTests`. Note: in both S08G runs the client's frame never reached the server; the
+  session ended by KCP dead link. The Netcode `Leave()` flush is a separate client defect.
 - **Enemy separation's work bound now holds under hash collisions (review R1-1).** The
   12-neighbour cap counted only entries in the queried cell, so hash-chain entries from other
   cells were stepped over uncounted. Enemies placed in many distinct cells that hash to one

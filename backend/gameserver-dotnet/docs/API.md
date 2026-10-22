@@ -79,7 +79,7 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error?, tick_rate?, protocol_version?, character_id? }` — see below; `character_id` (field 6, protocol 3) echoes the join token's `cid` claim (ADR-31), empty = the account's default character |
 | 7 | `input` | client → gameserver | `{ tick, move_x, move_y, attack_target_id?, ability_id?, ability_target_id?, aim_x?, aim_y?, aim_z?, render_tick?, render_alpha?, jump?, spawn_seq? }` |
 | 8 | `snapshot` | gameserver → client | see below |
-| 9 | `disconnect` | either | `{}` |
+| 9 | `disconnect` | either | `{}`. Client → game server: a **graceful leave**. The server saves the player and removes the entity at once, with no reconnect hold. A connection that drops without it gets the hold (see "A held entity is indistinguishable from a live one standing still") |
 | 10 | `resync` | client → gameserver | `{}` (ignored) — request a full keyframe |
 | 11 | `ping` | either | `{ timestamp }` — heartbeat, see below |
 | 12 | `pong` | either | `{ timestamp, server_time }` — reply to `ping` |
@@ -1151,8 +1151,15 @@ a later snapshot with a fresh binding.
 #### A held entity is indistinguishable from a live one standing still
 
 The counterpart trap to the one above, and the more likely of the two to reach
-players. When a client disconnects, its entity is **not** removed — it is held
-for the reconnect grace period (30 s on a map server). During that window the
+players. When a client's connection **drops** (dead link, idle or ping timeout, a
+killed process), its entity is **not** removed. It is held for the reconnect grace
+period (30 s on a map server, 60 s in a dungeon; `ServerOptions.HoldTtl`), out of
+enemies' reach. A **graceful leave** is different. A client that sends `disconnect`
+before closing is saved and removed at once: there is nothing to reconnect to, so
+there is no hold. The hold below therefore applies only to drops. A client that
+wants its player gone immediately must get `disconnect` onto the wire before closing
+the transport. A frame queued and then dropped by an immediate close is a drop,
+which the server finds by KCP dead link about 3.5 s later. During that window the
 entity is still in every nearby client's snapshots, at its last position, with
 full HP. **There is no "held" flag on the wire**, and there is deliberately no
 `disconnected` field on `EntitySnapshot`.
