@@ -173,6 +173,46 @@ public enum InputRejectionReason
     /// here is a bug report about this file, never a statement about a player.
     /// </summary>
     AbilityOther = 15,
+
+    /// <summary>
+    /// The attack target resolved but is not something an attack can land on: a projectile,
+    /// a dropped item, or a player held for reconnect (<c>InputHandler.NotTargetableRejection</c>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Latency-explicable</b>, like <see cref="AttackTargetUnresolved"/>: a player whose
+    /// connection dropped became untargetable between the attacker choosing them and the
+    /// server processing the input. Counted under <see cref="AttackOther"/> until this value
+    /// existed, which is exactly the "classifier out of date" reading that bucket names.
+    /// </remarks>
+    AttackTargetUntargetable = 16,
+
+    /// <summary>
+    /// The attacker was under crowd control that forbids acting (a stun;
+    /// <c>InputHandler.CannotActRejection</c>). <b>Benign:</b> a stunned client keeps
+    /// sending until the snapshot carrying the status arrives, as a dead one does.
+    /// Previously folded into <see cref="AttackOther"/>.
+    /// </summary>
+    AttackCannotAct = 17,
+
+    /// <summary>
+    /// <c>AbilityLogic.ValidateCast</c>: the caster was under crowd control that forbids
+    /// casting (stun or silence; <c>AbilityLogic.CannotCastRejection</c>). <b>Benign</b> for
+    /// the reason <see cref="AttackCannotAct"/> is. Previously folded into
+    /// <see cref="AbilityOther"/>.
+    /// </summary>
+    AbilityCannotCast = 18,
+
+    /// <summary>
+    /// An area or projectile ability arrived without a usable aim point
+    /// (<c>AbilityLogic.MissingAimRejection</c>, from <c>ValidateCast</c> or from the
+    /// projectile spawn check). Previously folded into <see cref="AbilityOther"/>.
+    /// </summary>
+    /// <remarks>
+    /// Weighted benign, not forged: whether the shipped client can produce it (an aim point
+    /// on the caster's own position, say) has not been established, and a weight that
+    /// manufactures suspicion needs that evidence first.
+    /// </remarks>
+    AbilityMissingAim = 19,
 }
 
 /// <summary>
@@ -242,6 +282,10 @@ public static class InputRejection
         InputRejectionReason.AbilityTargetDead,
         InputRejectionReason.AbilityCasterDead,
         InputRejectionReason.AbilityOther,
+        InputRejectionReason.AttackTargetUntargetable,
+        InputRejectionReason.AttackCannotAct,
+        InputRejectionReason.AbilityCannotCast,
+        InputRejectionReason.AbilityMissingAim,
     };
 
     /// <summary>
@@ -267,6 +311,10 @@ public static class InputRejection
         InputRejectionReason.AbilityTargetDead => "ability_target_dead",
         InputRejectionReason.AbilityCasterDead => "ability_caster_dead",
         InputRejectionReason.AbilityOther => "ability_other",
+        InputRejectionReason.AttackTargetUntargetable => "attack_target_untargetable",
+        InputRejectionReason.AttackCannotAct => "attack_cannot_act",
+        InputRejectionReason.AbilityCannotCast => "ability_cannot_cast",
+        InputRejectionReason.AbilityMissingAim => "ability_missing_aim",
         _ => "unknown",
     };
 
@@ -306,6 +354,11 @@ public static class InputRejection
 
         // Unclassified: says this classifier is stale, not that a player misbehaved.
         InputRejectionReason.AbilityOther => RejectionWeight.Benign,
+
+        InputRejectionReason.AttackTargetUntargetable => RejectionWeight.LatencyExplicable,
+        InputRejectionReason.AttackCannotAct => RejectionWeight.Benign,
+        InputRejectionReason.AbilityCannotCast => RejectionWeight.Benign,
+        InputRejectionReason.AbilityMissingAim => RejectionWeight.Benign,
 
         InputRejectionReason.InvalidDirection => RejectionWeight.Forged,
 

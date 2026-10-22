@@ -82,7 +82,9 @@ internal sealed class SimFixture : IDisposable
 
     private readonly List<(string User, InputData Input, InputExtras Extras)> _queued = new();
 
-    public SimFixture(MapGeometry? geometry = null, int hz = 60, ulong lootSeed = 42, bool withLoot = true)
+    public SimFixture(
+        MapGeometry? geometry = null, int hz = 60, ulong lootSeed = 42, bool withLoot = true,
+        Action<string, InputRejectionReason>? onRejected = null)
     {
         Content = ContentLoader.LoadFromBytes(Encoding.UTF8.GetBytes(ContentJson), "test-content.json");
         World = new EcsWorld();
@@ -95,7 +97,7 @@ internal sealed class SimFixture : IDisposable
             lootSeed: lootSeed);
         Handler = new InputHandler(
             World, NullLogger.Instance, (v, k) => Deaths.Add((v, k)), hz, bounds,
-            onRejected: null, onAttackAccepted: null, events: Events, content: Content.Database);
+            onRejected: onRejected, onAttackAccepted: null, events: Events, content: Content.Database);
     }
 
     public void AddPlayer(string id, float x, float y, int hp = 100, int attack = 10, int defense = 5)
