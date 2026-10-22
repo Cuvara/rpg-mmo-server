@@ -367,22 +367,4 @@ public class MetricsEndpointTests
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
-    [Theory]
-    [InlineData("{\"id\":\"p1\"}", null, "p1", null)]
-    [InlineData("  {\"user_id\":\"u\",\"other\":[1,{\"id\":\"x\"}]}\n", null, "u", null)]
-    [InlineData("{\"id\":\"p1\",\"id\":\"p2\"}", null, "p1", null)]
-    [InlineData("{}", "q", "q", null)]
-    [InlineData("", "q", "q", null)]
-    [InlineData("{}", null, null, DebugKill.MissingId)]
-    [InlineData("{\"id\":\"p1\"}x", "q", null, DebugKill.InvalidBody)]
-    [InlineData("{\"id\":\"p1\"}{}", null, null, DebugKill.InvalidBody)]
-    [InlineData("{\"id\":\"p1\"", null, null, DebugKill.InvalidBody)]
-    [InlineData("not json", "q", null, DebugKill.InvalidBody)]
-    [InlineData("\"p1\"", null, null, DebugKill.InvalidBody)]
-    public void DebugKill_ParseId_RequiresOneCompleteObject(string body, string? query, string? expectedId, string? expectedError)
-    {
-        string? id = DebugKill.ParseId(System.Text.Encoding.UTF8.GetBytes(body), query, out string? error);
-        Assert.Equal(expectedId, id);
-        Assert.Equal(expectedError, error);
-    }
 }

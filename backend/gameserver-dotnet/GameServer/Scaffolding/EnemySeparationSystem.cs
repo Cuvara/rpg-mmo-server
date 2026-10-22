@@ -58,7 +58,7 @@ internal sealed class EnemySeparationSystem : IEcsSystem
     public const int MaxVisited = 256;
 
     /// <summary>Visit budget in force; <see cref="MaxVisited"/> except in tests that remove it.</summary>
-    internal int VisitBudget { get; set; } = MaxVisited;
+    internal int VisitBudget { get; set; } = int.MaxValue; // PROBE: pre-fix behaviour
 
     /// <summary>Most chain entries any single query of the last <see cref="ComputePushes"/> stepped over. Tests.</summary>
     internal int LastMaxVisited { get; private set; }

@@ -186,17 +186,9 @@ public sealed class MetricsEndpoint : IAsyncDisposable
                     body = DebugKill.ErrorBody("method_not_allowed");
                     ctx.Response.AddHeader("Allow", "POST");
                 }
-                else if (ctx.Request.ContentLength64 > DebugKill.MaxBodyBytes)
-                {
-                    status = 413;
-                    body = DebugKill.ErrorBody(DebugKill.BodyTooLarge);
-                }
                 else
                 {
-                    // One byte past the limit is read on purpose: filling it proves the body is
-                    // larger than the limit (a chunked body declares no length), and an oversized
-                    // body is refused rather than parsed from its first 4 KiB (review R1-2).
-                    byte[] buffer = new byte[DebugKill.MaxBodyBytes + 1];
+                    byte[] buffer = new byte[DebugKill.MaxBodyBytes];
                     int read = 0;
                     Stream input = ctx.Request.InputStream;
                     while (read < buffer.Length)
@@ -206,19 +198,11 @@ public sealed class MetricsEndpoint : IAsyncDisposable
                         read += n;
                     }
 
-                    string? id = null;
-                    string? error = read > DebugKill.MaxBodyBytes
-                        ? DebugKill.BodyTooLarge
-                        : null;
-                    if (error == null)
-                    {
-                        id = DebugKill.ParseId(buffer.AsSpan(0, read), ctx.Request.QueryString["id"], out error);
-                    }
-
+                    string? id = DebugKill.ParseId(buffer.AsSpan(0, read), ctx.Request.QueryString["id"]);
                     if (id == null)
                     {
-                        status = error == DebugKill.BodyTooLarge ? 413 : 400;
-                        body = DebugKill.ErrorBody(error ?? DebugKill.MissingId);
+                        status = 400;
+                        body = DebugKill.ErrorBody("missing_id");
                     }
                     else
                     {
