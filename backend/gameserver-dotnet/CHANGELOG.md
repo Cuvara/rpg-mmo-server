@@ -39,6 +39,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   same placements, different seed -> different).
 
 ### Fixed
+- `SnapshotCadenceTests` runs in `WallClockCollection`. Its rate and tick assertions are
+  wall-clock figures. Beside the rest of the suite it failed on an unchanged server (base
+  11f0140: 11.38/s and 14.83/s in two full-suite runs, against 15 +/- 0.17), while it reads 15.0/s
+  with every gap 4 in isolation. This is the #426 remedy; no assertion or tolerance changed.
 - **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse
   (#449).** `KcpCrypto` ran CFB-128 by hand with one `EncryptEcb` call per 16-byte block, about
   90 one-shot cipher setups per MTU datagram. Measured at 95 players with AI on: ~340 us to seal
