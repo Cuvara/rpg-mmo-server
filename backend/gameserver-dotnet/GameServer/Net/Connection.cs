@@ -120,6 +120,17 @@ public sealed class Connection : IDisposable
     public bool Kicked => _kicked;
     private volatile bool _kicked;
 
+    /// <summary>
+    /// True once the client said it is leaving (a <c>disconnect</c> frame), as opposed to
+    /// the connection dropping. A graceful leave is saved and released at once; only a drop
+    /// gets the reconnect hold. Set before the close, so the teardown it triggers sees it.
+    /// </summary>
+    public bool Left => _left;
+    private volatile bool _left;
+
+    /// <summary>Mark this connection as a graceful leave. See <see cref="Left"/>.</summary>
+    public void MarkLeft() => _left = true;
+
     /// <summary>Mark this connection as torn down by a duplicate-login kick. One-way.</summary>
     public void MarkKicked() => _kicked = true;
 

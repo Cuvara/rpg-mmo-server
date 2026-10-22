@@ -2118,7 +2118,7 @@ public sealed class GameServerHost : IAsyncDisposable
 
             if (entityAttached && !(conn?.Transferred ?? false) && !(conn?.Kicked ?? false))
             {
-                OnPlayerDisconnected(userId, countedOnline, conn);
+                OnPlayerDisconnected(userId, countedOnline, conn, graceful: conn?.Left ?? false);
             }
             conn?.Dispose();
 
@@ -2225,6 +2225,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 break;
 
             case MsgType.Disconnect:
+                // A graceful leave, not a drop: the player chose to go and the client will not
+                // reconnect, so the teardown saves and releases the entity now instead of
+                // holding it for the reconnect window. Marked BEFORE Close(), for the reason
+                // MarkTransferred is: closing ends the read loop and the handler's finally
+                // reads the flag.
+                conn.MarkLeft();
                 conn.Close();
                 break;
 
@@ -2665,7 +2671,7 @@ public sealed class GameServerHost : IAsyncDisposable
     /// already replaced this connection, removing by id would close the replacement —
     /// the player got kicked milliseconds after a successful rejoin (#229).
     /// </param>
-    private void OnPlayerDisconnected(string userId, bool countedOnline, Connection? conn)
+    private void OnPlayerDisconnected(string userId, bool countedOnline, Connection? conn, bool graceful = false)
     {
         // Whether THIS connection was still the registered one. When it was not, a
         // newer connection owns the user now: this teardown balances its own join
@@ -2694,7 +2700,15 @@ public sealed class GameServerHost : IAsyncDisposable
         // already sets to 60s for a dungeon and 30s for a map. It used to be hardcoded to
         // 60s here as well, so a dungeon host could not be given a shorter window — which
         // made the empty-instance shutdown below untestable without a real 60s wait.
-        var holdTtl = _options.HoldTtl;
+        //
+        // A graceful leave (the client sent `disconnect`) gets no window at all. It goes
+        // through this same path with a zero delay rather than a separate removal, so it
+        // keeps everything the hold path guarantees: out of reach at once (Linkdead), saved
+        // before removal, and a reconnect that lands during the save keeps its entity.
+        // Releasing at once also means a player can leave mid-combat without staying in the
+        // world. Whether that should be restricted (a combat-logout rule) is a gameplay
+        // decision, and this does not make one.
+        var holdTtl = graceful ? TimeSpan.Zero : _options.HoldTtl;
 
         var holdCts = new CancellationTokenSource();
         // Replace rather than overwrite: a superseded hold's CTS would otherwise never
@@ -2717,8 +2731,15 @@ public sealed class GameServerHost : IAsyncDisposable
             if (handle.IsValid) writer.PlayerTagOf(in handle).Linkdead = true;
         });
 
-        _logger.LogInformation("Player {UserId} disconnected, holding entity for {Ttl}",
-            userId, holdTtl);
+        if (graceful)
+        {
+            _logger.LogInformation("Player {UserId} left; saving and releasing the entity", userId);
+        }
+        else
+        {
+            _logger.LogInformation("Player {UserId} disconnected, holding entity for {Ttl}",
+                userId, holdTtl);
+        }
 
         // Fire-and-forget: remove entity after hold TTL unless reconnected
         _ = Task.Run(async () =>
