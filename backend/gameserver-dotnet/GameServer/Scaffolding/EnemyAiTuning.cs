@@ -145,6 +145,26 @@ internal static class EnemyAiTuning
     public const int AttackersPerTarget = 3;
 
     /// <summary>
+    /// Spacing kept between living enemies (<c>GAMESERVER_ENEMY_SEPARATION</c>), world units.
+    /// PLACEHOLDER pending enemy design, chosen from the scale already in force: enemies stand
+    /// off at <see cref="ContactRange"/> (1.0) from their target, so 0.8 lets about seven of them
+    /// ring a player (2 pi x 1.0 / 0.8) before the rest queue behind, instead of every enemy
+    /// occupying the same point. It is below the contact range so a ring still reaches its target.
+    /// </summary>
+    public const float SeparationRadius = 0.8f;
+
+    /// <summary>
+    /// Hard per-map enemy population ceiling (<c>GAMESERVER_ENEMY_BUDGET</c>). PLACEHOLDER pending
+    /// encounter design. Chosen from the testlab load sweep (rpg-mmo-server#468): every enemy
+    /// chases into the players' area of interest and is replicated to all of them, and the
+    /// worst per-entity replication gap stayed at two world ticks with 165 enemies and three
+    /// players, but grew to 266 ms at 615 enemies and to 11 s at 2,415. 300 keeps the
+    /// population inside the envelope the sweep showed fresh, and still grows with players up to
+    /// six of them at the per-player rate (30 + 45 x 6 = 300).
+    /// </summary>
+    public const int EnemyBudget = 300;
+
+    /// <summary>
     /// Whether a player whose HP reaches 0 is returned to the map at the spawn point with
     /// full HP, on the next world tick.
     ///
@@ -190,6 +210,13 @@ internal enum EnemyAiPhase
     Move = 1,
 
     /// <summary>
+    /// Keep living enemies at least <see cref="EnemyAiTuning.SeparationRadius"/> apart, after
+    /// <see cref="Move"/> has put them where they want to be and before <see cref="Attack"/>
+    /// measures range from where they are (rpg-mmo-server#469).
+    /// </summary>
+    Separate = 2,
+
+    /// <summary>
     /// Decide which enemies swing, and at whom, after <see cref="Move"/> has put them
     /// where they are this tick.
     ///
@@ -207,7 +234,7 @@ internal enum EnemyAiPhase
     /// and the death all happen on the next critical tick inside <c>InputHandler</c>,
     /// down the one combat path this server has.</para>
     /// </summary>
-    Attack = 2,
+    Attack = 3,
 
     /// <summary>
     /// Return dead players to the map. After <see cref="Attack"/> so a player killed by
@@ -215,7 +242,7 @@ internal enum EnemyAiPhase
     /// — the death has to be observable, and a revival in the same pass that dealt the
     /// killing blow would erase it before any snapshot sampled it.
     /// </summary>
-    Respawn = 3,
+    Respawn = 4,
 
     /// <summary>
     /// Reap last, and never before the thing that kills. It removes enemies that are
@@ -223,5 +250,5 @@ internal enum EnemyAiPhase
     /// fact produced by <see cref="Move"/> earlier in this same tick. Reaping first would let an enemy be
     /// visible inside the despawn zone for a tick, and would defer every kill by one.
     /// </summary>
-    Reap = 4,
+    Reap = 5,
 }

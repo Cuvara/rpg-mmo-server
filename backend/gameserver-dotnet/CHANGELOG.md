@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Enemy separation and queueing (#469).** `GAMESERVER_ENEMY_SEPARATION` (default 0.8 world
+  units, `0` = off, which restores the old movement exactly) keeps living enemies apart. A
+  new World-group system `enemy.separate` (`EnemySeparationSystem`, order between move and
+  attack) pushes overlapping pairs apart, half each, with each enemy's push capped at one
+  movement step. Neighbours come from a spatial hash with the spacing as cell size, and at
+  most 12 neighbours are examined per enemy, so the cost is linear and bounded at any density
+  (a 20 000-enemy coincident pile is one step under a second). It uses reused scratch arrays,
+  allocates nothing per tick, and gives the same result for the same input. `enemy.move` now
+  queues: a chaser whose step would take it inside the spacing of an enemy ahead and nearer
+  the target holds, or slides sideways onto a free spot near the contact ring, instead of
+  pushing in and being pushed back out every tick (the jitter #469 describes). Before this
+  change every chaser converged on the same point. Tests: `EnemySeparationTests` (a pile
+  spreads; a chasing crowd keeps its spacing where the control collapses; a settled crowd is
+  still; same seed, same crowd; 20 000 enemies bounded; 0 touches nothing) and
+  `EnemyBattleRoyaleTests.WithSeparation_ChasersSettleInAStableCrowd`. The value is a
+  placeholder pending enemy design. Product decision recorded: overflow enemies queue behind
+  the ring and do not circle round to find a gap.
+- **`GAMESERVER_ENEMY_BUDGET` - hard per-map enemy ceiling (#468).** The default is 300. The
+  cap in force is `min(MAX + MAX_PER_PLAYER x players, BUDGET)`, so the per-player formula
+  can no longer grow the population, and with it every player's replication load, without
+  bound. It is shown on `/status` as `budget=N` in `enemy_ai`, and `enemy_ai_max_now` is the
+  clamped value. The value is a placeholder chosen inside the replication envelope the
+  testlab sweep showed fresh. It is not a capacity claim.
+- **`GAMESERVER_SPAWN_SCATTER` - spread fresh player placements (#469).** The default is 3
+  world units; `0` keeps the spawn point itself. Before this change every new or respawned
+  player started on the same point. Placements follow a 16-slot spiral in arrival order, are
+  clamped to the map, and fall back to the point when a candidate lands in a static box.
+  Restored positions are never moved. Tests: `SpawnScatterTests`.
 - **`GAMESERVER_DEBUG_ENTITIES=on` serves `/debug/entities`** on the metrics port: every
   entity's id, type, authoritative position, HP, max HP, speed and dead flag, with the
   server tick and a monotonic timestamp (schema `rpg.debug-entities.v1`). It is read under the
@@ -22,6 +50,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and in `/status` `enemy_ai` as `seed=N`. Passed through compose and all three fleets (optional
   `gameserver-config` key `enemy-seed`). Tests: `EnemySeedTests` (parse, refusal, same seed ->
   same placements, different seed -> different).
+
+### Changed
+- `EnemyAiPhase` is renumbered to make room for `Separate` (Spawn 0, Move 1, Separate 2,
+  Attack 3, Respawn 4, Reap 5). `EnemyBattleRoyaleTests.EnemiesCommitToTheNearestPlayer` now
+  asserts that each enemy is in the crowd around its player (in contact, or queued behind
+  one that is) instead of within a fixed 2 units: ten enemies per player overflow the contact
+  ring at the separation spacing. `ChasersStopAtContactRange_AndDoNotOscillate` pins the old
+  arithmetic with separation 0.
 
 ### Fixed
 - **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse

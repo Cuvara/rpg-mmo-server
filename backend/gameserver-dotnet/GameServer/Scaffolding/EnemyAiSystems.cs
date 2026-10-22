@@ -233,10 +233,17 @@ internal sealed class EnemyMoveSystem : IEcsSystem
     [SimulationScratch]
     private PlayerTargetBuffer _players = new();
 
-    public EnemyMoveSystem(float dt, EnemyAiSettings settings)
+    /// <summary>
+    /// The separation step, for its queueing query (#469). Null when separation is off, which
+    /// keeps the pre-change arithmetic exactly.
+    /// </summary>
+    private readonly EnemySeparationSystem? _separation;
+
+    public EnemyMoveSystem(float dt, EnemyAiSettings settings, EnemySeparationSystem? separation = null)
     {
         _dt = dt;
         _settings = settings;
+        _separation = settings.SeparationRadius > 0f ? separation : null;
     }
 
     public string Name => "enemy.move";
@@ -262,7 +269,7 @@ internal sealed class EnemyMoveSystem : IEcsSystem
         // during the walk: nothing in this system writes a player's position.
         int livePlayers = _settings.Chase ? _players.Refresh(writer) : 0;
 
-        var body = new Body(_dt, _settings, livePlayers > 0 ? _players : null);
+        var body = new Body(_dt, _settings, livePlayers > 0 ? _players : null, _separation);
         writer.VisitChunks<EnemyAi, Body>(ref body);
     }
 
@@ -282,12 +289,14 @@ internal sealed class EnemyMoveSystem : IEcsSystem
         /// allocation would look like here.
         /// </summary>
         private readonly PlayerTargetBuffer? _players;
+        private readonly EnemySeparationSystem? _separation;
 
-        public Body(float dt, EnemyAiSettings settings, PlayerTargetBuffer? players)
+        public Body(float dt, EnemyAiSettings settings, PlayerTargetBuffer? players, EnemySeparationSystem? separation)
         {
             _dt = dt;
             _settings = settings;
             _players = players;
+            _separation = separation;
         }
 
         public void Visit(in SimChunk chunk)
@@ -336,6 +345,45 @@ internal sealed class EnemyMoveSystem : IEcsSystem
                 // off from, and applying a stand-off there would leave a ring of enemies
                 // circling the centre forever instead of reaching the despawn zone.
                 if (hasTarget && distSq <= _settings.ContactRangeSq) continue;
+
+                // Queue behind an enemy that is already between this one and the target
+                // (#469). Only when chasing: the origin fallback has no crowd to queue in.
+                float step = speed * _dt;
+                if (hasTarget && _separation != null)
+                {
+                    if (_separation.IsBlockedAhead(positions[i].Value.X, positions[i].Value.Y, target.X, target.Y, step, out float side))
+                    {
+                        // Near the target, slide round the one in front - away from it, along the
+                        // ring - but only onto a free spot; otherwise hold. Far out, a queue holds
+                        // still: sliding there would just shuffle an overflow crowd every tick.
+                        float d0 = MathF.Sqrt(distSq);
+                        if (d0 - _settings.ContactRange <= 2f * _settings.SeparationRadius)
+                        {
+                            float sgn = side > 0f ? -1f : 1f;
+                            float tnx = -dy / d0 * sgn, tny = dx / d0 * sgn;
+                            float nx = positions[i].Value.X + (tnx * step), ny = positions[i].Value.Y + (tny * step);
+                            if (_separation.IsFree(nx, ny, positions[i].Value.X, positions[i].Value.Y))
+                            {
+                                positions[i].Value = new Vec2(nx, ny);
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    // With separation on, the last step stops AT the contact range instead of
+                    // overshooting inside it: an enemy inside the ring is pushed back out by its
+                    // neighbours and walks in again, which is the same oscillation. Separation off
+                    // keeps the pinned arithmetic below untouched.
+                    float dist = MathF.Sqrt(distSq);
+                    float room = dist - _settings.ContactRange;
+                    if (room < step)
+                    {
+                        float k = room / dist;
+                        positions[i].Value = new Vec2(positions[i].Value.X + (dx * k), positions[i].Value.Y + (dy * k));
+                        continue;
+                    }
+                }
 
                 float invDist = 1.0f / MathF.Sqrt(distSq);
                 positions[i].Value = new Vec2(

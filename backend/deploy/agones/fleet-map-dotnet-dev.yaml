@@ -759,6 +759,24 @@ spec:
                       name: gameserver-config
                       key: enemy-seed
                       optional: true
+                - name: GAMESERVER_ENEMY_SEPARATION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-separation
+                      optional: true
+                - name: GAMESERVER_ENEMY_BUDGET
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-budget
+                      optional: true
+                - name: GAMESERVER_SPAWN_SCATTER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: spawn-scatter
+                      optional: true
 
                 # ------------------------------------------------------------
                 # BOTS (Scaffolding)

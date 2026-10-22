@@ -5,6 +5,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Passthrough for `GAMESERVER_ENEMY_SEPARATION`, `GAMESERVER_ENEMY_BUDGET` and
+  `GAMESERVER_SPAWN_SCATTER` (rpg-mmo-server#468, #469) in `docker-compose.yml`,
+  `docker-compose.override.yml`, the Agones fleet and both k8s fleets (optional
+  `gameserver-config` keys `enemy-separation`, `enemy-budget`, `spawn-scatter`). Unset keeps
+  the server defaults.
+
 ### Fixed
 - **`stack.sh --scratch` collided with the default stack.** Compose loads
   `docker-compose.override.yml` whenever no `-f` is given, and that file publishes the default

@@ -34,10 +34,12 @@ public class EnemyBattleRoyaleTests
     private static EnemyAiSettings Quiet(
         int max = 1, int perPlayer = 0, int wave = 1, int wavePerPlayer = 0,
         bool chase = true, float spawnDistance = 13f, float minSpawn = 8f,
-        float waveInterval = 1.5f)
+        float waveInterval = 1.5f, float? separation = null, int? seed = null)
     {
         var lookup = new Dictionary<string, string?>
         {
+            [EnemyAiSettings.EnvSeparation] = separation?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            [EnemyAiSettings.EnvSeed] = seed?.ToString(System.Globalization.CultureInfo.InvariantCulture),
             [EnemyAiSettings.EnvMaxEnemies] = max.ToString(),
             [EnemyAiSettings.EnvMaxEnemiesPerPlayer] = perPlayer.ToString(),
             [EnemyAiSettings.EnvWaveSize] = wave.ToString(),
@@ -75,6 +77,33 @@ public class EnemyBattleRoyaleTests
 
     private static List<EntityState> Enemies(EcsWorld world) =>
         world.GetEntitiesInRange(new Vec2(0, 0), 10_000f).FindAll(e => e.Type == "mob");
+
+    /// <summary>
+    /// The enemies of <paramref name="all"/> that belong to the crowd around
+    /// <paramref name="player"/>: in contact (within the contact range plus one step, since a
+    /// chaser closes in whole steps), or queued directly behind a crowd member nearer the
+    /// player (within the separation spacing plus one step of it). With separation on (#469)
+    /// a chaser that finds the ring in front of it occupied holds there instead of pushing
+    /// through, so "in contact" alone is not the end state; this is. Built nearest first, so a
+    /// queue only counts when it is anchored to the ring - two enemies stuck together far away
+    /// are not a crowd.
+    /// </summary>
+    private static HashSet<string> CrowdOf(List<EntityState> all, Vec2 player, EnemyAiSettings settings)
+    {
+        float step = settings.Speed / TickRate;
+        float contact = settings.ContactRange + step + 0.001f;
+        float link = settings.SeparationRadius + step + 0.001f;
+        var crowd = new List<EntityState>();
+        foreach (EntityState e in all.OrderBy(e => Dist(e.Position, player)))
+        {
+            if (Dist(e.Position, player) <= contact || crowd.Any(c => Dist(c.Position, e.Position) <= link))
+            {
+                crowd.Add(e);
+            }
+        }
+
+        return crowd.Select(e => e.Id).ToHashSet();
+    }
 
     private static float Dist(in Vec2 a, in Vec2 b)
     {
@@ -180,12 +209,18 @@ public class EnemyBattleRoyaleTests
 
         List<EntityState> settled = Enemies(world);
         Assert.Equal(20, settled.Count);
+        HashSet<string> leftCrowd = CrowdOf(settled, left, settings);
+        HashSet<string> rightCrowd = CrowdOf(settled, right, settings);
         foreach (EntityState e in settled)
         {
             Vec2 mine = nearPlayer[e.Id];
             Vec2 theirs = mine.X < 0 ? right : left;
 
-            Assert.True(Dist(e.Position, mine) < 2f,
+            // Reached: in contact, or queued in the crowd around that player. About ten
+            // enemies per player overflow the contact ring at the separation spacing, so a
+            // fixed radius such as "within 2 units" would assert an arrangement the spacing
+            // cannot always produce (#469).
+            Assert.True((mine.X < 0 ? leftCrowd : rightCrowd).Contains(e.Id),
                 $"{e.Id} did not reach the player it started beside: {Dist(e.Position, mine)}");
             Assert.True(Dist(e.Position, theirs) > 150f,
                 $"{e.Id} crossed the map to the far player: {Dist(e.Position, theirs)}");
@@ -195,7 +230,7 @@ public class EnemyBattleRoyaleTests
     /// <summary>
     /// Chasers stop at contact rather than walking through the player and oscillating.
     /// The bound is the contact range plus one step, because a chaser closes in whole
-    /// steps and may stop just outside.
+    /// steps and may stop just outside. Separation off: the pre-#469 arithmetic, pinned.
     /// </summary>
     [Fact]
     public void ChasersStopAtContactRange_AndDoNotOscillate()
@@ -204,7 +239,7 @@ public class EnemyBattleRoyaleTests
         var player = new Vec2(25f, -25f);
         world.AddEntity(TestHelpers.CreatePlayer("p1", player.X, player.Y));
 
-        EnemyAiSettings settings = Quiet(max: 6, wave: 6);
+        EnemyAiSettings settings = Quiet(max: 6, wave: 6, separation: 0f);
         var ai = new EnemySpawner(world, TickRate, settings, NullLogger.Instance);
 
         Run(ai, 200);
@@ -218,6 +253,60 @@ public class EnemyBattleRoyaleTests
             Assert.True(d <= settings.ContactRange + step + 0.001f,
                 $"{e.Id} never closed to contact: {d}");
             Assert.True(d > 0f, $"{e.Id} landed exactly on the player");
+        }
+    }
+
+    /// <summary>
+    /// The same with separation on (#469), over several seeded placements: every chaser ends
+    /// in the crowd around the player (in contact, or queued behind one that is - see
+    /// <see cref="CrowdOf"/>), none pushed more than a step inside contact, no two closer than the spacing less its
+    /// deadband, and the settled crowd does not move at all - holding is stable, it does not
+    /// oscillate between pushing in and being pushed out. Seeds 2, 3, 6 and 7 are placements
+    /// where one chaser is wedged between two ring members and must queue.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(42)]
+    public void WithSeparation_ChasersSettleInAStableCrowd(int seed)
+    {
+        using var world = new EcsWorld();
+        var player = new Vec2(25f, -25f);
+        world.AddEntity(TestHelpers.CreatePlayer("p1", player.X, player.Y));
+
+        EnemyAiSettings settings = Quiet(max: 6, wave: 6, seed: seed);
+        Assert.True(settings.SeparationRadius > 0f);
+        var ai = new EnemySpawner(world, TickRate, settings, NullLogger.Instance);
+
+        Run(ai, 200);
+        List<EntityState> enemies = Enemies(world);
+        Assert.Equal(6, enemies.Count);
+        var before = enemies.ToDictionary(e => e.Id, e => e.Position);
+
+        Run(ai, 60, from: 201);
+        List<EntityState> after = Enemies(world);
+
+        HashSet<string> crowd = CrowdOf(after, player, settings);
+        foreach (EntityState e in after)
+        {
+            float d = Dist(e.Position, player);
+            Assert.True(crowd.Contains(e.Id), $"{e.Id} is neither in contact nor queued: {d}");
+            // A queued neighbour's push may nudge a ring member inward, by at most one step
+            // (a separation correction is capped at the step, and the crowd is still, so it
+            // does not compound) - the same slack a chaser closing in whole steps has.
+            float step = settings.Speed / TickRate;
+            Assert.True(d >= settings.ContactRange - step - 0.001f, $"{e.Id} pushed onto the player: {d}");
+            Assert.True(Dist(e.Position, before[e.Id]) < 1e-3f,
+                $"{e.Id} still moving after settling: {Dist(e.Position, before[e.Id])}");
+            foreach (EntityState o in after)
+            {
+                if (string.CompareOrdinal(o.Id, e.Id) <= 0) continue;
+                Assert.True(Dist(e.Position, o.Position) >= settings.SeparationRadius * 0.97f,
+                    $"{e.Id} and {o.Id} overlap: {Dist(e.Position, o.Position)}");
+            }
         }
     }
 
@@ -521,7 +610,11 @@ public class EnemyBattleRoyaleTests
             world.AddEntity(TestHelpers.CreatePlayer($"p{i}", 100f + (i * 40f), i * 10f));
         }
 
-        var ai = new EnemySpawner(world, TickRate, EnemyAiSettings.Default, NullLogger.Instance);
+        // The budget lifted above 30 + 45 x 8 = 390, so the measurement is at the same saturated
+        // population it was written for; the separation pass (on by default) is included.
+        var env = new Dictionary<string, string?> { [EnemyAiSettings.EnvBudget] = "20000" };
+        Assert.True(EnemyAiSettings.TryCreate(n => env.GetValueOrDefault(n), MapBounds.Default, out var settings, out var err), err);
+        var ai = new EnemySpawner(world, TickRate, settings!, NullLogger.Instance);
 
         // Saturate first: spawning allocates (ids, EntityState) by design, and measuring
         // through the fill would be measuring the spawner's strings, not the chase.

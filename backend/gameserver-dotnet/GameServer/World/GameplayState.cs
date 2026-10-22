@@ -374,6 +374,49 @@ public sealed class GameplayState
     /// <summary>Lag-compensation history, created on first use and sized from the configuration.</summary>
     public HitboxHistory History => _history ??= new HitboxHistory(BaseHz, MaxHitboxEntities, MaxRewindMs);
 
+    /// <summary>
+    /// Radius, in world units, over which players starting at the same spawn point are spread
+    /// (<c>GAMESERVER_SPAWN_SCATTER</c>); 0 = everybody on the point itself. Set at boot.
+    /// </summary>
+    public float SpawnScatter { get; set; }
+
+    /// <summary>
+    /// Where <paramref name="playerId"/> starts when it is placed at <paramref name="point"/>:
+    /// the point itself with no scatter, otherwise the next slot of a 16-point spiral within
+    /// <see cref="SpawnScatter"/> of it (see the body). Inside the map bounds, and never inside a
+    /// static box: a candidate that lands in one falls back to the point, which the map author
+    /// placed somewhere standable (rpg-mmo-server#469). <paramref name="playerId"/> is accepted
+    /// for logging and future per-player policy; placement order decides the slot.
+    /// </summary>
+    public Vec2 ScatterSpawn(string? playerId, Vec2 point)
+    {
+        if (!(SpawnScatter > 0f)) return point;
+
+        // Vogel spiral over 16 slots, one slot per placement in order: point k sits at the golden
+        // angle times k and at radius R x sqrt((k + 0.5) / 16), so consecutive arrivals are
+        // spread evenly over the disc (about 0.44 R apart) instead of landing where a hash of
+        // their id happens to point. Deterministic for a given join/respawn order.
+        int k = _spawnSlot;
+        _spawnSlot = (_spawnSlot + 1) % 16;
+        float angle = k * 2.39996323f;
+        float r = SpawnScatter * MathF.Sqrt((k + 0.5f) / 16f);
+        Vec2 candidate = Geometry.Bounds.Clamp(new Vec2(point.X + (MathF.Cos(angle) * r), point.Y + (MathF.Sin(angle) * r)));
+
+        foreach (StaticBox box in Geometry.Boxes)
+        {
+            if (candidate.X >= box.MinX && candidate.X <= box.MaxX &&
+                candidate.Y >= box.MinY && candidate.Y <= box.MaxY)
+            {
+                return point;
+            }
+        }
+
+        return candidate;
+    }
+
+    /// <summary>Next spiral slot for <see cref="ScatterSpawn"/>.</summary>
+    private int _spawnSlot;
+
     /// <summary>The default spawn (map spawn named <c>default</c>), if the map has one.</summary>
     public bool TryGetDefaultSpawn(out Vec3 position)
     {

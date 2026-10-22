@@ -313,6 +313,22 @@ if (!GameServer.Scaffolding.BotSettings.TryCreate(
 
 GameServer.Scaffolding.BotSettings bots = botsParsed!;
 
+// Spawn scatter (rpg-mmo-server#469). Strict: a typo must not silently stack every player on
+// the spawn point again.
+float spawnScatter = ServerDefaults.SpawnScatter;
+string? spawnScatterRaw = Env(ServerEnv.SpawnScatter);
+if (!string.IsNullOrWhiteSpace(spawnScatterRaw))
+{
+    if (!float.TryParse(spawnScatterRaw.Trim(), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out spawnScatter)
+        || !float.IsFinite(spawnScatter) || spawnScatter < 0f || spawnScatter > 50f)
+    {
+        logger.LogCritical("invalid {Name}={Value}: expected a number of world units in 0..50",
+            ServerEnv.SpawnScatter, spawnScatterRaw);
+        return 2;
+    }
+}
+
 // /debug/entities (dev/test only, see ServerEnv.DebugEntities). Strict like every knob above:
 // a typo that silently left it off would make a test run report "no server positions" for a
 // reason that names nothing.
@@ -1025,6 +1041,7 @@ GameServer.Scaffolding.EnemySpawner? enemyPhase = null;
 
 var options = new ServerOptions
 {
+    SpawnScatter = spawnScatter,
     ServerAddr = addr,
     Transport = transport,
     TransportKey = transportKey,
