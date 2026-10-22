@@ -129,6 +129,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   at the connection's first encode. Regression test:
   `UpdateGapTests.LateJoinDuringShedding_GaugeCountsFromTheJoinNotTickZero` (fails on the old
   code with a 60 003-tick gauge for a join at tick 60 000).
+- **`/debug/kill` refuses oversized and malformed bodies before queueing (review R1-2).**
+  The handler parsed the first 4096 bytes of a larger body, and the parser returned at the
+  first id it found. So `{"id":"p1"}` followed by garbage, or by kilobytes of padding,
+  queued a kill. Now:
+  - a body over `DebugKill.MaxBodyBytes` is refused with 413 `body_too_large`, by
+    `Content-Length` or by reading one byte past the limit for a chunked body;
+  - a non-empty body must be exactly one complete JSON object, else 400 `invalid_body`, with
+    no fallback to the query string.
+  Tests: `MetricsEndpointTests.DebugKill_RefusesOversizedAndTrailingGarbageBodies_WithoutQueueing`
+  and `DebugKill_ParseId_RequiresOneCompleteObject`.
 - **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse
   (#449).** `KcpCrypto` ran CFB-128 by hand with one `EncryptEcb` call per 16-byte block, about
   90 one-shot cipher setups per MTU datagram. Measured at 95 players with AI on: ~340 us to seal
