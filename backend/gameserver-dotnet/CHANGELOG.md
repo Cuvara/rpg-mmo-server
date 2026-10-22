@@ -65,6 +65,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   arithmetic with separation 0.
 
 ### Fixed
+- `EnemyAiCharacterizationTests.EnemiesSpawnOnTheSpawnCircle_AndHaveAlreadyMovedOneStepThatTick` ran
+  with the default enemy separation (0.8) and unseeded placement. When two first-wave enemies
+  landed within 0.8 u of each other, separation pushed them and the radius check failed: 51 of
+  2000 trials (2.6 %). It now runs with separation 0 and a fixed seed. It characterises the
+  pre-#469 spawn-and-move shape that separation 0 restores; separation has its own tests. No
+  assertion changed.
 - **Enemy separation's work bound now holds under hash collisions (review R1-1).** The
   12-neighbour cap counted only entries in the queried cell, so hash-chain entries from other
   cells were stepped over uncounted. Enemies placed in many distinct cells that hash to one
