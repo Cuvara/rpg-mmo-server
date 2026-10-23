@@ -208,18 +208,29 @@ public class SnapshotTraceTests(ITestOutputHelper output)
             conn.TakePendingSnapshot(out _, out _, out _, out _, out _, out _);
         }
 
-        // Warm up the complete path, including tiered JIT/OSR and lazy per-thread query
-        // scratch. Keep the data lane full so the steady state includes the drop-oldest path.
-        // This stays outside the measurement: the assertion below remains exactly zero.
-        const int WarmupRounds = 2_048;
-        for (int i = 0; i < Math.Max(Connection.DataLaneCapacity + 10, WarmupRounds); i++) Round();
+        // Original warm-up, retained while isolating the intermittent allocation.
+        for (int i = 0; i < Connection.DataLaneCapacity + 10; i++) Round();
 
+        long gatherBytes = 0, claimBytes = 0;
         long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 200; i++) Round();
+        for (int i = 0; i < 200; i++)
+        {
+            state.Tick += 4;
+            long beforeGather = GC.GetAllocatedBytesForCurrentThread();
+            world.ReadAll(gather);
+            long afterGather = GC.GetAllocatedBytesForCurrentThread();
+            conn.TakePendingSnapshot(out _, out _, out _, out _, out _, out _);
+            long afterClaim = GC.GetAllocatedBytesForCurrentThread();
+            gatherBytes += afterGather - beforeGather;
+            claimBytes += afterClaim - afterGather;
+        }
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        long outsideGatherAndClaim = allocated - gatherBytes - claimBytes;
 
-        output.WriteLine($"traced={traced}: {allocated} bytes over 200 gathers, dropped_oldest={conn.SendDroppedOldest}");
+        output.WriteLine($"traced={traced}: {allocated} bytes over 200 gathers (gather={gatherBytes}, claim={claimBytes}, outside={outsideGatherAndClaim}), dropped_oldest={conn.SendDroppedOldest}");
         Assert.Equal(0, allocated);
+        Assert.Equal(0, gatherBytes);
+        Assert.Equal(0, claimBytes);
         Assert.True(conn.SendDroppedOldest > 0, "the data lane never filled, so the drop path was not measured");
     }
 
