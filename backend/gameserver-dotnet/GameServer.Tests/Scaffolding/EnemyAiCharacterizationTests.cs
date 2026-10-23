@@ -58,12 +58,14 @@ public class EnemyAiCharacterizationTests
         }
     }
 
-    private static (TickLoop loop, EcsWorld world, EnemySpawner ai) NewLoop()
+    private static (TickLoop loop, EcsWorld world, EnemySpawner ai) NewLoop(EnemyAiSettings? settings = null)
     {
         var world = new EcsWorld();
         var connections = new ConnectionManager();
         var handler = new InputHandler(world, NullLogger.Instance, null, TickRate, MapBounds.Default);
-        var ai = new EnemySpawner(world, TickRate, NullLogger.Instance);
+        var ai = settings == null
+            ? new EnemySpawner(world, TickRate, NullLogger.Instance)
+            : new EnemySpawner(world, TickRate, settings, NullLogger.Instance);
         var loop = new TickLoop(
             world, handler, connections, TickRate, GameConstants.DefaultAoiRadius,
             NullLogger.Instance, metrics: null,
@@ -127,10 +129,23 @@ public class EnemyAiCharacterizationTests
     /// spawn</b>, because the original spawned into the same list the move loop was about
     /// to walk. That one-tick detail is observable in the snapshot, so it is pinned.
     /// </summary>
+    /// <remarks>
+    /// Separation off and a fixed placement seed. This pins the pre-#469 spawn-and-move
+    /// shape, which <c>GAMESERVER_ENEMY_SEPARATION=0</c> restores exactly; separation has its
+    /// own tests (<c>EnemySeparationTests</c>). With the defaults (separation 0.8, unseeded
+    /// placement), two first-wave enemies that land within 0.8 u of each other on the circle
+    /// are pushed apart, and the radius assertion failed in 51 of 2000 trials (2.6 %).
+    /// </remarks>
     [Fact]
     public void EnemiesSpawnOnTheSpawnCircle_AndHaveAlreadyMovedOneStepThatTick()
     {
-        var (loop, world, ai) = NewLoop();
+        var env = new Dictionary<string, string?>
+        {
+            [EnemyAiSettings.EnvSeparation] = "0",
+            [EnemyAiSettings.EnvSeed] = "7",
+        };
+        Assert.True(EnemyAiSettings.TryCreate(k => env.GetValueOrDefault(k), MapBounds.Default, out var settings, out var err), err);
+        var (loop, world, ai) = NewLoop(settings);
         using (world)
         {
             for (int t = 0; t < TicksToFirstWave(); t++) loop.TickOnce();

@@ -6,7 +6,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Enemy separation and queueing (#469).** `GAMESERVER_ENEMY_SEPARATION` (default 0.8 world
+  units, `0` = off, which restores the old movement exactly) keeps living enemies apart. A
+  new World-group system `enemy.separate` (`EnemySeparationSystem`, order between move and
+  attack) pushes overlapping pairs apart, half each, with each enemy's push capped at one
+  movement step. Neighbours come from a spatial hash with the spacing as cell size, and at
+  most 12 neighbours are examined per enemy, so the cost is linear and bounded at any density
+  (a 20 000-enemy coincident pile is one step under a second). It uses reused scratch arrays,
+  allocates nothing per tick, and gives the same result for the same input. `enemy.move` now
+  queues: a chaser whose step would take it inside the spacing of an enemy ahead and nearer
+  the target holds, or slides sideways onto a free spot near the contact ring, instead of
+  pushing in and being pushed back out every tick (the jitter #469 describes). Before this
+  change every chaser converged on the same point. Tests: `EnemySeparationTests` (a pile
+  spreads; a chasing crowd keeps its spacing where the control collapses; a settled crowd is
+  still; same seed, same crowd; 20 000 enemies bounded; 0 touches nothing) and
+  `EnemyBattleRoyaleTests.WithSeparation_ChasersSettleInAStableCrowd`. The sideways slide is
+  clamped to the map, and its free-spot query reports a spot taken when it reaches the
+  neighbour cap (`FreeSpotQuery_IsConservativeWhereTheNeighbourCapBites`). Known limitation, not
+  new: enemy movement does not test static boxes, so neither do the push and the slide. The value is a
+  placeholder pending enemy design. Product decision recorded: overflow enemies queue behind
+  the ring and do not circle round to find a gap.
+- **`GAMESERVER_ENEMY_BUDGET` - hard per-map enemy ceiling (#468).** The default is 300. The
+  cap in force is `min(MAX + MAX_PER_PLAYER x players, BUDGET)`, so the per-player formula
+  can no longer grow the population, and with it every player's replication load, without
+  bound. It is shown on `/status` as `budget=N` in `enemy_ai`, and `enemy_ai_max_now` is the
+  clamped value. The value is a placeholder. Measured with the rpg-factory testlab on one host,
+  at 13 and 28 players: worst replication gap 200 ms (the target) with the budget, 266 ms and
+  533 ms with it lifted. The binding cost is snapshot bytes (shedding past the 8 KiB cap), not
+  tick time. It is not a capacity claim.
+- **`GAMESERVER_SPAWN_SCATTER` - spread fresh player placements (#469).** The default is 3
+  world units; `0` keeps the spawn point itself. Before this change every new or respawned
+  player started on the same point. Placements follow a 16-slot spiral in arrival order, are
+  clamped to the map, and fall back to the point when a candidate lands in a static box.
+  Restored positions are never moved. Tests: `SpawnScatterTests`.
+- **`GAMESERVER_DEBUG_ENTITIES=on` serves `/debug/entities`** on the metrics port: every
+  entity's id, type, authoritative position, HP, max HP, speed and dead flag, with the
+  server tick and a monotonic timestamp (schema `rpg.debug-entities.v1`). It is read under the
+  world's read lock on the HTTP thread, never on the tick, and written with `Utf8JsonWriter`
+  so NativeAOT needs no reflection metadata. Off by default. The listener does not exist
+  unless the knob is on. The fleet manifests never declare the knob (`FleetEnvPassthroughTests`
+  excludes it with the reason), because it exposes the whole world state. It exists for the
+  rpg-factory testlab, which compares what each rendered client drew with where the server
+  says every entity was. Strict parse (`on/off/true/false/1/0`, anything else exits 2).
+- **`GAMESERVER_ENEMY_SEED`** seeds the enemy spawner's placement RNG (anchor choice and
+  angle). Unset keeps `Random.Shared`, which is today's behaviour. A whole number 0..2^31-1
+  makes the placement sequence repeatable for a regression replay. It is shown on the banner
+  and in `/status` `enemy_ai` as `seed=N`. Passed through compose and all three fleets (optional
+  `gameserver-config` key `enemy-seed`). Tests: `EnemySeedTests` (parse, refusal, same seed ->
+  same placements, different seed -> different).
+
+### Changed
+- `EnemyAiPhase` is renumbered to make room for `Separate` (Spawn 0, Move 1, Separate 2,
+  Attack 3, Respawn 4, Reap 5). `EnemyBattleRoyaleTests.EnemiesCommitToTheNearestPlayer` now
+  asserts that each enemy is in the crowd around its player (in contact, or queued behind
+  one that is) instead of within a fixed 2 units: ten enemies per player overflow the contact
+  ring at the separation spacing. `ChasersStopAtContactRange_AndDoNotOscillate` pins the old
+  arithmetic with separation 0.
+
 ### Fixed
+- `EnemyAiCharacterizationTests.EnemiesSpawnOnTheSpawnCircle_AndHaveAlreadyMovedOneStepThatTick` ran
+  with the default enemy separation (0.8) and unseeded placement. When two first-wave enemies
+  landed within 0.8 u of each other, separation pushed them and the radius check failed: 51 of
+  2000 trials (2.6 %). It now runs with separation 0 and a fixed seed. It characterises the
+  pre-#469 spawn-and-move shape that separation 0 restores; separation has its own tests. No
+  assertion changed.
+- **Enemy separation's work bound now holds under hash collisions (review R1-1).** The
+  12-neighbour cap counted only entries in the queried cell, so hash-chain entries from other
+  cells were stepped over uncounted. Enemies placed in many distinct cells that hash to one
+  bucket made every query walk the whole chain, quadratic in total. Every chain step now counts
+  against `EnemySeparationSystem.MaxVisited` (256) in the push pass, the queue query and the
+  free-spot query. The free-spot query reports "taken" where this budget bites, as it already
+  did for the neighbour cap. Ordinary crowds never reach the budget, and their pushes and query
+  answers are bit-identical with and without it
+  (`EnemySeparationVisitBudgetTests.OrdinaryCrowds_AreBitIdenticalWithAndWithoutTheBudget`).
+  The adversarial layout is in `CollidingCells_DoNotMakeAQueryWalkTheWholeChain`: an
+  unbounded query visits 2001 entries, a bounded one at most 256. An offline model of the
+  walk put the worst ordinary crowd at 58 entries per push and 92 per query, which is why the
+  budget is 256 and not 64.
 - **KCP datagram encryption is ~10x cheaper, which removes the 95-player receive collapse
   (#449).** `KcpCrypto` ran CFB-128 by hand with one `EncryptEcb` call per 16-byte block, about
   90 one-shot cipher setups per MTU datagram. Measured at 95 players with AI on: ~340 us to seal

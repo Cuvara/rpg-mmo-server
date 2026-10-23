@@ -249,13 +249,50 @@ public class EnemyAiSettingsTests
     [InlineData(0, 30, 2)]
     [InlineData(1, 75, 8)]
     [InlineData(2, 120, 14)]
-    [InlineData(10, 480, 62)]
+    [InlineData(6, 300, 38)]
+    [InlineData(10, 300, 62)] // 30 + 45 x 10 = 480, held at the default budget of 300 (#468)
     public void DefaultsScaleAdditivelyWithPlayers(int players, int cap, int wave)
     {
         EnemyAiSettings s = EnemyAiSettings.Default;
 
         Assert.Equal(cap, s.EffectiveMaxEnemies(players));
         Assert.Equal(wave, s.EffectiveWaveSize(players));
+    }
+
+    /// <summary>
+    /// The per-map budget (#468) caps the per-player growth: the population follows the formula
+    /// up to the budget and stops there, whatever the player count.
+    /// </summary>
+    [Fact]
+    public void TheBudgetCapsThePopulationAtAnyPlayerCount()
+    {
+        EnemyAiSettings s = ParseOk((EnemyAiSettings.EnvBudget, "120"));
+
+        Assert.Equal(75, s.EffectiveMaxEnemies(1));
+        Assert.Equal(120, s.EffectiveMaxEnemies(2));
+        Assert.Equal(120, s.EffectiveMaxEnemies(500));
+        Assert.Contains("budget=120", s.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(EnemyAiSettings.EnvBudget, "0")]
+    [InlineData(EnemyAiSettings.EnvBudget, "-5")]
+    [InlineData(EnemyAiSettings.EnvBudget, "3OO")]
+    [InlineData(EnemyAiSettings.EnvSeparation, "-0.1")]
+    [InlineData(EnemyAiSettings.EnvSeparation, "wide")]
+    public void BudgetAndSeparation_AreParsedStrictly(string name, string value)
+    {
+        var env = new Dictionary<string, string?> { [name] = value };
+        Assert.False(Parse(env, out EnemyAiSettings? s, out string? err));
+        Assert.Null(s);
+        Assert.Contains(name, err, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SeparationDefaultsOn_AndZeroTurnsItOff()
+    {
+        Assert.Equal(0.8f, EnemyAiSettings.Default.SeparationRadius);
+        Assert.Equal(0f, ParseOk((EnemyAiSettings.EnvSeparation, "0")).SeparationRadius);
     }
 
     /// <summary>
@@ -269,7 +306,8 @@ public class EnemyAiSettingsTests
             (EnemyAiSettings.EnvMaxEnemies, "20000"),
             (EnemyAiSettings.EnvMaxEnemiesPerPlayer, "20000"),
             (EnemyAiSettings.EnvWaveSize, "2000"),
-            (EnemyAiSettings.EnvWaveSizePerPlayer, "2000"));
+            (EnemyAiSettings.EnvWaveSizePerPlayer, "2000"),
+            (EnemyAiSettings.EnvBudget, "20000"));
 
         Assert.Equal(EnemyAiSettings.PopulationCeiling, s.EffectiveMaxEnemies(1_000_000));
         Assert.Equal(EnemyAiSettings.WaveCeiling, s.EffectiveWaveSize(1_000_000));

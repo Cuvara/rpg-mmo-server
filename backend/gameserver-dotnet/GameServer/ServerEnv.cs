@@ -153,4 +153,20 @@ internal static class ServerEnv
     /// a deployment setting: a long-running service that reads it true never serves.
     /// </summary>
     public const string MigrateOnly = "GAMESERVER_MIGRATE_ONLY";
+
+    /// <summary>
+    /// <c>on</c> serves <c>/debug/entities</c> on the metrics port: every entity's id, type,
+    /// position, HP and dead flag, read under the world's read lock off the tick thread. For
+    /// automated test runs (rpg-factory testlab) that need server-authoritative positions.
+    /// Off by default and never set by a fleet manifest: it exposes the whole world state.
+    /// </summary>
+    public const string DebugEntities = "GAMESERVER_DEBUG_ENTITIES";
+
+    /// <summary>
+    /// Radius in world units over which a player placed at the spawn point (a new character, a
+    /// cross-map arrival or a respawn) is spread, so players do not start on one point and drag
+    /// every enemy onto it (rpg-mmo-server#469). <c>0</c> = everybody on the point. Default
+    /// <c>3</c> (see <c>ServerDefaults.SpawnScatter</c>). Decimal, 0..50, strict.
+    /// </summary>
+    public const string SpawnScatter = "GAMESERVER_SPAWN_SCATTER";
 }

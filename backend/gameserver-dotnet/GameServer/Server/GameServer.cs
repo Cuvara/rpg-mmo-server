@@ -279,6 +279,12 @@ public class ServerOptions
     public ulong? LootSeed { get; set; }
 
     /// <summary>
+    /// Radius over which fresh player placements at the spawn point are spread
+    /// (<see cref="ServerEnv.SpawnScatter"/>); 0 = all on the point.
+    /// </summary>
+    public float SpawnScatter { get; set; }
+
+    /// <summary>
     /// Character store (ADR-31). When set, joins load the character named by the join
     /// token's <c>cid</c> (or the account's default character) through it and the save
     /// paths write <c>character_state</c>; when null, the legacy <see cref="PlayerStore"/>
@@ -871,6 +877,7 @@ public sealed class GameServerHost : IAsyncDisposable
             loot: options.Loot,
             baseHz: rates.BaseHz,
             lootSeed: options.LootSeed ?? DeriveLootSeed(options.MapId));
+        _world.Gameplay.SpawnScatter = options.SpawnScatter;
         _characterStore = options.CharacterStore;
 
         // Same two inputs the per-attack cooldown uses, so the audit's bound is derived
@@ -1671,6 +1678,13 @@ public sealed class GameServerHost : IAsyncDisposable
                 }
 
                 var spawn = PlayerSpawn.Resolve(loaded, _options.MapId, _bounds, _world.Gameplay.DefaultSpawn());
+                if (!spawn.PositionRestored)
+                {
+                    // A fresh placement at the spawn point is spread per player; a restored
+                    // position is where the player left and is kept exactly.
+                    Vec2 scattered = _world.Gameplay.ScatterSpawn(userId, new Vec2(spawn.Position.X, spawn.Position.Y));
+                    spawn = spawn with { Position = new Vec3(scattered.X, scattered.Y, spawn.Position.Z) };
+                }
                 if (spawn.DiscardedMapId != null)
                 {
                     _logger.LogInformation(
@@ -1712,6 +1726,10 @@ public sealed class GameServerHost : IAsyncDisposable
                 bool hasMapSpawn = _world.Gameplay.TryGetDefaultSpawn(out Vec3 mapSpawn);
                 var spawn = PlayerSpawn.Resolve(
                     saved, _options.MapId, _bounds, hasMapSpawn ? new Vec2(mapSpawn.X, mapSpawn.Y) : null);
+                if (!spawn.PositionRestored)
+                {
+                    spawn = spawn with { Position = _world.Gameplay.ScatterSpawn(userId, spawn.Position) };
+                }
 
                 if (spawn.DiscardedMapId != null)
                 {

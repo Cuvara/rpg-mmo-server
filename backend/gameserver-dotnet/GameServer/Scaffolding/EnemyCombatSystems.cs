@@ -371,6 +371,9 @@ internal sealed class PlayerRespawnSystem : IEcsSystem
             at.Value = writer.Gameplay.TryGetDefaultSpawn(out _)
                 ? _settings.Bounds.Clamp(new Vec2(spawn.X, spawn.Y))
                 : _settings.Bounds.Clamp(PlayerSpawn.SpawnPoint);
+            // Same scatter as the join path, so a respawned player does not land on top of
+            // everyone else who respawned (rpg-mmo-server#469).
+            at.Value = writer.Gameplay.ScatterSpawn(writer.IdRefOf(in player).Value, at.Value);
             at.Z = writer.Gameplay.GroundAt(at.Value.X, at.Value.Y) > spawn.Z
                 ? writer.Gameplay.GroundAt(at.Value.X, at.Value.Y)
                 : spawn.Z;

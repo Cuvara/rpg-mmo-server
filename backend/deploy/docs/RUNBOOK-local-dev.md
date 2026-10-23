@@ -140,6 +140,14 @@ console `8351`, Redis `7379`, Postgres `6432`/`6433`. Use it to test a change
 without touching a stack someone else is using. Pass `--scratch` to every
 subcommand of that stack, including `down`.
 
+Scratch mode reads `docker-compose.yml` only (never the default stack's
+`docker-compose.override.yml`, whose fixed ports would collide) and builds its
+images as `:scratch`, so the default stack's `:dev` images are left alone. To set
+game server knobs for a scratch stack, write `KEY=value` lines to a file and pass
+`STACK_SCRATCH_EXTRA_ENV=<file>`; they are appended last to `.env.scratch`. This is
+how the rpg-factory testlab configures its runs (`GAMESERVER_DEBUG_ENTITIES=on`,
+`GAMESERVER_ENEMY_SEED`, `GAMESERVER_MAP_ID`, `GATEWAY_CONN_RATE_PER_MIN=0`).
+
 > **Trap this protects you from.** Without `--scratch`, running `up` in a
 > directory while another checkout has the same compose project up does not
 > fail — compose **adopts and recreates** the running containers, with your

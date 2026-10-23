@@ -18,4 +18,12 @@ public static class ServerDefaults
     public const float DefaultPlayerSpeed = 5.0f;
     public const int DefaultPlayerAttack = 10;
     public const int DefaultPlayerDefense = 5;
+
+    /// <summary>
+    /// Radius over which players placed at the spawn point are spread (<c>GAMESERVER_SPAWN_SCATTER</c>).
+    /// PLACEHOLDER pending level design: 3 units is a few capsule widths, enough that three players
+    /// joining together do not overlap and the enemy crowd splits by the nearest-player rule,
+    /// small enough that everyone still starts within one screen of the authored spawn point.
+    /// </summary>
+    public const float SpawnScatter = 3.0f;
 }

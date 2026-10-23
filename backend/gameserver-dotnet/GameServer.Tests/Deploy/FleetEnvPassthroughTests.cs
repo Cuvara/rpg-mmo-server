@@ -80,6 +80,13 @@ public class FleetEnvPassthroughTests
     private static readonly IReadOnlyDictionary<string, string> ExcludedEverywhere =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            ["GAMESERVER_DEBUG_ENTITIES"] =
+                "Dev and test only. It serves /debug/entities, a dump of every entity's id, " +
+                "type, position and HP, on the metrics port. A fleet exposes that port to " +
+                "Prometheus, so declaring the knob there makes the whole world state one " +
+                "ConfigMap edit away from being scrapeable. Compose forwards it for the " +
+                "rpg-factory testlab, which needs server-authoritative positions.",
+
             ["GAMESERVER_ID"] =
                 "FORBIDDEN on a fleet, not merely unnecessary. Program.cs resolves " +
                 "`--server-id ?? GAMESERVER_ID ?? POD_NAME`, so GAMESERVER_ID WINS over the " +
