@@ -200,24 +200,50 @@ public class SnapshotTraceTests(ITestOutputHelper output)
 
         var state = new GatherState { Conn = conn };
         Action<WorldReader> gather = state.Gather; // one delegate, built outside the measurement
+        bool measurePhases = false;
+        long gatherBytes = 0, claimBytes = 0;
 
         void Round()
         {
             state.Tick += 4;
+            long beforeGather = measurePhases ? GC.GetAllocatedBytesForCurrentThread() : 0;
             world.ReadAll(gather);
+            long afterGather = measurePhases ? GC.GetAllocatedBytesForCurrentThread() : 0;
             conn.TakePendingSnapshot(out _, out _, out _, out _, out _, out _);
+            if (measurePhases)
+            {
+                long afterClaim = GC.GetAllocatedBytesForCurrentThread();
+                gatherBytes += afterGather - beforeGather;
+                claimBytes += afterClaim - afterGather;
+            }
         }
 
-        // Warm up: JIT, buffer growth, and the data lane filling to capacity so the steady
-        // state includes the drop-oldest path.
-        for (int i = 0; i < Connection.DataLaneCapacity + 10; i++) Round();
+        // Repeat the original warm-up/measurement window in one process. The first window
+        // preserves the CI failure shape; later windows test for intermittent allocations.
+        const int ProbeTrials = 200;
+        long totalAllocated = 0;
+        for (int trial = 0; trial < ProbeTrials; trial++)
+        {
+            measurePhases = false;
+            for (int i = 0; i < Connection.DataLaneCapacity + 10; i++) Round();
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 200; i++) Round();
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            gatherBytes = 0;
+            claimBytes = 0;
+            measurePhases = true;
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 200; i++) Round();
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            long outsideGatherAndClaim = allocated - gatherBytes - claimBytes;
+            totalAllocated += allocated;
 
-        output.WriteLine($"traced={traced}: {allocated} bytes over 200 gathers, dropped_oldest={conn.SendDroppedOldest}");
-        Assert.Equal(0, allocated);
+            if (allocated != 0)
+                output.WriteLine($"trial {trial}: total={allocated}, gather={gatherBytes}, claim={claimBytes}, outside={outsideGatherAndClaim}");
+            Assert.Equal(0L, allocated);
+            Assert.Equal(0L, gatherBytes);
+            Assert.Equal(0L, claimBytes);
+        }
+
+        output.WriteLine($"traced={traced}: {ProbeTrials} windows x 200 gathers, total={totalAllocated} bytes, dropped_oldest={conn.SendDroppedOldest}");
         Assert.True(conn.SendDroppedOldest > 0, "the data lane never filled, so the drop path was not measured");
     }
 
