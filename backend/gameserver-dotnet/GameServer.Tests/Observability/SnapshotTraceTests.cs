@@ -200,30 +200,30 @@ public class SnapshotTraceTests(ITestOutputHelper output)
 
         var state = new GatherState { Conn = conn };
         Action<WorldReader> gather = state.Gather; // one delegate, built outside the measurement
+        bool measurePhases = false;
+        long gatherBytes = 0, claimBytes = 0;
 
         void Round()
         {
             state.Tick += 4;
+            long beforeGather = measurePhases ? GC.GetAllocatedBytesForCurrentThread() : 0;
             world.ReadAll(gather);
+            long afterGather = measurePhases ? GC.GetAllocatedBytesForCurrentThread() : 0;
             conn.TakePendingSnapshot(out _, out _, out _, out _, out _, out _);
+            if (measurePhases)
+            {
+                long afterClaim = GC.GetAllocatedBytesForCurrentThread();
+                gatherBytes += afterGather - beforeGather;
+                claimBytes += afterClaim - afterGather;
+            }
         }
 
         // Original warm-up, retained while isolating the intermittent allocation.
         for (int i = 0; i < Connection.DataLaneCapacity + 10; i++) Round();
 
-        long gatherBytes = 0, claimBytes = 0;
+        measurePhases = true;
         long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 200; i++)
-        {
-            state.Tick += 4;
-            long beforeGather = GC.GetAllocatedBytesForCurrentThread();
-            world.ReadAll(gather);
-            long afterGather = GC.GetAllocatedBytesForCurrentThread();
-            conn.TakePendingSnapshot(out _, out _, out _, out _, out _, out _);
-            long afterClaim = GC.GetAllocatedBytesForCurrentThread();
-            gatherBytes += afterGather - beforeGather;
-            claimBytes += afterClaim - afterGather;
-        }
+        for (int i = 0; i < 200; i++) Round();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         long outsideGatherAndClaim = allocated - gatherBytes - claimBytes;
 
