@@ -120,6 +120,17 @@ public sealed class Connection : IDisposable
     public bool Kicked => _kicked;
     private volatile bool _kicked;
 
+    /// <summary>
+    /// True once the client said it is leaving (a <c>disconnect</c> frame), as opposed to
+    /// the connection dropping. A graceful leave is saved and released at once; only a drop
+    /// gets the reconnect hold. Set before the close, so the teardown it triggers sees it.
+    /// </summary>
+    public bool Left => _left;
+    private volatile bool _left;
+
+    /// <summary>Mark this connection as a graceful leave. See <see cref="Left"/>.</summary>
+    public void MarkLeft() => _left = true;
+
     /// <summary>Mark this connection as torn down by a duplicate-login kick. One-way.</summary>
     public void MarkKicked() => _kicked = true;
 
@@ -249,6 +260,16 @@ public sealed class Connection : IDisposable
 
     private readonly object _snapshotLock = new();
 
+    // Snapshot delivery trace (#473): Stopwatch stamps of the staged job, written with it
+    // under _snapshotLock, and the copies the claim takes. Plain fields, read only when
+    // SnapshotTrace is set.
+    private long _pendingGatherTs;
+    private long _pendingEnqueueTs;
+    private int _pendingQueueDepth;
+    private long _claimedGatherTs;
+    private long _claimedEnqueueTs;
+    private int _claimedQueueDepth;
+
     /// <summary>
     /// Protocol 3 stat/status copies, double-buffered in step with <see cref="_aoiBuffers"/>
     /// (same index, same ownership rules). Filled only when the peer speaks protocol 3.
@@ -372,6 +393,10 @@ public sealed class Connection : IDisposable
         GameServer.World.WorldReader reader, float radius, ulong tick, int keyframeInterval,
         GameServer.Snapshot.TickEventBuffer? tickEvents = null)
     {
+        // The trace's one null check on this path; the stamp is taken only when it is on.
+        bool traced = SnapshotTrace != null;
+        long gatherTs = traced ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
         if (!reader.TryGetSnapshotAnchor(UserId, out var anchor, out ulong ackTick, out ulong ackAppliedTick))
         {
             // The result used to be discarded. On failure the anchor is default(Vec2) —
@@ -482,6 +507,15 @@ public sealed class Connection : IDisposable
             _pendingAckAppliedTick = ackAppliedTick;
             _pendingKeyframeInterval = keyframeInterval;
             _snapshotPending = true;
+            if (traced)
+            {
+                // Stamped with the job, under its lock, so a claim can never pair this job
+                // with another gather's stamps. Depth is read before this job's marker goes
+                // in: what is already queued ahead of it.
+                _pendingGatherTs = gatherTs;
+                _pendingEnqueueTs = System.Diagnostics.Stopwatch.GetTimestamp();
+                _pendingQueueDepth = _sendChannel.Reader.Count;
+            }
 
             // Appended under the same lock that publishes the job, so the write task never
             // sees a job whose events are half written.
@@ -580,6 +614,9 @@ public sealed class Connection : IDisposable
             keyframeInterval = _pendingKeyframeInterval;
             anchor = _pendingAnchor;
             observerKey = _observerKey;
+            _claimedGatherTs = _pendingGatherTs;
+            _claimedEnqueueTs = _pendingEnqueueTs;
+            _claimedQueueDepth = _pendingQueueDepth;
 
             eventCount = _pendingEvents.Count;
             if (eventCount == 0)
@@ -880,12 +917,13 @@ public sealed class Connection : IDisposable
 
         _closingToken = _cts.Token;
 
-        _sendChannel = Channel.CreateBounded<SendItem>(new BoundedChannelOptions(64)
+        _sendChannel = Channel.CreateBounded<SendItem>(new BoundedChannelOptions(DataLaneCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
             SingleWriter = false
-        });
+        }, _ => Interlocked.Increment(ref _sendDroppedOldest));
+        _kcpCounters = transport as IKcpCountersSource;
 
         // FullMode.Wait makes TryWrite report "full" instead of discarding anything.
         _controlChannel = Channel.CreateBounded<Envelope>(new BoundedChannelOptions(ControlLaneCapacity)
@@ -895,6 +933,43 @@ public sealed class Connection : IDisposable
             SingleWriter = false
         });
     }
+
+    /// <summary>Capacity of the drop-oldest data lane (snapshot markers and heartbeats).</summary>
+    internal const int DataLaneCapacity = 64;
+
+    private static long s_nextConnectionId;
+
+    /// <summary>
+    /// Process-unique connection number, in creation order. The snapshot trace's
+    /// <c>conn_id</c>: a user id is not unique over a run (a reconnect reuses it).
+    /// </summary>
+    public long ConnectionId { get; } = Interlocked.Increment(ref s_nextConnectionId);
+
+    /// <summary>
+    /// Snapshot delivery trace sink (<c>GAMESERVER_SNAPSHOT_TRACE</c>), or null when off.
+    /// Set before the write task starts. Null costs one check per gather and per write.
+    /// </summary>
+    public GameServer.Observability.SnapshotTrace? SnapshotTrace { get; set; }
+
+    private readonly IKcpCountersSource? _kcpCounters;
+    private long _sendDroppedOldest;
+
+    /// <summary>Items in the data lane right now (snapshot markers, heartbeats).</summary>
+    public int SendQueueDepth => _sendChannel.Reader.Count;
+
+    /// <summary>
+    /// Items the data lane discarded to make room (DropOldest), cumulative for this
+    /// connection. A dropped snapshot marker is harmless (the job stays staged; see
+    /// <see cref="GatherSnapshotView"/>); a dropped heartbeat is a lost ping reply.
+    /// </summary>
+    public long SendDroppedOldest => Interlocked.Read(ref _sendDroppedOldest);
+
+    /// <summary>
+    /// The KCP session's ARQ counters, or <see cref="KcpSessionCounters.Unavailable"/> when the
+    /// transport is not KCP. Takes the session lock: scrape and trace use only.
+    /// </summary>
+    public KcpSessionCounters ReadKcpCounters() =>
+        _kcpCounters?.ReadKcpCounters() ?? KcpSessionCounters.Unavailable;
 
     /// <summary>Enqueue an envelope for sending. Non-blocking; drops oldest if full.</summary>
     /// <remarks>
@@ -1029,6 +1104,7 @@ public sealed class Connection : IDisposable
 
                 Envelope? env = item.Envelope;
                 var isSnapshot = false;
+                ulong snapshotTick = 0;
 
                 if (env == null)
                 {
@@ -1050,6 +1126,7 @@ public sealed class Connection : IDisposable
                         intern: Encoding == WireEncoding.Proto, observer: anchor,
                         events: stagedEvents.AsSpan(0, stagedEventCount), observerKey: observerKey,
                         v3: v3Gather, ackAppliedTick: ackAppliedTick);
+                    snapshotTick = snapshot.Tick;
 
                     if (Encoding == WireEncoding.Proto && !IsSealed)
                     {
@@ -1060,6 +1137,7 @@ public sealed class Connection : IDisposable
                         // encoding, and JsonWriter would need its own reuse story.
                         ReadOnlyMemory<byte> pooledFrame =
                             _frameWriter.WriteFrame((byte)MsgType.Snapshot, snapshot);
+                        long pooledWriteStart = SnapshotTrace != null ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                         await _streamWriteMutex.WaitAsync(_cts.Token);
                         try
                         {
@@ -1069,6 +1147,7 @@ public sealed class Connection : IDisposable
                         finally { _streamWriteMutex.Release(); }
                         Interlocked.Increment(ref _snapshotFramesWritten);
                         Interlocked.Add(ref _snapshotBytesWritten, pooledFrame.Length);
+                        if (pooledWriteStart != 0) RecordTrace(snapshotTick, pooledWriteStart, pooledFrame.Length);
                         continue;
                     }
 
@@ -1077,6 +1156,7 @@ public sealed class Connection : IDisposable
                 }
 
                 byte[] frame = EncodeFrame(env);
+                long writeStart = isSnapshot && SnapshotTrace != null ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 await _streamWriteMutex.WaitAsync(_cts.Token);
                 try
                 {
@@ -1088,6 +1168,7 @@ public sealed class Connection : IDisposable
                 {
                     Interlocked.Increment(ref _snapshotFramesWritten);
                     Interlocked.Add(ref _snapshotBytesWritten, frame.Length);
+                    if (writeStart != 0) RecordTrace(snapshotTick, writeStart, frame.Length);
                 }
             }
         }
@@ -1097,6 +1178,33 @@ public sealed class Connection : IDisposable
         {
             _logger.LogWarning(ex, "Write loop error for user {UserId}", UserId);
         }
+    }
+
+    /// <summary>
+    /// One trace row for the snapshot just written. Write task only, trace on only. The KCP
+    /// counters are read here, at write end, so they describe the session the frame went into.
+    /// </summary>
+    private void RecordTrace(ulong worldTick, long writeStartTs, int bytes)
+    {
+        var trace = SnapshotTrace;
+        if (trace == null) return;
+        long writeEndTs = System.Diagnostics.Stopwatch.GetTimestamp();
+        var row = new GameServer.Observability.SnapshotTraceRow
+        {
+            ConnId = ConnectionId,
+            UserId = UserId,
+            WorldTick = worldTick,
+            GatherTs = _claimedGatherTs,
+            EnqueueTs = _claimedEnqueueTs,
+            WriteStartTs = writeStartTs,
+            WriteEndTs = writeEndTs,
+            Bytes = bytes,
+            // A job staged before the trace was attached carries no stamps.
+            QueueDepth = _claimedEnqueueTs == 0 ? -1 : _claimedQueueDepth,
+            DroppedOldestTotal = SendDroppedOldest,
+            Kcp = ReadKcpCounters(),
+        };
+        trace.Record(in row);
     }
 
     /// <summary>Read a single envelope from the wire (used during handshake).</summary>

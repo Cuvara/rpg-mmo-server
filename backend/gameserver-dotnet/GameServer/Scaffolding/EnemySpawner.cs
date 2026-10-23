@@ -134,10 +134,12 @@ public sealed class EnemySpawner : ISimulationPhase
         // arguments — pass them in any order and the schedule still runs
         // spawn -> move -> reap. That is the difference from the previous shape, where
         // ordering was three method calls in a private method and nothing said so.
+        var separation = new EnemySeparationSystem(dt, _settings);
         _schedule = new SimulationSchedule(
             rates,
             new EnemySpawnSystem(dt, _settings, logger),
-            new EnemyMoveSystem(dt, _settings),
+            new EnemyMoveSystem(dt, _settings, separation),
+            separation,
             new EnemyAttackSystem(rates, _settings, _decisions, _attacks),
             // WorldEvery as the one-shot hold, for the reason GameServer passes it to
             // InputHandler: an action written on one group and sampled on another has to

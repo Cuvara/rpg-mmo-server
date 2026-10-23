@@ -35,6 +35,11 @@ public class ServerOptions
     /// </summary>
     public string TransportKey { get; set; } = "";
     /// <summary>
+    /// Snapshot delivery trace sink (<c>GAMESERVER_SNAPSHOT_TRACE</c>, #473), handed to every
+    /// joined connection. Null = off. Owned (and disposed) by the caller.
+    /// </summary>
+    public Observability.SnapshotTrace? SnapshotTrace { get; set; }
+    /// <summary>
     /// Flood-protection and backpressure limits for the KCP listener (session caps, rate
     /// limits, idle timeout, queue bounds). Defaults are the production values.
     /// </summary>
@@ -277,6 +282,12 @@ public class ServerOptions
     /// Never the wall clock: the same kills on the same server roll the same loot.
     /// </summary>
     public ulong? LootSeed { get; set; }
+
+    /// <summary>
+    /// Radius over which fresh player placements at the spawn point are spread
+    /// (<see cref="ServerEnv.SpawnScatter"/>); 0 = all on the point.
+    /// </summary>
+    public float SpawnScatter { get; set; }
 
     /// <summary>
     /// Character store (ADR-31). When set, joins load the character named by the join
@@ -682,6 +693,44 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </remarks>
     public int Connections => _connections.Count;
 
+    /// <summary>
+    /// Per-connection delivery state folded over every live connection, for <c>/status</c>
+    /// (#473): the deepest data lane, total DropOldest drops, and the worst KCP session. Takes
+    /// each session's lock once; scrape thread only.
+    /// </summary>
+    public DeliveryStats ReadDeliveryStats()
+    {
+        var stats = new DeliveryStats { KcpRemoteWindowMin = -1 };
+        _connections.ForEach(conn =>
+        {
+            int depth = conn.SendQueueDepth;
+            if (depth > stats.SendQueueDepthMax) stats.SendQueueDepthMax = depth;
+            stats.SendDroppedOldest += conn.SendDroppedOldest;
+            var k = conn.ReadKcpCounters();
+            if (k.WaitSnd < 0) return;
+            if (k.WaitSnd > stats.KcpWaitSndMax) stats.KcpWaitSndMax = k.WaitSnd;
+            if (k.RtoMs > stats.KcpRtoMaxMs) stats.KcpRtoMaxMs = k.RtoMs;
+            if (stats.KcpRemoteWindowMin < 0 || k.RemoteWindow < stats.KcpRemoteWindowMin)
+                stats.KcpRemoteWindowMin = k.RemoteWindow;
+        });
+        return stats;
+    }
+
+    /// <summary>See <see cref="ReadDeliveryStats"/>.</summary>
+    public sealed class DeliveryStats
+    {
+        /// <summary>Deepest drop-oldest data lane over live connections.</summary>
+        public int SendQueueDepthMax;
+        /// <summary>DropOldest drops summed over live connections (closed ones are gone).</summary>
+        public long SendDroppedOldest;
+        /// <summary>Largest KCP WaitSnd (segments queued or unacknowledged) over live sessions.</summary>
+        public int KcpWaitSndMax;
+        /// <summary>Largest current KCP retransmission timeout, in milliseconds.</summary>
+        public int KcpRtoMaxMs;
+        /// <summary>Smallest receive window a peer advertises; -1 with no KCP session.</summary>
+        public int KcpRemoteWindowMin;
+    }
+
     /// <summary>Reconnect holds currently pending. Diagnostics and tests.</summary>
     public int PendingHolds => _holds.Count;
 
@@ -772,6 +821,12 @@ public sealed class GameServerHost : IAsyncDisposable
     /// Per-account refused-input counts and anomaly scores. Observation only.
     /// </summary>
     public Input.InputAnomalyTracker Anomalies => _anomalies;
+
+    /// <summary>
+    /// The resolver every damage and death in this world goes through. For the debug kill
+    /// hook (<c>Scaffolding.DebugKillPhase</c>), which must reach death the way play does.
+    /// </summary>
+    internal Gameplay.CombatResolver Combat => _inputHandler.Combat;
 
     /// <summary>The accepted-attack-rate audit (roadmap A4). Observation only.</summary>
     public Input.AttackRateAudit AttackRates => _attackRates;
@@ -871,6 +926,7 @@ public sealed class GameServerHost : IAsyncDisposable
             loot: options.Loot,
             baseHz: rates.BaseHz,
             lootSeed: options.LootSeed ?? DeriveLootSeed(options.MapId));
+        _world.Gameplay.SpawnScatter = options.SpawnScatter;
         _characterStore = options.CharacterStore;
 
         // Same two inputs the per-attack cooldown uses, so the audit's bound is derived
@@ -1671,6 +1727,13 @@ public sealed class GameServerHost : IAsyncDisposable
                 }
 
                 var spawn = PlayerSpawn.Resolve(loaded, _options.MapId, _bounds, _world.Gameplay.DefaultSpawn());
+                if (!spawn.PositionRestored)
+                {
+                    // A fresh placement at the spawn point is spread per player; a restored
+                    // position is where the player left and is kept exactly.
+                    Vec2 scattered = _world.Gameplay.ScatterSpawn(userId, new Vec2(spawn.Position.X, spawn.Position.Y));
+                    spawn = spawn with { Position = new Vec3(scattered.X, scattered.Y, spawn.Position.Z) };
+                }
                 if (spawn.DiscardedMapId != null)
                 {
                     _logger.LogInformation(
@@ -1712,6 +1775,10 @@ public sealed class GameServerHost : IAsyncDisposable
                 bool hasMapSpawn = _world.Gameplay.TryGetDefaultSpawn(out Vec3 mapSpawn);
                 var spawn = PlayerSpawn.Resolve(
                     saved, _options.MapId, _bounds, hasMapSpawn ? new Vec2(mapSpawn.X, mapSpawn.Y) : null);
+                if (!spawn.PositionRestored)
+                {
+                    spawn = spawn with { Position = _world.Gameplay.ScatterSpawn(userId, spawn.Position) };
+                }
 
                 if (spawn.DiscardedMapId != null)
                 {
@@ -1804,6 +1871,7 @@ public sealed class GameServerHost : IAsyncDisposable
                 SessionKey = Net.Security.SessionKey.Derive(_options.JoinTokenSecret, claims.Jti),
             };
             conn.DeltaState.MaxSnapshotBytes = _options.MaxSnapshotBytes;
+            conn.SnapshotTrace = _options.SnapshotTrace;
         conn.DeltaState.ImportanceWeights = _options.Importance.Weights;
         // The distance factor normalises by this, so a connection scored against the wrong
         // radius would weight distance wrongly on every candidate -- invisibly, because the
@@ -2050,7 +2118,7 @@ public sealed class GameServerHost : IAsyncDisposable
 
             if (entityAttached && !(conn?.Transferred ?? false) && !(conn?.Kicked ?? false))
             {
-                OnPlayerDisconnected(userId, countedOnline, conn);
+                OnPlayerDisconnected(userId, countedOnline, conn, graceful: conn?.Left ?? false);
             }
             conn?.Dispose();
 
@@ -2157,6 +2225,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 break;
 
             case MsgType.Disconnect:
+                // A graceful leave, not a drop: the player chose to go and the client will not
+                // reconnect, so the teardown saves and releases the entity now instead of
+                // holding it for the reconnect window. Marked BEFORE Close(), for the reason
+                // MarkTransferred is: closing ends the read loop and the handler's finally
+                // reads the flag.
+                conn.MarkLeft();
                 conn.Close();
                 break;
 
@@ -2597,7 +2671,7 @@ public sealed class GameServerHost : IAsyncDisposable
     /// already replaced this connection, removing by id would close the replacement —
     /// the player got kicked milliseconds after a successful rejoin (#229).
     /// </param>
-    private void OnPlayerDisconnected(string userId, bool countedOnline, Connection? conn)
+    private void OnPlayerDisconnected(string userId, bool countedOnline, Connection? conn, bool graceful = false)
     {
         // Whether THIS connection was still the registered one. When it was not, a
         // newer connection owns the user now: this teardown balances its own join
@@ -2626,7 +2700,15 @@ public sealed class GameServerHost : IAsyncDisposable
         // already sets to 60s for a dungeon and 30s for a map. It used to be hardcoded to
         // 60s here as well, so a dungeon host could not be given a shorter window — which
         // made the empty-instance shutdown below untestable without a real 60s wait.
-        var holdTtl = _options.HoldTtl;
+        //
+        // A graceful leave (the client sent `disconnect`) gets no window at all. It goes
+        // through this same path with a zero delay rather than a separate removal, so it
+        // keeps everything the hold path guarantees: out of reach at once (Linkdead), saved
+        // before removal, and a reconnect that lands during the save keeps its entity.
+        // Releasing at once also means a player can leave mid-combat without staying in the
+        // world. Whether that should be restricted (a combat-logout rule) is a gameplay
+        // decision, and this does not make one.
+        var holdTtl = graceful ? TimeSpan.Zero : _options.HoldTtl;
 
         var holdCts = new CancellationTokenSource();
         // Replace rather than overwrite: a superseded hold's CTS would otherwise never
@@ -2649,8 +2731,15 @@ public sealed class GameServerHost : IAsyncDisposable
             if (handle.IsValid) writer.PlayerTagOf(in handle).Linkdead = true;
         });
 
-        _logger.LogInformation("Player {UserId} disconnected, holding entity for {Ttl}",
-            userId, holdTtl);
+        if (graceful)
+        {
+            _logger.LogInformation("Player {UserId} left; saving and releasing the entity", userId);
+        }
+        else
+        {
+            _logger.LogInformation("Player {UserId} disconnected, holding entity for {Ttl}",
+                userId, holdTtl);
+        }
 
         // Fire-and-forget: remove entity after hold TTL unless reconnected
         _ = Task.Run(async () =>

@@ -63,6 +63,27 @@ public sealed class EnemyAiSettings
     public const string EnvRespawnPlayers = "GAMESERVER_PLAYER_RESPAWN";
 
     /// <summary>
+    /// Seed for the spawner's placement RNG. Unset keeps <see cref="System.Random.Shared"/>
+    /// (today's behaviour); a value makes the anchor and angle sequence repeatable, which is
+    /// what a regression replay of an enemy-crowding case needs. Not a gameplay number: it
+    /// changes no rate, count or distance, only which random sequence is drawn.
+    /// </summary>
+    public const string EnvSeed = "GAMESERVER_ENEMY_SEED";
+
+    /// <summary>
+    /// Minimum spacing, in world units, that <c>EnemySeparationSystem</c> keeps between living
+    /// enemies. <c>0</c> turns separation off (the pre-change behaviour: a chasing crowd stacks on
+    /// one point, rpg-mmo-server#469).
+    /// </summary>
+    public const string EnvSeparation = "GAMESERVER_ENEMY_SEPARATION";
+
+    /// <summary>
+    /// Hard ceiling on this map's enemy population, whatever the player count: the effective cap
+    /// is <c>min(MAX + MAX_PER_PLAYER x players, BUDGET)</c> (rpg-mmo-server#468).
+    /// </summary>
+    public const string EnvBudget = "GAMESERVER_ENEMY_BUDGET";
+
+    /// <summary>
     /// Ceiling on the <i>effective</i> population, i.e. on
     /// <see cref="EffectiveMaxEnemies"/> however it was reached. Not a gameplay limit — a
     /// bound that turns a misplaced zero into a startup failure rather than into a world
@@ -96,7 +117,8 @@ public sealed class EnemyAiSettings
         int hp, int attack, int defense, float speed,
         bool chase, MapBounds bounds,
         bool attacksEnabled, float attackIntervalSec, int attackersPerTarget,
-        bool respawnPlayers)
+        bool respawnPlayers, int? seed = null,
+        float separationRadius = EnemyAiTuning.SeparationRadius, int budget = EnemyAiTuning.EnemyBudget)
     {
         MaxEnemies = maxEnemies;
         MaxEnemiesPerPlayer = maxEnemiesPerPlayer;
@@ -116,6 +138,9 @@ public sealed class EnemyAiSettings
         AttackIntervalSec = attackIntervalSec;
         AttackersPerTarget = attackersPerTarget;
         RespawnPlayers = respawnPlayers;
+        Seed = seed;
+        SeparationRadius = separationRadius;
+        Budget = budget;
         ContactRangeSq = contactRange * contactRange;
         MinSpawnDistanceSq = minSpawnDistance * minSpawnDistance;
         DespawnRadiusSq = EnemyAiTuning.DespawnRadius * EnemyAiTuning.DespawnRadius;
@@ -205,6 +230,15 @@ public sealed class EnemyAiSettings
     /// <summary>Whether a player at 0 HP is returned to the map at the spawn point.</summary>
     public bool RespawnPlayers { get; }
 
+    /// <summary>Placement RNG seed, or null for <see cref="System.Random.Shared"/>. See <see cref="EnvSeed"/>.</summary>
+    public int? Seed { get; }
+
+    /// <summary>Spacing kept between living enemies; 0 = off. See <see cref="EnvSeparation"/>.</summary>
+    public float SeparationRadius { get; }
+
+    /// <summary>Hard per-map population ceiling. See <see cref="EnvBudget"/>.</summary>
+    public int Budget { get; }
+
     /// <summary>
     /// Worst-case damage per second one player can take, given the damage a single hit
     /// deals. Published rather than left to the reader because it is the number that
@@ -264,6 +298,7 @@ public sealed class EnemyAiSettings
         // population that silently collapses is exactly the failure the ceiling exists to
         // turn into a bounded number.
         long cap = (long)MaxEnemies + ((long)MaxEnemiesPerPlayer * livePlayers);
+        if (cap > Budget) cap = Budget;
         return cap > PopulationCeiling ? PopulationCeiling : (int)cap;
     }
 
@@ -332,6 +367,24 @@ public sealed class EnemyAiSettings
             return false;
         }
 
+        if (!TryFloat(lookup, EnvSeparation, EnemyAiTuning.SeparationRadius, 0f, MaxDistance, out float separation, out error) ||
+            !TryInt(lookup, EnvBudget, EnemyAiTuning.EnemyBudget, 1, PopulationCeiling, out int budget, out error))
+        {
+            return false;
+        }
+
+        int? seed = null;
+        string? seedRaw = lookup(EnvSeed);
+        if (!string.IsNullOrWhiteSpace(seedRaw))
+        {
+            if (!TryInt(lookup, EnvSeed, 0, 0, int.MaxValue, out int seedValue, out error))
+            {
+                return false;
+            }
+
+            seed = seedValue;
+        }
+
         // Cross-value check. A minimum that meets or exceeds the spawn distance cannot be
         // satisfied by any player-anchored placement at all — every candidate is rejected,
         // the spawner falls through to its unavoidable-crowding path on every single
@@ -352,7 +405,7 @@ public sealed class EnemyAiSettings
             maxEnemies, maxPerPlayer, waveSize, wavePerPlayer, interval,
             spawnDistance, minSpawn, contact,
             hp, attack, defense, speed, chase, bounds,
-            attacks, attackInterval, attackers, respawn);
+            attacks, attackInterval, attackers, respawn, seed, separation, budget);
         return true;
     }
 
@@ -383,6 +436,12 @@ public sealed class EnemyAiSettings
             sb.Append(" attacks=off");
         }
         sb.Append(CultureInfo.InvariantCulture, $" respawn={(RespawnPlayers ? "on" : "off")}");
+        sb.Append(CultureInfo.InvariantCulture, $" budget={Budget}");
+        sb.Append(CultureInfo.InvariantCulture, $" separation={SeparationRadius}");
+        if (Seed is int seed)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $" seed={seed}");
+        }
         return sb.ToString();
     }
 

@@ -47,7 +47,7 @@ human inspection and for the Unity DOTS sample, which polls it.
   "capacity": 100,
   "entities": 34,
   "enemies_alive": 22,
-  "enemy_ai": "chase=on max=30+45/player wave=2+6/player every 1.5s spawn@13 min=8 contact=1 hp=16 atk=5 def=2 speed=2.5",
+  "enemy_ai": "chase=on max=30+45/player wave=2+6/player every 1.5s spawn@13 min=8 contact=1 hp=16 atk=5 def=2 speed=2.5 budget=300 separation=0.8",
   "enemy_ai_max_now": 570,
   "bots": "off",
   "bots_alive": 0,
@@ -131,10 +131,12 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `handshakes_rejected` | Handshakes refused **before authentication** since process start, every reason summed: pool full at accept, no complete join frame by `GAMESERVER_HANDSHAKE_TIMEOUT_MS`, or a first frame that was not a well-formed `MsgJoinToken`. Same value as `sum(gameserver_handshakes_rejected_total)`. A capacity refusal is not one of these — that is an authenticated join, logged at Warning |
 | `aoi_radius` | Effective area-of-interest radius in world units (`GAMESERVER_AOI_RADIUS`, default 50). **Published because nothing else reveals it.** Two servers with identical rates, capacity and snapshot budget report completely different `snapshot_bytes` at the same population if their radii differ, and the radius is not on the wire — so before this field the only way to learn a pod's radius was to read the manifest that was supposed to have produced it, which an **already-allocated** GameServer does not necessarily reflect: its environment is fixed at pod creation and a fleet update reaches only new pods. |
 | `aoi_covers_whole_map` | True when `aoi_radius` reaches the map's diagonal, so interest management filters nothing and every entity appears in every snapshot for every client. Also logged at Warning once at startup. Legitimate in a small dungeon instance; on an open map it is the explanation for a bandwidth figure that looks inexplicable. |
+| `map_id` | The map this server simulates (`--map-id` / `GAMESERVER_MAP_ID`) |
+| `map_bounds` | `{min_x, min_y, max_x, max_y, source}`: the play-area rectangle in force. Player movement is clamped to it and enemies and bots are placed inside it. `source` is `map_file` when `content/maps/<map_id>.json` exists, else `configured_size`: `GAMESERVER_MAP_WIDTH` x `_HEIGHT` centred on the origin. map_01 has no map file, so this is the only place its bounds can be read |
 | `importance_profile` | Replication-importance profile in force (`GAMESERVER_IMPORTANCE`): `legacy`, `balanced`, or **`custom`** whenever any weight was overridden. Published for the same reason as `aoi_radius`: deployment-set, not on the wire, and two servers running different profiles are indistinguishable from any client. The label never claims a profile it is not running — a server reporting `balanced` with a replaced weight would be worse than one reporting nothing, because it invites a reader to look up what balanced means. |
 | `importance_weights` | The four weights with a data source, as they are actually running. `balanced` is a label; a custom profile is only readable as its numbers. |
 | `enemy_ai` | The enemy AI tuning in force (the `GAMESERVER_ENEMY_*` family), rendered as one line, or `off` when `GAMESERVER_ENEMIES=false`. Published for the same reason as `aoi_radius` and `importance_profile`: deployment-set, not on the wire, and two servers running different enemy tuning are indistinguishable from any client and from every other field here — `enemies_alive` answers "how many are there **now**", which is the same number on a server capped at 30 that has filled and one capped at 300 that has not. |
-| `enemy_ai_max_now` | Enemy population cap in force **at this instant**: `GAMESERVER_ENEMY_MAX + GAMESERVER_ENEMY_MAX_PER_PLAYER × players_online`. Rendered as well as configured, because the configuration is "30 + 45 per player" and the behaviour is a number, and an operator comparing it against `enemies_alive` needs the one that applies right now. **Counted from the world's player entities, not from `players_online`.** Those are different numbers and the difference is not academic: synthetic players (`bots`) are entities the cap scales on and are not connections, so a probe server with 24 bots and nobody logged in published a cap of 30 while actually running 1110 when this field was derived from the connection count. It still counts a dead player awaiting respawn, which the spawner does not, so it can read one allowance high during a wipe. |
+| `enemy_ai_max_now` | Enemy population cap in force **at this instant**: `min(GAMESERVER_ENEMY_MAX + GAMESERVER_ENEMY_MAX_PER_PLAYER × players_online, GAMESERVER_ENEMY_BUDGET)`. When it equals the `budget=N` in `enemy_ai`, the budget is what binds (#468). Rendered as well as configured, because the configuration is "30 + 45 per player" and the behaviour is a number, and an operator comparing it against `enemies_alive` needs the one that applies right now. **Counted from the world's player entities, not from `players_online`.** Those are different numbers and the difference is not academic: synthetic players (`bots`) are entities the cap scales on and are not connections, so a probe server with 24 bots and nobody logged in published a cap of 30 while actually running 1110 when this field was derived from the connection count. It still counts a dead player awaiting respawn, which the spawner does not, so it can read one allowance high during a wipe. |
 | `enemy_attacks_decided` | Enemy attacks decided and emitted as input since start; 0 with `GAMESERVER_ENEMY_ATTACKS=off` or with nothing in range. Counts **decisions, not landed hits**: an enemy decides on a world tick and the attack is validated on the next critical tick, so the gap between this and `attacks_accepted` is targets that another enemy killed in between. A small, non-zero gap during a wipe is expected; a large one means something is refusing attacks that the decision thought were legal. |
 | `enemy_attacks_throttled` | Enemy attacks **not** emitted because the target had already taken `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` hits in the current window. **The field that says whether the survivability cap is doing anything**, and the only one that does: "enemies are attacking and the cap is holding" and "enemies are not attacking at all" are indistinguishable from a player's HP bar, from `enemies_alive` and from every other field here, and they differ in exactly this counter. A crowd standing on a player with this at zero means the cap is not what is limiting the fight. |
 | `player_respawns` | Players returned to the map after their HP reached 0 (`GAMESERVER_PLAYER_RESPAWN`). **Includes synthetic players**, and a demo whose crowd is bots will show this climbing while `bots_alive` stays flat — which is the intended reading rather than a discrepancy: without the respawn rule a dead bot never acts again for the life of the process, so the population drains while the count does not move. |
@@ -145,12 +147,67 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `snapshot_entities_gathered` | Entities found in viewers' areas of interest, summed across every viewer every world tick — what the server **considered** in-interest, before the byte budget or the replication schedule withheld anything. Its pair is the client's own entity count: the two differing localises a loss to encode/decode, the two agreeing means the interest genuinely held that many. Read them together or neither is conclusive — before both existed, "the wire is delivering N" was an inference on both sides at once (Cuvara/Netcode#161). |
 | `snapshot_max_gather` | Largest single-viewer gather seen on this server. Kept beside the total because an **average hides the case that matters** — one client with an empty view among many full ones, which is the shape an anchor or interest bug makes. |
 | `snapshot_anchor_missing` | Viewer gathers **skipped** because the connection's own entity could not be resolved, so there was no position to centre its area of interest on. Brief non-zero around join and despawn is normal; sustained growth means a connection has outlived its entity and is being sent nothing. Read it as a *correctness* counter rather than a load one: before #385 this case was silent and anchored the AOI at `(0,0)` — the single most populated point on the map, where the mobs spawn — so the client received a busy, plausible view of somewhere it was not, with every other counter clean. |
-| `snapshot_max_update_gap_ms` | Longest wait, in **milliseconds**, between an entity's last send and the send that delivered an update it was owed — **whatever withheld it**: the replication schedule, the byte budget, or both in turn. This is the server's share of the client's 150ms interpolation cover, so read it against `150 − 45` (ADR-27 decisions 11–12). The single-source gauges, `snapshot_max_state_age` and `snapshot_max_shed_age`, each see one source only, in different units, and neither — nor their sum — bounds it: measured at 20Hz `tiered` under byte pressure they summed to 300ms against a 356ms worst gap (BENCHMARK.md Part XX). High-water mark since start, so join-time keyframe truncation is in it too. |
+| `snapshot_max_update_gap_ms` | Longest wait, in **milliseconds**, between an entity's last send and the send that delivered an update it was owed — **whatever withheld it**: the replication schedule, the byte budget, or both in turn. This is the server's share of the client's 150ms interpolation cover, so read it against `150 − 45` (ADR-27 decisions 11–12). The single-source gauges, `snapshot_max_state_age` and `snapshot_max_shed_age`, each see one source only, in different units, and neither — nor their sum — bounds it: measured at 20Hz `tiered` under byte pressure they summed to 300ms against a 356ms worst gap (BENCHMARK.md Part XX). High-water mark over each live connection's life, so join-time keyframe truncation is in it too — counted **from the join**, not from server start: before #471 an entity shed from a late joiner's first keyframe was charged the server's whole uptime (17 016 ms beside a one-tick `snapshot_max_shed_age`). |
+| `snapshot_send_queue_depth_max` | Deepest per-connection data lane right now: snapshot markers and heartbeats waiting for the connection's write task. Capacity 64; snapshots themselves are coalesced into one staged job, so a deep lane means the write task is not keeping up, not that snapshots are piling up (#473) |
+| `snapshot_send_dropped_oldest` | Items the drop-oldest data lanes discarded, summed over **live** connections. A dropped snapshot marker loses nothing (the job stays staged); a dropped heartbeat is a lost ping reply (#473) |
+| `kcp_wait_snd_max` | Largest KCP `WaitSnd` (segments queued or sent and not yet acknowledged) over live sessions, now. The writer is held at 256 and the session closes as a slow consumer past 1024. Rising on every session at once means acknowledgements stopped arriving: path loss or delay, not the process (#473) |
+| `kcp_rto_max_ms` | Largest current KCP retransmission timeout over live sessions, in ms. Follows the smoothed RTT the server measures from ACKs (minimum 30 ms with `nodelay`) (#473) |
+| `kcp_rmt_wnd_min` | Smallest receive window, in segments, any client last advertised. `0` means that client stopped reading and the server stopped sending to it until a window probe or update. `-1` with no live KCP session (#473) |
+| `kcp_segments_retransmitted` | KCP segments sent more than once since start, every session including closed ones: fast, early and timeout retransmissions together. Same value as `gameserver_kcp_segments_retransmitted_total` (#473) |
+| `snapshot_trace_rows_written` / `snapshot_trace_rows_dropped` | Rows the snapshot delivery trace (`GAMESERVER_SNAPSHOT_TRACE`) wrote and dropped; both `-1` when the trace is off. A non-zero drop count means the trace has holes: a missing row is then not evidence of a missing snapshot. See "Snapshot delivery trace" below |
 | `snapshot_max_state_age` | Longest gap, in **base ticks** (the base rate, `SIM_CRITICAL_HZ`, 60 by default — **not** world ticks; the encoder is handed the base tick), between an entity's state going stale for a client and being re-sent — the cost side of the schedule. **Not the same number as `snapshot_max_shed_age`**: a not-due entity is not a shed entity, so the budget's bookkeeping is blind to schedule deferrals, and reading one for the other reports a healthy zero while entities go seconds without an update. |
 | `inputs_dropped` | Client inputs discarded at ingest since process start (per-connection budget or world-wide queue cap, summed). Same value as `sum(gameserver_inputs_dropped_total)`. Movement coalesced in place is **not** a drop and not counted here |
 | `transfers_rejected` | `MsgTransferMap` requests refused because a transfer was already running on that connection. Same value as `gameserver_transfers_rejected_total` |
 | `commands_received` / `commands_accepted` / `commands_rejected` | Gameplay commands (MsgType 32, ADR-30; `docs/API.md` "Command channel") received, answered `ok = true`, and answered `ok = false`, since start. `received = accepted + rejected` once in-flight commands finish — every command gets exactly one result. The per-reason split of `commands_rejected` is on `gameserver_commands_rejected_total{reason}` |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
+
+### Snapshot delivery trace (`GAMESERVER_SNAPSHOT_TRACE`)
+
+Opt-in, dev/test only (#473). When the variable names a file, the server truncates it at
+startup and writes **one CSV line per (connection, sent snapshot)**. It exists to split a
+client-observed arrival gap into the server's share (gather, queue, encode, KCP send) and the
+path's share. The column set is a contract with the rpg-factory testlab analyzer (C1): change it
+only together with that analyzer.
+
+```
+conn_id,user_id,world_tick,gather_us,enqueue_us,write_start_us,write_end_us,bytes,queue_depth,dropped_oldest_total,kcp_wait_snd,kcp_snd_wnd,kcp_rmt_wnd,kcp_retrans_total,kcp_rto_ms
+```
+
+| Column | Meaning |
+|--------|---------|
+| `conn_id` | Process-unique connection number in creation order. A user id is not unique over a run: a reconnect reuses it |
+| `user_id` | The connection's user id (CSV-quoted only if it contains `,`, `"` or a newline) |
+| `world_tick` | The tick the client sees in this snapshot (`SnapshotMessage.tick`, a base tick) |
+| `gather_us` | When the tick thread began gathering this connection's view |
+| `enqueue_us` | When the gathered view was published and its marker enqueued on the data lane |
+| `write_start_us` | When the write task, having encoded the snapshot, started the transport write |
+| `write_end_us` | When the transport write returned (KCP `Send` + immediate flush to the UDP socket) |
+| `bytes` | Frame bytes, length prefix and envelope included |
+| `queue_depth` | Items already in the data lane when this snapshot's marker was enqueued |
+| `dropped_oldest_total` | Cumulative items this connection's drop-oldest lane discarded |
+| `kcp_wait_snd` | Segments queued or unacknowledged, read at write end |
+| `kcp_snd_wnd` | Local send window in segments (128) |
+| `kcp_rmt_wnd` | Receive window the client last advertised, in segments |
+| `kcp_retrans_total` | Cumulative segments this session sent more than once |
+| `kcp_rto_ms` | Current retransmission timeout, ms |
+
+All `*_us` values are microseconds on the **monotonic** clock (`Stopwatch`) since the process's
+first statement (`ProcessClock`), so they are comparable across connections in one file and
+never with another process's clock. `-1` means "not recorded": a job staged before the trace
+was attached carries no gather or enqueue stamp, and a transport that is not KCP (test doubles
+only) has no `kcp_*` values. No field is ever estimated.
+
+Rows are recorded by each connection's write task into a fixed ring (65 536 rows) and written by
+a background thread every 250 ms; the tick thread only stamps two timestamps per gather. A full
+ring drops the new row and counts it in `snapshot_trace_rows_dropped`. Off (unset or empty), the
+cost is one null check per gather and per write and no allocation
+(`SnapshotTraceTests.TheGatherPath_AllocatesNothing_TraceOnOrOff`). Wire bytes do not change.
+
+How to read it: `enqueue_us - gather_us` is the gather, `write_start_us - enqueue_us` is the
+wait for the write task plus the encode, `write_end_us - write_start_us` is the KCP send under
+the session lock. A client gap with these flat and `kcp_retrans_total` / `kcp_wait_snd` stepping
+up on every connection at once is on the path; with them flat and `kcp_wait_snd` low (ACKs
+arriving on time) it is above the client's KCP layer.
 
 ### Do not compute a rate — read `achieved_tick_hz`
 
@@ -223,6 +280,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_kcp_datagrams_dropped_total` | counter | `map_id`, `reason` | Inbound UDP datagrams dropped by the listener — `reason=oversize` (> 1500 B, never parsed), `undersize`, `rate` (per-session token bucket; KCP retransmits them), `bad_crypto` (wrong or missing `TRANSPORT_KEY`), `fec`, `no_session` (not a session opener from an unknown endpoint), `conv_mismatch`, `malformed`. `bad_crypto` climbing is the signature of a client built with a different key |
 | `gameserver_kcp_writes_rejected_total` | counter | `map_id` | Application frames larger than one maximum wire frame; each one closes its session. Zero forever on a healthy server |
 | `gameserver_kcp_datagrams_received_total` | counter | `map_id` | Datagrams the single KCP receive thread took off the socket (handled or dropped) |
+| `gameserver_kcp_segments_retransmitted_total` | counter | `map_id` | KCP segments sent more than once (fast, early and timeout retransmissions), every session, closed ones included. Rising while `gameserver_kcp_datagrams_dropped_total` stays flat means loss or ACK delay on the **path**, not in the process (#473) |
 | `gameserver_kcp_receive_busy_seconds_total` | counter | `map_id` | Time that receive thread spent handling datagrams. **Its rate is the thread's utilisation**: every session shares it, and near 1.0 the kernel drops datagrams for every player at once (`/proc/net/snmp` `Udp: RcvbufErrors`), seen as mass `dead_link` closes. Measured ~0.4-0.55 at 95 players with AI enemies on the WSL dev box |
 | `gameserver_gc_collections_total` | counter | `map_id`, `generation=0\|1\|2` | Garbage collections since process start. A gen-2 rate during a load run is the first thing to read when tick p99 jumps |
 | `gameserver_gc_allocated_bytes_total` | counter | `map_id` | Managed bytes allocated since start; its rate over a run is the allocation pressure the hot paths are meant to keep near zero |
@@ -314,8 +372,26 @@ Distinct from `gameserver_inputs_dropped_total`, which is ingest backpressure.
 | `attack_out_of_range` | Target outside attack range | **Yes** — target moved in flight; rises with RTT |
 | `attack_on_cooldown` | Cooldown had not expired | **Mostly** — client cooldown prediction drift |
 | `attack_other` | Validator reason this build does not classify | **N/A** — means the classifier is stale, i.e. a bug in `InputRejection` |
+| `attack_target_untargetable` | Target resolved but cannot be attacked: an item, a projectile, or a player held for reconnect | **Yes** — the target's connection dropped in flight |
+| `attack_cannot_act` | Attacker under crowd control that forbids acting (stun) | **Yes** — a stunned client keeps sending until the status reaches it |
+| `ability_unknown` | Ability id not in the content set | **Yes** — stale hotbar, or client and server content disagree |
+| `ability_on_cooldown` | Global ability cooldown had not expired | **Mostly** — client cooldown prediction drift |
+| `ability_out_of_range` | Target or aim point outside the ability's range | **Yes** — target moved in flight |
+| `ability_target_unresolved` | Entity-targeted ability with no target that resolves to a live entity | **Yes** — target despawned in flight |
+| `ability_target_dead` | Target already dead | **Yes** — someone else's blow landed first |
+| `ability_caster_dead` | Caster dead (`AbilityLogic.ValidateCast`) | **Yes** — in practice `dead_entity` catches a dead caster's input first, so this stays near zero |
+| `ability_cannot_cast` | Caster under crowd control that forbids casting (stun or silence) | **Yes** — as `attack_cannot_act` |
+| `ability_missing_aim` | Area or projectile ability without a usable aim point (none, or one with no direction from the caster) | **Unknown** — whether the shipped client can produce it is not established; weighted benign until it is |
+| `ability_other` | Validator reason this build does not classify | **N/A** — a bug in `InputRejection`, as `attack_other` |
 
-**All nine series are primed to zero at startup**, so "no rejections" reads as `0` rather
+**Combat authority at a glance** (the test lab's view): rejected casts and attacks by reason are
+the `attack_*` and `ability_*` series above; a dead caster's or attacker's input is `dead_entity`.
+For example `sum by (reason) (rate(gameserver_inputs_rejected_total{reason=~"attack_.*|ability_.*"}[1m]))`.
+`attack_target_untargetable`, `attack_cannot_act`, `ability_cannot_cast` and
+`ability_missing_aim` were counted under `attack_other` / `ability_other` before they had series
+of their own; a non-zero `*_other` now again means only "the classifier is stale".
+
+**Every series in the table is primed to zero at startup**, so "no rejections" reads as `0` rather
 than as an absent series. That is deliberate and it is why the reasons are a bounded enum
 rather than the validator's free-form strings — which additionally embed
 attacker-controlled values (the rejected vector, the target id) and would be unbounded

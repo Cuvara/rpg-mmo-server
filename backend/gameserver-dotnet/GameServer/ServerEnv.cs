@@ -153,4 +153,32 @@ internal static class ServerEnv
     /// a deployment setting: a long-running service that reads it true never serves.
     /// </summary>
     public const string MigrateOnly = "GAMESERVER_MIGRATE_ONLY";
+
+    /// <summary>
+    /// <c>on</c> serves <c>/debug/entities</c> on the metrics port: every entity's id, type,
+    /// position, HP and dead flag, read under the world's read lock off the tick thread. For
+    /// automated test runs (rpg-factory testlab) that need server-authoritative positions.
+    /// The same switch serves <c>POST /debug/kill</c>, which takes a player's HP to 0 on the tick
+    /// thread through the normal death path (<c>Scaffolding.DebugKillPhase</c>).
+    /// Off by default and never set by a fleet manifest: it exposes the whole world state and
+    /// lets anyone reaching the metrics port kill any player.
+    /// </summary>
+    public const string DebugEntities = "GAMESERVER_DEBUG_ENTITIES";
+
+    /// <summary>
+    /// File path for the opt-in snapshot delivery trace (#473): one CSV line per (connection,
+    /// sent snapshot) with gather, enqueue and write timestamps, queue depth and KCP session
+    /// counters (see <c>Observability.SnapshotTrace</c>). Unset or empty = off, at the cost of
+    /// one null check per gather and per write. The file is truncated at startup; a path that
+    /// cannot be opened exits 2. Dev and test only, never set by a fleet manifest.
+    /// </summary>
+    public const string SnapshotTrace = "GAMESERVER_SNAPSHOT_TRACE";
+
+    /// <summary>
+    /// Radius in world units over which a player placed at the spawn point (a new character, a
+    /// cross-map arrival or a respawn) is spread, so players do not start on one point and drag
+    /// every enemy onto it (rpg-mmo-server#469). <c>0</c> = everybody on the point. Default
+    /// <c>3</c> (see <c>ServerDefaults.SpawnScatter</c>). Decimal, 0..50, strict.
+    /// </summary>
+    public const string SpawnScatter = "GAMESERVER_SPAWN_SCATTER";
 }

@@ -5,7 +5,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `stack.sh up` stamps the gateway and game server images with `STACK_GIT_REVISION=<sha>` (env)
+  as the `org.opencontainers.image.revision` label. Before this change every stack-built image read
+  `unknown`, so a scratch stack could not be traced to a commit. The SHA comes from the caller,
+  because git inside WSL cannot resolve a Windows-created worktree. Unset keeps `unknown`;
+  a value that is not a hex SHA exits 2. Documented in `docs/RUNBOOK-local-dev.md`.
+- Compose passthrough for `GAMESERVER_SNAPSHOT_TRACE` (rpg-mmo-server#473) in
+  `docker-compose.yml` and `docker-compose.override.yml`: the snapshot delivery trace file
+  path, dev and test only. Deliberately **not** declared in the Agones fleet or the k8s fleets
+  (`FleetEnvPassthroughTests` excludes it with the reason: unbounded file growth on the pod
+  and every player's user id). `docs/RUNBOOK-local-dev.md` says how to get the file out.
+- Passthrough for `GAMESERVER_ENEMY_SEPARATION`, `GAMESERVER_ENEMY_BUDGET` and
+  `GAMESERVER_SPAWN_SCATTER` (rpg-mmo-server#468, #469) in `docker-compose.yml`,
+  `docker-compose.override.yml`, the Agones fleet and both k8s fleets (optional
+  `gameserver-config` keys `enemy-separation`, `enemy-budget`, `spawn-scatter`). Unset keeps
+  the server defaults.
+
 ### Fixed
+- **`stack.sh --scratch` collided with the default stack.** Compose loads
+  `docker-compose.override.yml` whenever no `-f` is given, and that file publishes the default
+  stack's fixed host ports (8000, 9101/9102, 9000/udp, 9002/udp, 9103). It also pinned
+  `GAMESERVER_PUBLIC_ADDR` to `:9000`, so a scratch stack bound the default stack's ports and
+  advertised its UDP port. Scratch mode now passes `-f docker-compose.yml` explicitly and
+  uses its own image tags (`:scratch`), so building a scratch stack from a branch no longer
+  retags the `:dev` images the default stack recreates from.
+
 - **`registry.addr_kcp_join` could never pass: the verify probe did not perform the KCP join.**
   `k8s/verify/probe` declared `-kcp-join` / `PROBE_KCP_JOIN` and read `TRANSPORT_KEY`, but
   `probe enterworld` stopped at the gateway hop and never printed `kcp_join=`, so the check
@@ -30,6 +55,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   down once empty. On a server not in `require` mode the probe is accepted into the world.
   Do not aim it at a `Ready` server you do not want allocated; production targets need
   explicit authorization. `PROBE_KCP_JOIN=0` stops the probe at the gateway hop.
+
+### Added
+- `STACK_SCRATCH_EXTRA_ENV=<file>`: KEY=value lines appended last to `.env.scratch`, so a
+  caller (the rpg-factory testlab) can set game server knobs on the scratch stack without
+  editing `.env`.
+- Compose passthroughs: `GAMESERVER_DEBUG_ENTITIES` (both game servers, dev and test only),
+  `GAMESERVER_ENEMY_SEED` (both game servers and all three fleets), and the gateway's
+  `GATEWAY_CONN_RATE_PER_MIN` / `GATEWAY_CONN_BURST` (defaults unchanged at 10). Every local
+  client reaches the gateway from the same docker bridge address, so the 11th join within a
+  minute was refused with `connection rate limited`. A local or scratch stack can now raise
+  the limit.
 
 ### Changed
 - **Host UDP buffer limits for the KCP game socket.** `scripts/bootstrap-vps.sh` writes

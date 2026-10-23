@@ -12,6 +12,10 @@ using GameServer.Net.Transport;
 using GameServer.Registry;
 using GameServer.Server;
 
+// The monotonic origin every *_us figure (snapshot trace) counts from: touched first, so it
+// is as close to process start as this program gets.
+_ = ProcessClock.Origin;
+
 // ── Parse command-line args and environment variables ──
 
 string mode = GetArg(args, "--mode") ?? Env(ServerEnv.Mode) ?? "map";
@@ -312,6 +316,64 @@ if (!GameServer.Scaffolding.BotSettings.TryCreate(
 }
 
 GameServer.Scaffolding.BotSettings bots = botsParsed!;
+
+// Spawn scatter (rpg-mmo-server#469). Strict: a typo must not silently stack every player on
+// the spawn point again.
+float spawnScatter = ServerDefaults.SpawnScatter;
+string? spawnScatterRaw = Env(ServerEnv.SpawnScatter);
+if (!string.IsNullOrWhiteSpace(spawnScatterRaw))
+{
+    if (!float.TryParse(spawnScatterRaw.Trim(), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out spawnScatter)
+        || !float.IsFinite(spawnScatter) || spawnScatter < 0f || spawnScatter > 50f)
+    {
+        logger.LogCritical("invalid {Name}={Value}: expected a number of world units in 0..50",
+            ServerEnv.SpawnScatter, spawnScatterRaw);
+        return 2;
+    }
+}
+
+// /debug/entities (dev/test only, see ServerEnv.DebugEntities). Strict like every knob above:
+// a typo that silently left it off would make a test run report "no server positions" for a
+// reason that names nothing.
+bool debugEntities;
+switch (Env(ServerEnv.DebugEntities)?.Trim().ToLowerInvariant())
+{
+    case null or "" or "off" or "false" or "0":
+        debugEntities = false;
+        break;
+    case "on" or "true" or "1":
+        debugEntities = true;
+        break;
+    default:
+        logger.LogCritical(
+            "invalid {Name}={Value}: expected on/off (true/false, 1/0)",
+            ServerEnv.DebugEntities, Env(ServerEnv.DebugEntities));
+        return 2;
+}
+
+// Snapshot delivery trace (dev/test only, see ServerEnv.SnapshotTrace, #473). A path that
+// cannot be opened is fatal rather than a silent "off": a test run that asked for a trace and
+// got none would report a clean server for a reason that names nothing.
+SnapshotTrace? snapshotTrace = null;
+string? snapshotTracePath = Env(ServerEnv.SnapshotTrace)?.Trim();
+if (!string.IsNullOrEmpty(snapshotTracePath))
+{
+    try
+    {
+        snapshotTrace = SnapshotTrace.Open(snapshotTracePath);
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+    {
+        logger.LogCritical("invalid {Name}={Value}: cannot create the trace file: {Error}",
+            ServerEnv.SnapshotTrace, snapshotTracePath, ex.Message);
+        return 2;
+    }
+    logger.LogWarning(
+        "{Name} is set: writing one CSV line per sent snapshot per connection to {Path}. " +
+        "Dev/test diagnostics; leave it unset in production",
+        ServerEnv.SnapshotTrace, snapshotTracePath);
+}
 
 if (!GameServer.Server.ImportanceSettings.TryCreate(
         GetArg(args, "--importance") ?? Env(GameServer.Server.ImportanceSettings.EnvVar),
@@ -1004,8 +1066,15 @@ IAgonesSdk agonesSdk = useAgones
 // which the status assembly reads as zero rather than as a missing field.
 GameServer.Scaffolding.EnemySpawner? enemyPhase = null;
 
+// The debug kill hook (POST /debug/kill) when GAMESERVER_DEBUG_ENTITIES is on: the queue the
+// HTTP thread fills and the tick drains, and the resolver it kills through, read back from the
+// server once the server exists. Both stay null otherwise.
+GameServer.Scaffolding.DebugKillQueue? debugKills = debugEntities ? new GameServer.Scaffolding.DebugKillQueue() : null;
+GameServer.Gameplay.CombatResolver? debugKillCombat = null;
+
 var options = new ServerOptions
 {
+    SpawnScatter = spawnScatter,
     ServerAddr = addr,
     Transport = transport,
     TransportKey = transportKey,
@@ -1031,6 +1100,7 @@ var options = new ServerOptions
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,
     MaxSnapshotBytes = maxSnapshotBytes,
+    SnapshotTrace = snapshotTrace,
     Aoi = aoi,
     Importance = importance,
     ReplicationSchedule = replicationSchedule,
@@ -1063,12 +1133,16 @@ var options = new ServerOptions
     // Captured so /status can publish what enemy-side combat has actually done. The phase
     // is built by the factory below, inside the server's constructor, so there is no
     // instance to read until then — and nothing reads this before the server is running.
-    SimulationPhaseFactory = loadTestEntities > 0
-        ? (world, loggerFactory, onGroupRan) => new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan)
-        : (enableEnemySpawner || bots.Enabled)
-            ? (world, loggerFactory, onGroupRan) =>
+    SimulationPhaseFactory = (loadTestEntities > 0 || enableEnemySpawner || bots.Enabled || debugEntities)
+        ? (world, loggerFactory, onGroupRan) =>
+        {
+            var phases = new List<GameServer.Server.ISimulationPhase>(3);
+            if (loadTestEntities > 0)
             {
-                var phases = new List<GameServer.Server.ISimulationPhase>(2);
+                phases.Add(new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan));
+            }
+            else
+            {
                 if (enableEnemySpawner)
                 {
                     enemyPhase = new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan, enemyAi);
@@ -1080,11 +1154,21 @@ var options = new ServerOptions
                     // CompositeSimulationPhase.
                     phases.Add(new GameServer.Scaffolding.BotPlayerSpawner(world, simulationRates, bots, loggerFactory.CreateLogger<GameServer.Scaffolding.BotPlayerSpawner>(), onGroupRan));
                 }
-                return phases.Count == 1
-                    ? phases[0]
-                    : new GameServer.Scaffolding.CompositeSimulationPhase(phases.ToArray());
             }
-            : null,
+            if (debugKills != null)
+            {
+                // Last, so a debug kill lands after this tick's player.respawn run and is
+                // undone by the next one, as an enemy kill is — see DebugKillPhase. The
+                // resolver is read back from the server once it exists (debugKillCombat).
+                phases.Add(new GameServer.Scaffolding.DebugKillPhase(
+                    world, debugKills, () => Volatile.Read(ref debugKillCombat),
+                    loggerFactory.CreateLogger<GameServer.Scaffolding.DebugKillPhase>()));
+            }
+            return phases.Count == 1
+                ? phases[0]
+                : new GameServer.Scaffolding.CompositeSimulationPhase(phases.ToArray());
+        }
+        : null,
     // The composition root is the one place allowed to know what the game is, so it is
     // where the status endpoint's entity count comes from. The JSON field stays
     // `enemies_alive` — the Unity DOTS sample polls /status and reads it.
@@ -1171,6 +1255,19 @@ var uptime = System.Diagnostics.Stopwatch.StartNew();
 // see SetContentProvider for why this is not a re-serialisation.
 metricsEndpoint?.SetContentProvider(() => (content.CanonicalBytes, content.Hash));
 
+// The debug surface (/debug/entities, /debug/kill), one switch. The kill hook exists only
+// where the world is already readable; it is applied on the tick thread by DebugKillPhase,
+// and this only hands that phase the resolver and the port.
+if (debugEntities)
+{
+    Volatile.Write(ref debugKillCombat, server.Combat);
+}
+GameServer.Observability.DebugSurface.Enable(
+    metricsEndpoint, debugEntities,
+    () => GameServer.Observability.DebugEntitiesDocument.Write(
+        server.World, server.CurrentTick, uptime.Elapsed.TotalSeconds),
+    debugKills == null ? null : debugKills.Submit);
+
 // Wire up the /status JSON endpoint with live server state.
 metricsEndpoint?.SetStatusProvider(() =>
 {
@@ -1178,6 +1275,7 @@ metricsEndpoint?.SetStatusProvider(() =>
     // scalar. `tickRate` is `--tick-rate` / GAMESERVER_TICK_RATE, which no deployment
     // sets, so reading it here reported the compiled-in default forever regardless of
     // what the server was running — #144.
+    var delivery = server.ReadDeliveryStats();
     var status = new ServerStatus
     {
         Ok = true,
@@ -1264,6 +1362,10 @@ metricsEndpoint?.SetStatusProvider(() =>
         MaxSnapshotBytes = maxSnapshotBytes,
         AoiRadius = aoi.Radius,
         AoiCoversWholeMap = aoi.CoversWholeMap,
+        MapId = mapId,
+        // The same bounds ServerOptions.MapBounds hands the motor and the enemy/bot settings
+        // were rebuilt against: one rectangle, read from one place.
+        MapBounds = GameServer.Observability.MapBoundsStatus.From(map.Geometry.Bounds, map.FromFile),
         ImportanceProfile = importance.Profile,
         ImportanceWeights = importance.ToString(),
         ReplicationSchedule = replicationSchedule.Describe(worldHz),
@@ -1285,6 +1387,14 @@ metricsEndpoint?.SetStatusProvider(() =>
         SnapshotMaxGather = metrics.MaxGather,
         SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,
         SnapshotMaxShedAge = metrics.MaxShedAge,
+        SnapshotSendQueueDepthMax = delivery.SendQueueDepthMax,
+        SnapshotSendDroppedOldest = delivery.SendDroppedOldest,
+        KcpWaitSndMax = delivery.KcpWaitSndMax,
+        KcpRtoMaxMs = delivery.KcpRtoMaxMs,
+        KcpRemoteWindowMin = delivery.KcpRemoteWindowMin,
+        KcpSegmentsRetransmitted = server.TransportStats?.SegmentsRetransmitted ?? 0,
+        SnapshotTraceRowsWritten = snapshotTrace?.RowsWritten ?? -1,
+        SnapshotTraceRowsDropped = snapshotTrace?.RowsDropped ?? -1,
         TransfersRejected = metrics.TransfersRejected,
         CommandsReceived = metrics.CommandsReceived,
         CommandsAccepted = metrics.CommandsAccepted,
@@ -1323,6 +1433,15 @@ finally
     if (redisEventStream is not null) await redisEventStream.DisposeAsync();
     if (agonesSdk is IDisposable disposableAgones) disposableAgones.Dispose();
     if (postgresStore is not null) await postgresStore.DisposeAsync();
+    if (snapshotTrace is not null)
+    {
+        // After the server: its connections stop recording before the last flush.
+        snapshotTrace.Dispose();
+        logger.LogInformation(
+            "Snapshot trace closed: {Written} rows written, {Dropped} dropped{Failure}",
+            snapshotTrace.RowsWritten, snapshotTrace.RowsDropped,
+            snapshotTrace.Failure is { } f ? $", write failed: {f}" : "");
+    }
 }
 
 logger.LogInformation("GameServer .NET exited");

@@ -31,8 +31,14 @@
 # Flags (any subcommand):
 #   --scratch     run an ISOLATED second stack (own compose project, own
 #                 container names, every published port offset) so it can
-#                 coexist with a stack that is already up.
+#                 coexist with a stack that is already up. Uses only
+#                 docker-compose.yml (never the default stack's override), image
+#                 tags `:scratch`, and appends STACK_SCRATCH_EXTRA_ENV=<file>
+#                 (KEY=value lines) last, so a caller can set game server knobs.
 #   --no-build    skip the image builds in `up` (use the images already there).
+#
+# STACK_GIT_REVISION=<sha> (env) stamps the gateway and game server images with
+# that commit as org.opencontainers.image.revision; unset leaves it `unknown`.
 #
 # `make` is NOT required and is not installed on every dev box here; the
 # Makefile's flow-* targets are thin wrappers around this script.
@@ -119,11 +125,28 @@ if [ "$SCRATCH" -eq 1 ]; then
 		# PUBLISHED port, not the in-container listen port.
 		echo "GAMESERVER_PUBLIC_ADDR=:9300"
 		echo "GAME_DB_URL=postgres://\${POSTGRES_GAME_USER:-game}:\${POSTGRES_GAME_PASSWORD:-localdev}@localhost:6433/\${POSTGRES_GAME_DB:-gamestate}?sslmode=disable"
+		# Own image tags, so building a scratch stack from a branch never retags the
+		# images the default stack recreates from (`:dev`).
+		echo "GATEWAY_IMAGE=${GATEWAY_IMAGE:-rpg-mmo/gateway:scratch}"
+		echo "GAMESERVER_IMAGE=${GAMESERVER_IMAGE:-rpg-mmo/gameserver-dotnet:scratch}"
+		# Caller-supplied overrides (game server knobs, ports), appended last so they
+		# win. The rpg-factory testlab passes its scenario's server settings here.
+		if [ -n "${STACK_SCRATCH_EXTRA_ENV:-}" ]; then
+			echo "# --- from STACK_SCRATCH_EXTRA_ENV=$STACK_SCRATCH_EXTRA_ENV ---"
+			cat "$STACK_SCRATCH_EXTRA_ENV"
+			echo
+		fi
 	} >"$SCRATCH_ENV_FILE"
 	ENV_FILE=$SCRATCH_ENV_FILE
+	# docker-compose.override.yml is the DEFAULT stack's: it publishes fixed host ports
+	# (8000, 9000/udp, 9101, 9002/udp, 9103) and pins GAMESERVER_PUBLIC_ADDR to :9000.
+	# Compose loads it automatically when no -f is given, so a scratch stack used to bind
+	# the default stack's ports and advertise its UDP port. Name the base file explicitly.
+	COMPOSE_FILES="-f docker-compose.yml"
 else
 	PROJECT=rpg-mmo-meta
 	ENV_FILE=.env
+	COMPOSE_FILES=""
 fi
 
 # Load the SAME file into this shell, so the script's own probes and the
@@ -248,7 +271,7 @@ fi
 
 # Relative --env-file/-f paths only: the docker.exe shim cannot resolve absolute
 # WSL paths (docs/CICD.md §4a), which is why this script cd's to its own dir.
-dc() { $COMPOSE -p "$PROJECT" --env-file "$ENV_FILE" --profile realtime "$@"; }
+dc() { $COMPOSE -p "$PROJECT" $COMPOSE_FILES --env-file "$ENV_FILE" --profile realtime "$@"; }
 
 redis_cli() {
 	dc exec -T redis sh -c \
@@ -290,11 +313,25 @@ do_up() {
 			echo "==> modules/nakama.so up to date with nakama/ and shared/ sources — skipping plugin build"
 		fi
 
+		# Provenance: STACK_GIT_REVISION=<sha> is stamped into both images as the
+		# org.opencontainers.image.revision label. Taken from the caller rather than
+		# `git rev-parse` here: git inside WSL cannot resolve a worktree created by
+		# Windows git (its .git file names a C:/ path). Unset keeps the Dockerfile
+		# default, `unknown`.
+		REVISION_ARGS=()
+		if [ -n "${STACK_GIT_REVISION:-}" ]; then
+			if ! [[ "$STACK_GIT_REVISION" =~ ^[0-9a-f]{7,40}$ ]]; then
+				echo "STACK_GIT_REVISION=$STACK_GIT_REVISION is not a hex commit SHA (7-40 chars)" >&2
+				exit 2
+			fi
+			REVISION_ARGS=(--build-arg "GIT_REVISION=$STACK_GIT_REVISION")
+			echo "==> stamping images with revision $STACK_GIT_REVISION"
+		fi
 		echo "==> building gateway image"
-		docker build -f docker/Dockerfile.gateway \
+		docker build -f docker/Dockerfile.gateway ${REVISION_ARGS[@]+"${REVISION_ARGS[@]}"} \
 			-t "${GATEWAY_IMAGE:-rpg-mmo/gateway:dev}" ..
 		echo "==> building C# gameserver image (NativeAOT — slow on a cold cache)"
-		docker build -f docker/Dockerfile.gameserver-dotnet \
+		docker build -f docker/Dockerfile.gameserver-dotnet ${REVISION_ARGS[@]+"${REVISION_ARGS[@]}"} \
 			-t "${GAMESERVER_IMAGE:-rpg-mmo/gameserver-dotnet:dev}" ..
 	fi
 

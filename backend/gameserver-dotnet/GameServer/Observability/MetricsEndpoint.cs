@@ -35,6 +35,10 @@ public sealed class MetricsEndpoint : IAsyncDisposable
     private Task? _healthTask;
     private Task? _statusTask;
     private Task? _contentTask;
+    private HttpListener? _debugEntitiesListener;
+    private Task? _debugEntitiesTask;
+    private HttpListener? _debugKillListener;
+    private Task? _debugKillTask;
     private Func<(byte[] Bytes, string Hash)>? _contentProvider;
     private Func<ServerStatus>? _statusProvider;
 
@@ -56,6 +60,189 @@ public sealed class MetricsEndpoint : IAsyncDisposable
     /// Must be called after the server is fully wired up (tick loop, spawner, stores).
     /// </summary>
     public void SetStatusProvider(Func<ServerStatus> provider) => _statusProvider = provider;
+
+    /// <summary>
+    /// Serve <c>/debug/entities</c> from <paramref name="provider"/>, which returns a complete
+    /// UTF-8 JSON document. Opt-in (<see cref="ServerEnv.DebugEntities"/>): the listener does
+    /// not exist unless this is called, so a server that never enables it binds nothing new.
+    /// </summary>
+    /// <returns>False when the listener could not be bound; the server keeps running.</returns>
+    public bool EnableDebugEntities(Func<byte[]> provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (_debugEntitiesListener != null) return true;
+
+        var listener = new HttpListener();
+        try
+        {
+            listener.Prefixes.Add(UriPrefix + "debug/entities/");
+            listener.Start();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not bind /debug/entities ({Reason}); endpoint disabled", ex.Message);
+            try { listener.Close(); } catch { /* ignore */ }
+            return false;
+        }
+
+        _debugEntitiesListener = listener;
+        _debugEntitiesTask = Task.Run(() => DebugEntitiesLoopAsync(listener, provider, _cts.Token));
+        _logger.LogWarning(
+            "/debug/entities enabled on {Prefix}: the whole world state is readable on this port " +
+            "(dev/test only)", UriPrefix);
+        return true;
+    }
+
+    private async Task DebugEntitiesLoopAsync(HttpListener listener, Func<byte[]> provider, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            HttpListenerContext ctx;
+            try
+            {
+                ctx = await listener.GetContextAsync();
+            }
+            catch (ObjectDisposedException) { break; }
+            catch (HttpListenerException) { break; }
+            catch (OperationCanceledException) { break; }
+
+            try
+            {
+                byte[] body = provider();
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                ctx.Response.ContentLength64 = body.Length;
+                await ctx.Response.OutputStream.WriteAsync(body, ct);
+                ctx.Response.Close();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "/debug/entities response failed");
+                try { ctx.Response.Abort(); } catch { /* ignore */ }
+            }
+        }
+    }
+
+    /// <summary>How long <c>POST /debug/kill</c> waits for the tick thread before answering 504.</summary>
+    internal static readonly TimeSpan DebugKillTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Serve <c>POST /debug/kill</c>: take one player's HP to 0 down the normal damage and
+    /// death path. <paramref name="submit"/> queues the request for the tick thread and
+    /// completes when the tick has resolved it (or the token withdraws it); this listener only
+    /// parses, waits and answers. Opt-in under the same switch as <c>/debug/entities</c>
+    /// (<see cref="ServerEnv.DebugEntities"/>): the listener does not exist unless this is called.
+    /// </summary>
+    /// <returns>False when the listener could not be bound; the server keeps running.</returns>
+    public bool EnableDebugKill(Func<string, CancellationToken, Task<DebugKillResult>> submit)
+    {
+        ArgumentNullException.ThrowIfNull(submit);
+        if (_debugKillListener != null) return true;
+
+        var listener = new HttpListener();
+        try
+        {
+            listener.Prefixes.Add(UriPrefix + "debug/kill/");
+            listener.Start();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not bind /debug/kill ({Reason}); endpoint disabled", ex.Message);
+            try { listener.Close(); } catch { /* ignore */ }
+            return false;
+        }
+
+        _debugKillListener = listener;
+        _debugKillTask = Task.Run(() => DebugKillLoopAsync(listener, submit, _cts.Token));
+        _logger.LogWarning(
+            "/debug/kill enabled on {Prefix}: anyone reaching this port can kill any player " +
+            "(dev/test only)", UriPrefix);
+        return true;
+    }
+
+    private async Task DebugKillLoopAsync(
+        HttpListener listener, Func<string, CancellationToken, Task<DebugKillResult>> submit, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            HttpListenerContext ctx;
+            try
+            {
+                ctx = await listener.GetContextAsync();
+            }
+            catch (ObjectDisposedException) { break; }
+            catch (HttpListenerException) { break; }
+            catch (OperationCanceledException) { break; }
+
+            try
+            {
+                int status;
+                byte[] body;
+                if (!string.Equals(ctx.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+                {
+                    // A state change, so never on GET: a crawler or a browser prefetch must not
+                    // be able to kill anybody by following a link.
+                    status = 405;
+                    body = DebugKill.ErrorBody("method_not_allowed");
+                    ctx.Response.AddHeader("Allow", "POST");
+                }
+                else if (ctx.Request.ContentLength64 > DebugKill.MaxBodyBytes)
+                {
+                    status = 413;
+                    body = DebugKill.ErrorBody(DebugKill.BodyTooLarge);
+                }
+                else
+                {
+                    // One byte past the limit is read on purpose: filling it proves the body is
+                    // larger than the limit (a chunked body declares no length), and an oversized
+                    // body is refused rather than parsed from its first 4 KiB (review R1-2).
+                    byte[] buffer = new byte[DebugKill.MaxBodyBytes + 1];
+                    int read = 0;
+                    Stream input = ctx.Request.InputStream;
+                    while (read < buffer.Length)
+                    {
+                        int n = await input.ReadAsync(buffer.AsMemory(read), ct);
+                        if (n == 0) break;
+                        read += n;
+                    }
+
+                    string? id = null;
+                    string? error = read > DebugKill.MaxBodyBytes
+                        ? DebugKill.BodyTooLarge
+                        : null;
+                    if (error == null)
+                    {
+                        id = DebugKill.ParseId(buffer.AsSpan(0, read), ctx.Request.QueryString["id"], out error);
+                    }
+
+                    if (id == null)
+                    {
+                        status = error == DebugKill.BodyTooLarge ? 413 : 400;
+                        body = DebugKill.ErrorBody(error ?? DebugKill.MissingId);
+                    }
+                    else
+                    {
+                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        timeout.CancelAfter(DebugKillTimeout);
+                        DebugKillResult result = await submit(id, timeout.Token);
+                        status = DebugKill.StatusCode(result.Outcome);
+                        body = DebugKill.ResultBody(id, in result);
+                    }
+                }
+
+                ctx.Response.StatusCode = status;
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                ctx.Response.ContentLength64 = body.Length;
+                await ctx.Response.OutputStream.WriteAsync(body, ct);
+                ctx.Response.Close();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "/debug/kill response failed");
+                try { ctx.Response.Abort(); } catch { /* ignore */ }
+            }
+        }
+    }
 
     /// <summary>
     /// Register the callback that supplies the content document served at <c>/content</c>.
@@ -449,6 +636,8 @@ public sealed class MetricsEndpoint : IAsyncDisposable
         try { _healthListener.Close(); } catch { /* ignore */ }
         try { _statusListener?.Close(); } catch { /* ignore */ }
         try { _contentListener?.Close(); } catch { /* ignore */ }
+        try { _debugEntitiesListener?.Close(); } catch { /* ignore */ }
+        try { _debugKillListener?.Close(); } catch { /* ignore */ }
 
         if (_healthTask != null)
         {
@@ -463,6 +652,17 @@ public sealed class MetricsEndpoint : IAsyncDisposable
         if (_contentTask != null)
         {
             try { await _contentTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { /* ignore */ }
+        }
+
+        if (_debugEntitiesTask != null)
+        {
+            try { await _debugEntitiesTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { /* ignore */ }
+        }
+        if (_debugKillTask != null)
+        {
+            try { await _debugKillTask.WaitAsync(TimeSpan.FromSeconds(2)); }
             catch { /* ignore */ }
         }
 

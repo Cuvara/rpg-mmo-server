@@ -410,6 +410,24 @@ public sealed class ServerStatus
     [JsonPropertyName("aoi_covers_whole_map")]
     public bool AoiCoversWholeMap { get; set; }
 
+    /// <summary>The map this server simulates (<c>--map-id</c> / <c>GAMESERVER_MAP_ID</c>).</summary>
+    [JsonPropertyName("map_id")]
+    public string MapId { get; set; } = "";
+
+    /// <summary>
+    /// The play-area rectangle in force: what player movement is clamped to and what enemies
+    /// and bots are placed inside. From <c>content/maps/&lt;map_id&gt;.json</c> when that file
+    /// exists, otherwise the configured map size (<see cref="MapBoundsStatus.Source"/>).
+    /// </summary>
+    /// <remarks>
+    /// Published because a map without a content file (map_01 today) has bounds nobody can
+    /// read anywhere else: they are <c>GAMESERVER_MAP_WIDTH</c>/<c>_HEIGHT</c> centred on the
+    /// origin, and the test lab's enemy-bounds check needs the rectangle the server actually
+    /// clamped to, not one it reconstructs from a manifest.
+    /// </remarks>
+    [JsonPropertyName("map_bounds")]
+    public MapBoundsStatus MapBounds { get; set; } = new();
+
     /// <summary>
     /// Replication-importance profile in force (<c>GAMESERVER_IMPORTANCE</c>):
     /// <c>legacy</c>, <c>balanced</c>, or <c>custom</c> when a weight was overridden.
@@ -645,6 +663,60 @@ public sealed class ServerStatus
     public int SnapshotMaxShedAge { get; set; }
 
     /// <summary>
+    /// Deepest per-connection data lane (snapshot markers and heartbeats waiting for the write
+    /// task) over live connections, now. Bounded by the lane's capacity, 64 (#473).
+    /// </summary>
+    [JsonPropertyName("snapshot_send_queue_depth_max")]
+    public int SnapshotSendQueueDepthMax { get; set; }
+
+    /// <summary>
+    /// Items the drop-oldest data lanes discarded, summed over LIVE connections (a closed
+    /// connection's drops leave the sum). A dropped snapshot marker loses nothing; a dropped
+    /// heartbeat is a lost ping reply (#473).
+    /// </summary>
+    [JsonPropertyName("snapshot_send_dropped_oldest")]
+    public long SnapshotSendDroppedOldest { get; set; }
+
+    /// <summary>
+    /// Largest KCP <c>WaitSnd</c> (segments queued or sent and not yet acknowledged) over live
+    /// sessions, now. The writer waits at 256 and the session closes past 1024 (#473).
+    /// </summary>
+    [JsonPropertyName("kcp_wait_snd_max")]
+    public int KcpWaitSndMax { get; set; }
+
+    /// <summary>Largest current KCP retransmission timeout over live sessions, in ms (#473).</summary>
+    [JsonPropertyName("kcp_rto_max_ms")]
+    public int KcpRtoMaxMs { get; set; }
+
+    /// <summary>
+    /// Smallest receive window, in segments, any peer last advertised; 0 means a client stopped
+    /// reading and the server stopped sending to it. -1 with no live KCP session (#473).
+    /// </summary>
+    [JsonPropertyName("kcp_rmt_wnd_min")]
+    public int KcpRemoteWindowMin { get; set; }
+
+    /// <summary>
+    /// KCP segments sent more than once since start, all sessions, closed ones included. Same
+    /// value as <c>gameserver_kcp_segments_retransmitted_total</c> (#473).
+    /// </summary>
+    [JsonPropertyName("kcp_segments_retransmitted")]
+    public long KcpSegmentsRetransmitted { get; set; }
+
+    /// <summary>
+    /// Rows the snapshot delivery trace (<c>GAMESERVER_SNAPSHOT_TRACE</c>) has written; -1
+    /// when the trace is off.
+    /// </summary>
+    [JsonPropertyName("snapshot_trace_rows_written")]
+    public long SnapshotTraceRowsWritten { get; set; }
+
+    /// <summary>
+    /// Rows the snapshot delivery trace dropped (ring full, or the file failed); -1 when off.
+    /// Non-zero means the trace has holes: do not read a missing row as a missing snapshot.
+    /// </summary>
+    [JsonPropertyName("snapshot_trace_rows_dropped")]
+    public long SnapshotTraceRowsDropped { get; set; }
+
+    /// <summary>
     /// <c>MsgTransferMap</c> requests refused because a transfer was already running on
     /// that connection. Same value as <c>gameserver_transfers_rejected_total</c>.
     /// </summary>
@@ -828,6 +900,42 @@ public sealed class AnomalousAccount
     /// <summary>Refused inputs by reason, keyed by the metric label.</summary>
     [JsonPropertyName("by_reason")]
     public Dictionary<string, long> ByReason { get; set; } = new();
+}
+
+/// <summary>The play-area rectangle on <c>/status</c> (<see cref="ServerStatus.MapBounds"/>).</summary>
+public sealed class MapBoundsStatus
+{
+    /// <summary><see cref="Source"/> when the bounds come from the map's content file.</summary>
+    public const string SourceMapFile = "map_file";
+
+    /// <summary><see cref="Source"/> when no map file exists and the configured size is used.</summary>
+    public const string SourceConfiguredSize = "configured_size";
+
+    [JsonPropertyName("min_x")]
+    public float MinX { get; set; }
+
+    [JsonPropertyName("min_y")]
+    public float MinY { get; set; }
+
+    [JsonPropertyName("max_x")]
+    public float MaxX { get; set; }
+
+    [JsonPropertyName("max_y")]
+    public float MaxY { get; set; }
+
+    /// <summary><c>map_file</c> or <c>configured_size</c>.</summary>
+    [JsonPropertyName("source")]
+    public string Source { get; set; } = "";
+
+    /// <summary>Builds the field from the bounds the server was configured with.</summary>
+    public static MapBoundsStatus From(in Shared.GameLogic.Components.MapBounds bounds, bool fromFile) => new()
+    {
+        MinX = bounds.MinX,
+        MinY = bounds.MinY,
+        MaxX = bounds.MaxX,
+        MaxY = bounds.MaxY,
+        Source = fromFile ? SourceMapFile : SourceConfiguredSize,
+    };
 }
 
 /// <summary>
