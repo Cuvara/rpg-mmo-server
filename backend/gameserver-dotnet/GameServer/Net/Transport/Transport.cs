@@ -67,6 +67,17 @@ public interface ITransportConnection : IDisposable
     void Close();
 }
 
+/// <summary>
+/// A transport connection that can report its KCP session's ARQ counters. Implemented by the
+/// KCP transport only; a test double that does not implement it reports
+/// <see cref="KcpSessionCounters.Unavailable"/>.
+/// </summary>
+public interface IKcpCountersSource
+{
+    /// <summary>One locked reading of the session's counters.</summary>
+    KcpSessionCounters ReadKcpCounters();
+}
+
 /// <summary>A listener that yields <see cref="ITransportConnection"/>s.</summary>
 public interface ITransportListener : IDisposable
 {
@@ -149,8 +160,10 @@ internal sealed class KcpTransportListener : ITransportListener
 }
 
 /// <summary>A single accepted KCP session.</summary>
-internal sealed class KcpTransportConnection(KcpSession session) : ITransportConnection
+internal sealed class KcpTransportConnection(KcpSession session) : ITransportConnection, IKcpCountersSource
 {
+    public KcpSessionCounters ReadKcpCounters() => session.ReadCounters();
+
     private readonly KcpStream _stream = new(session);
 
     public Stream Stream => _stream;

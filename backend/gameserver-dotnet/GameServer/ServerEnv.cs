@@ -163,6 +163,15 @@ internal static class ServerEnv
     public const string DebugEntities = "GAMESERVER_DEBUG_ENTITIES";
 
     /// <summary>
+    /// File path for the opt-in snapshot delivery trace (#473): one CSV line per (connection,
+    /// sent snapshot) with gather, enqueue and write timestamps, queue depth and KCP session
+    /// counters (see <c>Observability.SnapshotTrace</c>). Unset or empty = off, at the cost of
+    /// one null check per gather and per write. The file is truncated at startup; a path that
+    /// cannot be opened exits 2. Dev and test only, never set by a fleet manifest.
+    /// </summary>
+    public const string SnapshotTrace = "GAMESERVER_SNAPSHOT_TRACE";
+
+    /// <summary>
     /// Radius in world units over which a player placed at the spawn point (a new character, a
     /// cross-map arrival or a respawn) is spread, so players do not start on one point and drag
     /// every enemy onto it (rpg-mmo-server#469). <c>0</c> = everybody on the point. Default

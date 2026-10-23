@@ -122,6 +122,7 @@ public sealed class Kcp
     private readonly uint _deadLink = DeadLink;
     private int _fastresend;
     private int _nocwnd;
+    private long _retransmitted;
 
     private readonly List<Segment> _sndQueue = [];
     private readonly List<Segment> _sndBuf = [];
@@ -208,6 +209,25 @@ public sealed class Kcp
 
     /// <summary>Number of packets queued or in flight.</summary>
     public int WaitSnd => _sndBuf.Count + _sndQueue.Count;
+
+    /// <summary>
+    /// Segments sent again after their first transmission, cumulative for this conversation:
+    /// fast retransmits, early retransmits and RTO timeouts together. Diagnostics only
+    /// (snapshot delivery trace, #473); the wire is unaffected.
+    /// </summary>
+    public long RetransmittedSegments => _retransmitted;
+
+    /// <summary>Local send window, in segments (<see cref="WndSize"/>).</summary>
+    public uint SendWindow => _sndWnd;
+
+    /// <summary>Receive window the peer last advertised, in segments. 0 stops new sends.</summary>
+    public uint RemoteWindow => _rmtWnd;
+
+    /// <summary>Current retransmission timeout, in milliseconds, from the smoothed RTT.</summary>
+    public uint RtoMs => _rxRto;
+
+    /// <summary>Smoothed round-trip time, in milliseconds, as this side measures it from ACKs.</summary>
+    public int SmoothedRttMs => _rxSrtt;
 
     // ── Application data in and out ──────────────────────────────────────────
 
@@ -697,6 +717,7 @@ public sealed class Kcp
                 if (needsend)
                 {
                     current = CurrentMs();
+                    if (segment.Xmit > 0) _retransmitted++;
                     segment.Xmit++;
                     segment.Ts = current;
                     segment.Wnd = seg.Wnd;
