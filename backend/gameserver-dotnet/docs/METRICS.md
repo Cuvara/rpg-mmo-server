@@ -366,6 +366,8 @@ Distinct from `gameserver_inputs_dropped_total`, which is ingest backpressure.
 type has no server handler. It is a dispatch-level protocol signal: unknown messages are ignored,
 and the authenticated session stays open. The reason set is bounded; message type values are not
 used as metric labels. This separate counter preserves the input counter's tick-validation meaning.
+With Debug logging enabled, the server also records the unknown numeric type id; an
+`IsEnabled(LogLevel.Debug)` guard avoids formatting or allocating that diagnostic when disabled.
 
 | `reason` | Meaning | Honest cause? |
 |---|---|---|
