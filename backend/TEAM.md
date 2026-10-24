@@ -217,6 +217,9 @@ Before reporting any measurement, benchmark, CI verdict, counter reading or "it 
 - **Verify remote and live state, not exit codes.** After a push, `git ls-remote`. After a
   config change, read it back off `/status`.
 
+Provisional readiness gates and the open human decisions behind them: **`backend/docs/READINESS-GATES.md`**.
+Cross-repo release order, verification and rollback: **`backend/docs/RELEASE-RUNBOOK.md`**.
+
 The full incident list, with what each one cost, is **`backend/docs/MEASUREMENT.md`**. The
 working checklist is the `verify-a-result` skill in `.claude/skills/`.
 
