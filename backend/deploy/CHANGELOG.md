@@ -6,6 +6,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- The restore rehearsal now runs weekly and on manual dispatch, uses PostgreSQL 16 and Redis 7.4 clients, and verifies restored string, hash, stream, and expiring-key data.
 - `docs/RELEASE-RUNBOOK.md` and `docs/READINESS-GATES.md` (backend docs): the cross-repo release
   order (SGL tag, Netcode/UnityDots tags, client pins, server image) with per-step verification
   and per-component rollback, and the provisional engineering gates with their instruments.

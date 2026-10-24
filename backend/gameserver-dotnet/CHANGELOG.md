@@ -7,12 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Share the effective-speed resolution used by entity snapshots and input movement, preserving the existing speed values and wire identity.
 - Snapshot `speed` now reports effective movement speed after slows and haste, and is
   present as zero while root or stun prevents movement. Speed transitions, including to
   and from zero, remain delta-visible; unchanged speed stays absent on field-level deltas.
   Protocol version is unchanged for old-peer safety.
 
 ### Fixed
+- Restore a Debug-level record of unknown post-join message type ids; the `IsEnabled` guard keeps disabled Debug logging allocation-free.
 - Wait for KCP acknowledgement before closing reason-bearing refusals and kicks, so the
   client receives refusal text and duplicate-login reasons before teardown.
 - A replacement login that registers while a duplicate-login reason is still draining no

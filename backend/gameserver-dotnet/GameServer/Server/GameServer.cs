@@ -2242,9 +2242,11 @@ public sealed class GameServerHost : IAsyncDisposable
                 break;
 
             default:
-                // Unknown message types are ignored for forward compatibility. Keep this
-                // path allocation-free and observable through a bounded protocol counter.
+                // Unknown message types are ignored for forward compatibility. Keep the
+                // type id available to operators without allocating when Debug is disabled.
                 _metrics?.RecordUnknownMessageType();
+                if (_logger.IsEnabled(LogLevel.Debug))
+                    _logger.LogDebug("Ignoring unknown message type {MessageType}", env.Type);
                 break;
         }
         return Task.CompletedTask;

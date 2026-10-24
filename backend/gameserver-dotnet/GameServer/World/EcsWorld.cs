@@ -5,9 +5,18 @@ using System.Threading;
 using Arch.Core;
 using GameServer.World.Components;
 using Shared.GameLogic.Components;
+using Shared.GameLogic.Systems;
 using ArchWorld = Arch.Core.World;
 
 namespace GameServer.World;
+
+internal static class EffectiveMovementSpeed
+{
+    public static float Resolve(float baseSpeed, StatusSet? statuses) =>
+        statuses is { Count: > 0 }
+            ? statuses.CanMove ? statuses.EffectiveSpeed(baseSpeed) : 0f
+            : baseSpeed;
+}
 
 /// <summary>
 /// Pending input queued for processing in the next tick, already bound to the entity
@@ -802,8 +811,8 @@ public sealed class EcsWorld : IDisposable
                 {
                     float speed = locomotions[i].Speed;
                     SimRecord? record = _gameplay.Get(ids[i].Stable);
-                    if (record is { Kind: not SimKind.None, Statuses: { Count: > 0 } statuses })
-                        speed = statuses.CanMove ? statuses.EffectiveSpeed(speed) : 0f;
+                    if (record is { Kind: not SimKind.None })
+                        speed = EffectiveMovementSpeed.Resolve(speed, record.Statuses);
 
                     var composed = new EntityState
                     {
@@ -914,8 +923,8 @@ public sealed class EcsWorld : IDisposable
             if (rec.Statuses is { Count: > 0 } statuses)
             {
                 maxHp = statuses.EffectiveMaxHp(maxHp);
-                speed = statuses.CanMove ? statuses.EffectiveSpeed(speed) : 0f;
             }
+            speed = EffectiveMovementSpeed.Resolve(speed, rec.Statuses);
             ownerId = rec.OwnerId;
             ownerKey = rec.OwnerKey;
             spawnSeq = rec.SpawnSeq;

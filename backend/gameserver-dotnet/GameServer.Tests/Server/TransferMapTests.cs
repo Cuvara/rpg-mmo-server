@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using GameServer.Net;
 using GameServer.Net.Transport;
@@ -156,8 +158,9 @@ public class TransferMapTests
     [Fact]
     public async Task UnknownMessageType_IncrementsCounterAndKeepsSessionOpen()
     {
+        using var loggerFactory = new CapturingLoggerFactory();
         using var metrics = new GameMetrics("map_unknown_type", $"test.{Guid.NewGuid():N}");
-        await using var h = await Harness.StartAsync(metrics);
+        await using var h = await Harness.StartAsync(metrics, loggerFactory);
         using var client = await h.JoinAsync("user-unknown-type");
         var stream = client.GetStream();
 
@@ -173,6 +176,8 @@ public class TransferMapTests
         await stream.FlushAsync();
 
         await h.WaitForAsync(() => metrics.UnknownMessageTypesRejected == 1);
+        await h.WaitForAsync(() => loggerFactory.Entries.Any(e =>
+            e.Level == LogLevel.Debug && e.Message.Contains("99", StringComparison.Ordinal)));
 
         var ping = WireProtocol.NewEnvelope(MsgType.Ping, new PingMessage { Timestamp = 123 }, WireEncoding.Json);
         await stream.WriteAsync(WireProtocol.Encode(ping));
@@ -183,6 +188,26 @@ public class TransferMapTests
         Assert.Equal(1, metrics.UnknownMessageTypesRejected);
         Assert.Equal(1, h.Server.EntityCount);
         Assert.Equal(1, metrics.PlayersOnline);
+    }
+
+    private sealed class CapturingLoggerFactory : ILoggerFactory
+    {
+        private readonly ConcurrentQueue<(LogLevel Level, string Message)> _entries = new();
+        public IReadOnlyCollection<(LogLevel Level, string Message)> Entries => _entries.ToArray();
+        public ILogger CreateLogger(string categoryName) => new Sink(_entries);
+        public void AddProvider(ILoggerProvider provider) { }
+        public void Dispose() { }
+
+        private sealed class Sink(ConcurrentQueue<(LogLevel Level, string Message)> entries) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+                Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                entries.Enqueue((logLevel, formatter(state, exception)));
+            }
+        }
     }
 
     // ─────────────────────── test harness ───────────────────────
@@ -233,7 +258,7 @@ public class TransferMapTests
         public required CancellationTokenSource Cts { get; init; }
         public required Task RunTask { get; init; }
 
-        public static async Task<Harness> StartAsync(GameMetrics metrics)
+        public static async Task<Harness> StartAsync(GameMetrics metrics, ILoggerFactory? loggerFactory = null)
         {
             // Bind an ephemeral port and ask the server which one it got, rather than
             // picking one ourselves. The old FreeTcpPort() helper bound port 0, read the
@@ -256,7 +281,7 @@ public class TransferMapTests
                 HoldTtl = TimeSpan.FromMilliseconds(300),
                 SaveInterval = TimeSpan.FromHours(1),
                 Metrics = metrics,
-                LoggerFactory = NullLoggerFactory.Instance
+                LoggerFactory = loggerFactory ?? NullLoggerFactory.Instance
             };
 
             var server = new GameServerHost(options);
