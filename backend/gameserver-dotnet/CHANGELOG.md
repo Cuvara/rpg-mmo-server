@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Snapshot frame writer allocation.** The protobuf ByteString envelope wrapper
+  allocated 32 B for every frame. The reusable writer now streams the generated snapshot
+  message directly through CodedOutputStream; the always-on allocation guard covers
+  warmed delta encode plus frame write at 50, 200 and 500 viewers for peer protocol
+  versions 0 and 3. Frame bytes remain pinned by WriteFrame_IsByteIdenticalToTheAllocatingPath.
+
 ### Added
 - **Snapshot delivery trace and per-connection delivery counters (#473).**
   `GAMESERVER_SNAPSHOT_TRACE` (a file path, unset = off) writes one CSV line per (connection,

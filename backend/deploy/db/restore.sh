@@ -24,6 +24,7 @@
 # Environment overrides:
 #   META_CONTAINER / GAME_CONTAINER, POSTGRES_USER/DB, POSTGRES_GAME_USER/DB
 #   BACKUP_KUBE_CONTEXT / BACKUP_KUBE_NAMESPACE   (same as --kube-context; see below)
+#   DB_CONNECTION_MODE=host use local PostgreSQL clients with PGHOST/PGPORT/PGUSER/PGPASSWORD
 #
 #   --kube-context CTX   restore into the IN-CLUSTER StatefulSet (postgres-meta /
 #                        postgres-game in rpg-k8s-data) through `kubectl exec`, instead of
@@ -45,6 +46,7 @@ CREATE=0
 JOBS=2
 KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
 KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
+DB_HOST_MODE="${DB_CONNECTION_MODE:-}"
 
 # ---------------------------------------------------------------- arg parsing
 while [ $# -gt 0 ]; do
@@ -155,6 +157,8 @@ db_exec() {
 	shift
 	if [ -n "$KUBE_CTX" ]; then
 		kubectl --context "$KUBE_CTX" -n "$KUBE_NS" exec $interactive "statefulset/$target" -- "$@"
+	elif [ "$DB_HOST_MODE" = "host" ]; then
+		"$@"
 	else
 		"$DOCKER" exec $interactive "$target" "$@"
 	fi
@@ -177,6 +181,8 @@ db_put() {
 	if [ -n "$KUBE_CTX" ]; then
 		kubectl --context "$KUBE_CTX" -n "$KUBE_NS" cp "$src" "${target}-0:${dest}" -c postgres >/dev/null ||
 			return 1
+	elif [ "$DB_HOST_MODE" = "host" ]; then
+		cp "$src" "$dest" || return 1
 	else
 		db_exec -i "$target" sh -c "cat > '$dest'" <"$src" || return 1
 	fi
@@ -194,6 +200,14 @@ if [ -n "$KUBE_CTX" ]; then
 		-o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ] ||
 		die "statefulset '$CONTAINER' in $KUBE_NS ($KUBE_CTX) is not ready"
 	log "mode: k8s (context $KUBE_CTX, namespace $KUBE_NS)"
+	DB_HOST_MODE=""
+elif [ "$DB_HOST_MODE" = "host" ]; then
+	for tool in pg_restore psql pg_isready; do
+		command -v "$tool" >/dev/null 2>&1 || die "DB_CONNECTION_MODE=host requires $tool"
+	done
+	pg_isready -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" -U "$PGUSER_NAME" -d postgres >/dev/null 2>&1 ||
+		die "PostgreSQL at ${PGHOST:-localhost}:${PGPORT:-5432} is not ready"
+	log "mode: host PostgreSQL client (${PGHOST:-localhost}:${PGPORT:-5432})"
 else
 	DOCKER="$(detect_docker)" || die "docker not available (tried docker, docker.exe)"
 	[ "$("$DOCKER" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ] ||
