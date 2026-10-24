@@ -221,11 +221,15 @@ public class SnapshotTraceTests(ITestOutputHelper output)
         // Repeat the original warm-up/measurement window in one process. The first window
         // preserves the CI failure shape; later windows test for intermittent allocations.
         const int ProbeTrials = 200;
+        const int WarmupCalls = 100;
         long totalAllocated = 0;
         for (int trial = 0; trial < ProbeTrials; trial++)
         {
             measurePhases = false;
-            for (int i = 0; i < Connection.DataLaneCapacity + 10; i++) Round();
+            // Dynamic TieredPGO can defer profile instrumentation while gather tiers up.
+            // Match SnapshotAllocationTests' 100-call warm-up so measurement starts past
+            // that transition, without changing the zero-allocation assertion below.
+            for (int i = 0; i < WarmupCalls; i++) Round();
 
             gatherBytes = 0;
             claimBytes = 0;

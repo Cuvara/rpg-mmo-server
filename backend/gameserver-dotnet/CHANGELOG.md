@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+
+- Warm the snapshot trace allocation guard for 100 rounds before measurement to cover Dynamic TieredPGO tier-up, preserving its zero-allocation assertion.
+
+### Changed
 - Share the effective-speed resolution used by entity snapshots and input movement, preserving the existing speed values and wire identity.
 - Snapshot `speed` now reports effective movement speed after slows and haste, and is
   present as zero while root or stun prevents movement. Speed transitions, including to
