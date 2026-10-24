@@ -647,14 +647,18 @@ the value (including a server predating this field); a present zero means the en
 immobile, such as while rooted or stunned. A present positive value is the effective
 speed after active slows and haste. Updated receivers MUST check presence before applying
 the value. Older Protobuf receivers decode a present zero as the default and keep their
-historical absent-value behavior. The server emits `speed` on every JSON entity mention,
-including zero; legacy JSON receivers that treat non-positive values as absent keep the
-old behavior, while upgraded receivers can distinguish the key from an omitted one.
+historical absent-value behavior. On field-delta partials, `changed_fields` bit `0x0020`
+governs `speed` in both Protobuf and JSON encodings. A receiver MUST ignore a present
+`speed` value when that bit is clear; JSON may include the key even when speed did not
+change. Legacy JSON receivers that treat non-positive values as absent keep the old
+behavior, while upgraded receivers honor the mask and distinguish zero (immobile) from
+an absent value.
 
-`speed` is sent on **every** mention of an entity, including handle-only ones. It is
-never interned: a client that resolves a handle expects complete state, and sending it
-only alongside the id would leave it correct once per keyframe interval and stale in
-between.
+On full snapshots and entity introductions, `speed` is present. On field-delta partials,
+it is included in Protobuf only when bit `0x0020` is set; JSON may still include it when
+the bit is clear, so receivers must follow the mask. Speed is not interned: a client that
+resolves a handle expects complete state, and sending it only alongside the id would
+leave it correct once per keyframe interval and stale in between.
 
 ### Protocol 3 entity state — normative (ADR-28..30)
 
