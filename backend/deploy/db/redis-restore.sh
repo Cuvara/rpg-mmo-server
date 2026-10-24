@@ -60,6 +60,7 @@ MODE="scratch"
 CONFIRMED=0
 KEEP_SCRATCH=0
 REDIS_CONTAINER="${REDIS_CONTAINER:-rpg-redis}"
+REDIS_IMAGE="${REDIS_IMAGE:-}"
 KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
 KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
 REDIS_STATEFULSET="${REDIS_STATEFULSET:-redis}"
@@ -303,7 +304,7 @@ DOCKER="$(detect_docker)" || die "docker not available (tried docker, docker.exe
 
 # Reuse the live container's image so the scratch instance is the same Redis
 # version that wrote the dump (an older redis refuses a newer RDB version).
-IMAGE="$("$DOCKER" inspect -f '{{.Config.Image}}' "$REDIS_CONTAINER" 2>/dev/null || true)"
+IMAGE="${REDIS_IMAGE:-$("$DOCKER" inspect -f '{{.Config.Image}}' "$REDIS_CONTAINER" 2>/dev/null || true)}"
 [ -n "$IMAGE" ] || IMAGE="redis:7.4-alpine"
 
 # rcli <container> <args...>
