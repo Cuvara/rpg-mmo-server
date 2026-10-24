@@ -1976,6 +1976,8 @@ public sealed class GameServerHost : IAsyncDisposable
                     },
                     conn.Encoding);
                 await conn.WriteOneAsync(refusal);
+                await DrainReasonDeliveryAsync(conn, Net.Sealed.SealedRefusalReason.EncodingCannotSeal,
+                    handshakeToken);
                 return;
             }
 
@@ -2067,12 +2069,8 @@ public sealed class GameServerHost : IAsyncDisposable
                             },
                             conn.Encoding);
                         await conn.WriteOneAsync(kick);
-                        if (!await conn.DrainTransportAsync(TimeSpan.FromSeconds(2), ct))
-                        {
-                            _logger.LogWarning(
-                                "Sealed refusal kick was not acknowledged before transport drain timeout for {UserId}",
-                                userId);
-                        }
+                        await DrainReasonDeliveryAsync(conn,
+                            Net.Sealed.SealedRefusalReason.NoSealedSession, ct);
                     }
                     catch (Exception kickEx)
                     {
@@ -2397,6 +2395,7 @@ public sealed class GameServerHost : IAsyncDisposable
                 conn.Encoding);
             await conn.WriteOneAsync(kick);
             await conn.WriteOneAsync(disc);
+            await DrainReasonDeliveryAsync(conn, Events.KickEvents.ReasonDuplicateLogin);
         }
         catch (Exception ex)
         {
@@ -2914,7 +2913,7 @@ public sealed class GameServerHost : IAsyncDisposable
     /// The handshake deadline: a rejected peer that will not read its reply must not hold
     /// the handler past <c>GAMESERVER_HANDSHAKE_TIMEOUT_MS</c> either.
     /// </param>
-    private static async Task SendError(Connection conn, string error, CancellationToken ct = default)
+    private async Task SendError(Connection conn, string error, CancellationToken ct = default)
     {
         // ProtocolVersion is echoed on EVERY rejection, not only a version refusal.
         // Unlike TickRate this is not privileged tuning, and it is the only way a
@@ -2929,6 +2928,19 @@ public sealed class GameServerHost : IAsyncDisposable
                 ProtocolVersion = WireProtocol.ProtocolVersion,
             }, conn.Encoding);
         await conn.WriteOneAsync(resp, ct);
+        await DrainReasonDeliveryAsync(conn, error, ct);
+    }
+
+    private async Task DrainReasonDeliveryAsync(
+        Connection conn, string reason, CancellationToken ct = default)
+    {
+        if (!await conn.DrainTransportAsync(TimeSpan.FromSeconds(2), ct))
+        {
+            _logger.LogWarning(
+                "Reason-bearing response was not acknowledged before transport drain timeout " +
+                "for {UserId} (reason={Reason})",
+                conn.UserId, reason);
+        }
     }
 
     private static (string host, int port) ParseAddr(string addr)

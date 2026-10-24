@@ -13,9 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Protocol version is unchanged for old-peer safety.
 
 ### Fixed
-- Wait for KCP acknowledgement before closing a sealed-transport refusal, so the kick reason is not lost during teardown.
-
-### Fixed
+- Wait for KCP acknowledgement before closing reason-bearing refusals and kicks, so the
+  client receives refusal text and duplicate-login reasons before teardown.
 - **Snapshot frame writer allocation.** The protobuf ByteString envelope wrapper
   allocated 32 B for every frame. The reusable writer now streams the generated snapshot
   message directly through CodedOutputStream; the always-on allocation guard covers
