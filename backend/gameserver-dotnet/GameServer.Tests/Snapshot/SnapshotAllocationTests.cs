@@ -7,14 +7,6 @@ using Xunit.Abstractions;
 
 namespace GameServer.Tests.Snapshot;
 
-// Allocation counters are thread-local, but parallel tests can share a worker thread.
-// Run these guards in isolation so unrelated suite work cannot contaminate the sample.
-[CollectionDefinition(Name, DisableParallelization = true)]
-public sealed class SnapshotAllocationCollection
-{
-    public const string Name = "snapshot-allocation";
-}
-
 /// <summary>
 /// The snapshot path's per-tick allocation, and the guard that keeps it down.
 ///
@@ -34,7 +26,6 @@ public sealed class SnapshotAllocationCollection
 /// caller that starts holding messages across encodes, forcing a copy back), not to pin
 /// an exact byte count that a runtime upgrade could move.</para>
 /// </summary>
-[Collection(SnapshotAllocationCollection.Name)]
 public class SnapshotAllocationTests(ITestOutputHelper output)
 {
     private const int Keyframe = 30;
@@ -213,6 +204,7 @@ public class SnapshotAllocationTests(ITestOutputHelper output)
     public void DeltaEncodeAndFrameWrite_AllocateNothingAfterWarmup(int viewers, uint peerProtocolVersion)
     {
         const int Calls = 60;
+        const int WarmupCalls = 100;
         var states = new SnapshotDeltaState[viewers];
         var writers = new SnapshotFrameWriter[viewers];
         for (int i = 0; i < viewers; i++)
@@ -230,10 +222,11 @@ public class SnapshotAllocationTests(ITestOutputHelper output)
                 global::Shared.GameLogic.Components.EntityAction.Moving, 1);
         }
 
-        // Allocate pools, buffers and JIT code before measuring, then warm the delta arm
-        // separately so every measured call is a steady-state delta with changed entities.
+        // Allocate pools and buffers first. Dynamic TieredPGO can defer profile
+        // instrumentation while the encode and frame methods tier up, so warm each
+        // state/writer well past the transition before measuring steady-state deltas.
         RunDeltaEncodeAndFrame(states, writers, views, 2);
-        for (int i = 0; i < 20; i++)
+        for (int i = 0; i < WarmupCalls; i++)
             RunDeltaEncodeAndFrame(states, writers, views, (ulong)i + 3);
 
         long encodeBytes = 0;
