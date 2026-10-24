@@ -309,7 +309,7 @@ public sealed class InputHandler
         ref Locomotion loc = ref writer.LocomotionOf(h);
         StatusSet? statuses = CombatResolver.StatusesOf(writer, h);
         bool canMove = statuses == null || statuses.CanMove;
-        float speed = statuses is { Count: > 0 } ? statuses.EffectiveSpeed(loc.Speed) : loc.Speed;
+        float speed = EffectiveMovementSpeed.Resolve(loc.Speed, statuses);
         bool jump = loc.JumpQueued && canMove;
         loc.JumpQueued = false;
 

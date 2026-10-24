@@ -3,6 +3,9 @@ name: Restore rehearsal
 on:
   pull_request:
     branches: [main, master, develop, staging]
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,7 +13,7 @@ permissions:
 jobs:
   restore-drill:
     name: PostgreSQL and Redis restore rehearsal
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres-source:
         image: postgres:16.4-alpine
@@ -54,7 +57,18 @@ jobs:
       - name: Install PostgreSQL and Redis clients
         run: |
           sudo apt-get update
-          sudo apt-get install --yes postgresql-client redis-tools
+          sudo install -d -m 0755 /usr/share/keyrings
+          curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor --yes -o /usr/share/keyrings/redis-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(. /etc/os-release && echo \"$VERSION_CODENAME\") main" \
+            | sudo tee /etc/apt/sources.list.d/redis.list >/dev/null
+          sudo apt-get update
+          redis_tools_version="$(apt-cache madison redis-tools | awk '$3 ~ /^6:7\.4\./ { print $3; exit }')"
+          test -n "$redis_tools_version"
+          sudo apt-get install --yes postgresql-client-16 "redis-tools=$redis_tools_version"
+          psql --version
+          redis-cli --version
+          psql --version | grep -Eq ' 16\.'
+          redis-cli --version | grep -Eq ' 7\.4\.'
 
       - name: Apply game-state migrations and seed representative data
         env:
@@ -83,6 +97,9 @@ jobs:
           set -euo pipefail
           redis-cli -h 127.0.0.1 -p 6379 SET 'restore-drill:session:one' 'session-value-one'
           redis-cli -h 127.0.0.1 -p 6379 SET 'restore-drill:session:two' 'session-value-two'
+          redis-cli -h 127.0.0.1 -p 6379 HSET 'restore-drill:servers:map_01:one' id one addr '127.0.0.1:9000'
+          redis-cli -h 127.0.0.1 -p 6379 XADD 'restore-drill:events:game' '*' type probe value seeded
+          redis-cli -h 127.0.0.1 -p 6379 SET 'restore-drill:ttl' 'expires-after-restore' EX 86400
 
       - name: Back up and restore PostgreSQL into a fresh service
         env:
@@ -137,7 +154,11 @@ jobs:
           trap cleanup EXIT
           test "$(docker exec "$restored_container" redis-cli --raw GET 'restore-drill:session:one')" = 'session-value-one'
           test "$(docker exec "$restored_container" redis-cli --raw GET 'restore-drill:session:two')" = 'session-value-two'
-          echo 'Redis restore verified: 2 durable keys and their values.'
+          test "$(docker exec "$restored_container" redis-cli --raw HGET 'restore-drill:servers:map_01:one' addr)" = '127.0.0.1:9000'
+          test "$(docker exec "$restored_container" redis-cli --raw XRANGE 'restore-drill:events:game' - + | grep -c 'seeded')" = 1
+          test "$(docker exec "$restored_container" redis-cli --raw GET 'restore-drill:ttl')" = 'expires-after-restore'
+          test "$(docker exec "$restored_container" redis-cli --raw TTL 'restore-drill:ttl')" -gt 0
+          echo 'Redis restore verified: strings, hash, stream entry, and TTL key.'
 
       - name: Retain synthetic backup archives
         uses: actions/upload-artifact@v4
