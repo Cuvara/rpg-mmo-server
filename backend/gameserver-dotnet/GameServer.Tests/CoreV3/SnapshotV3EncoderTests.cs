@@ -150,6 +150,37 @@ public class SnapshotV3EncoderTests
     }
 
     [Fact]
+    public void PartialDeltaWithoutSpeedChange_LeavesSpeedAbsentAndKeepsBaselineSize()
+    {
+        using var f = new SimFixture();
+        f.AddPlayer("p0", 0f, 0f);
+        f.AddPlayer("p1", 4f, 0f);
+        f.Step();
+
+        var state = new SnapshotDeltaState
+        {
+            SelfId = "p0",
+            PeerProtocolVersion = 3,
+            FieldDelta = true,
+        };
+        SnapshotMessage keyframe = state.Encode(1, 0, f.Views().ToArray(), 30, intern: true);
+        Assert.True(keyframe.Full);
+
+        f.Input("p1", SimFixture.Move(2, 1f, 0f));
+        f.Step();
+        SnapshotMessage delta = state.Encode(2, 0, f.Views().ToArray(), 30, intern: true);
+
+        Assert.False(delta.Full);
+        EntitySnapshot partial = Assert.Single(delta.Entities);
+        Assert.NotEqual(0u, partial.ChangedFields);
+        Assert.Equal(0u, partial.ChangedFields & SnapshotFieldBits.Speed);
+        Assert.False(partial.HasSpeed);
+        // Develop emitted 16 bytes for this partial entity. An optional present-zero
+        // reset adds five bytes even though speed is absent from changed_fields.
+        Assert.Equal(16, partial.CalculateSize());
+    }
+
+    [Fact]
     public void SnapshotSpeed_UsesEffectiveChilledSpeed()
     {
         using var f = new SimFixture();

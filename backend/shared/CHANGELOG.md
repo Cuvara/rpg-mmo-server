@@ -8,7 +8,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - `EntitySnapshot.speed` is now proto3 `optional` without changing its field number or
   type: absent means unknown, and present zero means immobile. Go protobuf conversion
-  preserves zero presence; legacy JSON retains the scalar field's old absent-value behavior.
+  encodes scalar DTO speed explicitly; decoding to the Go DTO still collapses absent and
+  zero. Legacy JSON retains its scalar field's old absent-value behavior.
 - **Realtime gameplay is KCP/UDP only (`transport`).** New `transport.Gameplay` (`"kcp"`),
   `ValidateGameplay` and `DialGameplay`: the gameplay hop accepts `kcp` and nothing else, and
   `DialGameplay` refuses any other advertised transport before a packet is sent — there is no

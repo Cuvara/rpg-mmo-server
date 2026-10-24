@@ -232,6 +232,9 @@ func (e Envelope) UnmarshalPayload(v any) error {
 // MUST act on to stay correct. Do NOT bump for self-describing optional presence
 // when old peers safely decode the same field's default and keep their prior
 // absent-value behavior; the server can then roll out before upgraded receivers.
+// F5-WIRE-SPEED records the Lead's explicit ruling that publishing effective
+// rather than base speed is safe at version 3: tag, float units and legacy
+// decoding remain the same, and old receivers keep their prior zero fallback.
 //
 // The full contract, including the migration path for unversioned peers, is in
 // shared/proto/wire.proto under "Protocol version", and normatively in
@@ -536,7 +539,10 @@ type EntitySnapshot struct {
 	// Speed is effective movement speed in world units per second, for client-side
 	// prediction. Protobuf field presence distinguishes absent (unknown/old sender)
 	// from present zero (immobile). Legacy JSON receivers that treat non-positive
-	// speed as missing keep the historical absent-value behavior.
+	// speed as missing keep the historical absent-value behavior. This Go DTO keeps
+	// Speed scalar, so its protobuf conversion cannot preserve absent versus present
+	// zero; Go consumers needing that distinction must use the generated wire type
+	// or add an explicit presence field before forwarding snapshots to a client.
 	Speed float32 `json:"speed"`
 
 	// FacingBrad is the entity's facing as 16-bit binary radians BIASED BY ONE:

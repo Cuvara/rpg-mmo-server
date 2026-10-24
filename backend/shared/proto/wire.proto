@@ -135,6 +135,11 @@ message Envelope {
 // bump the number — a rule that fired on every change would be a build counter,
 // not a compatibility contract. EntitySnapshot.speed keeps its tag and type,
 // and this presence update is safe for old receivers for the same reason.
+// F5-WIRE-SPEED (Lead ruling): speed now reports effective movement speed and
+// uses optional presence, with no version bump. The tag and float units stay
+// unchanged; old receivers retain their zero-as-absent fallback, while the
+// positive value now matches movement the server actually applies. New
+// receivers use presence to distinguish immobility from an old sender.
 //
 // HISTORY.
 //   1  first advertised version.

@@ -25,9 +25,10 @@ namespace GameServer.Tests.CoreV3;
 /// simply omits those; <see cref="SnapshotV3EncoderTests"/> covers that).
 /// </para>
 /// <para>
-/// These digests were updated for effective speed replication: when a status changes speed, the
-/// shared legacy speed field changes too. The encoder still drops v3-only events and fields for
-/// protocol 2 peers; the scenario verifies the legacy envelope shape and deterministic stream.
+/// The no-Chill run and Chill run have identical bytes before tick 40. Ground Snare roots mobs
+/// earlier in both runs, so effective speed legitimately changes those frames too. Chill then
+/// adds p2's slowed speed and movement changes from tick 40 onward. V3-only events and fields
+/// remain filtered for protocol 2 peers.
 /// </para>
 /// </remarks>
 public class V2WireIdentityTests
@@ -35,8 +36,9 @@ public class V2WireIdentityTests
     private const int Ticks = 150;
     private const int KeyframeInterval = 30;
 
-    internal static (string digest, string head, int statusEvents) RunScenario(
-        WireEncoding encoding, int maxSnapshotBytes, uint peerVersion, bool filterV3EventsInHarness)
+    internal static (string digest, string head, int statusEvents, string beforeChill, string fromChill) RunScenario(
+        WireEncoding encoding, int maxSnapshotBytes, uint peerVersion, bool filterV3EventsInHarness,
+        bool applyPlayerChill = true)
     {
         using var f = new SimFixture(withLoot: false);
         string[] players = { "p0", "p1", "p2", "p3" };
@@ -58,6 +60,8 @@ public class V2WireIdentityTests
         }
 
         var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var beforeChillSha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var fromChillSha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var head = new StringBuilder();
         var buffer = new EntityView[64];
         var events = new List<PendingGameEvent>();
@@ -87,7 +91,7 @@ public class V2WireIdentityTests
             }
 
             if (t == 5) f.ApplyStatus("m1", SimFixture.Burning, source: "p0");
-            if (t == 40) f.ApplyStatus("p2", SimFixture.Chilled, source: "m0");
+            if (applyPlayerChill && t == 40) f.ApplyStatus("p2", SimFixture.Chilled, source: "m0");
 
             f.Events.Clear();
             f.Step();
@@ -125,6 +129,8 @@ public class V2WireIdentityTests
 
                 byte[] frame = WireProtocol.Encode(WireProtocol.NewEnvelope(MsgType.Snapshot, msg, encoding));
                 sha.AppendData(frame);
+                if (t < 40) beforeChillSha.AppendData(frame);
+                else fromChillSha.AppendData(frame);
                 if (head.Length < 600)
                 {
                     head.Append($"t{t} {id} full={msg.Full} n={msg.Entities.Count} rm={msg.Removed.Count} " +
@@ -133,12 +139,15 @@ public class V2WireIdentityTests
             }
         }
 
-        return (Convert.ToHexString(sha.GetHashAndReset()), head.ToString(), statusEvents);
+        return (Convert.ToHexString(sha.GetHashAndReset()), head.ToString(), statusEvents,
+            Convert.ToHexString(beforeChillSha.GetHashAndReset()),
+            Convert.ToHexString(fromChillSha.GetHashAndReset()));
     }
 
-    // Updated because effective speed from status effects is now replicated in the shared field.
-    private const string ProtoBudgetDefault = "AC4460562A6D7CCCC0FD844C1EA717B2DDB2473EC234298CD1D8EE71F25AD3E9";
-    private const string ProtoBudgetTight = "3F6284B174B96E3687A9AA730B4DF1FABCE38192B7F53C4662D352C805E9C5D8";
+    // Effective speed changes when the scenario roots mobs with Ground Snare (before tick 40)
+    // and chills p2 (from tick 40). Those are the only expected causes of changed v2 bytes.
+    private const string ProtoBudgetDefault = "C62CFD9D201F31B2EACFD6E052F0F1FD974D4FF52600BAC5E8793F3DF541E674";
+    private const string ProtoBudgetTight = "64381E031A2B5FC0634BCB5A78A2F3EA6A122619A092081D25311C51FAF405AA";
     private const string Json = "5CB4D48834FF6D78BB36BAF7837CC5F5360EDC699BB656421C7614D0486F4E4E";
 
     [Theory]
@@ -147,7 +156,7 @@ public class V2WireIdentityTests
     [InlineData(WireEncoding.Json, SnapshotDeltaState.DefaultMaxSnapshotBytes, Json)]
     public void ProtocolTwoPeer_GetsThePreV3Bytes_FromAV3World(WireEncoding encoding, int budget, string expected)
     {
-        (string digest, string head, int statusEvents) =
+        (string digest, string head, int statusEvents, _, _) =
             RunScenario(encoding, budget, peerVersion: 2, filterV3EventsInHarness: false);
 
         Assert.True(statusEvents > 0, "the scenario no longer produces status events; it proves less than it claims");
@@ -156,10 +165,28 @@ public class V2WireIdentityTests
             $"actual   {digest}\nfirst snapshots:\n{head}");
     }
 
+    [Theory]
+    [InlineData(WireEncoding.Proto, SnapshotDeltaState.DefaultMaxSnapshotBytes, ProtoBudgetDefault)]
+    [InlineData(WireEncoding.Proto, 120, ProtoBudgetTight)]
+    [InlineData(WireEncoding.Json, SnapshotDeltaState.DefaultMaxSnapshotBytes, Json)]
+    public void ProtocolTwoIdentityChangesOnlyAfterSpeedChangingChill(
+        WireEncoding encoding, int budget, string expectedWithChill)
+    {
+        var baseline = RunScenario(encoding, budget, peerVersion: 2, filterV3EventsInHarness: false,
+            applyPlayerChill: false);
+        var chilled = RunScenario(encoding, budget, peerVersion: 2, filterV3EventsInHarness: false,
+            applyPlayerChill: true);
+
+        Assert.Equal(baseline.beforeChill, chilled.beforeChill);
+        Assert.Equal(expectedWithChill, chilled.digest);
+        Assert.NotEqual(baseline.fromChill, chilled.fromChill);
+    }
+
     [Fact]
     public void TheScenarioExercisesKeyframesDeltasEventsAndShedding()
     {
-        (_, string head, _) = RunScenario(WireEncoding.Proto, 120, peerVersion: 2, filterV3EventsInHarness: false);
+        (_, string head, _, _, _) = RunScenario(WireEncoding.Proto, 120, peerVersion: 2,
+            filterV3EventsInHarness: false);
         Assert.Contains("full=True", head);
         Assert.Contains("full=False", head);
     }
