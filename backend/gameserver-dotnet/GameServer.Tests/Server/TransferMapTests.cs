@@ -152,6 +152,39 @@ public class TransferMapTests
         Assert.Contains("map_id is required", resp.Error);
     }
 
+    /// <summary>An unsupported post-join type is counted and ignored without closing the session.</summary>
+    [Fact]
+    public async Task UnknownMessageType_IncrementsCounterAndKeepsSessionOpen()
+    {
+        using var metrics = new GameMetrics("map_unknown_type", $"test.{Guid.NewGuid():N}");
+        await using var h = await Harness.StartAsync(metrics);
+        using var client = await h.JoinAsync("user-unknown-type");
+        var stream = client.GetStream();
+
+        // Type 99 is not in MsgType, but its JSON envelope is well-formed. Forward
+        // compatibility requires the server to ignore it and keep this session alive.
+        var unknown = new GameServer.Net.Envelope
+        {
+            Type = 99,
+            Payload = System.Text.Encoding.UTF8.GetBytes("{}"),
+            Encoding = WireEncoding.Json,
+        };
+        await stream.WriteAsync(WireProtocol.Encode(unknown));
+        await stream.FlushAsync();
+
+        await h.WaitForAsync(() => metrics.UnknownMessageTypesRejected == 1);
+
+        var ping = WireProtocol.NewEnvelope(MsgType.Ping, new PingMessage { Timestamp = 123 }, WireEncoding.Json);
+        await stream.WriteAsync(WireProtocol.Encode(ping));
+        await stream.FlushAsync();
+        var pong = await ReadUntilAsync(stream, MsgType.Pong);
+
+        Assert.Equal(123, WireProtocol.GetPayload<PongMessage>(pong).Timestamp);
+        Assert.Equal(1, metrics.UnknownMessageTypesRejected);
+        Assert.Equal(1, h.Server.EntityCount);
+        Assert.Equal(1, metrics.PlayersOnline);
+    }
+
     // ─────────────────────── test harness ───────────────────────
 
     /// <summary>

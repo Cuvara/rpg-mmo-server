@@ -297,6 +297,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_players_kicked_total` | counter | `map_id` | Duplicate-login kicks (ADR-20): connections force-closed because a `session_superseded` event on `events:kick` named their join-token jti. Entity released immediately, no reconnect hold. Pair with the gateway's `gateway_kick_publish_total`: publishes without matching kicks means events are being lost or mis-addressed |
 | `gameserver_handshakes_pending` | gauge | `map_id` | Accepted sockets inside the join handshake right now. Outside `players_online` and outside `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` |
 | `gameserver_handshakes_rejected_total` | counter | `map_id`, `reason` | Handshakes refused before authentication: `pool_full` (closed at accept, pending pool at its bound), `timeout` (no complete join frame within `GAMESERVER_HANDSHAKE_TIMEOUT_MS` — idle socket, partial prefix or partial body), `malformed` (first frame was not a well-formed `MsgJoinToken`). Not a capacity refusal |
+| `gameserver_messages_rejected_total` | counter | `map_id`, `reason` | Post-authentication messages ignored because the server does not support their type. Currently `unknown_type`; the connection remains open for forward compatibility. Separate from tick-validated inputs and pre-authentication handshake rejections |
 | `gameserver_inputs_dropped_total` | counter | `map_id`, `reason` | Inputs discarded at ingest: `connection_budget` (one connection exceeded `GAMESERVER_MAX_INPUTS_PER_TICK` between two drains) or `queue_full` (the world-wide queue hit `GAMESERVER_MAX_PENDING_INPUTS`). A rising `connection_budget` from one map with flat `processed_inputs` is one client flooding; a rising `queue_full` is the population as a whole |
 | `gameserver_inputs_coalesced_total` | counter | `map_id` | Movement-only inputs that replaced the sender's previous queued movement in place. **Not a loss** — the tick integrates one direction per player per tick regardless — but the rate says how far above the tick rate clients are sending |
 | `gameserver_transfers_rejected_total` | counter | `map_id` | `MsgTransferMap` refused because one was already in flight on that connection |
@@ -360,6 +361,11 @@ trace. They change no enforcement.
 
 `gameserver_inputs_rejected_total{reason}` — inputs that reached the tick and were refused.
 Distinct from `gameserver_inputs_dropped_total`, which is ingest backpressure.
+
+`gameserver_messages_rejected_total{reason="unknown_type"}` counts well-formed messages whose
+type has no server handler. It is a dispatch-level protocol signal: unknown messages are ignored,
+and the authenticated session stays open. The reason set is bounded; message type values are not
+used as metric labels. This separate counter preserves the input counter's tick-validation meaning.
 
 | `reason` | Meaning | Honest cause? |
 |---|---|---|

@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   versions 0 and 3. Frame bytes remain pinned by WriteFrame_IsByteIdenticalToTheAllocatingPath.
 
 ### Added
+- **Unknown message type telemetry.** A bounded `gameserver_messages_rejected_total{reason="unknown_type"}` counter records unsupported post-join message types while preserving forward-compatible behavior: the message is ignored and the session remains open. Recording uses prebuilt tags and does not allocate on the dispatch path. `docs/METRICS.md` documents the series; the S16 testlab consumer must be updated to assert this metric.
 - **Snapshot delivery trace and per-connection delivery counters (#473).**
   `GAMESERVER_SNAPSHOT_TRACE` (a file path, unset = off) writes one CSV line per (connection,
   sent snapshot): `conn_id,user_id,world_tick,gather_us,enqueue_us,write_start_us,write_end_us,

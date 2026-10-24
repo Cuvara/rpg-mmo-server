@@ -359,6 +359,19 @@ public class GameMetricsTests
             GameServer.Input.InputRejection.All.Select(GameServer.Input.InputRejection.Label).OrderBy(x => x),
             seen.OrderBy(x => x));
     }
+
+    [Fact]
+    public void UnknownMessageTypeIsPublishedWithBoundedReason()
+    {
+        using var h = new Harness(nameof(UnknownMessageTypeIsPublishedWithBoundedReason));
+
+        h.Metrics.RecordUnknownMessageType();
+
+        var metric = Find(h.Collect(), "gameserver.messages.rejected");
+        Assert.NotNull(metric);
+        Assert.Equal(1, SumLong(metric!, ("reason", "unknown_type"), ("map_id", "map_01")));
+        Assert.Equal(1, h.Metrics.UnknownMessageTypesRejected);
+    }
     // ── The Nakama reward path (ADR-24 §8.1) ─────────────────────────────────
 
     [Fact]
