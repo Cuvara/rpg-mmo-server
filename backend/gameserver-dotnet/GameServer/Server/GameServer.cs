@@ -2067,6 +2067,12 @@ public sealed class GameServerHost : IAsyncDisposable
                             },
                             conn.Encoding);
                         await conn.WriteOneAsync(kick);
+                        if (!await conn.DrainTransportAsync(TimeSpan.FromSeconds(2), ct))
+                        {
+                            _logger.LogWarning(
+                                "Sealed refusal kick was not acknowledged before transport drain timeout for {UserId}",
+                                userId);
+                        }
                     }
                     catch (Exception kickEx)
                     {

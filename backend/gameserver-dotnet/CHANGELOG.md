@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Wait for KCP acknowledgement before closing a sealed-transport refusal, so the kick reason is not lost during teardown.
+
+### Fixed
 - **Snapshot frame writer allocation.** The protobuf ByteString envelope wrapper
   allocated 32 B for every frame. The reusable writer now streams the generated snapshot
   message directly through CodedOutputStream; the always-on allocation guard covers
