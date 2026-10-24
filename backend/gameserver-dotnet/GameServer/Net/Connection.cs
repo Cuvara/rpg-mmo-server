@@ -1343,6 +1343,55 @@ public sealed class Connection : IDisposable
         catch (OperationCanceledException) { /* connection closed */ }
     }
 
+    private readonly object _drainLock = new();
+    private int _reasonDrains;
+    private bool _closeAfterDrain;
+
+    /// <summary>
+    /// Open a reason-delivery window: until the matching <see cref="EndReasonDrain"/>,
+    /// <see cref="CloseUnlessDraining"/> defers instead of closing. The caller owns a
+    /// bounded drain (2 s) and MUST call <see cref="EndReasonDrain"/> in a finally.
+    /// </summary>
+    public void BeginReasonDrain()
+    {
+        lock (_drainLock) _reasonDrains++;
+    }
+
+    /// <summary>
+    /// Close the window opened by <see cref="BeginReasonDrain"/>. When a
+    /// <see cref="CloseUnlessDraining"/> arrived meanwhile and this was the last open
+    /// window, the deferred close runs now.
+    /// </summary>
+    public void EndReasonDrain()
+    {
+        bool close;
+        lock (_drainLock)
+        {
+            close = --_reasonDrains <= 0 && _closeAfterDrain;
+            if (_reasonDrains < 0) _reasonDrains = 0;
+        }
+        if (close) Close();
+    }
+
+    /// <summary>
+    /// Close now, unless a reason is still draining to the peer: then remember the
+    /// request and let <see cref="EndReasonDrain"/> close. Used when a newer login
+    /// replaces this connection, so the replacement never cuts off the duplicate-login
+    /// reason the old client is owed.
+    /// </summary>
+    public void CloseUnlessDraining()
+    {
+        lock (_drainLock)
+        {
+            if (_reasonDrains > 0)
+            {
+                _closeAfterDrain = true;
+                return;
+            }
+        }
+        Close();
+    }
+
     /// <summary>Close the connection. Idempotent.</summary>
     public void Close()
     {

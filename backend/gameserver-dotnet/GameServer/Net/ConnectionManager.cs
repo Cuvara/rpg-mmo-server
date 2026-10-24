@@ -55,7 +55,10 @@ public sealed class ConnectionManager
         {
             if (_connections.TryRemove(conn.UserId, out var old))
             {
-                old.Close();
+                // Deferred while the old session is still draining a duplicate-login
+                // reason: closing here would discard the frame the old client needs to
+                // stop reconnecting (and so kicking this replacement in turn).
+                old.CloseUnlessDraining();
             }
             _connections[conn.UserId] = conn;
             RebuildSnapshotLocked();
