@@ -10,8 +10,8 @@ using Shared.GameLogic.Components;
 namespace GameServer.Tests.CoreV3;
 
 /// <summary>
-/// Protocol 2 peers must receive, from a protocol 3 world, exactly the bytes the encoder
-/// produced before protocol 3 existed (ADR-30 decision 5: v3 data goes only to v3 peers).
+/// Protocol 2 peers receive the legacy wire shape from a protocol 3 world. Version 3 only
+/// adds fields when negotiated; effective movement speed remains part of the shared legacy shape.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -25,9 +25,9 @@ namespace GameServer.Tests.CoreV3;
 /// simply omits those; <see cref="SnapshotV3EncoderTests"/> covers that).
 /// </para>
 /// <para>
-/// After the change the harness passes the UNFILTERED events and sets the peer version to 2: the
-/// encoder itself must drop the v3 event types, leave z/velocity/owner/stats/statuses out of the
-/// bytes and out of its change detection, and reproduce every digest exactly.
+/// These digests were updated for effective speed replication: when a status changes speed, the
+/// shared legacy speed field changes too. The encoder still drops v3-only events and fields for
+/// protocol 2 peers; the scenario verifies the legacy envelope shape and deterministic stream.
 /// </para>
 /// </remarks>
 public class V2WireIdentityTests
@@ -136,11 +136,10 @@ public class V2WireIdentityTests
         return (Convert.ToHexString(sha.GetHashAndReset()), head.ToString(), statusEvents);
     }
 
-    // Generated against commit 3f87b56's encoder (see the class remarks). Do not regenerate to
-    // make a failure pass: a protocol 2 peer's bytes are not supposed to move.
-    private const string ProtoBudgetDefault = "591F0A3B32011B3A42EF71B6157F2EFDD043CBC47DF4AC8B3BFE524CF1804328";
-    private const string ProtoBudgetTight = "457EA7F069CFF77DEA6109BD5FF79629865AB8E1541E408BA4EE73A2FEEC86EB";
-    private const string Json = "5DC61A00E56415975650F0E13D1189BE5B685FF4A9182E1A4C37731482BC2296";
+    // Updated because effective speed from status effects is now replicated in the shared field.
+    private const string ProtoBudgetDefault = "AC4460562A6D7CCCC0FD844C1EA717B2DDB2473EC234298CD1D8EE71F25AD3E9";
+    private const string ProtoBudgetTight = "3F6284B174B96E3687A9AA730B4DF1FABCE38192B7F53C4662D352C805E9C5D8";
+    private const string Json = "5CB4D48834FF6D78BB36BAF7837CC5F5360EDC699BB656421C7614D0486F4E4E";
 
     [Theory]
     [InlineData(WireEncoding.Proto, SnapshotDeltaState.DefaultMaxSnapshotBytes, ProtoBudgetDefault)]

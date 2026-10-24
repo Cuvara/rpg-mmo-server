@@ -82,6 +82,9 @@ internal static class JsonWriter
                 w.WriteNumber("y"u8, e.Y);
                 w.WriteNumber("hp"u8, e.Hp);
                 w.WriteNumber("max_hp"u8, e.MaxHp);
+                // Always present on a complete entity. Writing zero keeps legacy JSON
+                // readers compatible and lets upgraded readers distinguish it from an
+                // omitted key; assigning it during JSON decode also sets HasSpeed.
                 w.WriteNumber("speed"u8, e.Speed);
                 // Omitted when zero, unlike speed. Zero is the reserved "not sent" value
                 // for both of these (facing is biased by one precisely so that no real
@@ -579,6 +582,7 @@ internal static class JsonReader
                 else if (y) e.Y = r.GetSingle();
                 else if (hp) e.Hp = r.GetInt32();
                 else if (maxHp) e.MaxHp = r.GetInt32();
+                // The optional protobuf setter records presence, including an explicit 0.
                 else if (speed) e.Speed = r.GetSingle();
                 // Absent leaves the Protobuf default 0, which both fields define as
                 // "not sent" - so the two encodings agree without a second rule.

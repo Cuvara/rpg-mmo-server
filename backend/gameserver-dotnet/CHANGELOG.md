@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Snapshot `speed` now reports effective movement speed after slows and haste, and is
+  present as zero while root or stun prevents movement. Speed transitions, including to
+  and from zero, remain delta-visible; protocol version is unchanged for old-peer safety.
+
 ### Added
 - **Snapshot delivery trace and per-connection delivery counters (#473).**
   `GAMESERVER_SNAPSHOT_TRACE` (a file path, unset = off) writes one CSV line per (connection,

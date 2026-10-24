@@ -8,10 +8,9 @@ import "math"
 // The reason is the trap this protocol has already been bitten by twice: proto3
 // elides a zero, and 0.0 radians is a perfectly ordinary facing (due east). With
 // a plain float, a sender meaning "east" and a sender predating the field are
-// byte-identical, and no receiver rule can tell them apart. `speed` has that
-// ambiguity and must document its way around it, because a zero speed is
-// genuinely meaningful. Facing has no such excuse, so the ambiguity is designed
-// out instead: every representable angle maps to a NON-ZERO wire value.
+// byte-identical, and no receiver rule can tell them apart. `speed` uses explicit
+// optional presence because zero speed is meaningful. Facing reserves zero instead,
+// so every representable angle maps to a NON-ZERO wire value.
 //
 // It is also 1-3 bytes of varint instead of a float's fixed 5, on the hottest
 // message in the protocol.

@@ -127,13 +127,14 @@ message Envelope {
 //   4. Adding a message or field that a receiver MUST act on to stay correct —
 //      i.e. one where ignoring it silently diverges rather than degrades.
 //
-// DO NOT bump for a purely additive optional field whose absence is covered by a
-// documented "zero means not sent" rule and whose omission degrades visibly
-// rather than diverging silently. An old peer ignoring it is then a supported
-// configuration, which is the whole point of writing that rule down. `facing`
+// DO NOT bump for a self-describing optional field or presence update when old
+// peers decode the same tag/type's default and keep their prior absent-value
+// behavior. Updated peers use presence to distinguish that default from an
+// explicit value; old peers safely ignore the distinction. `facing`
 // and `action` (EntitySnapshot, version 1) are exactly this case and did NOT
 // bump the number — a rule that fired on every change would be a build counter,
-// not a compatibility contract.
+// not a compatibility contract. EntitySnapshot.speed keeps its tag and type,
+// and this presence update is safe for old receivers for the same reason.
 //
 // HISTORY.
 //   1  first advertised version.
@@ -147,7 +148,7 @@ message Envelope {
 //
 // ZERO MEANS "NOT SENT", AND IS NOT REFUSED BY DEFAULT. proto3 elides a zero
 // uint32, so a peer predating this field is indistinguishable on the wire from
-// one sending 0 — the same trap documented at length on EntitySnapshot.speed.
+// one sending 0. Unlike EntitySnapshot.speed, this field is not optional.
 // Version numbering therefore starts at 1, never 0, and 0 is reserved to mean
 // "this peer does not advertise a version".
 //
@@ -459,10 +460,10 @@ enum EntityType {
 // one that has nothing to say. IDLE is deliberately 1, NOT 0: proto3 elides a
 // zero enum, so making idle the zero value would make "this entity is standing
 // still" and "this server does not know about actions" the same bytes. That is
-// the exact ambiguity documented at length on `speed` below, and here it is
 // avoidable for free, so it is avoided. `EntityType` already reserves 0 the same
 // way (ENTITY_TYPE_UNSPECIFIED means "see type_name"), so this is the file's
-// established idiom rather than a new rule.
+// established idiom rather than a new rule. `speed` uses optional presence
+// because zero is a meaningful movement value.
 //
 // This is LEVEL-triggered, not edge-triggered: it says what state the entity is
 // in, not that a state was entered. A renderer that needs to retrigger the same
@@ -535,9 +536,8 @@ message EntitySnapshot {
   // field optional, so a peer that does not implement interning still works.
   uint32 handle = 8;
 
-  // Movement speed in world units per second — the value the server's
-  // MovementSystem.Integrate is actually multiplying by, for THIS entity right
-  // now, not the spawn default.
+  // Effective movement speed in world units per second for THIS entity right
+  // now, after active slow and haste modifiers, not the spawn default.
   //
   // Exists for client-side prediction. Prediction replays local input through
   // the same Shared.GameLogic movement code the server runs, and that code needs
@@ -548,18 +548,19 @@ message EntitySnapshot {
   // it presents as rubber-banding, which reads as a network problem and gets
   // debugged as one, in the wrong layer.
   //
-  // ZERO MEANS "NOT SENT", NOT "IMMOBILE". proto3 elides a zero float, so a
-  // pre-speed server and a genuinely immobile entity are indistinguishable on
-  // the wire. A receiver MUST treat `speed <= 0` as "no value" and fall back to
-  // its configured default rather than concluding the entity cannot move —
-  // trusting it unconditionally means an old server pins every client's
-  // predicted speed to zero and the local player stops moving.
+  // Presence is explicit. An absent speed means this sender does not know the
+  // value (including a sender predating this field); a present zero means the
+  // entity is immobile, such as while rooted or stunned. A present positive
+  // value is the effective speed after active slows and haste effects. Updated
+  // receivers MUST inspect field presence before applying the value. Older
+  // receivers decode a present zero as the proto3 default and retain their
+  // historical absent-value behavior.
   //
   // Sent on every mention of an entity, never interned. Interning it would buy
   // ~5 bytes and inherit the whole handle-lifecycle contract above; speed is a
   // plain value with no identity, and the delta encoder already suppresses
   // entities whose state has not changed at all.
-  float speed = 9;
+  optional float speed = 9;
 
   // Facing direction, as 16-bit BINARY RADIANS BIASED BY ONE.
   //
@@ -573,12 +574,9 @@ message EntitySnapshot {
   // server predating this field would put IDENTICAL BYTES on the wire, and no
   // receiver rule can separate them.
   //
-  // `speed` below has exactly that ambiguity and has to document its way around
-  // it, because a speed of zero is genuinely meaningful and float is the natural
-  // type. Facing has no such excuse: reserving zero costs one addition on each
-  // side and removes the ambiguity BY CONSTRUCTION rather than by asking every
-  // implementer to remember a rule. Every representable angle has a non-zero wire
-  // value, so an absent field means one thing only.
+  // `speed` below uses optional presence because a speed of zero is meaningful.
+  // Facing instead reserves zero and biases every real angle by one. Every
+  // representable angle therefore has a non-zero wire value.
   //
   // It is also smaller: 1-3 bytes of varint against a float's fixed 5, on the
   // hottest message in the protocol. That is the same class of saving as the

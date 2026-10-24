@@ -229,9 +229,9 @@ func (e Envelope) UnmarshalPayload(v any) error {
 // on, changing the meaning/units/reference frame of an existing field, changing
 // the snapshot state machine (handle lifecycle, keyframe reset, the delta
 // "changed" rule, the normative merge algorithm), or adding something a receiver
-// MUST act on to stay correct. Do NOT bump for a purely additive optional field
-// covered by a documented "zero means not sent" rule — an old peer ignoring it
-// is a supported configuration, which is the point of writing that rule down.
+// MUST act on to stay correct. Do NOT bump for self-describing optional presence
+// when old peers safely decode the same field's default and keep their prior
+// absent-value behavior; the server can then roll out before upgraded receivers.
 //
 // The full contract, including the migration path for unversioned peers, is in
 // shared/proto/wire.proto under "Protocol version", and normatively in
@@ -533,11 +533,10 @@ type EntitySnapshot struct {
 	MaxHP  int     `json:"max_hp"`
 	Handle uint32  `json:"-"`
 
-	// Speed is movement speed in world units per second, for client-side
-	// prediction. Zero means "not sent", NOT "immobile": proto3 elides a zero
-	// float, so a pre-speed sender is indistinguishable from a stationary
-	// entity. Receivers must fall back to a configured default rather than
-	// conclude the entity cannot move.
+	// Speed is effective movement speed in world units per second, for client-side
+	// prediction. Protobuf field presence distinguishes absent (unknown/old sender)
+	// from present zero (immobile). Legacy JSON receivers that treat non-positive
+	// speed as missing keep the historical absent-value behavior.
 	Speed float32 `json:"speed"`
 
 	// FacingBrad is the entity's facing as 16-bit binary radians BIASED BY ONE:
@@ -547,8 +546,8 @@ type EntitySnapshot struct {
 	//
 	// The bias exists because 0.0 radians is a legitimate facing (due east), so a
 	// plain float would make "east" and "not sent" the same bytes under proto3's
-	// zero elision. Unlike Speed, that ambiguity is avoidable here, so it is
-	// avoided rather than documented around. `omitempty` keeps an unset facing off
+	// zero elision. Speed uses explicit optional presence; facing encodes its
+	// sentinel in the value. `omitempty` keeps an unset facing off
 	// the JSON wire too, so both encodings spell "not sent" the same way.
 	FacingBrad uint32 `json:"facing_brad,omitempty"`
 

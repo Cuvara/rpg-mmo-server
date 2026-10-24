@@ -636,18 +636,20 @@ are present. The server encodes this at the wire layer; clients MUST also follow
 a delta entity whose id is not yet in `world` is a full replace even when
 `changed_fields != 0`. See the updated merge algorithm below.
 
-**`speed`** is movement speed in world units per second, as the server is integrating it
+**`speed`** is effective movement speed in world units per second, as the server is integrating it
 for that entity *right now* — not the spawn default. It exists so a client can predict
 local movement through the same `Shared.GameLogic` code the server runs; without it a
 client can only assume the default, and any buff, mount or slow desyncs the two with no
 error on either side (it presents as rubber-banding, which reads as a network fault).
 
-> **`speed <= 0` means "not sent", not "immobile".** proto3 elides a zero float, so a
-> server predating this field is indistinguishable from a stationary entity. A receiver
-> MUST fall back to its configured default rather than conclude the entity cannot move —
-> trusting the value unconditionally means an old server pins a client's predicted speed
-> to zero and the local player stops moving. JSON does not elide, so `"speed":0` is
-> explicit there; the rule is the same for both encodings.
+`speed` has explicit Protobuf presence. An absent field means the sender does not know
+the value (including a server predating this field); a present zero means the entity is
+immobile, such as while rooted or stunned. A present positive value is the effective
+speed after active slows and haste. Updated receivers MUST check presence before applying
+the value. Older Protobuf receivers decode a present zero as the default and keep their
+historical absent-value behavior. The server emits `speed` on every JSON entity mention,
+including zero; legacy JSON receivers that treat non-positive values as absent keep the
+old behavior, while upgraded receivers can distinguish the key from an omitted one.
 
 `speed` is sent on **every** mention of an entity, including handle-only ones. It is
 never interned: a client that resolves a handle expects complete state, and sending it
@@ -844,10 +846,9 @@ wire v in [1, 65536]      -> angle = (v - 1) * 2π / 65536 radians,
 **Why not `float facing`?** Because proto3 elides a zero float and **0.0 radians is a
 perfectly ordinary facing** — due east. A server meaning "east" and a server predating
 the field would put *identical bytes* on the wire, and no receiver rule could separate
-them. `speed` has exactly that ambiguity and has to document its way around it, because
-a zero speed is genuinely meaningful and float is the natural type. Facing has no such
-excuse, so the ambiguity is removed **by construction**: every representable angle maps
-to a non-zero value.
+them. `speed` handles its meaningful zero with proto3 optional presence. Facing instead
+reserves zero and biases each real angle, so the ambiguity is removed **by construction**:
+every representable angle maps to a non-zero value.
 
 It is also 1–3 bytes of varint against a float's fixed 5, on the hottest message in the
 protocol — the same class of saving as the entity-type enum and id interning. Resolution
@@ -1085,8 +1086,9 @@ DELTA     payload=20 bytes   tick=15744  ack_tick=2  full=false
 > 08807b 1002 2212 1ddaac2a3f 2864 3064 3801 4001 4d0000a040
 > ```
 >
-> proto3 still elides it when it is exactly zero, which is the same thing as it being
-> absent — see the `speed <= 0` rule above.
+> This positive-speed example keeps the same bytes with explicit presence. A present
+> zero now emits `4d00000000` (field 9, fixed32); an absent speed emits no field. Older
+> receivers decode the explicit zero as their default and keep their historical fallback.
 
 Same entity, 60 bytes → 20 bytes (65 → 25 with field 9). Three separate rules are visible in this one
 pair: `id` is sent exactly once (interning), `type_name` is absent in both frames

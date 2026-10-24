@@ -148,4 +148,30 @@ public class WireJsonV3Tests
             "{\"tick\":1,\"entities\":[{\"id\":\"p1\",\"type\":\"player\",\"x\":1,\"y\":2,\"hp\":5,\"max_hp\":10,\"speed\":4}]}",
             json);
     }
+
+    [Fact]
+    public void SnapshotSpeed_ZeroPresenceRoundTripsInProtoAndLegacyJson()
+    {
+        var proto = new SnapshotMessage { Tick = 1 };
+        proto.Entities.Add(new EntitySnapshot { Id = "p1", Type = EntityType.Player, Speed = 0f });
+        Assert.True(proto.Entities[0].HasSpeed);
+        Envelope protoEnvelope = WireProtocol.NewEnvelope(MsgType.Snapshot, proto, WireEncoding.Proto);
+        var protoBack = WireProtocol.GetPayload<SnapshotMessage>(
+            WireProtocol.DecodeBody(WireProtocol.EncodeBody(protoEnvelope)));
+        Assert.True(protoBack.Entities[0].HasSpeed);
+        Assert.Equal(0f, protoBack.Entities[0].Speed);
+
+        var json = new SnapshotMessage { Tick = 1 };
+        json.Entities.Add(new EntitySnapshot { Id = "p1", Type = EntityType.Player, Speed = 0f });
+        Envelope jsonEnvelope = WireProtocol.NewEnvelope(MsgType.Snapshot, json, WireEncoding.Json);
+        Assert.Contains("\"speed\":0", Json(jsonEnvelope));
+        var jsonBack = RoundTrip<SnapshotMessage>(MsgType.Snapshot, jsonEnvelope);
+        Assert.True(jsonBack.Entities[0].HasSpeed);
+        Assert.Equal(0f, jsonBack.Entities[0].Speed);
+
+        byte[] absentBody = Encoding.UTF8.GetBytes(
+            "{\"type\":8,\"payload\":{\"tick\":1,\"entities\":[{\"id\":\"p1\",\"type\":\"player\"}]}}");
+        SnapshotMessage absent = WireProtocol.GetPayload<SnapshotMessage>(WireProtocol.DecodeBody(absentBody));
+        Assert.False(absent.Entities[0].HasSpeed);
+    }
 }

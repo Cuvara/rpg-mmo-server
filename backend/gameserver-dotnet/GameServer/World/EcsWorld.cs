@@ -800,6 +800,11 @@ public sealed class EcsWorld : IDisposable
 
                 if (sink != null || matches < destination.Length)
                 {
+                    float speed = locomotions[i].Speed;
+                    SimRecord? record = _gameplay.Get(ids[i].Stable);
+                    if (record is { Kind: not SimKind.None, Statuses: { Count: > 0 } statuses })
+                        speed = statuses.CanMove ? statuses.EffectiveSpeed(speed) : 0f;
+
                     var composed = new EntityState
                     {
                         Id = ids[i].Value,
@@ -812,7 +817,7 @@ public sealed class EcsWorld : IDisposable
                         Defense = combats[i].Defense,
                         CooldownUntilTick = combats[i].CooldownUntilTick,
                         AbilityCooldownUntilTick = combats[i].AbilityCooldownUntilTick,
-                        Speed = locomotions[i].Speed,
+                        Speed = speed,
                         FacingBrad = locomotions[i].FacingBrad,
                         Action = locomotions[i].Action,
                         ActionSeq = locomotions[i].ActionSeq,
@@ -903,9 +908,14 @@ public sealed class EcsWorld : IDisposable
         uint spawnSeq = 0;
         uint statsVersion = 0;
         uint statusesVersion = 0;
+        float speed = locomotion.Speed;
         if (rec != null && rec.Kind != SimKind.None)
         {
-            if (rec.Statuses is { Count: > 0 } statuses) maxHp = statuses.EffectiveMaxHp(maxHp);
+            if (rec.Statuses is { Count: > 0 } statuses)
+            {
+                maxHp = statuses.EffectiveMaxHp(maxHp);
+                speed = statuses.CanMove ? statuses.EffectiveSpeed(speed) : 0f;
+            }
             ownerId = rec.OwnerId;
             ownerKey = rec.OwnerKey;
             spawnSeq = rec.SpawnSeq;
@@ -920,7 +930,7 @@ public sealed class EcsWorld : IDisposable
             position.Value,
             health.Hp,
             maxHp,
-            locomotion.Speed,
+            speed,
             locomotion.FacingBrad,
             locomotion.Action,
             locomotion.ActionSeq,
