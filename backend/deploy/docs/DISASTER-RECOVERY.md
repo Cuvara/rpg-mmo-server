@@ -935,6 +935,10 @@ more cheaply.
 Rehearse, do not assume. Minimum:
 
 - **Per deploy** (automatic): CD takes PG + Redis backups in `db-migrate`.
+- **Per pull request** (automatic): `.github/workflows/restore-drill.yml` applies the
+  game-state migrations and restores synthetic PostgreSQL and Redis data into fresh
+  disposable services/containers. This CI rehearsal checks tables, rows and key values;
+  it complements, but does not replace, the live-mode release drill below.
 - **Monthly**: `db/redis-restore.sh --file <newest>` and
   `db/restore.sh --target <scratch> --yes` — a backup nobody has restored is a
   hypothesis, not a backup. **The monthly scratch rehearsal is not sufficient on

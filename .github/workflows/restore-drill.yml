@@ -1,0 +1,149 @@
+name: Restore rehearsal
+
+on:
+  pull_request:
+    branches: [main, master, develop, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  restore-drill:
+    name: PostgreSQL and Redis restore rehearsal
+    runs-on: ubuntu-latest
+    services:
+      postgres-source:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: game
+          POSTGRES_PASSWORD: restore-drill-only
+          POSTGRES_DB: gamestate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U game -d gamestate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres-restore:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: game
+          POSTGRES_PASSWORD: restore-drill-only
+          POSTGRES_DB: gamestate
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U game -d gamestate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis-source:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL and Redis clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client redis-tools
+
+      - name: Apply game-state migrations and seed representative data
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: game
+          PGPASSWORD: restore-drill-only
+        run: |
+          set -euo pipefail
+          for migration in backend/deploy/db/migrations/gamestate/*.sql; do
+            psql --dbname=gamestate --set ON_ERROR_STOP=1 --file "$migration"
+          done
+          psql --dbname=gamestate --set ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO player_states (user_id, map_id, x, y, hp, max_hp)
+          VALUES ('restore-drill-user', 'map_01', 12.5, -4.25, 80, 100);
+          INSERT INTO character_state (character_id, user_id, map_id, x, y, z, yaw, hp, max_hp, level, xp)
+          VALUES ('restore-drill-character', 'restore-drill-user', 'map_01', 12.5, -4.25, 0, 1.5, 80, 100, 3, 1250);
+          INSERT INTO character_items (instance_id, character_id, item_id, quantity, container, bag_index)
+          VALUES ('restore-drill-item', 'restore-drill-character', 'potion_small', 2, 'bag', 0);
+          INSERT INTO item_grants (grant_id, character_id, kind, instance_id)
+          VALUES ('restore-drill-grant', 'restore-drill-character', 'grant', 'restore-drill-item');
+          SQL
+
+      - name: Seed disposable Redis source
+        run: |
+          set -euo pipefail
+          redis-cli -h 127.0.0.1 -p 6379 SET 'restore-drill:session:one' 'session-value-one'
+          redis-cli -h 127.0.0.1 -p 6379 SET 'restore-drill:session:two' 'session-value-two'
+
+      - name: Back up and restore PostgreSQL into a fresh service
+        env:
+          DB_CONNECTION_MODE: host
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: game
+          PGPASSWORD: restore-drill-only
+          POSTGRES_GAME_USER: game
+          POSTGRES_GAME_DB: gamestate
+          BACKUP_DIR: ${{ runner.temp }}/restore-drill
+        run: |
+          set -euo pipefail
+          bash backend/deploy/db/backup.sh --db gamestate --dir "$BACKUP_DIR"
+          dump="$(find "$BACKUP_DIR/gamestate" -name 'gamestate-*.dump' -print -quit)"
+          test -n "$dump"
+          DB_CONNECTION_MODE=host PGHOST=127.0.0.1 PGPORT=5433 PGUSER=game PGPASSWORD=restore-drill-only \
+            POSTGRES_GAME_USER=game POSTGRES_GAME_DB=gamestate \
+            bash backend/deploy/db/restore.sh --file "$dump" --db gamestate --target restore_drill --yes
+          export PGHOST=127.0.0.1 PGPORT=5433 PGUSER=game PGPASSWORD=restore-drill-only
+          table_count="$(psql --dbname=restore_drill --tuples-only --no-align --set ON_ERROR_STOP=1 \
+            --command "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('player_states','character_state','character_items','item_grants')")"
+          test "$table_count" = 4
+          test "$(psql --dbname=restore_drill -At --set ON_ERROR_STOP=1 --command "SELECT count(*) FROM player_states WHERE user_id='restore-drill-user' AND hp=80")" = 1
+          test "$(psql --dbname=restore_drill -At --set ON_ERROR_STOP=1 --command "SELECT count(*) FROM character_state WHERE character_id='restore-drill-character' AND xp=1250")" = 1
+          test "$(psql --dbname=restore_drill -At --set ON_ERROR_STOP=1 --command "SELECT count(*) FROM character_items WHERE instance_id='restore-drill-item' AND quantity=2")" = 1
+          test "$(psql --dbname=restore_drill -At --set ON_ERROR_STOP=1 --command "SELECT count(*) FROM item_grants WHERE grant_id='restore-drill-grant'")" = 1
+          echo 'PostgreSQL restore verified: 4 migration tables and all 4 representative rows.'
+
+      - name: Back up and restore Redis into a fresh container
+        env:
+          REDIS_CONNECTION_MODE: host
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: '6379'
+          REDIS_IMAGE: redis:7.4-alpine
+          REDIS_BACKUP_DIR: ${{ runner.temp }}/restore-drill/redis
+        run: |
+          set -euo pipefail
+          bash backend/deploy/db/redis-backup.sh --dir "$REDIS_BACKUP_DIR"
+          rdb="$(find "$REDIS_BACKUP_DIR" -name 'redis-*.rdb' -print -quit)"
+          test -n "$rdb"
+          restore_log="$RUNNER_TEMP/redis-restore.log"
+          bash backend/deploy/db/redis-restore.sh --file "$rdb" --keep-scratch 2>&1 | tee "$restore_log"
+          read -r restored_container restored_volume < <(
+            sed -nE "s/.*keeping scratch container '([^']+)' and volume '([^']+)'.*/\1 \2/p" "$restore_log"
+          )
+          test -n "$restored_container"
+          cleanup() {
+            docker rm -f "$restored_container" >/dev/null 2>&1 || true
+            docker volume rm "$restored_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          test "$(docker exec "$restored_container" redis-cli --raw GET 'restore-drill:session:one')" = 'session-value-one'
+          test "$(docker exec "$restored_container" redis-cli --raw GET 'restore-drill:session:two')" = 'session-value-two'
+          echo 'Redis restore verified: 2 durable keys and their values.'
+
+      - name: Retain synthetic backup archives
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: restore-drill-${{ github.run_id }}
+          path: ${{ runner.temp }}/restore-drill
+          if-no-files-found: ignore
+          retention-days: 7

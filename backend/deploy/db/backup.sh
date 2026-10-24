@@ -23,6 +23,7 @@
 #   POSTGRES_GAME_USER/DB   game credentials          (default game/gamestate)
 #   BACKUP_KUBE_CONTEXT     kubectl context -> k8s mode  (default: unset = compose containers)
 #   BACKUP_KUBE_NAMESPACE   namespace of the StatefulSets (default rpg-k8s-data)
+#   DB_CONNECTION_MODE=host use local PostgreSQL clients with PGHOST/PGPORT/PGUSER/PGPASSWORD
 #
 # Output:
 #   $BACKUP_DIR/<db>/<db>-<UTC timestamp>.dump    (pg_dump -Fc, restorable with restore.sh)
@@ -40,6 +41,7 @@ SKIP_MISSING=0
 KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
 KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
 DUMPED=0
+DB_HOST_MODE="${DB_CONNECTION_MODE:-}"
 
 # ---------------------------------------------------------------- arg parsing
 while [ $# -gt 0 ]; do
@@ -132,6 +134,14 @@ detect_docker() {
 if [ -n "$KUBE_CTX" ]; then
 	command -v kubectl >/dev/null 2>&1 || die "--kube-context given but kubectl is not on PATH"
 	log "mode: k8s (context $KUBE_CTX, namespace $KUBE_NS)"
+	DB_HOST_MODE=""
+elif [ "$DB_HOST_MODE" = "host" ]; then
+	for tool in pg_dump pg_restore pg_isready; do
+		command -v "$tool" >/dev/null 2>&1 || die "DB_CONNECTION_MODE=host requires $tool"
+	done
+	pg_isready -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" -U "${PGUSER:-${POSTGRES_GAME_USER:-game}}" >/dev/null 2>&1 ||
+		die "PostgreSQL at ${PGHOST:-localhost}:${PGPORT:-5432} is not ready"
+	log "mode: host PostgreSQL client (${PGHOST:-localhost}:${PGPORT:-5432})"
 else
 	DOCKER="$(detect_docker)" || die "docker not available (tried docker, docker.exe)"
 fi
@@ -140,6 +150,8 @@ target_running() {
 	if [ -n "$KUBE_CTX" ]; then
 		[ "$(kubectl --context "$KUBE_CTX" -n "$KUBE_NS" get statefulset "$1" \
 			-o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ]
+	elif [ "$DB_HOST_MODE" = "host" ]; then
+		pg_isready -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" -U "$2" -d "$3" >/dev/null 2>&1
 	else
 		[ "$("$DOCKER" inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
 	fi
@@ -156,6 +168,8 @@ db_exec() {
 	shift
 	if [ -n "$KUBE_CTX" ]; then
 		kubectl --context "$KUBE_CTX" -n "$KUBE_NS" exec $interactive "statefulset/$target" -- "$@"
+	elif [ "$DB_HOST_MODE" = "host" ]; then
+		"$@"
 	else
 		"$DOCKER" exec $interactive "$target" "$@"
 	fi
@@ -178,6 +192,8 @@ db_put() {
 	if [ -n "$KUBE_CTX" ]; then
 		kubectl --context "$KUBE_CTX" -n "$KUBE_NS" cp "$src" "${target}-0:${dest}" -c postgres >/dev/null ||
 			return 1
+	elif [ "$DB_HOST_MODE" = "host" ]; then
+		cp "$src" "$dest" || return 1
 	else
 		db_exec -i "$target" sh -c "cat > '$dest'" <"$src" || return 1
 	fi
@@ -194,7 +210,7 @@ db_put() {
 dump_db() {
 	local label="$1" container="$2" user="$3" dbname="$4"
 
-	if ! target_running "$container"; then
+	if ! target_running "$container" "$user" "$dbname"; then
 		if [ "$SKIP_MISSING" -eq 1 ]; then
 			warn "'$container' not running -- skipping $label"
 			return 0
