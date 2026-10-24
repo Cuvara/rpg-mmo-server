@@ -48,6 +48,7 @@ namespace GameServer.Observability;
 /// gameserver.handshakes.pending       -> gameserver_handshakes_pending
 /// gameserver.handshakes.rejected      -> gameserver_handshakes_rejected_total{reason}
 /// gameserver.inputs.dropped           -> gameserver_inputs_dropped_total{reason}
+/// gameserver.messages.rejected        -> gameserver_messages_rejected_total{reason}
 /// gameserver.inputs.coalesced         -> gameserver_inputs_coalesced_total
 /// gameserver.transfers.rejected       -> gameserver_transfers_rejected_total
 /// gameserver.commands.received        -> gameserver_commands_received_total
@@ -106,6 +107,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _unversionedHandshakes;
     private readonly Counter<long> _nakamaRewardOutcomes;
     private readonly Counter<long> _inputsRejected;
+    private readonly Counter<long> _messagesRejected;
     private readonly Counter<long> _anomalyAlerts;
     private readonly Counter<long> _attackRateViolations;
     private readonly TagList[] _inputRejectionTags;
@@ -131,6 +133,7 @@ public sealed class GameMetrics : IDisposable
     private readonly TagList _rewardUnknownTags;
     private readonly TagList _inputBudgetTags;
     private readonly TagList _inputQueueFullTags;
+    private readonly TagList _unknownMessageTypeTags;
     private readonly TagList _saveOkTags;
     private readonly TagList _criticalTags;
     private readonly TagList _worldTags;
@@ -139,6 +142,7 @@ public sealed class GameMetrics : IDisposable
     private readonly KeyValuePair<string, object?>[] _mapTagArray;
 
     private int _playersOnline;
+    private long _unknownMessageTypeCount;
     private Func<int>? _entityCountProvider;
 
     /// <summary>Meter name this instance publishes under.</summary>
@@ -182,6 +186,7 @@ public sealed class GameMetrics : IDisposable
 
         _inputBudgetTags = new TagList { { "map_id", mapId }, { "reason", "connection_budget" } };
         _inputQueueFullTags = new TagList { { "map_id", mapId }, { "reason", "queue_full" } };
+        _unknownMessageTypeTags = new TagList { { "map_id", mapId }, { "reason", "unknown_type" } };
 
         _tickDuration = _meter.CreateHistogram<double>(
             TickDurationInstrument,
@@ -381,6 +386,12 @@ public sealed class GameMetrics : IDisposable
                          "Most reasons are latency-explicable and rise on an honest client " +
                          "with a bad connection; invalid_direction is the exception, being " +
                          "something the shipped client cannot emit. See docs/METRICS.md.");
+
+        _messagesRejected = _meter.CreateCounter<long>(
+            "gameserver.messages.rejected",
+            description: "Client messages ignored because their message type is unsupported. " +
+                         "This dispatch-level protocol observation is separate from inputs " +
+                         "refused by tick validation and handshakes rejected before authentication.");
 
         // One pre-built TagList per reason, allocated once. The zero-priming that makes
         // these series VISIBLE at zero is not done here -- see PrimeCounters, which must
@@ -1268,6 +1279,7 @@ public sealed class GameMetrics : IDisposable
     {
         foreach (var reason in GameServer.Input.InputRejection.All)
             _inputsRejected.Add(0, _inputRejectionTags[(int)reason]);
+        _messagesRejected.Add(0, _unknownMessageTypeTags);
 
         _anomalyAlerts.Add(0, _mapTags);
         _attackRateViolations.Add(0, _mapTags);
@@ -1291,6 +1303,16 @@ public sealed class GameMetrics : IDisposable
         Interlocked.Increment(ref _inputsRejectedByReason[i]);
         _inputsRejected.Add(1, _inputRejectionTags[i]);
     }
+
+    /// <summary>Record one unsupported client message type. The message remains ignored and the session stays open.</summary>
+    public void RecordUnknownMessageType()
+    {
+        Interlocked.Increment(ref _unknownMessageTypeCount);
+        _messagesRejected.Add(1, _unknownMessageTypeTags);
+    }
+
+    /// <summary>Unsupported client message types observed since start.</summary>
+    public long UnknownMessageTypesRejected => Interlocked.Read(ref _unknownMessageTypeCount);
 
     /// <summary>
     /// Record one account crossing the input-anomaly alert threshold. Observation only.

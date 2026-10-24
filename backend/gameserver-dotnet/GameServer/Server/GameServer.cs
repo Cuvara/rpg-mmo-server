@@ -2241,8 +2241,9 @@ public sealed class GameServerHost : IAsyncDisposable
                 break;
 
             default:
-                _logger.LogDebug("Unhandled message type {Type} from {UserId}",
-                    env.Type, conn.UserId);
+                // Unknown message types are ignored for forward compatibility. Keep this
+                // path allocation-free and observable through a bounded protocol counter.
+                _metrics?.RecordUnknownMessageType();
                 break;
         }
         return Task.CompletedTask;
