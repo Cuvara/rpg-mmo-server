@@ -1252,9 +1252,9 @@ type EntitySnapshot struct {
 	Speed *float32 `protobuf:"fixed32,9,opt,name=speed,proto3,oneof" json:"speed,omitempty"`
 	// Facing direction, as 16-bit BINARY RADIANS BIASED BY ONE.
 	//
-	//   wire 0                -> NOT SENT: this sender has no facing to report.
-	//   wire v in [1, 65536]  -> angle = (v - 1) * 2*PI / 65536 radians,
-	//                            counter-clockwise from +X (due east).
+	//	wire 0                -> NOT SENT: this sender has no facing to report.
+	//	wire v in [1, 65536]  -> angle = (v - 1) * 2*PI / 65536 radians,
+	//	                         counter-clockwise from +X (due east).
 	//
 	// WHY THE BIAS, AND WHY NOT A FLOAT. `float facing` is the obvious encoding and
 	// it is wrong here, because proto3 elides a zero float and 0.0 radians is a
@@ -1329,20 +1329,21 @@ type EntitySnapshot struct {
 	// field rather than resetting it to the proto3 default (zero).
 	//
 	// Bit assignments:
-	//   0x0001 → x          (field 3)
-	//   0x0002 → y          (field 4)
-	//   0x0004 → hp         (field 5)
-	//   0x0008 → max_hp     (field 6)
-	//   0x0010 → type / type_name (fields 7 / 2)
-	//   0x0020 → speed      (field 9)
-	//   0x0040 → facing_brad (field 10)
-	//   0x0080 → action     (field 11)
-	//   0x0100 → action_seq (field 12)
-	//   0x0200 → z          (field 14)                  protocol version 3
-	//   0x0400 → velocity   (fields 15-17)              protocol version 3
-	//   0x0800 → owner / spawn_seq (fields 18 / 19)     protocol version 3
-	//   0x1000 → stats      (fields 20 / 21)            protocol version 3
-	//   0x2000 → statuses   (fields 22 / 23)            protocol version 3
+	//
+	//	0x0001 → x          (field 3)
+	//	0x0002 → y          (field 4)
+	//	0x0004 → hp         (field 5)
+	//	0x0008 → max_hp     (field 6)
+	//	0x0010 → type / type_name (fields 7 / 2)
+	//	0x0020 → speed      (field 9)
+	//	0x0040 → facing_brad (field 10)
+	//	0x0080 → action     (field 11)
+	//	0x0100 → action_seq (field 12)
+	//	0x0200 → z          (field 14)                  protocol version 3
+	//	0x0400 → velocity   (fields 15-17)              protocol version 3
+	//	0x0800 → owner / spawn_seq (fields 18 / 19)     protocol version 3
+	//	0x1000 → stats      (fields 20 / 21)            protocol version 3
+	//	0x2000 → statuses   (fields 22 / 23)            protocol version 3
 	//
 	// ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
 	// delta never sets this field; a receiver that sees 0 MUST apply the same rule
@@ -2637,8 +2638,8 @@ type SealedServerHello struct {
 	PublicKey []byte `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
 	// HMAC-SHA256 over the handshake transcript, 32 bytes:
 	//
-	//   "cuvara/sealed-handshake/v1" || 0x00 || jti || 0x00
-	//     || client_public (32) || server_public (32)
+	//	"cuvara/sealed-handshake/v1" || 0x00 || jti || 0x00
+	//	  || client_public (32) || server_public (32)
 	//
 	// BOTH EPHEMERAL PUBLIC KEYS ARE IN THE TRANSCRIPT, and that is what stops a
 	// man in the middle: an attacker who substitutes its own key changes the
@@ -2671,8 +2672,8 @@ type SealedServerHello struct {
 	//
 	// The signed input is NOT the transcript. It is:
 	//
-	//   "cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00
-	//     || identity_public (32)
+	//	"cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00
+	//	  || identity_public (32)
 	//
 	// where `transcript` is EXACTLY the bytes described on `binding` above,
 	// unchanged byte for byte. That is deliberate: key derivation
