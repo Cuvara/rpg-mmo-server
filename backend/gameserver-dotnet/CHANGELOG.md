@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - Wait for KCP acknowledgement before closing reason-bearing refusals and kicks, so the
   client receives refusal text and duplicate-login reasons before teardown.
+- A replacement login that registers while a duplicate-login reason is still draining no
+  longer closes the old connection mid-drain (`ConnectionManager.Add` defers the close to
+  the end of the bounded 2 s drain), so the old client receives `duplicate_login` instead of
+  a dead link that would reconnect and kick the new session. The replacement keeps its entity
+  and registration, and the kicked connection's join counter is balanced once.
 - **Snapshot frame writer allocation.** The protobuf ByteString envelope wrapper
   allocated 32 B for every frame. The reusable writer now streams the generated snapshot
   message directly through CodedOutputStream; the always-on allocation guard covers
