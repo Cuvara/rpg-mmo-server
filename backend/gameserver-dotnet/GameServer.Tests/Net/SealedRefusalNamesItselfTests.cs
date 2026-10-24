@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
@@ -105,9 +106,10 @@ public class SealedRefusalNamesItselfTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var server = new GameServerHost(RequireSealed());
         var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
+        await using var proxy = AdversityProxy.Start(port, AdversityProxy.Profile.Clean(seed: 20261024));
 
         using var client = new KcpTestClient();
-        await client.ConnectAsync("127.0.0.1", port, cts.Token);
+        await client.ConnectAsync("127.0.0.1", proxy.Port, cts.Token);
         await using var stream = client.GetStream();
 
         var join = WireProtocol.NewEnvelope(
@@ -123,15 +125,33 @@ public class SealedRefusalNamesItselfTests
         Assert.NotNull(respEnv);
         var resp = WireProtocol.GetPayload<JoinTokenResponse>(respEnv!);
         Assert.True(resp.Ok, resp.Error);
+        var serverSession = Assert.IsType<GameServer.Net.Transport.KcpSession>(client.ServerSession);
+
+        // Start the blackout only after the join reply was acknowledged, so the next
+        // unacknowledged server datagram is the refusal kick.
+        Assert.True(await serverSession.WaitForSendDrainAsync(TimeSpan.FromSeconds(1), cts.Token));
+        proxy.Blackout(toServer: false, toClient: true);
 
         // Now say nothing, as a client with sealing switched off does. The server must
         // tell us why it is going away rather than just going away.
-        var kickEnv = await WireProtocol.DecodeAsync(stream, cts.Token);
+        var queued = Stopwatch.StartNew();
+        while (serverSession.WaitSnd == 0 && queued.Elapsed < TimeSpan.FromSeconds(10))
+            await Task.Delay(5, cts.Token);
+        Assert.True(serverSession.WaitSnd > 0, "the refusal kick was never queued");
+
+        // Hold the first kick datagram until KCP has reported it in flight, then restore
+        // the link. Without waiting for the ARQ acknowledgement the refusal path closes
+        // the session here and KCP cannot retransmit the lost kick.
+        proxy.Blackout(toServer: false, toClient: false);
+        using var receiveCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var kickEnv = await WireProtocol.DecodeAsync(stream, receiveCts.Token);
         Assert.NotNull(kickEnv);
         Assert.True(kickEnv!.Type == (byte)MsgType.Kick, $"expected a Kick, got {kickEnv.Type}");
 
         var kick = WireProtocol.GetPayload<KickMessage>(kickEnv);
         Assert.Equal(SealedRefusalReason.NoSealedSession, kick.Reason);
+        Assert.True(await serverSession.WaitForSendDrainAsync(TimeSpan.FromSeconds(1), cts.Token));
+        Assert.Equal(0, serverSession.WaitSnd);
 
         cts.Cancel();
         try { await runTask; } catch (OperationCanceledException) { /* expected */ }

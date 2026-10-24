@@ -67,6 +67,13 @@ public interface ITransportConnection : IDisposable
     void Close();
 }
 
+/// <summary>A transport that can wait until its reliable send queue is acknowledged.</summary>
+public interface ITransportDrain
+{
+    /// <summary>Waits for all queued stream bytes to be acknowledged, or until the timeout.</summary>
+    Task<bool> DrainAsync(TimeSpan timeout, CancellationToken ct);
+}
+
 /// <summary>
 /// A transport connection that can report its KCP session's ARQ counters. Implemented by the
 /// KCP transport only; a test double that does not implement it reports
@@ -160,9 +167,10 @@ internal sealed class KcpTransportListener : ITransportListener
 }
 
 /// <summary>A single accepted KCP session.</summary>
-internal sealed class KcpTransportConnection(KcpSession session) : ITransportConnection, IKcpCountersSource
+internal sealed class KcpTransportConnection(KcpSession session) : ITransportConnection, IKcpCountersSource, ITransportDrain
 {
     public KcpSessionCounters ReadKcpCounters() => session.ReadCounters();
+    public Task<bool> DrainAsync(TimeSpan timeout, CancellationToken ct) => session.WaitForSendDrainAsync(timeout, ct);
 
     private readonly KcpStream _stream = new(session);
 

@@ -1254,6 +1254,10 @@ public sealed class Connection : IDisposable
         }
     }
 
+    /// <summary>Waits for a reliable transport to acknowledge its queued bytes.</summary>
+    public Task<bool> DrainTransportAsync(TimeSpan timeout, CancellationToken ct = default) =>
+        _transport is ITransportDrain drain ? drain.DrainAsync(timeout, ct) : Task.FromResult(true);
+
     private async Task WriteFrameAsync(byte[] frame, CancellationToken ct)
     {
         await _streamWriteMutex.WaitAsync(ct);

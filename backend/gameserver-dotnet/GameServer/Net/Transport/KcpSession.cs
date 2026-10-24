@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
@@ -266,6 +267,22 @@ public sealed class KcpSession : IDisposable
             }
 
             await wait.WaitAsync(ct);
+        }
+    }
+
+    /// <summary>Waits for every queued or in-flight segment to be acknowledged.</summary>
+    /// <returns>True when the send queue drains; false on close or timeout.</returns>
+    public async Task<bool> WaitForSendDrainAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        while (true)
+        {
+            if (WaitSnd == 0) return true;
+            if (IsClosed) return false;
+            TimeSpan remaining = timeout - sw.Elapsed;
+            if (remaining <= TimeSpan.Zero) return false;
+            await Task.Delay(remaining < TimeSpan.FromMilliseconds(5)
+                ? remaining : TimeSpan.FromMilliseconds(5), ct);
         }
     }
 
