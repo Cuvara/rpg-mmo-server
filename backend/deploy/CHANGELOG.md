@@ -6,6 +6,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `docs/RELEASE-RUNBOOK.md` and `docs/READINESS-GATES.md` (backend docs): the cross-repo release
+  order (SGL tag, Netcode/UnityDots tags, client pins, server image) with per-step verification
+  and per-component rollback, and the provisional engineering gates with their instruments.
+  Docs only. The runbook is proposed and undrilled; the gates quote no capacity ceiling and leave
+  target CCU, entity mix, device tier and RTT budget as open human decisions (audit A4
+  OE-01/02/05).
 - Pull requests run `.github/workflows/restore-drill.yml`, which applies the shipped
   game-state migrations to disposable PostgreSQL 16.4 and Redis 7.4 services, exercises
   the backup and restore scripts, and checks restored rows and keys. The PostgreSQL and

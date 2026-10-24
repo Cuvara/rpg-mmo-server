@@ -227,4 +227,6 @@ changed under it. Three rules:
 
 Related: `CORE-COMPLETION.md` (the gate before gameplay), `ARCHITECTURE-DECISIONS.md` (ADR
 rationale), `BENCHMARK.md` (current measured numbers), `MEASUREMENT.md` (how to take a
-measurement here without fooling yourself), `backend/TEAM.md` (cross-module contracts).
+measurement here without fooling yourself), `READINESS-GATES.md` (provisional pass/fail gates and
+the open human decisions), `RELEASE-RUNBOOK.md` (cross-repo release order, verification and
+rollback), `backend/TEAM.md` (cross-module contracts).
