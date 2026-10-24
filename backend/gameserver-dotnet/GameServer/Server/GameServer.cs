@@ -2146,6 +2146,9 @@ public sealed class GameServerHost : IAsyncDisposable
         switch ((MsgType)env.Type)
         {
             case MsgType.Input:
+                // A kicked session is owed a reason, not a say: while its reason drains, a
+                // replacement may own the entity and this connection's input must not move it.
+                if (conn.Kicked) return Task.CompletedTask;
                 // Bounded ingest (F04): movement coalesces in place, edge-triggered
                 // actions are budgeted per connection per drain, and the queue as a whole
                 // is capped. Nothing here awaits or allocates beyond the decode, so a
@@ -2383,8 +2386,18 @@ public sealed class GameServerHost : IAsyncDisposable
             _logger.LogWarning(ex, "Save before duplicate-login kick failed for {UserId}", userId);
         }
 
+        // Marked BEFORE the notification, and before Close(), like MarkTransferred:
+        // closing ends the read loop, whose finally consults the flag — set after, and
+        // the handler races in with a second teardown plus the 30s hold this kick
+        // exists to prevent. Early also fences the old client's input off the entity
+        // for the length of the drain.
+        conn.MarkKicked();
+
         // Best-effort notification, MsgKick then MsgDisconnect — the frames must
-        // never disagree about why (the gateway's eviction contract).
+        // never disagree about why (the gateway's eviction contract). The drain window
+        // keeps a replacement login's ConnectionManager.Add from closing this
+        // connection mid-drain; the close it asked for runs at EndReasonDrain.
+        conn.BeginReasonDrain();
         try
         {
             var kick = WireProtocol.NewEnvelope(MsgType.Kick,
@@ -2401,11 +2414,10 @@ public sealed class GameServerHost : IAsyncDisposable
         {
             _logger.LogDebug(ex, "Kick notification to {UserId} failed (peer already gone?)", userId);
         }
-
-        // Marked BEFORE Close(), like MarkTransferred: closing ends the read loop,
-        // whose finally consults the flag — set after, and the handler races in
-        // with a second teardown plus the 30s hold this kick exists to prevent.
-        conn.MarkKicked();
+        finally
+        {
+            conn.EndReasonDrain();
+        }
 
         // By identity: if a newer connection somehow replaced this one between the
         // jti check and here, its registration (and entity) must not be destroyed.
@@ -2423,6 +2435,15 @@ public sealed class GameServerHost : IAsyncDisposable
             // A kick removes the entity outright and schedules no hold, so nothing else
             // would ever notice that this was the last member of the party.
             ShutdownIfInstanceFinished();
+        }
+        else
+        {
+            // A replacement login registered while the reason drained. It owns the
+            // entity and the registration; neither is touched. This connection is
+            // Kicked, so its handler's finally skips teardown and its own join
+            // counter would never be balanced -- balance it here, once.
+            _metrics?.PlayerLeft();
+            _registration?.NotifyPlayerCountChanged();
         }
         conn.Close();
 

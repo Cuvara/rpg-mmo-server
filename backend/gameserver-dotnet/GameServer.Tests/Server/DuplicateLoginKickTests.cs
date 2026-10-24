@@ -91,6 +91,66 @@ public class DuplicateLoginKickTests
         Assert.True(await serverSession.WaitForSendDrainAsync(TimeSpan.FromSeconds(1), h.Cts.Token));
     }
 
+    /// <summary>
+    /// The race the drain must survive: the replacement login registers while the old
+    /// session's duplicate-login reason is still unacknowledged. Registering used to
+    /// close the old connection on the spot, losing the reason, so the old client saw a
+    /// dead link, reconnected and kicked the new session in turn.
+    /// </summary>
+    [Fact]
+    public async Task Kick_ReplacementJoinsDuringBlackout_OldClientStillGetsReason_NewSessionSurvives()
+    {
+        using var metrics = new GameMetrics("map_kick", $"test.{Guid.NewGuid():N}");
+        await using var h = await Harness.StartAsync(metrics);
+        await using var proxy = AdversityProxy.Start(h.Port, AdversityProxy.Profile.Clean(seed: 20261025));
+
+        string oldJti = Guid.NewGuid().ToString("N");
+        using var oldClient = await h.JoinAsync("user-flap", oldJti, proxy.Port);
+        var oldSession = Assert.IsType<KcpSession>(oldClient.ServerSession);
+        Assert.True(await oldSession.WaitForSendDrainAsync(TimeSpan.FromSeconds(1), h.Cts.Token));
+        var oldConn = h.Server.ConnectionOf("user-flap");
+        Assert.NotNull(oldConn);
+
+        proxy.Blackout(toServer: false, toClient: true);
+        Task<bool> kickTask = h.Server.KickPlayerAsync("user-flap", oldJti);
+        var queued = System.Diagnostics.Stopwatch.StartNew();
+        while (oldSession.WaitSnd == 0 && queued.Elapsed < TimeSpan.FromSeconds(10))
+            await Task.Delay(5, h.Cts.Token);
+        Assert.True(oldSession.WaitSnd > 0, "the duplicate-login kick was never queued");
+
+        // The replacement registers while the reason is still in flight.
+        using var newClient = await h.JoinAsync("user-flap", Guid.NewGuid().ToString("N"));
+        var newConn = h.Server.ConnectionOf("user-flap");
+        Assert.NotNull(newConn);
+        Assert.NotSame(oldConn, newConn);
+        Assert.False(kickTask.IsCompleted, "the replacement cut the reason drain short");
+        Assert.True(oldSession.WaitSnd > 0, "the old session was closed before the reason was acknowledged");
+
+        proxy.Blackout(toServer: false, toClient: false);
+        Assert.True(await kickTask.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        var stream = oldClient.GetStream();
+        var kickEnv = await ReadUntilAsync(stream, MsgType.Kick);
+        Assert.Equal("duplicate_login", WireProtocol.GetPayload<KickMessage>(kickEnv).Reason);
+        var discEnv = await ReadUntilAsync(stream, MsgType.Disconnect);
+        using var doc = System.Text.Json.JsonDocument.Parse(discEnv.Payload);
+        Assert.Equal("duplicate_login", doc.RootElement.GetProperty("reason").GetString());
+
+        // Exactly one live entity and one live connection, and it is the replacement.
+        Assert.Same(newConn, h.Server.ConnectionOf("user-flap"));
+        Assert.Equal(1, h.Server.Connections);
+        Assert.Equal(1, h.Server.EntityCount);
+        Assert.Equal(1, metrics.PlayersOnline);
+        Assert.Equal(0, h.Server.PendingHolds);
+
+        // Give a wrongly-scheduled teardown time to show itself, then re-check.
+        await Task.Delay(300, h.Cts.Token);
+        Assert.Same(newConn, h.Server.ConnectionOf("user-flap"));
+        Assert.Equal(1, h.Server.EntityCount);
+        Assert.Equal(1, metrics.PlayersOnline);
+        Assert.Equal(0, h.Server.PendingHolds);
+    }
+
     [Fact]
     public async Task Kick_WrongOrEmptyJti_IsANoOp()
     {
