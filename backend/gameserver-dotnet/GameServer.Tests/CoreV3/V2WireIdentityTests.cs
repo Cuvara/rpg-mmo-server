@@ -169,7 +169,7 @@ public class V2WireIdentityTests
     [InlineData(WireEncoding.Proto, SnapshotDeltaState.DefaultMaxSnapshotBytes, ProtoBudgetDefault)]
     [InlineData(WireEncoding.Proto, 120, ProtoBudgetTight)]
     [InlineData(WireEncoding.Json, SnapshotDeltaState.DefaultMaxSnapshotBytes, Json)]
-    public void ProtocolTwoIdentityChangesOnlyAfterSpeedChangingChill(
+    public void ProtocolTwoIdentityDiffersAfterSpeedChangingChill(
         WireEncoding encoding, int budget, string expectedWithChill)
     {
         var baseline = RunScenario(encoding, budget, peerVersion: 2, filterV3EventsInHarness: false,
