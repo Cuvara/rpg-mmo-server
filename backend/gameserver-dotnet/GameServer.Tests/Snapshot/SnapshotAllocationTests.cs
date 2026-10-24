@@ -1,5 +1,6 @@
 using GameServer.Net;
 using GameServer.Snapshot;
+using GameServer.World;
 using RpgMmo.Wire.V1;
 using Shared.GameLogic.Components;
 using Xunit.Abstractions;
@@ -191,6 +192,84 @@ public class SnapshotAllocationTests(ITestOutputHelper output)
         // exact figure. Anything near parity means pooling was removed or defeated.
         Assert.True(pooled < legacy / 4,
             $"expected the pooled path to allocate far less; legacy {legacy}, pooled {pooled}");
+    }
+
+    [Theory]
+    [InlineData(50, 0)]
+    [InlineData(200, 0)]
+    [InlineData(500, 0)]
+    [InlineData(50, 3)]
+    [InlineData(200, 3)]
+    [InlineData(500, 3)]
+    public void DeltaEncodeAndFrameWrite_AllocateNothingAfterWarmup(int viewers, uint peerProtocolVersion)
+    {
+        const int Calls = 60;
+        var states = new SnapshotDeltaState[viewers];
+        var writers = new SnapshotFrameWriter[viewers];
+        for (int i = 0; i < viewers; i++)
+        {
+            states[i] = new SnapshotDeltaState { PeerProtocolVersion = peerProtocolVersion };
+            states[i].RequestFull();
+            writers[i] = new SnapshotFrameWriter();
+        }
+
+        var views = new EntityView[VisiblePerViewer];
+        for (int i = 0; i < views.Length; i++)
+        {
+            views[i] = new EntityView(i + 1, $"player-{i:D4}", "player",
+                new Vec2(i, i * 0.5f), 100, 100, 5f, 1,
+                global::Shared.GameLogic.Components.EntityAction.Moving, 1);
+        }
+
+        // Allocate pools, buffers and JIT code before measuring, then warm the delta arm
+        // separately so every measured call is a steady-state delta with changed entities.
+        RunDeltaEncodeAndFrame(states, writers, views, 2);
+        for (int i = 0; i < 20; i++)
+            RunDeltaEncodeAndFrame(states, writers, views, (ulong)i + 3);
+
+        long encodeBytes = 0;
+        long frameBytes = 0;
+        for (int tick = 0; tick < Calls; tick++)
+        {
+            for (int viewer = 0; viewer < viewers; viewer++)
+            {
+                for (int entity = 0; entity < views.Length; entity++)
+                {
+                    ref EntityView view = ref views[entity];
+                    view = new EntityView(view.Key, view.Id, view.Type,
+                        new Vec2(view.Position.X + 0.125f, view.Position.Y),
+                        view.Hp, view.MaxHp, view.Speed, view.FacingBrad, view.Action, view.ActionSeq,
+                        view.Z, view.VelX, view.VelY, view.VelZ, view.OwnerId, view.OwnerKey,
+                        view.SpawnSeq, view.StatsVersion, view.StatusesVersion);
+                }
+
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                SnapshotMessage snapshot = states[viewer].Encode(
+                    (ulong)tick + 23, (ulong)tick + 23, views.AsSpan(),
+                    keyframeInterval: int.MaxValue, intern: true);
+                long afterEncode = GC.GetAllocatedBytesForCurrentThread();
+                _ = writers[viewer].WriteFrame((byte)MsgType.Snapshot, snapshot);
+                long afterFrame = GC.GetAllocatedBytesForCurrentThread();
+                encodeBytes += afterEncode - before;
+                frameBytes += afterFrame - afterEncode;
+            }
+        }
+
+        output.WriteLine($"{viewers} viewers x {VisiblePerViewer} visible, v{peerProtocolVersion}, {Calls} changed deltas: " +
+                         $"encode {encodeBytes} B, frame {frameBytes} B");
+        Assert.Equal(0L, encodeBytes);
+        Assert.Equal(0L, frameBytes);
+    }
+
+    private static void RunDeltaEncodeAndFrame(
+        SnapshotDeltaState[] states, SnapshotFrameWriter[] writers, EntityView[] views, ulong tick)
+    {
+        for (int viewer = 0; viewer < states.Length; viewer++)
+        {
+            SnapshotMessage snapshot = states[viewer].Encode(
+                tick, tick, views.AsSpan(), keyframeInterval: int.MaxValue, intern: true);
+            _ = writers[viewer].WriteFrame((byte)MsgType.Snapshot, snapshot);
+        }
     }
 
     /// <summary>

@@ -9,17 +9,15 @@ namespace GameServer.Snapshot;
 /// Serializes a snapshot into a length-prefixed wire frame using buffers it keeps and
 /// reuses, instead of allocating a fresh array per snapshot per tick.
 ///
-/// <para>The path this replaces allocated four arrays for every snapshot sent:
-/// <c>SnapshotMessage.ToByteArray()</c> for the payload, a <c>ByteString</c> copy of it
-/// into the envelope, <c>Envelope.ToByteArray()</c> for the body, and the framed array
-/// with the length prefix. At 200 players that was 44 280 B/tick. Here the payload and
-/// the frame each go into a grown-once buffer, and the envelope wraps the payload with
-/// <see cref="UnsafeByteOperations.UnsafeWrap"/> rather than copying it.</para>
+/// <para>The generated snapshot serializer writes directly into a reusable protobuf
+/// output stream. The envelope fields use the protobuf library's <see cref="CodedOutputStream"/>
+/// primitives, so the payload is length-prefixed in place without a per-frame
+/// <see cref="ByteString"/> wrapper.</para>
 ///
-/// <para><b>The bytes are unchanged by construction.</b> Both messages are still written
-/// by the generated protobuf writers — this only changes where the bytes land. Nothing
-/// here hand-rolls a tag or a varint, which is the version of this optimisation that
-/// would have put the wire at risk. <c>SnapshotByteIdentityTests</c> is the guard.</para>
+/// <para><b>The bytes are unchanged by construction.</b> The snapshot is still written by its
+/// generated serializer, while the envelope fields use the protobuf library's tag, enum and
+/// length writers. <c>SnapshotByteIdentityTests</c> and
+/// <c>WriteFrame_IsByteIdenticalToTheAllocatingPath</c> guard the wire bytes.</para>
 ///
 /// <para><b>Threading and lifetime:</b> one instance per connection, used only by that
 /// connection's write task — the same single-threaded ownership as
@@ -29,14 +27,19 @@ namespace GameServer.Snapshot;
 /// </summary>
 public sealed class SnapshotFrameWriter
 {
-    private readonly GrowingBufferWriter _payload = new();
     private readonly GrowingBufferWriter _frame = new();
 
     /// <summary>
-    /// Reused envelope wrapper. Only <c>Type</c> and <c>Payload</c> are ever set, and both
-    /// are overwritten on every call, so no state survives between frames.
+    /// The stream and protobuf output buffer are reused across frames by this connection.
     /// </summary>
-    private readonly Envelope _envelope = new();
+    private readonly FrameBufferStream _frameStream;
+    private readonly CodedOutputStream _output;
+
+    public SnapshotFrameWriter()
+    {
+        _frameStream = new FrameBufferStream(_frame);
+        _output = new CodedOutputStream(_frameStream, 256, leaveOpen: true);
+    }
 
     /// <summary>
     /// Serialize <paramref name="snapshot"/> as message <paramref name="type"/> into a
@@ -45,22 +48,53 @@ public sealed class SnapshotFrameWriter
     /// </summary>
     public ReadOnlyMemory<byte> WriteFrame(byte type, SnapshotMessage snapshot)
     {
-        _payload.Reset(reserve: 0);
-        snapshot.WriteTo(_payload);
-
-        _envelope.Type = type;
-        // Wrap, do not copy: the ByteString is a view over the payload buffer, and it is
-        // replaced on the next call — well inside that buffer's validity window.
-        _envelope.Payload = UnsafeByteOperations.UnsafeWrap(_payload.WrittenMemory);
-
-        // Reserve the 4-byte length prefix, write the body after it, then fill the prefix
-        // in once the body's length is known.
+        // Reserve the 4-byte length prefix, write the protobuf body after it, then fill
+        // the prefix once the body's length is known.
         _frame.Reset(reserve: 4);
-        _envelope.WriteTo(_frame);
+        int payloadSize = snapshot.CalculateSize();
+        if (type != 0)
+        {
+            _output.WriteTag(1, WireFormat.WireType.Varint);
+            _output.WriteEnum(type);
+        }
+        if (payloadSize != 0)
+        {
+            _output.WriteTag(2, WireFormat.WireType.LengthDelimited);
+            _output.WriteLength(payloadSize);
+            snapshot.WriteTo(_output);
+        }
+        _output.Flush();
 
         int bodySize = _frame.Written - 4;
         BinaryPrimitives.WriteInt32BigEndian(_frame.Buffer.AsSpan(0, 4), bodySize);
         return _frame.Buffer.AsMemory(0, _frame.Written);
+    }
+
+    private sealed class FrameBufferStream(GrowingBufferWriter buffer) : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+        public override int Read(byte[] destination, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] source, int offset, int count) =>
+            Write(source.AsSpan(offset, count));
+
+        public override void Write(ReadOnlySpan<byte> source)
+        {
+            source.CopyTo(buffer.GetSpan(source.Length));
+            buffer.Advance(source.Length);
+        }
     }
 
     /// <summary>
