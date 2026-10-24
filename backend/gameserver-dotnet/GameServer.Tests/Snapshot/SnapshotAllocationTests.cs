@@ -7,6 +7,14 @@ using Xunit.Abstractions;
 
 namespace GameServer.Tests.Snapshot;
 
+// Allocation counters are thread-local, but parallel tests can share a worker thread.
+// Run these guards in isolation so unrelated suite work cannot contaminate the sample.
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class SnapshotAllocationCollection
+{
+    public const string Name = "snapshot-allocation";
+}
+
 /// <summary>
 /// The snapshot path's per-tick allocation, and the guard that keeps it down.
 ///
@@ -26,6 +34,7 @@ namespace GameServer.Tests.Snapshot;
 /// caller that starts holding messages across encodes, forcing a copy back), not to pin
 /// an exact byte count that a runtime upgrade could move.</para>
 /// </summary>
+[Collection(SnapshotAllocationCollection.Name)]
 public class SnapshotAllocationTests(ITestOutputHelper output)
 {
     private const int Keyframe = 30;
