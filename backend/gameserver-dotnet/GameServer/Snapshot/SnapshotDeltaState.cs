@@ -1153,8 +1153,8 @@ public sealed class SnapshotDeltaState
     /// this depth. Every field is reset, not just the ones the caller is about to set: a
     /// stale <c>Id</c> or <c>Handle</c> carried over from a previous tick would be wrong
     /// state on the wire, which is the failure mode this whole subsystem exists to avoid.
-    /// Clearing to the proto3 defaults also keeps the bytes identical, since default
-    /// values are not emitted.
+    /// Clearing to proto3 defaults keeps ordinary fields absent. Speed is optional, so its
+    /// presence must be cleared explicitly when the delta does not carry a new speed value.
     /// </summary>
     private EntitySnapshot Rent()
     {
@@ -1178,7 +1178,7 @@ public sealed class SnapshotDeltaState
         e.Y = 0f;
         e.Hp = 0;
         e.MaxHp = 0;
-        e.Speed = 0f;
+        e.ClearSpeed();
         // Reset like every other field: a pooled message that kept a previous entity's
         // facing would attach it to whichever entity rents the object next, which is a
         // wrong value rather than a missing one - far harder to notice.
@@ -1979,7 +1979,7 @@ public sealed class SnapshotDeltaState
                 msg.Y = 0f;
                 msg.Hp = 0;
                 msg.MaxHp = 0;
-                msg.Speed = 0f;
+                msg.ClearSpeed();
                 msg.FacingBrad = 0;
                 msg.Action = WireAction.Unspecified;
                 msg.ActionSeq = 0;

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Snapshot `speed` now reports effective movement speed after slows and haste, and is
+  present as zero while root or stun prevents movement. Speed transitions, including to
+  and from zero, remain delta-visible; unchanged speed stays absent on field-level deltas.
+  Protocol version is unchanged for old-peer safety.
+
 ### Fixed
 - **Snapshot frame writer allocation.** The protobuf ByteString envelope wrapper
   allocated 32 B for every frame. The reusable writer now streams the generated snapshot

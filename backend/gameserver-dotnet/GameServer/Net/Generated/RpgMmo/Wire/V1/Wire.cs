@@ -43,72 +43,72 @@ namespace RpgMmo.Wire.V1 {
             "CmFiaWxpdHlfaWQYBSABKA0SGQoRYWJpbGl0eV90YXJnZXRfaWQYBiABKAkS",
             "DQoFYWltX3gYByABKAISDQoFYWltX3kYCCABKAISDQoFYWltX3oYCSABKAIS",
             "EwoLcmVuZGVyX3RpY2sYCiABKAQSDAoEanVtcBgLIAEoCBIRCglzcGF3bl9z",
-            "ZXEYDCABKA0SFAoMcmVuZGVyX2FscGhhGA0gASgCIpAECg5FbnRpdHlTbmFw",
+            "ZXEYDCABKA0SFAoMcmVuZGVyX2FscGhhGA0gASgCIp8ECg5FbnRpdHlTbmFw",
             "c2hvdBIKCgJpZBgBIAEoCRIRCgl0eXBlX25hbWUYAiABKAkSCQoBeBgDIAEo",
             "AhIJCgF5GAQgASgCEgoKAmhwGAUgASgFEg4KBm1heF9ocBgGIAEoBRIoCgR0",
             "eXBlGAcgASgOMhoucnBnbW1vLndpcmUudjEuRW50aXR5VHlwZRIOCgZoYW5k",
-            "bGUYCCABKA0SDQoFc3BlZWQYCSABKAISEwoLZmFjaW5nX2JyYWQYCiABKA0S",
-            "LAoGYWN0aW9uGAsgASgOMhwucnBnbW1vLndpcmUudjEuRW50aXR5QWN0aW9u",
-            "EhIKCmFjdGlvbl9zZXEYDCABKA0SFgoOY2hhbmdlZF9maWVsZHMYDSABKA0S",
-            "CQoBehgOIAEoAhINCgV2ZWxfeBgPIAEoAhINCgV2ZWxfeRgQIAEoAhINCgV2",
-            "ZWxfehgRIAEoAhINCgVvd25lchgSIAEoDRIRCglzcGF3bl9zZXEYEyABKA0S",
-            "KAoFc3RhdHMYFCADKAsyGS5ycGdtbW8ud2lyZS52MS5TdGF0VmFsdWUSFQoN",
-            "c3RhdHNfcmVtb3ZlZBgVIAMoDRIuCghzdGF0dXNlcxgWIAMoCzIcLnJwZ21t",
-            "by53aXJlLnYxLlN0YXR1c0VmZmVjdBIYChBzdGF0dXNlc19yZW1vdmVkGBcg",
-            "AygNEhAKCG93bmVyX2lkGBggASgJIisKCVN0YXRWYWx1ZRIPCgdzdGF0X2lk",
-            "GAEgASgNEg0KBXZhbHVlGAIgASgRIlcKDFN0YXR1c0VmZmVjdBIRCgllZmZl",
-            "Y3RfaWQYASABKA0SDgoGc3RhY2tzGAIgASgNEhQKDGV4cGlyZXNfdGljaxgD",
-            "IAEoBBIOCgZzb3VyY2UYBCABKA0ixAEKCUdhbWVFdmVudBIrCgR0eXBlGAEg",
-            "ASgOMh0ucnBnbW1vLndpcmUudjEuR2FtZUV2ZW50VHlwZRIOCgZzb3VyY2UY",
-            "AiABKA0SDgoGdGFyZ2V0GAMgASgNEg4KBmFtb3VudBgEIAEoERISCgphYmls",
-            "aXR5X2lkGAUgASgNEg0KBWZsYWdzGAYgASgNEhEKCXNvdXJjZV9pZBgHIAEo",
-            "CRIRCgl0YXJnZXRfaWQYCCABKAkSEQoJZWZmZWN0X2lkGAkgASgNIscBCg9T",
-            "bmFwc2hvdE1lc3NhZ2USDAoEdGljaxgBIAEoBBIQCghhY2tfdGljaxgCIAEo",
-            "BBIMCgRmdWxsGAMgASgIEjAKCGVudGl0aWVzGAQgAygLMh4ucnBnbW1vLndp",
-            "cmUudjEuRW50aXR5U25hcHNob3QSDwoHcmVtb3ZlZBgFIAMoCRIpCgZldmVu",
-            "dHMYBiADKAsyGS5ycGdtbW8ud2lyZS52MS5HYW1lRXZlbnQSGAoQYWNrX2Fw",
-            "cGxpZWRfdGljaxgHIAEoBCIjChFEaXNjb25uZWN0TWVzc2FnZRIOCgZyZWFz",
-            "b24YASABKAkiDwoNUmVzeW5jUmVxdWVzdCI+Cg5Db21tYW5kUmVxdWVzdBIL",
-            "CgNzZXEYASABKA0SDgoGb3Bjb2RlGAIgASgNEg8KB3BheWxvYWQYAyABKAwi",
-            "SAoNQ29tbWFuZFJlc3VsdBILCgNzZXEYASABKA0SCgoCb2sYAiABKAgSDQoF",
-            "ZXJyb3IYAyABKAkSDwoHcGF5bG9hZBgEIAEoDCItCgpTZXJ2ZXJQdXNoEg4K",
-            "Bm9wY29kZRgBIAEoDRIPCgdwYXlsb2FkGAIgASgMIiQKElRyYW5zZmVyTWFw",
-            "UmVxdWVzdBIOCgZtYXBfaWQYASABKAkiMAoTVHJhbnNmZXJNYXBSZXNwb25z",
-            "ZRIKCgJvaxgBIAEoCBINCgVlcnJvchgCIAEoCSIgCgtQaW5nTWVzc2FnZRIR",
-            "Cgl0aW1lc3RhbXAYASABKAMiNQoLUG9uZ01lc3NhZ2USEQoJdGltZXN0YW1w",
-            "GAEgASgDEhMKC3NlcnZlcl90aW1lGAIgASgDIh0KC0tpY2tNZXNzYWdlEg4K",
-            "BnJlYXNvbhgBIAEoCSInChFTZWFsZWRDbGllbnRIZWxsbxISCgpwdWJsaWNf",
-            "a2V5GAEgASgMImEKEVNlYWxlZFNlcnZlckhlbGxvEhIKCnB1YmxpY19rZXkY",
-            "ASABKAwSDwoHYmluZGluZxgCIAEoDBINCgVlcnJvchgDIAEoCRIYChBzZXJ2",
-            "ZXJfc2lnbmF0dXJlGAQgASgMKpwECgdNc2dUeXBlEhgKFE1TR19UWVBFX1VO",
-            "U1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVUSBABEhYKEk1TR19UWVBFX0FV",
-            "VEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVSX1dPUkxEEAMSHQoZTVNHX1RZ",
-            "UEVfRU5URVJfV09STERfUkVTUBAEEhcKE01TR19UWVBFX0pPSU5fVE9LRU4Q",
-            "BRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JFU1AQBhISCg5NU0dfVFlQRV9J",
-            "TlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9UEAgSFwoTTVNHX1RZUEVfRElT",
-            "Q09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lOQxAKEhkKFU1TR19UWVBFX1RS",
-            "QU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RSQU5TRkVSX01BUF9SRVNQEA4S",
-            "EQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19UWVBFX1BPTkcQDBIRCg1NU0df",
-            "VFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VBTEVEX0NMSUVOVF9IRUxMTxAQ",
-            "EiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJfSEVMTE8QERIUChBNU0dfVFlQ",
-            "RV9DT01NQU5EECASGwoXTVNHX1RZUEVfQ09NTUFORF9SRVNVTFQQIRIYChRN",
-            "U0dfVFlQRV9TRVJWRVJfUFVTSBAiKp0BCgpFbnRpdHlUeXBlEhsKF0VOVElU",
-            "WV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX1RZUEVfUExBWUVSEAES",
-            "EwoPRU5USVRZX1RZUEVfTU9CEAISEwoPRU5USVRZX1RZUEVfTlBDEAMSFAoQ",
-            "RU5USVRZX1RZUEVfSVRFTRAEEhoKFkVOVElUWV9UWVBFX1BST0pFQ1RJTEUQ",
-            "BSqUAQoMRW50aXR5QWN0aW9uEh0KGUVOVElUWV9BQ1RJT05fVU5TUEVDSUZJ",
-            "RUQQABIWChJFTlRJVFlfQUNUSU9OX0lETEUQARIYChRFTlRJVFlfQUNUSU9O",
-            "X01PVklORxACEhsKF0VOVElUWV9BQ1RJT05fQVRUQUNLSU5HEAMSFgoSRU5U",
-            "SVRZX0FDVElPTl9ERUFEEAQqygIKDUdhbWVFdmVudFR5cGUSHwobR0FNRV9F",
-            "VkVOVF9UWVBFX1VOU1BFQ0lGSUVEEAASGgoWR0FNRV9FVkVOVF9UWVBFX0RB",
-            "TUFHRRABEhgKFEdBTUVfRVZFTlRfVFlQRV9IRUFMEAISGQoVR0FNRV9FVkVO",
-            "VF9UWVBFX0RFQVRIEAMSIAocR0FNRV9FVkVOVF9UWVBFX0FCSUxJVFlfQ0FT",
-            "VBAEEhsKF0dBTUVfRVZFTlRfVFlQRV9YUF9HQUlOEAUSHAoYR0FNRV9FVkVO",
-            "VF9UWVBFX0xFVkVMX1VQEAYSIgoeR0FNRV9FVkVOVF9UWVBFX1NUQVRVU19B",
-            "UFBMSUVEEAcSIgoeR0FNRV9FVkVOVF9UWVBFX1NUQVRVU19SRU1PVkVEEAgS",
-            "IgoeR0FNRV9FVkVOVF9UWVBFX1BST0pFQ1RJTEVfSElUEAlCRlozZ2l0aHVi",
-            "LmNvbS9kdXljdW9uZy9ycGctbW1vL3NoYXJlZC9wcm90by9nZW47d2lyZXBi",
-            "qgIOUnBnTW1vLldpcmUuVjFiBnByb3RvMw=="));
+            "bGUYCCABKA0SEgoFc3BlZWQYCSABKAJIAIgBARITCgtmYWNpbmdfYnJhZBgK",
+            "IAEoDRIsCgZhY3Rpb24YCyABKA4yHC5ycGdtbW8ud2lyZS52MS5FbnRpdHlB",
+            "Y3Rpb24SEgoKYWN0aW9uX3NlcRgMIAEoDRIWCg5jaGFuZ2VkX2ZpZWxkcxgN",
+            "IAEoDRIJCgF6GA4gASgCEg0KBXZlbF94GA8gASgCEg0KBXZlbF95GBAgASgC",
+            "Eg0KBXZlbF96GBEgASgCEg0KBW93bmVyGBIgASgNEhEKCXNwYXduX3NlcRgT",
+            "IAEoDRIoCgVzdGF0cxgUIAMoCzIZLnJwZ21tby53aXJlLnYxLlN0YXRWYWx1",
+            "ZRIVCg1zdGF0c19yZW1vdmVkGBUgAygNEi4KCHN0YXR1c2VzGBYgAygLMhwu",
+            "cnBnbW1vLndpcmUudjEuU3RhdHVzRWZmZWN0EhgKEHN0YXR1c2VzX3JlbW92",
+            "ZWQYFyADKA0SEAoIb3duZXJfaWQYGCABKAlCCAoGX3NwZWVkIisKCVN0YXRW",
+            "YWx1ZRIPCgdzdGF0X2lkGAEgASgNEg0KBXZhbHVlGAIgASgRIlcKDFN0YXR1",
+            "c0VmZmVjdBIRCgllZmZlY3RfaWQYASABKA0SDgoGc3RhY2tzGAIgASgNEhQK",
+            "DGV4cGlyZXNfdGljaxgDIAEoBBIOCgZzb3VyY2UYBCABKA0ixAEKCUdhbWVF",
+            "dmVudBIrCgR0eXBlGAEgASgOMh0ucnBnbW1vLndpcmUudjEuR2FtZUV2ZW50",
+            "VHlwZRIOCgZzb3VyY2UYAiABKA0SDgoGdGFyZ2V0GAMgASgNEg4KBmFtb3Vu",
+            "dBgEIAEoERISCgphYmlsaXR5X2lkGAUgASgNEg0KBWZsYWdzGAYgASgNEhEK",
+            "CXNvdXJjZV9pZBgHIAEoCRIRCgl0YXJnZXRfaWQYCCABKAkSEQoJZWZmZWN0",
+            "X2lkGAkgASgNIscBCg9TbmFwc2hvdE1lc3NhZ2USDAoEdGljaxgBIAEoBBIQ",
+            "CghhY2tfdGljaxgCIAEoBBIMCgRmdWxsGAMgASgIEjAKCGVudGl0aWVzGAQg",
+            "AygLMh4ucnBnbW1vLndpcmUudjEuRW50aXR5U25hcHNob3QSDwoHcmVtb3Zl",
+            "ZBgFIAMoCRIpCgZldmVudHMYBiADKAsyGS5ycGdtbW8ud2lyZS52MS5HYW1l",
+            "RXZlbnQSGAoQYWNrX2FwcGxpZWRfdGljaxgHIAEoBCIjChFEaXNjb25uZWN0",
+            "TWVzc2FnZRIOCgZyZWFzb24YASABKAkiDwoNUmVzeW5jUmVxdWVzdCI+Cg5D",
+            "b21tYW5kUmVxdWVzdBILCgNzZXEYASABKA0SDgoGb3Bjb2RlGAIgASgNEg8K",
+            "B3BheWxvYWQYAyABKAwiSAoNQ29tbWFuZFJlc3VsdBILCgNzZXEYASABKA0S",
+            "CgoCb2sYAiABKAgSDQoFZXJyb3IYAyABKAkSDwoHcGF5bG9hZBgEIAEoDCIt",
+            "CgpTZXJ2ZXJQdXNoEg4KBm9wY29kZRgBIAEoDRIPCgdwYXlsb2FkGAIgASgM",
+            "IiQKElRyYW5zZmVyTWFwUmVxdWVzdBIOCgZtYXBfaWQYASABKAkiMAoTVHJh",
+            "bnNmZXJNYXBSZXNwb25zZRIKCgJvaxgBIAEoCBINCgVlcnJvchgCIAEoCSIg",
+            "CgtQaW5nTWVzc2FnZRIRCgl0aW1lc3RhbXAYASABKAMiNQoLUG9uZ01lc3Nh",
+            "Z2USEQoJdGltZXN0YW1wGAEgASgDEhMKC3NlcnZlcl90aW1lGAIgASgDIh0K",
+            "C0tpY2tNZXNzYWdlEg4KBnJlYXNvbhgBIAEoCSInChFTZWFsZWRDbGllbnRI",
+            "ZWxsbxISCgpwdWJsaWNfa2V5GAEgASgMImEKEVNlYWxlZFNlcnZlckhlbGxv",
+            "EhIKCnB1YmxpY19rZXkYASABKAwSDwoHYmluZGluZxgCIAEoDBINCgVlcnJv",
+            "chgDIAEoCRIYChBzZXJ2ZXJfc2lnbmF0dXJlGAQgASgMKpwECgdNc2dUeXBl",
+            "EhgKFE1TR19UWVBFX1VOU1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVUSBAB",
+            "EhYKEk1TR19UWVBFX0FVVEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVSX1dP",
+            "UkxEEAMSHQoZTVNHX1RZUEVfRU5URVJfV09STERfUkVTUBAEEhcKE01TR19U",
+            "WVBFX0pPSU5fVE9LRU4QBRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JFU1AQ",
+            "BhISCg5NU0dfVFlQRV9JTlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9UEAgS",
+            "FwoTTVNHX1RZUEVfRElTQ09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lOQxAK",
+            "EhkKFU1TR19UWVBFX1RSQU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RSQU5T",
+            "RkVSX01BUF9SRVNQEA4SEQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19UWVBF",
+            "X1BPTkcQDBIRCg1NU0dfVFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VBTEVE",
+            "X0NMSUVOVF9IRUxMTxAQEiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJfSEVM",
+            "TE8QERIUChBNU0dfVFlQRV9DT01NQU5EECASGwoXTVNHX1RZUEVfQ09NTUFO",
+            "RF9SRVNVTFQQIRIYChRNU0dfVFlQRV9TRVJWRVJfUFVTSBAiKp0BCgpFbnRp",
+            "dHlUeXBlEhsKF0VOVElUWV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZ",
+            "X1RZUEVfUExBWUVSEAESEwoPRU5USVRZX1RZUEVfTU9CEAISEwoPRU5USVRZ",
+            "X1RZUEVfTlBDEAMSFAoQRU5USVRZX1RZUEVfSVRFTRAEEhoKFkVOVElUWV9U",
+            "WVBFX1BST0pFQ1RJTEUQBSqUAQoMRW50aXR5QWN0aW9uEh0KGUVOVElUWV9B",
+            "Q1RJT05fVU5TUEVDSUZJRUQQABIWChJFTlRJVFlfQUNUSU9OX0lETEUQARIY",
+            "ChRFTlRJVFlfQUNUSU9OX01PVklORxACEhsKF0VOVElUWV9BQ1RJT05fQVRU",
+            "QUNLSU5HEAMSFgoSRU5USVRZX0FDVElPTl9ERUFEEAQqygIKDUdhbWVFdmVu",
+            "dFR5cGUSHwobR0FNRV9FVkVOVF9UWVBFX1VOU1BFQ0lGSUVEEAASGgoWR0FN",
+            "RV9FVkVOVF9UWVBFX0RBTUFHRRABEhgKFEdBTUVfRVZFTlRfVFlQRV9IRUFM",
+            "EAISGQoVR0FNRV9FVkVOVF9UWVBFX0RFQVRIEAMSIAocR0FNRV9FVkVOVF9U",
+            "WVBFX0FCSUxJVFlfQ0FTVBAEEhsKF0dBTUVfRVZFTlRfVFlQRV9YUF9HQUlO",
+            "EAUSHAoYR0FNRV9FVkVOVF9UWVBFX0xFVkVMX1VQEAYSIgoeR0FNRV9FVkVO",
+            "VF9UWVBFX1NUQVRVU19BUFBMSUVEEAcSIgoeR0FNRV9FVkVOVF9UWVBFX1NU",
+            "QVRVU19SRU1PVkVEEAgSIgoeR0FNRV9FVkVOVF9UWVBFX1BST0pFQ1RJTEVf",
+            "SElUEAlCRlozZ2l0aHViLmNvbS9kdXljdW9uZy9ycGctbW1vL3NoYXJlZC9w",
+            "cm90by9nZW47d2lyZXBiqgIOUnBnTW1vLldpcmUuVjFiBnByb3RvMw=="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), typeof(global::RpgMmo.Wire.V1.GameEventType), }, null, new pbr::GeneratedClrTypeInfo[] {
@@ -120,7 +120,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion", "CharacterId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId", "AbilityId", "AbilityTargetId", "AimX", "AimY", "AimZ", "RenderTick", "Jump", "SpawnSeq", "RenderAlpha" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq", "ChangedFields", "Z", "VelX", "VelY", "VelZ", "Owner", "SpawnSeq", "Stats", "StatsRemoved", "Statuses", "StatusesRemoved", "OwnerId" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq", "ChangedFields", "Z", "VelX", "VelY", "VelZ", "Owner", "SpawnSeq", "Stats", "StatsRemoved", "Statuses", "StatusesRemoved", "OwnerId" }, new[]{ "Speed" }, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.StatValue), global::RpgMmo.Wire.V1.StatValue.Parser, new[]{ "StatId", "Value" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.StatusEffect), global::RpgMmo.Wire.V1.StatusEffect.Parser, new[]{ "EffectId", "Stacks", "ExpiresTick", "Source" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.GameEvent), global::RpgMmo.Wire.V1.GameEvent.Parser, new[]{ "Type", "Source", "Target", "Amount", "AbilityId", "Flags", "SourceId", "TargetId", "EffectId" }, null, null, null, null),
@@ -286,10 +286,10 @@ namespace RpgMmo.Wire.V1 {
   /// one that has nothing to say. IDLE is deliberately 1, NOT 0: proto3 elides a
   /// zero enum, so making idle the zero value would make "this entity is standing
   /// still" and "this server does not know about actions" the same bytes. That is
-  /// the exact ambiguity documented at length on `speed` below, and here it is
   /// avoidable for free, so it is avoided. `EntityType` already reserves 0 the same
   /// way (ENTITY_TYPE_UNSPECIFIED means "see type_name"), so this is the file's
-  /// established idiom rather than a new rule.
+  /// established idiom rather than a new rule. `speed` uses optional presence
+  /// because zero is a meaningful movement value.
   ///
   /// This is LEVEL-triggered, not edge-triggered: it says what state the entity is
   /// in, not that a state was entered. A renderer that needs to retrigger the same
@@ -3285,6 +3285,7 @@ namespace RpgMmo.Wire.V1 {
   {
     private static readonly pb::MessageParser<EntitySnapshot> _parser = new pb::MessageParser<EntitySnapshot>(() => new EntitySnapshot());
     private pb::UnknownFieldSet _unknownFields;
+    private int _hasBits0;
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public static pb::MessageParser<EntitySnapshot> Parser { get { return _parser; } }
@@ -3312,6 +3313,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public EntitySnapshot(EntitySnapshot other) : this() {
+      _hasBits0 = other._hasBits0;
       id_ = other.id_;
       typeName_ = other.typeName_;
       x_ = other.x_;
@@ -3479,11 +3481,12 @@ namespace RpgMmo.Wire.V1 {
 
     /// <summary>Field number for the "speed" field.</summary>
     public const int SpeedFieldNumber = 9;
+    private readonly static float SpeedDefaultValue = 0F;
+
     private float speed_;
     /// <summary>
-    /// Movement speed in world units per second — the value the server's
-    /// MovementSystem.Integrate is actually multiplying by, for THIS entity right
-    /// now, not the spawn default.
+    /// Effective movement speed in world units per second for THIS entity right
+    /// now, after active slow and haste modifiers, not the spawn default.
     ///
     /// Exists for client-side prediction. Prediction replays local input through
     /// the same Shared.GameLogic movement code the server runs, and that code needs
@@ -3494,12 +3497,13 @@ namespace RpgMmo.Wire.V1 {
     /// it presents as rubber-banding, which reads as a network problem and gets
     /// debugged as one, in the wrong layer.
     ///
-    /// ZERO MEANS "NOT SENT", NOT "IMMOBILE". proto3 elides a zero float, so a
-    /// pre-speed server and a genuinely immobile entity are indistinguishable on
-    /// the wire. A receiver MUST treat `speed &lt;= 0` as "no value" and fall back to
-    /// its configured default rather than concluding the entity cannot move —
-    /// trusting it unconditionally means an old server pins every client's
-    /// predicted speed to zero and the local player stops moving.
+    /// Presence is explicit. An absent speed means this sender does not know the
+    /// value (including a sender predating this field); a present zero means the
+    /// entity is immobile, such as while rooted or stunned. A present positive
+    /// value is the effective speed after active slows and haste effects. Updated
+    /// receivers MUST inspect field presence before applying the value. Older
+    /// receivers decode a present zero as the proto3 default and retain their
+    /// historical absent-value behavior.
     ///
     /// Sent on every mention of an entity, never interned. Interning it would buy
     /// ~5 bytes and inherit the whole handle-lifecycle contract above; speed is a
@@ -3509,10 +3513,23 @@ namespace RpgMmo.Wire.V1 {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public float Speed {
-      get { return speed_; }
+      get { if ((_hasBits0 & 1) != 0) { return speed_; } else { return SpeedDefaultValue; } }
       set {
+        _hasBits0 |= 1;
         speed_ = value;
       }
+    }
+    /// <summary>Gets whether the "speed" field is set</summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool HasSpeed {
+      get { return (_hasBits0 & 1) != 0; }
+    }
+    /// <summary>Clears the value of the "speed" field</summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void ClearSpeed() {
+      _hasBits0 &= ~1;
     }
 
     /// <summary>Field number for the "facing_brad" field.</summary>
@@ -3531,12 +3548,9 @@ namespace RpgMmo.Wire.V1 {
     /// server predating this field would put IDENTICAL BYTES on the wire, and no
     /// receiver rule can separate them.
     ///
-    /// `speed` below has exactly that ambiguity and has to document its way around
-    /// it, because a speed of zero is genuinely meaningful and float is the natural
-    /// type. Facing has no such excuse: reserving zero costs one addition on each
-    /// side and removes the ambiguity BY CONSTRUCTION rather than by asking every
-    /// implementer to remember a rule. Every representable angle has a non-zero wire
-    /// value, so an absent field means one thing only.
+    /// `speed` below uses optional presence because a speed of zero is meaningful.
+    /// Facing instead reserves zero and biases every real angle by one. Every
+    /// representable angle therefore has a non-zero wire value.
     ///
     /// It is also smaller: 1-3 bytes of varint against a float's fixed 5, on the
     /// hottest message in the protocol. That is the same class of saving as the
@@ -3909,7 +3923,7 @@ namespace RpgMmo.Wire.V1 {
       if (MaxHp != 0) hash ^= MaxHp.GetHashCode();
       if (Type != global::RpgMmo.Wire.V1.EntityType.Unspecified) hash ^= Type.GetHashCode();
       if (Handle != 0) hash ^= Handle.GetHashCode();
-      if (Speed != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(Speed);
+      if (HasSpeed) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(Speed);
       if (FacingBrad != 0) hash ^= FacingBrad.GetHashCode();
       if (Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) hash ^= Action.GetHashCode();
       if (ActionSeq != 0) hash ^= ActionSeq.GetHashCode();
@@ -3975,7 +3989,7 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(64);
         output.WriteUInt32(Handle);
       }
-      if (Speed != 0F) {
+      if (HasSpeed) {
         output.WriteRawTag(77);
         output.WriteFloat(Speed);
       }
@@ -4069,7 +4083,7 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(64);
         output.WriteUInt32(Handle);
       }
-      if (Speed != 0F) {
+      if (HasSpeed) {
         output.WriteRawTag(77);
         output.WriteFloat(Speed);
       }
@@ -4155,7 +4169,7 @@ namespace RpgMmo.Wire.V1 {
       if (Handle != 0) {
         size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Handle);
       }
-      if (Speed != 0F) {
+      if (HasSpeed) {
         size += 1 + 4;
       }
       if (FacingBrad != 0) {
@@ -4231,7 +4245,7 @@ namespace RpgMmo.Wire.V1 {
       if (other.Handle != 0) {
         Handle = other.Handle;
       }
-      if (other.Speed != 0F) {
+      if (other.HasSpeed) {
         Speed = other.Speed;
       }
       if (other.FacingBrad != 0) {

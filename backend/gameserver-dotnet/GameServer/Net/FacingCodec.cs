@@ -13,9 +13,8 @@ namespace GameServer.Net;
 /// radians, and it is wrong here: proto3 elides a zero float and 0.0 radians is a
 /// perfectly ordinary facing — due east. A sender meaning "east" and a sender predating
 /// the field would put IDENTICAL BYTES on the wire, and no receiver rule can separate
-/// them. <c>speed</c> has exactly that ambiguity and has to document its way around it,
-/// because a zero speed is genuinely meaningful and float is the natural type. Facing
-/// has no such excuse, so the ambiguity is designed out: every representable angle maps
+/// them. <c>speed</c> uses explicit optional presence because a zero speed is meaningful.
+/// Facing reserves zero instead: every representable angle maps
 /// to a NON-ZERO wire value, and zero is reserved permanently.
 /// </para>
 /// <para>

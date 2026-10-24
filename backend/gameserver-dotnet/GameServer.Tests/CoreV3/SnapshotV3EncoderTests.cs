@@ -116,6 +116,85 @@ public class SnapshotV3EncoderTests
     public void V3Client_UnderATightBudget_ConvergesExactly() =>
         RunReconstruction(WireEncoding.Proto, fieldDelta: true, budget: 140, quietTicks: 120);
 
+    [Fact]
+    public void SnapshotSpeed_UsesSlowAndRootedMovementAndDeltaSendsTransitions()
+    {
+        using var f = new SimFixture();
+        f.AddPlayer("p1", 0f, 0f);
+        f.Step();
+
+        var state = new SnapshotDeltaState
+        {
+            PeerProtocolVersion = 3,
+            FieldDelta = true,
+        };
+        EntityView[] baselineViews = f.Views().ToArray();
+        SnapshotMessage baseline = state.Encode(1, 0, baselineViews, 30, intern: true);
+        Assert.Equal(5f, Assert.Single(baseline.Entities).Speed);
+
+        f.ApplyStatus("p1", SimFixture.Rooted);
+        EntityView[] rootedViews = f.Views().ToArray();
+        SnapshotMessage rooted = state.Encode(2, 0, rootedViews, 30, intern: true);
+        EntitySnapshot rootedEntity = Assert.Single(rooted.Entities);
+        Assert.Equal(0f, rootedEntity.Speed);
+        Assert.True(rootedEntity.HasSpeed);
+        Assert.NotEqual(0u, rootedEntity.ChangedFields & SnapshotFieldBits.Speed);
+
+        f.StepUntil(6); // Root expires at tick 6.
+        EntityView[] restoredViews = f.Views().ToArray();
+        SnapshotMessage restored = state.Encode(7, 0, restoredViews, 30, intern: true);
+        EntitySnapshot restoredEntity = Assert.Single(restored.Entities);
+        Assert.Equal(5f, restoredEntity.Speed);
+        Assert.True(restoredEntity.HasSpeed);
+        Assert.NotEqual(0u, restoredEntity.ChangedFields & SnapshotFieldBits.Speed);
+    }
+
+    [Fact]
+    public void PartialDeltaWithoutSpeedChange_LeavesSpeedAbsentAndKeepsBaselineSize()
+    {
+        using var f = new SimFixture();
+        f.AddPlayer("p0", 0f, 0f);
+        f.AddPlayer("p1", 4f, 0f);
+        f.Step();
+
+        var state = new SnapshotDeltaState
+        {
+            SelfId = "p0",
+            PeerProtocolVersion = 3,
+            FieldDelta = true,
+        };
+        SnapshotMessage keyframe = state.Encode(1, 0, f.Views().ToArray(), 30, intern: true);
+        Assert.True(keyframe.Full);
+
+        f.Input("p1", SimFixture.Move(2, 1f, 0f));
+        f.Step();
+        SnapshotMessage delta = state.Encode(2, 0, f.Views().ToArray(), 30, intern: true);
+
+        Assert.False(delta.Full);
+        EntitySnapshot partial = Assert.Single(delta.Entities);
+        Assert.NotEqual(0u, partial.ChangedFields);
+        Assert.Equal(0u, partial.ChangedFields & SnapshotFieldBits.Speed);
+        Assert.False(partial.HasSpeed);
+        // Develop emitted 16 bytes for this partial entity. An optional present-zero
+        // reset adds five bytes even though speed is absent from changed_fields.
+        Assert.Equal(16, partial.CalculateSize());
+    }
+
+    [Fact]
+    public void SnapshotSpeed_UsesEffectiveChilledSpeed()
+    {
+        using var f = new SimFixture();
+        f.AddPlayer("p1", 0f, 0f);
+        f.Step();
+        f.ApplyStatus("p1", SimFixture.Chilled);
+
+        EntityView[] views = f.Views().ToArray();
+        var state = new SnapshotDeltaState { PeerProtocolVersion = 3 };
+        SnapshotMessage snapshot = state.Encode(1, 0, views, 30);
+
+        Assert.Equal(2.5f, Assert.Single(snapshot.Entities).Speed);
+    }
+
     private static void RunReconstruction(WireEncoding encoding, bool fieldDelta, int budget, int quietTicks)
     {
         using var f = new SimFixture(withLoot: true);

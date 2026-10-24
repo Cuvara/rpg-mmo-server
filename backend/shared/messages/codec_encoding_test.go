@@ -7,6 +7,9 @@ import (
 	"math"
 	"reflect"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
+	wirepb "github.com/duycuong/rpg-mmo/shared/proto/gen"
 )
 
 // bothEncodings is the table every codec test runs against, so a behaviour that
@@ -399,15 +402,10 @@ func assertSnapshotEqual(t *testing.T, got, want SnapshotMessage) {
 	}
 }
 
-// TestSpeedZeroMeansNotSent pins the semantic that makes the `speed` field safe to
-// add to a live protocol (wire.proto field 9, rpg-mmo-server#91).
-//
-// proto3 elides a zero float, so a sender that predates the field and an entity that
-// genuinely cannot move are indistinguishable on the wire. That ambiguity is
-// deliberate and is why receivers must treat non-positive as "no value" and fall back
-// to a configured default. This test documents the wire behaviour the rule rests on:
-// zero survives a round trip as zero, carrying no information either way.
-func TestSpeedZeroMeansNotSent(t *testing.T) {
+// TestSpeedZeroHasProtoPresence pins field 9's optional zero representation. Legacy
+// JSON still decodes into a scalar DTO, where missing and zero share the old default;
+// JSON receivers that treat non-positive values as absent retain that behavior.
+func TestSpeedZeroHasProtoPresence(t *testing.T) {
 	for _, enc := range bothEncodings {
 		want := SnapshotMessage{
 			Tick:     1,
@@ -426,6 +424,17 @@ func TestSpeedZeroMeansNotSent(t *testing.T) {
 
 		if got.Entities[0].Speed != 0 {
 			t.Errorf("%v: speed: got %v, want 0", enc, got.Entities[0].Speed)
+		}
+		if enc == EncodingProto {
+			var pb wirepb.SnapshotMessage
+			if err := proto.Unmarshal(env.Payload, &pb); err != nil {
+				t.Fatalf("proto unmarshal: %v", err)
+			}
+			if len(pb.Entities) != 1 || pb.Entities[0].Speed == nil {
+				t.Fatal("protobuf speed zero was not present")
+			}
+		} else if !bytes.Contains(env.Payload, []byte(`"speed":0`)) {
+			t.Fatalf("legacy JSON did not encode explicit zero: %s", env.Payload)
 		}
 	}
 }

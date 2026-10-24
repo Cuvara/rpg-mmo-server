@@ -36,11 +36,9 @@ namespace Shared.GameLogic.Components
         /// buff, mount or slow desyncs the two with no error on either side.
         /// </para>
         /// <para>
-        /// <b>Zero means "not sent", not "immobile."</b> proto3 elides a zero float, so a
-        /// sender predating the wire field is indistinguishable from a stationary entity.
-        /// Consumers must treat a non-positive value as absent and fall back to a
-        /// configured default — trusting it outright means an old server pins a client's
-        /// predicted speed to zero and the local player stops moving.
+        /// The wire carries this as an optional field: absent means unknown, while a
+        /// present zero means immobile. The wire decoder must preserve that presence and
+        /// apply the configured fallback only when the field is absent.
         /// </para>
         /// </remarks>
         public readonly float Speed;

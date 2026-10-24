@@ -160,8 +160,9 @@ public class SnapshotByteIdentityTests
         // This digest is SUPPOSED to be hard to change, and it moved because the
         // protocol deliberately gained two fields — not because a walk was
         // restructured. The scenario's players move every tick, so they now carry a
-        // facing varint and an action varint; entities that never move carry neither,
-        // because both fields reserve zero for "not sent" and proto3 elides it.
+        // facing varint and an action varint; both reserve zero for "not sent" and proto3
+        // elides them. Speed has explicit presence, and all entities in this fixture have
+        // positive speed, so its bytes remain identical to the old stream.
         // If you are reading this because the test failed again, the question to answer
         // first is whether YOUR change was supposed to alter the wire. If it was not,
         // do not touch the constant.
@@ -187,9 +188,9 @@ public class SnapshotByteIdentityTests
         // Before that: 24D8C5C2AB12909864D9BB4ACE6CB629AC9B1DDD0DDB3DF09B8DD24AF11A293C
         //   (2026-08-14, the `speed` field).
         //
-        // JSON is not proto3 and does NOT elide a zero, so `"speed":0` appears on every
-        // entity here even when Protobuf would omit it — which is why the two encodings
-        // are pinned separately. The two NEW fields are the exception to that asymmetry:
+        // JSON writes speed unconditionally. The current Protobuf schema also preserves
+        // explicit presence, and every speed in this fixture is positive, so both speed
+        // encodings keep their pre-change bytes. The two NEW fields are the exception:
         // this writer omits them when zero, deliberately, because zero is their reserved
         // "not sent" value rather than a legitimate reading. Writing `"facing_brad":0`
         // would assert "there is a facing and it is the reserved value", which is not a

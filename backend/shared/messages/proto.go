@@ -271,7 +271,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					HP:     int(e.Hp),
 					MaxHP:  int(e.MaxHp),
 					Handle: e.Handle,
-					Speed:  e.Speed,
+					Speed:  e.GetSpeed(),
 					// Unknown future action values are carried through as-is rather
 					// than clamped to a known one: a value this build does not
 					// recognise belongs to a newer peer, and mapping it onto "idle"
@@ -514,11 +514,10 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 				Hp:     int32(e.HP),
 				MaxHp:  int32(e.MaxHP),
 				Handle: e.Handle,
-				Speed:  e.Speed,
-				// Both are plain pass-throughs: the "zero means not sent" contract
-				// lives in the encoding itself (facing is biased so no real angle is
-				// 0; action reserves 0) rather than in a translation here, which is
-				// exactly why those encodings were chosen.
+				Speed:  &e.Speed,
+				// Speed presence is explicit so zero can mean immobile. Facing is
+				// biased and action reserves its zero value, so both pass through
+				// their existing non-zero wire values unchanged.
 				FacingBrad: e.FacingBrad,
 				Action:     wirepb.EntityAction(e.Action),
 				ActionSeq:  e.ActionSeq,

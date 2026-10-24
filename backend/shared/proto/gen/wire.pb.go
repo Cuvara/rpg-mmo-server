@@ -242,10 +242,10 @@ func (EntityType) EnumDescriptor() ([]byte, []int) {
 // one that has nothing to say. IDLE is deliberately 1, NOT 0: proto3 elides a
 // zero enum, so making idle the zero value would make "this entity is standing
 // still" and "this server does not know about actions" the same bytes. That is
-// the exact ambiguity documented at length on `speed` below, and here it is
 // avoidable for free, so it is avoided. `EntityType` already reserves 0 the same
 // way (ENTITY_TYPE_UNSPECIFIED means "see type_name"), so this is the file's
-// established idiom rather than a new rule.
+// established idiom rather than a new rule. `speed` uses optional presence
+// because zero is a meaningful movement value.
 //
 // This is LEVEL-triggered, not edge-triggered: it says what state the entity is
 // in, not that a state was entered. A renderer that needs to retrigger the same
@@ -1225,9 +1225,8 @@ type EntitySnapshot struct {
 	// Zero means "not interned": the sender is using `id` directly. That keeps the
 	// field optional, so a peer that does not implement interning still works.
 	Handle uint32 `protobuf:"varint,8,opt,name=handle,proto3" json:"handle,omitempty"`
-	// Movement speed in world units per second — the value the server's
-	// MovementSystem.Integrate is actually multiplying by, for THIS entity right
-	// now, not the spawn default.
+	// Effective movement speed in world units per second for THIS entity right
+	// now, after active slow and haste modifiers, not the spawn default.
 	//
 	// Exists for client-side prediction. Prediction replays local input through
 	// the same Shared.GameLogic movement code the server runs, and that code needs
@@ -1238,18 +1237,19 @@ type EntitySnapshot struct {
 	// it presents as rubber-banding, which reads as a network problem and gets
 	// debugged as one, in the wrong layer.
 	//
-	// ZERO MEANS "NOT SENT", NOT "IMMOBILE". proto3 elides a zero float, so a
-	// pre-speed server and a genuinely immobile entity are indistinguishable on
-	// the wire. A receiver MUST treat `speed <= 0` as "no value" and fall back to
-	// its configured default rather than concluding the entity cannot move —
-	// trusting it unconditionally means an old server pins every client's
-	// predicted speed to zero and the local player stops moving.
+	// Presence is explicit. An absent speed means this sender does not know the
+	// value (including a sender predating this field); a present zero means the
+	// entity is immobile, such as while rooted or stunned. A present positive
+	// value is the effective speed after active slows and haste effects. Updated
+	// receivers MUST inspect field presence before applying the value. Older
+	// receivers decode a present zero as the proto3 default and retain their
+	// historical absent-value behavior.
 	//
 	// Sent on every mention of an entity, never interned. Interning it would buy
 	// ~5 bytes and inherit the whole handle-lifecycle contract above; speed is a
 	// plain value with no identity, and the delta encoder already suppresses
 	// entities whose state has not changed at all.
-	Speed float32 `protobuf:"fixed32,9,opt,name=speed,proto3" json:"speed,omitempty"`
+	Speed *float32 `protobuf:"fixed32,9,opt,name=speed,proto3,oneof" json:"speed,omitempty"`
 	// Facing direction, as 16-bit BINARY RADIANS BIASED BY ONE.
 	//
 	//	wire 0                -> NOT SENT: this sender has no facing to report.
@@ -1262,12 +1262,9 @@ type EntitySnapshot struct {
 	// server predating this field would put IDENTICAL BYTES on the wire, and no
 	// receiver rule can separate them.
 	//
-	// `speed` below has exactly that ambiguity and has to document its way around
-	// it, because a speed of zero is genuinely meaningful and float is the natural
-	// type. Facing has no such excuse: reserving zero costs one addition on each
-	// side and removes the ambiguity BY CONSTRUCTION rather than by asking every
-	// implementer to remember a rule. Every representable angle has a non-zero wire
-	// value, so an absent field means one thing only.
+	// `speed` below uses optional presence because a speed of zero is meaningful.
+	// Facing instead reserves zero and biases every real angle by one. Every
+	// representable angle therefore has a non-zero wire value.
 	//
 	// It is also smaller: 1-3 bytes of varint against a float's fixed 5, on the
 	// hottest message in the protocol. That is the same class of saving as the
@@ -1499,8 +1496,8 @@ func (x *EntitySnapshot) GetHandle() uint32 {
 }
 
 func (x *EntitySnapshot) GetSpeed() float32 {
-	if x != nil {
-		return x.Speed
+	if x != nil && x.Speed != nil {
+		return *x.Speed
 	}
 	return 0
 }
@@ -2814,7 +2811,7 @@ const file_wire_proto_rawDesc = "" +
 	"renderTick\x12\x12\n" +
 	"\x04jump\x18\v \x01(\bR\x04jump\x12\x1b\n" +
 	"\tspawn_seq\x18\f \x01(\rR\bspawnSeq\x12!\n" +
-	"\frender_alpha\x18\r \x01(\x02R\vrenderAlpha\"\xd1\x05\n" +
+	"\frender_alpha\x18\r \x01(\x02R\vrenderAlpha\"\xe0\x05\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -2823,8 +2820,8 @@ const file_wire_proto_rawDesc = "" +
 	"\x02hp\x18\x05 \x01(\x05R\x02hp\x12\x15\n" +
 	"\x06max_hp\x18\x06 \x01(\x05R\x05maxHp\x12.\n" +
 	"\x04type\x18\a \x01(\x0e2\x1a.rpgmmo.wire.v1.EntityTypeR\x04type\x12\x16\n" +
-	"\x06handle\x18\b \x01(\rR\x06handle\x12\x14\n" +
-	"\x05speed\x18\t \x01(\x02R\x05speed\x12\x1f\n" +
+	"\x06handle\x18\b \x01(\rR\x06handle\x12\x19\n" +
+	"\x05speed\x18\t \x01(\x02H\x00R\x05speed\x88\x01\x01\x12\x1f\n" +
 	"\vfacing_brad\x18\n" +
 	" \x01(\rR\n" +
 	"facingBrad\x124\n" +
@@ -2842,7 +2839,8 @@ const file_wire_proto_rawDesc = "" +
 	"\rstats_removed\x18\x15 \x03(\rR\fstatsRemoved\x128\n" +
 	"\bstatuses\x18\x16 \x03(\v2\x1c.rpgmmo.wire.v1.StatusEffectR\bstatuses\x12)\n" +
 	"\x10statuses_removed\x18\x17 \x03(\rR\x0fstatusesRemoved\x12\x19\n" +
-	"\bowner_id\x18\x18 \x01(\tR\aownerId\":\n" +
+	"\bowner_id\x18\x18 \x01(\tR\aownerIdB\b\n" +
+	"\x06_speed\":\n" +
 	"\tStatValue\x12\x17\n" +
 	"\astat_id\x18\x01 \x01(\rR\x06statId\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x11R\x05value\"~\n" +
@@ -3022,6 +3020,7 @@ func file_wire_proto_init() {
 	if File_wire_proto != nil {
 		return
 	}
+	file_wire_proto_msgTypes[8].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
