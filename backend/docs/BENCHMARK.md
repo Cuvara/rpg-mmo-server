@@ -3363,3 +3363,38 @@ by frame count across report windows, the first two windows (join) excluded.
   `SIM_WORLD_HZ` at 15. What this removes is the last unmeasured assumption under the
   arithmetic in decisions 10–12, namely that "inside the budget" really means invisible.
   Turning it on is now a bandwidth-versus-CPU decision (Part XX §61) and an operator's call.
+
+## Part XXII — snapshot delta and frame allocation attribution (2026-10-24)
+
+Run `20261024-F4-SRV-ALLOC-before-cc7884f` is the same-host control at `cc7884f`; log:
+`C:\Users\duycu\orca\workspaces\rpg-mmo-server\f4-before-tick-bench.log`. Run
+`20261024-F4-SRV-ALLOC-after-cc7884f-working-tree` is the post-fix run; its stage-attributed
+log is `C:\Users\duycu\orca\workspaces\rpg-mmo-server\f4-after-tick-bench-attributed.log`.
+Both use BENCH_TICK=1, the same JIT runtime, 600 warm-up ticks and 2,000 measured iterations
+per arm at 50 / 200 / 500 viewers. This local tick bench is an allocation probe, not a
+player-capacity claim.
+
+The direct 16-entity micro arm isolates the fixed writer cost: before, changed-delta encode
+was 0 B/call and WriteFrame was 32 B/call (2,000 calls); after, both were 0 B/call. The
+always-on `SnapshotAllocationTests.DeltaEncodeAndFrameWrite_AllocateNothingAfterWarmup`
+control warms a full snapshot and checks 60 changed deltas for each viewer at 50, 200 and
+500 viewers for peer protocol versions 0 and 3. Before the product fix it measured encode
+0 B and frame 32 B/call; after the fix both stages measured 0 B. `SnapshotByteIdentityTests`
+and `WriteFrame_IsByteIdenticalToTheAllocatingPath` passed, pinning the encoded bytes.
+
+| viewers | combined delta B/frame before | after | after encode stage | after frame stage | encode max / frame max |
+|---:|---:|---:|---:|---:|---:|
+| 50 | 54.0 | 21.6 | 20.5 | 1.2 | 43,152 / 7,352 |
+| 200 | 63.3 | 29.8 | 28.9 | 0.9 | 67,448 / 6,224 |
+| 500 | 69.8 | 37.0 | 36.1 | 0.8 | 67,448 / 4,200 |
+
+The 32 B/call frame cost came from creating a ByteString wrapper with `UnsafeWrap`; direct
+stage counters confirmed that Encode itself was 0 B in the stable micro arm. After the fix,
+the combined production-shaped breakdown still contains transient allocations in the
+Encode and frame stages, with large maxima, while the fixed-shape guard reports zero for both
+stages. Those maxima occur while the simulated AOI changes. The counters localize them to
+Encode and frame writing but do not identify individual object types; entity-pool growth and
+the reusable frame buffer are possible sources in those paths. The fixed-shape guard reports
+zero for both stages after warm-up for protocol versions 0 and 3, and the micro arm reports
+zero for 2,000 changed deltas. The benchmark now reports encode and frame stages separately
+so high-water growth events cannot be read as a fixed per-frame allocation.

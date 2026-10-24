@@ -116,6 +116,9 @@ public sealed class TickAllocationBench
         /// which one is paying.</summary>
         public long KeyframeBytes, KeyframeFrames, KeyframeMax;
         public long DeltaBytes, DeltaFrames, DeltaMax;
+        public long KeyframeEncodeBytes, DeltaEncodeBytes;
+        public long KeyframeFrameBytes, DeltaFrameBytes;
+        public long KeyframeEncodeMax, DeltaEncodeMax, KeyframeFrameMax, DeltaFrameMax;
 
         public Rig(int players)
         {
@@ -346,6 +349,13 @@ public sealed class TickAllocationBench
                 $"(n={rig.KeyframeFrames}, max {rig.KeyframeMax}), " +
                 $"delta {rig.DeltaBytes / (double)Math.Max(rig.DeltaFrames, 1):F1} B " +
                 $"(n={rig.DeltaFrames}, max {rig.DeltaMax})");
+            _out.WriteLine(
+                $"  stage attribution per frame: delta encode " +
+                $"{rig.DeltaEncodeBytes / (double)Math.Max(rig.DeltaFrames, 1):F1} B (max {rig.DeltaEncodeMax}), " +
+                $"delta frame write {rig.DeltaFrameBytes / (double)Math.Max(rig.DeltaFrames, 1):F1} B (max {rig.DeltaFrameMax}); " +
+                $"keyframe encode {rig.KeyframeEncodeBytes / (double)Math.Max(rig.KeyframeFrames, 1):F1} B " +
+                $"(max {rig.KeyframeEncodeMax}), keyframe frame write " +
+                $"{rig.KeyframeFrameBytes / (double)Math.Max(rig.KeyframeFrames, 1):F1} B (max {rig.KeyframeFrameMax})");
         }
 
         // The largest whole-tick iterations, with their indices: reading the spacing
@@ -568,20 +578,32 @@ public sealed class TickAllocationBench
             long b0 = GC.GetAllocatedBytesForCurrentThread();
             var snapshot = conn.DeltaState.Encode(
                 tick, ackTick, buffer.AsSpan(0, count), keyframeInterval, intern: true);
+            long afterEncode = GC.GetAllocatedBytesForCurrentThread();
             _ = rig.FrameWriters[i].WriteFrame((byte)RpgMmo.Wire.V1.MsgType.Snapshot, snapshot);
-            long d = GC.GetAllocatedBytesForCurrentThread() - b0;
+            long afterFrame = GC.GetAllocatedBytesForCurrentThread();
+            long encodeBytes = afterEncode - b0;
+            long frameBytes = afterFrame - afterEncode;
+            long d = afterFrame - b0;
 
             if (snapshot.Full)
             {
                 rig.KeyframeBytes += d;
                 rig.KeyframeFrames++;
                 if (d > rig.KeyframeMax) rig.KeyframeMax = d;
+                rig.KeyframeEncodeBytes += encodeBytes;
+                rig.KeyframeFrameBytes += frameBytes;
+                if (encodeBytes > rig.KeyframeEncodeMax) rig.KeyframeEncodeMax = encodeBytes;
+                if (frameBytes > rig.KeyframeFrameMax) rig.KeyframeFrameMax = frameBytes;
             }
             else
             {
                 rig.DeltaBytes += d;
                 rig.DeltaFrames++;
                 if (d > rig.DeltaMax) rig.DeltaMax = d;
+                rig.DeltaEncodeBytes += encodeBytes;
+                rig.DeltaFrameBytes += frameBytes;
+                if (encodeBytes > rig.DeltaEncodeMax) rig.DeltaEncodeMax = encodeBytes;
+                if (frameBytes > rig.DeltaFrameMax) rig.DeltaFrameMax = frameBytes;
             }
         }
     }
