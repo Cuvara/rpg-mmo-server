@@ -139,7 +139,7 @@ elif [ "$DB_HOST_MODE" = "host" ]; then
 	for tool in pg_dump pg_restore pg_isready; do
 		command -v "$tool" >/dev/null 2>&1 || die "DB_CONNECTION_MODE=host requires $tool"
 	done
-	pg_isready -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" -U "${PGUSER:-${POSTGRES_GAME_USER:-game}}" >/dev/null 2>&1 ||
+	pg_isready -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" -U "${PGUSER:-${POSTGRES_GAME_USER:-game}}" -d postgres >/dev/null 2>&1 ||
 		die "PostgreSQL at ${PGHOST:-localhost}:${PGPORT:-5432} is not ready"
 	log "mode: host PostgreSQL client (${PGHOST:-localhost}:${PGPORT:-5432})"
 else
