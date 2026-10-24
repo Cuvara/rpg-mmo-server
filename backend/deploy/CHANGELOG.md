@@ -6,6 +6,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Pull requests run `.github/workflows/restore-drill.yml`, which applies the shipped
+  game-state migrations to disposable PostgreSQL 16.4 and Redis 7.4 services, exercises
+  the backup and restore scripts, and checks restored rows and keys. The PostgreSQL and
+  Redis backup scripts have opt-in host-client modes, and `redis-restore.sh` accepts an
+  image override for its scratch container; existing Docker and Kubernetes behavior
+  remains the default. See `docs/DATABASE.md` and
+  `docs/CICD.md`.
 - `stack.sh up` stamps the gateway and game server images with `STACK_GIT_REVISION=<sha>` (env)
   as the `org.opencontainers.image.revision` label. Before this change every stack-built image read
   `unknown`, so a scratch stack could not be traced to a commit. The SHA comes from the caller,

@@ -5,6 +5,7 @@ Two workflows plus one reusable building block:
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
 | CI | `.github/workflows/ci.yml` | push/PR to `main`/`master` (`backend/**`, `.github/workflows/**`), `workflow_dispatch` | Validate — per-module vet + test + build. Never deploys. |
+| Restore rehearsal | `.github/workflows/restore-drill.yml` | pull requests to `main`/`master`/`develop`/`staging` | Exercise PostgreSQL and Redis backups and restores on disposable GitHub-hosted services. |
 | CD | `.github/workflows/cd.yml` | push to `develop`, `staging`, `release-*`; `workflow_dispatch` | Build the deployable bundle, then deploy it to a self-hosted runner. |
 | _(reusable)_ | `.github/workflows/_go-module.yml` | `workflow_call` only | vet + test (+ optional build / artifact upload) for **one** Go module. |
 

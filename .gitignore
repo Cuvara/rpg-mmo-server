@@ -37,6 +37,9 @@ Thumbs.db
 # Claude Code
 .claude/
 
+# Python bytecode from CI helper compile checks
+.github/scripts/__pycache__/
+
 # Serena MCP server — per-developer project index and memories, regenerated on
 # demand and machine-specific. project.local.yml carries local paths.
 .serena/

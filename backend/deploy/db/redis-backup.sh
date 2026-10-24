@@ -26,6 +26,7 @@
 #   REDIS_PASSWORD    AUTH password          (default empty = no auth)
 #   BACKUP_KUBE_CONTEXT    kubectl context -> k8s mode (default: unset = compose)
 #   BACKUP_KUBE_NAMESPACE  namespace of statefulset/redis (default rpg-k8s-data)
+#   REDIS_CONNECTION_MODE=host use redis-cli with REDIS_HOST/REDIS_PORT
 #
 # Output:
 #   $REDIS_BACKUP_DIR/redis-<UTC timestamp>.rdb   (restorable with redis-restore.sh)
@@ -42,6 +43,7 @@ SKIP_MISSING=0
 KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
 KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
 REDIS_STATEFULSET="${REDIS_STATEFULSET:-redis}"
+REDIS_HOST_MODE="${REDIS_CONNECTION_MODE:-}"
 
 # ---------------------------------------------------------------- arg parsing
 while [ $# -gt 0 ]; do
@@ -122,6 +124,17 @@ detect_docker() {
 if [ -n "$KUBE_CTX" ]; then
 	command -v kubectl >/dev/null 2>&1 || die "--kube-context given but kubectl is not on PATH"
 	TARGET_DESC="statefulset/$REDIS_STATEFULSET in $KUBE_NS ($KUBE_CTX)"
+	REDIS_HOST_MODE=""
+elif [ "$REDIS_HOST_MODE" = "host" ]; then
+	command -v redis-cli >/dev/null 2>&1 || die "REDIS_CONNECTION_MODE=host requires redis-cli"
+	TARGET_DESC="Redis at ${REDIS_HOST:-localhost}:${REDIS_PORT:-6379}"
+	if [ -n "${REDIS_PASSWORD:-}" ]; then
+		redis-cli -h "${REDIS_HOST:-localhost}" -p "${REDIS_PORT:-6379}" -a "$REDIS_PASSWORD" --no-auth-warning PING >/dev/null 2>&1 ||
+			die "$TARGET_DESC is not ready"
+	else
+		redis-cli -h "${REDIS_HOST:-localhost}" -p "${REDIS_PORT:-6379}" PING >/dev/null 2>&1 ||
+			die "$TARGET_DESC is not ready"
+	fi
 else
 	DOCKER="$(detect_docker)" || die "docker not available (tried docker, docker.exe)"
 	TARGET_DESC="container '$REDIS_CONTAINER'"
@@ -131,6 +144,10 @@ fi
 r_exec() {
 	if [ -n "$KUBE_CTX" ]; then
 		kubectl --context "$KUBE_CTX" -n "$KUBE_NS" exec "statefulset/$REDIS_STATEFULSET" -- "$@"
+	elif [ "$REDIS_HOST_MODE" = "host" ]; then
+		[ "$1" = redis-cli ] || die "host Redis mode only supports redis-cli commands"
+		shift
+		redis-cli -h "${REDIS_HOST:-localhost}" -p "${REDIS_PORT:-6379}" "$@"
 	else
 		"$DOCKER" exec "$REDIS_CONTAINER" "$@"
 	fi
@@ -155,7 +172,9 @@ redis_cli() {
 }
 
 # ----------------------------------------------------------------------- main
-if ! target_running; then
+if [ "$REDIS_HOST_MODE" = "host" ]; then
+	:
+elif ! target_running; then
 	if [ "$SKIP_MISSING" -eq 1 ]; then
 		warn "$TARGET_DESC not running -- skipping redis backup (NOTHING backed up)"
 		echo "::warning title=redis-backup.sh::Redis was not backed up ($TARGET_DESC not running)"
@@ -216,7 +235,15 @@ OUT="$REDIS_BACKUP_DIR/redis-$STAMP.rdb"
 # Write to .partial so an interrupted run never leaves a file that looks like a
 # usable backup. `docker exec cat` keeps the bytes on stdout: no host-path
 # translation, which is what breaks `docker cp` under WSL/docker.exe.
-if ! r_exec cat /data/dump.rdb >"$OUT.partial" 2>"$OUT.err"; then
+if [ "$REDIS_HOST_MODE" = "host" ]; then
+	if ! redis_cli --rdb "$OUT.partial" >"$OUT.err" 2>&1; then
+		warn "redis-cli RDB transfer failed:"
+		cat "$OUT.err" >&2 || true
+		rm -f "$OUT.partial" "$OUT.err"
+		die "redis backup failed"
+	fi
+	[ "$(head -c 5 "$OUT.partial")" = "REDIS" ] || die "Redis returned an invalid RDB file"
+elif ! r_exec cat /data/dump.rdb >"$OUT.partial" 2>"$OUT.err"; then
 	warn "copy of /data/dump.rdb failed:"
 	cat "$OUT.err" >&2 || true
 	rm -f "$OUT.partial" "$OUT.err"
@@ -238,9 +265,13 @@ rm -f "$OUT.err"
 #
 # Retry with a sync in between: on WSL drvfs mounts (/mnt/*) a file read immediately
 # after the redirect closes can briefly appear short.
-r_exec redis-check-rdb /data/dump.rdb >/dev/null 2>&1 ||
-	die "redis-check-rdb rejected /data/dump.rdb inside $TARGET_DESC -- the snapshot itself is corrupt"
-remote_md5="$(r_exec md5sum /data/dump.rdb 2>/dev/null | cut -c1-32)"
+if [ "$REDIS_HOST_MODE" != "host" ]; then
+	r_exec redis-check-rdb /data/dump.rdb >/dev/null 2>&1 ||
+		die "redis-check-rdb rejected /data/dump.rdb inside $TARGET_DESC -- the snapshot itself is corrupt"
+	remote_md5="$(r_exec md5sum /data/dump.rdb 2>/dev/null | cut -c1-32)"
+else
+	remote_md5="$(md5sum <"$OUT.partial" | cut -c1-32)"
+fi
 verify_ok=0
 for attempt in 1 2 3; do
 	sync "$OUT.partial" 2>/dev/null || sync

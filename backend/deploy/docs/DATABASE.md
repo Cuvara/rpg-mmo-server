@@ -11,6 +11,25 @@ instances.
 Everything below is about the game-state instance. The meta instance is only
 ever backed up and restored, never migrated by us.
 
+## 0. Pull request restore rehearsal
+
+`.github/workflows/restore-drill.yml` runs on pull requests using disposable
+PostgreSQL `16.4-alpine` and Redis `7.4-alpine` services, matching the deployed
+data-tier images. It applies every numbered game-state migration, inserts sample
+player, character, item and grant rows, and writes two sample Redis keys. The
+workflow calls `backup.sh`, `redis-backup.sh`, `restore.sh` and
+`redis-restore.sh`, restoring PostgreSQL into a separate fresh service and Redis
+into a fresh scratch container. It then checks the migrated tables, sample rows,
+and exact Redis key values; the synthetic archives are retained as a CI artifact
+for seven days.
+
+For service containers and other TCP-accessible PostgreSQL instances, the scripts
+accept `DB_CONNECTION_MODE=host` and the standard `PGHOST`, `PGPORT`, `PGUSER`
+and `PGPASSWORD` variables. Redis backup accepts `REDIS_CONNECTION_MODE=host`
+with `REDIS_HOST` and `REDIS_PORT`; Redis restore accepts `REDIS_IMAGE` to select
+the matching scratch image. These modes are opt-in; existing Docker and
+Kubernetes modes remain the default.
+
 ---
 
 ## 1. Migrations
