@@ -81,6 +81,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Histogram<double> _groupDuration;
     private readonly Counter<long> _groupRuns;
     private readonly Counter<long> _tickOverruns;
+    private readonly Counter<long> _tickTimerFallbacks;
     private readonly Counter<long> _backlogDropped;
     private readonly Counter<long> _snapshotsSent;
     private readonly Counter<long> _snapshotsCoalesced;
@@ -479,6 +480,11 @@ public sealed class GameMetrics : IDisposable
             description: "Base ticks whose work exceeded the base period. A non-zero rate " +
                          "means the configured SIM_CRITICAL_HZ is not sustainable on this host.");
 
+        _tickTimerFallbacks = _meter.CreateCounter<long>(
+            "gameserver.tick.timer_fallbacks",
+            description: "Times the Windows high-resolution tick timer failed and the loop " +
+                         "reverted to WaitOne + SpinOnce pacing (at most once per tick loop).");
+
         _backlogDropped = _meter.CreateCounter<long>(
             "gameserver.tick.backlog_dropped",
             description: "Base ticks discarded because the loop fell too far behind wall " +
@@ -683,6 +689,9 @@ public sealed class GameMetrics : IDisposable
 
     /// <summary>Record a base tick whose work exceeded the base period.</summary>
     public void RecordTickOverrun() => _tickOverruns.Add(1, _mapTags);
+
+    /// <summary>Record the tick sleeper reverting from the high-resolution timer.</summary>
+    public void RecordTickTimerFallback() => _tickTimerFallbacks.Add(1, _mapTags);
 
     /// <summary>Record base ticks dropped because the loop could not catch up.</summary>
     public void RecordTickBacklogDropped(long ticks)

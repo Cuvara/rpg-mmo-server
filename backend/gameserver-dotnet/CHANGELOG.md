@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Protocol version is unchanged for old-peer safety.
 
 ### Fixed
+- **Windows tick timer failure no longer busy-spins.** When `SetWaitableTimer` (or
+  `CreateWaitableTimerExW`) fails, `TickSleeper` falls back permanently to the Linux-equivalent
+  `WaitOne` + yielding `SpinOnce` pacing, logs once, and increments
+  `gameserver.tick.timer_fallbacks`. Previously a failed set left the no-sleep spin running for
+  the whole residual. `TickSleeperFallbackTests` injects the failure through an internal seam.
 - **Windows tick pacing.** On native Windows the dedicated tick thread slept on the 15.625 ms
   system timer quantum (and `SpinWait` fell back to `Thread.Sleep(1)`), so ticks were issued
   in bursts: stdev of 4-tick snapshot intervals 6.9 ms against 0.4 ms on Linux. The sleep now

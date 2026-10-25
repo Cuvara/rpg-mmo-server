@@ -26,7 +26,9 @@ namespace GameServer.Server;
 /// handle array is built once, so a sleep allocates nothing.</para>
 ///
 /// <para>On Linux, or if the timer cannot be created (older Windows), this falls back to
-/// <c>ct.WaitHandle.WaitOne</c>, which is exactly the previous behaviour.</para>
+/// <c>ct.WaitHandle.WaitOne</c>, which is exactly the previous behaviour. The same fallback
+/// is taken permanently the first time <c>SetWaitableTimer</c> fails at run time, and is
+/// reported once through the <c>onFallback</c> callback.</para>
 /// </summary>
 internal sealed partial class TickSleeper : IDisposable
 {
@@ -34,21 +36,51 @@ internal sealed partial class TickSleeper : IDisposable
     private const uint TimerAllAccess = 0x1F0003;
 
     private readonly WaitHandle _cancel;
-    private readonly TimerWaitHandle? _timer;
+    private readonly WaitHandle? _timer;
     private readonly WaitHandle[]? _handles;
+    private readonly Func<WaitHandle, long, bool> _setTimer;
+    private readonly Action<string>? _onFallback;
+    private volatile bool _fellBack;
 
-    /// <summary>True when sleeps use the high-resolution timer.</summary>
-    public bool IsHighResolution => _timer != null;
+    /// <summary>True while sleeps use the high-resolution timer.</summary>
+    public bool IsHighResolution => _timer != null && !_fellBack;
 
-    public TickSleeper(CancellationToken ct)
+    /// <summary>
+    /// True once a timer call failed and this sleeper permanently reverted to the
+    /// <c>WaitOne</c> + <c>SpinOnce</c> pacing used on Linux.
+    /// </summary>
+    public bool FellBack => _fellBack;
+
+    public TickSleeper(CancellationToken ct, Action<string>? onFallback = null)
+        : this(ct, onFallback, CreateNativeTimer, SetNativeTimer, requireWindows: true)
+    {
+    }
+
+    /// <summary>
+    /// Test seam: injects the timer calls so the failure path runs on any OS. A null
+    /// <paramref name="createTimer"/> result behaves like a failed
+    /// <c>CreateWaitableTimerExW</c>.
+    /// </summary>
+    internal TickSleeper(
+        CancellationToken ct,
+        Action<string>? onFallback,
+        Func<WaitHandle?> createTimer,
+        Func<WaitHandle, long, bool> setTimer,
+        bool requireWindows = false)
     {
         _cancel = ct.WaitHandle;
-        if (!OperatingSystem.IsWindows()) return;
+        _onFallback = onFallback;
+        _setTimer = setTimer;
+        if (requireWindows && !OperatingSystem.IsWindows()) return;
 
-        nint raw = CreateWaitableTimerExW(0, null, CreateWaitableTimerHighResolution, TimerAllAccess);
-        if (raw == 0) return; // pre-1803 Windows: keep the coarse wait
+        var timer = createTimer();
+        if (timer == null)
+        {
+            FallBack("CreateWaitableTimerExW failed"); // pre-1803 Windows or a failed create
+            return;
+        }
 
-        _timer = new TimerWaitHandle(raw);
+        _timer = timer;
         _handles = new WaitHandle[] { _timer, _cancel };
     }
 
@@ -58,13 +90,16 @@ internal sealed partial class TickSleeper : IDisposable
     /// </summary>
     public bool Sleep(int milliseconds)
     {
-        if (_timer == null)
+        if (!IsHighResolution)
             return _cancel.WaitOne(milliseconds);
 
         // Relative due time: negative, in 100 ns units.
         long dueTime = -(long)milliseconds * 10_000;
-        if (!SetWaitableTimer(_timer.SafeWaitHandle.DangerousGetHandle(), in dueTime, 0, 0, 0, 0))
+        if (!_setTimer(_timer!, dueTime))
+        {
+            FallBack("SetWaitableTimer failed");
             return _cancel.WaitOne(milliseconds);
+        }
 
         return WaitHandle.WaitAny(_handles!) == 1;
     }
@@ -73,20 +108,43 @@ internal sealed partial class TickSleeper : IDisposable
     /// High-resolution sleep for <paramref name="stopwatchTicks"/> <see cref="Stopwatch"/>
     /// ticks, at 100 ns resolution rather than whole milliseconds, so the caller can leave a
     /// sub-millisecond residual to spin. Only valid when <see cref="IsHighResolution"/>.
-    /// Returns true when cancellation woke it.
+    /// Returns true when cancellation woke it. If the timer call fails, the sleeper falls back
+    /// for good: this call sleeps the whole milliseconds that fit before the deadline and
+    /// <see cref="IsHighResolution"/> turns false, so the caller must then spin with the
+    /// yielding <c>SpinOnce()</c> and take the legacy path from the next tick on.
     /// </summary>
     public bool SleepHighResolution(long stopwatchTicks)
     {
         // Relative due time: negative, in 100 ns units.
         long dueTime = -(stopwatchTicks * 10_000_000 / Stopwatch.Frequency);
         if (dueTime >= 0) return _cancel.WaitOne(0);
-        if (!SetWaitableTimer(_timer!.SafeWaitHandle.DangerousGetHandle(), in dueTime, 0, 0, 0, 0))
-            return _cancel.WaitOne((int)(stopwatchTicks * 1000 / Stopwatch.Frequency));
+        if (!_setTimer(_timer!, dueTime))
+        {
+            FallBack("SetWaitableTimer failed");
+            int ms = (int)(stopwatchTicks * 1000 / Stopwatch.Frequency) - 1;
+            return _cancel.WaitOne(ms > 0 ? ms : 0);
+        }
 
         return WaitHandle.WaitAny(_handles!) == 1;
     }
 
     public void Dispose() => _timer?.Dispose();
+
+    private void FallBack(string reason)
+    {
+        if (_fellBack) return;
+        _fellBack = true;
+        _onFallback?.Invoke(reason);
+    }
+
+    private static WaitHandle? CreateNativeTimer()
+    {
+        nint raw = CreateWaitableTimerExW(0, null, CreateWaitableTimerHighResolution, TimerAllAccess);
+        return raw == 0 ? null : new TimerWaitHandle(raw);
+    }
+
+    private static bool SetNativeTimer(WaitHandle timer, long dueTime) =>
+        SetWaitableTimer(timer.SafeWaitHandle.DangerousGetHandle(), in dueTime, 0, 0, 0, 0);
 
     private sealed class TimerWaitHandle : WaitHandle
     {

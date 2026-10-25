@@ -31,6 +31,10 @@ public sealed class TickLoop
     private readonly int _keyframeInterval;
     private readonly ILogger _logger;
     private readonly GameMetrics? _metrics;
+
+    /// <summary>Test seam: replaces the sleeper so the timer-failure path runs on any OS.</summary>
+    internal static Func<CancellationToken, Action<string>, TickSleeper>? SleeperFactoryForTests;
+
     private ulong _currentTick;
     private int _snapshotsThisTick;
 
@@ -398,7 +402,14 @@ public sealed class TickLoop
         long nextDeadline = Stopwatch.GetTimestamp() + periodTicks;
 
         // Owned for the loop's lifetime; disposed on every exit path, exceptions included.
-        using var sleeper = new TickSleeper(ct);
+        Action<string> onFallback = reason =>
+        {
+            _metrics?.RecordTickTimerFallback();
+            _logger.LogWarning(
+                "High-resolution tick timer unavailable ({Reason}); using the WaitOne + SpinOnce pacing",
+                reason);
+        };
+        using var sleeper = SleeperFactoryForTests?.Invoke(ct, onFallback) ?? new TickSleeper(ct, onFallback);
 
         while (!ct.IsCancellationRequested)
         {
@@ -446,7 +457,10 @@ public sealed class TickLoop
                     while (Stopwatch.GetTimestamp() < nextDeadline)
                     {
                         if (ct.IsCancellationRequested) break;
-                        spin.SpinOnce(sleep1Threshold: -1);
+                        // If the timer call just failed the sleeper fell back: yield like the
+                        // legacy path instead of spinning flat out for the whole residual.
+                        if (sleeper.IsHighResolution) spin.SpinOnce(sleep1Threshold: -1);
+                        else spin.SpinOnce();
                     }
                 }
                 else
