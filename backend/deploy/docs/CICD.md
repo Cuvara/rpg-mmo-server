@@ -6,11 +6,11 @@ Two workflows plus one reusable building block:
 |----------|------|---------|---------|
 | CI | `.github/workflows/ci.yml` | push/PR to `main`/`master` (`backend/**`, `.github/workflows/**`), `workflow_dispatch` | Validate — per-module vet + test + build. Never deploys. |
 | Restore rehearsal | `.github/workflows/restore-drill.yml` | pull requests to `main`/`master`/`develop`/`staging`, weekly schedule, `workflow_dispatch` | Exercise PostgreSQL and Redis backups and restores on disposable GitHub-hosted services. The runner is pinned to Ubuntu 24.04; clients use PostgreSQL 16 and Redis 7.4. |
-| Dev backup rehearsal | `.github/workflows/backup-dev.yml` | `workflow_dispatch` only | Backup dev PostgreSQL and Redis without deployment; optional isolated scratch restore. Requires the protected dev Environment and a `[self-hosted, dev]` runner. |
+| Dev backup rehearsal | `.github/workflows/backup-dev.yml` | `workflow_dispatch` only | Backup dev PostgreSQL and Redis without deployment; optional isolated scratch restore. Requires Environment `dev` protection (pending admin setup, see [RUNNER.md](RUNNER.md)) and a `[self-hosted, dev]` runner. |
 | CD | `.github/workflows/cd.yml` | push to `develop`, `staging`, `release-*`; `workflow_dispatch` | Build the deployable bundle, then deploy it to a self-hosted runner. |
 | _(reusable)_ | `.github/workflows/_go-module.yml` | `workflow_call` only | vet + test (+ optional build / artifact upload) for **one** Go module. |
 
-The self-hosted runner trust boundary, ephemeral JIT lifecycle, dev soak exclusion, and backup rehearsal procedures are documented in [RUNNER.md](RUNNER.md). The dev backup workflow shares `cd-dev` concurrency with CD and uploads metadata only; it does not deploy.
+The self-hosted runner trust boundary, ephemeral JIT lifecycle, dev soak exclusion, and backup rehearsal procedures are documented in [RUNNER.md](RUNNER.md). The dev backup workflow uses its own `backup-dev` group; it is not serialized with CD, so schedule a no-CD window (see [RUNNER.md](RUNNER.md)). It uploads metadata only and does not deploy.
 
 Every job that touches Go in either workflow is a call of `_go-module.yml`, so
 the per-module recipe (checkout, setup-go with a module-scoped cache, vet, test,
