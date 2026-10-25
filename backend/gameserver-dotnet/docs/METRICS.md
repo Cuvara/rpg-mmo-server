@@ -262,6 +262,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_sim_group_runs_total` | counter | `map_id`, `group` | Times a simulation group has run. The ratio between groups **is** the configured rate ratio |
 | `gameserver_nakama_reward_outcomes_total` | counter | `map_id`, `outcome` | Answers to Nakama's `reward_kills`, one per attempt including retries — `outcome=granted\|partial\|not_granted\|too_large\|unknown`. See below |
 | `gameserver_tick_overruns_total` | counter | `map_id` | Base ticks whose work exceeded the base period — see below |
+| `gameserver_tick_timer_fallbacks_total` | counter | `map_id` | Tick loops where the Windows high-resolution timer failed and pacing fell back to `WaitOne` + `SpinOnce` (at most once per loop) |
 | `gameserver_tick_backlog_dropped_total` | counter | `map_id` | Base ticks discarded because the loop fell too far behind the wall clock — see below |
 | `gameserver_achieved_tick_hz` | gauge | `map_id` | **Measured** base-tick rate over a 2s window, from the monotonic clock. Compare with the configured `SIM_CRITICAL_HZ` — a healthy server has them equal. Never derived from wall time: a wall-clock rate on a host with a fast `CLOCK_REALTIME` reports a healthy loop as slow (#147/#153). `0` = not measured yet |
 | `gameserver_players_online` | gauge | `map_id` | Connected players |

@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and from zero, remain delta-visible; unchanged speed stays absent on field-level deltas.
   Protocol version is unchanged for old-peer safety.
 
+### Added
+- Documented the `gameserver_tick_timer_fallbacks_total` metric for Windows tick-timer fallback.
+
 ### Fixed
 - **Windows tick timer failure no longer busy-spins.** When `SetWaitableTimer` (or
   `CreateWaitableTimerExW`) fails, `TickSleeper` falls back permanently to the Linux-equivalent
