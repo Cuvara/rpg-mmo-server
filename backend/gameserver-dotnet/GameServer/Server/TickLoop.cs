@@ -31,6 +31,10 @@ public sealed class TickLoop
     private readonly int _keyframeInterval;
     private readonly ILogger _logger;
     private readonly GameMetrics? _metrics;
+
+    /// <summary>Test seam: replaces the sleeper so the timer-failure path runs on any OS.</summary>
+    internal static Func<CancellationToken, Action<string>, TickSleeper>? SleeperFactoryForTests;
+
     private ulong _currentTick;
     private int _snapshotsThisTick;
 
@@ -389,12 +393,23 @@ public sealed class TickLoop
         // truncation at 15Hz (1000/15 is exact); the base rate cannot.
         long periodTicks = Stopwatch.Frequency / _rates.BaseHz;
         double periodMs = 1000.0 / _rates.BaseHz;
+        long spinMarginTicks = Stopwatch.Frequency / 4000; // 0.25 ms: busy-wait bound on Windows
 
         _logger.LogInformation(
             "Tick loop starting: base {BaseHz}Hz ({PeriodMs:F2}ms budget), {Rates}",
             _rates.BaseHz, periodMs, _rates);
 
         long nextDeadline = Stopwatch.GetTimestamp() + periodTicks;
+
+        // Owned for the loop's lifetime; disposed on every exit path, exceptions included.
+        Action<string> onFallback = reason =>
+        {
+            _metrics?.RecordTickTimerFallback();
+            _logger.LogWarning(
+                "High-resolution tick timer unavailable ({Reason}); using the WaitOne + SpinOnce pacing",
+                reason);
+        };
+        using var sleeper = SleeperFactoryForTests?.Invoke(ct, onFallback) ?? new TickSleeper(ct, onFallback);
 
         while (!ct.IsCancellationRequested)
         {
@@ -428,17 +443,42 @@ public sealed class TickLoop
                 // granularity is coarser than the 16.6 ms base period, and its lateness
                 // used to be inherited by every tick as jitter. SpinOnce yields once its
                 // internal threshold passes, so the busy window is bounded.
-                int delayMs = (int)(remaining * 1000 / Stopwatch.Frequency);
-                if (delayMs > 1)
+                if (sleeper.IsHighResolution)
                 {
-                    if (ct.WaitHandle.WaitOne(delayMs - 1)) break;
-                }
+                    // Windows: the default 15.625 ms quantum would overshoot the deadline
+                    // and the spin would never run, so sleep on a high-resolution timer to
+                    // spinMarginTicks short of the deadline, with 100 ns precision. The spin
+                    // is therefore bounded by that margin (0.25 ms) and never calls
+                    // Thread.Sleep(1), which lasts a whole quantum here.
+                    long sleepTicks = remaining - spinMarginTicks;
+                    if (sleepTicks > 0 && sleeper.SleepHighResolution(sleepTicks)) break;
 
-                var spin = new SpinWait();
-                while (Stopwatch.GetTimestamp() < nextDeadline)
+                    var spin = new SpinWait();
+                    while (Stopwatch.GetTimestamp() < nextDeadline)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        // If the timer call just failed the sleeper fell back: yield like the
+                        // legacy path instead of spinning flat out for the whole residual.
+                        if (sleeper.IsHighResolution) spin.SpinOnce(sleep1Threshold: -1);
+                        else spin.SpinOnce();
+                    }
+                }
+                else
                 {
-                    if (ct.IsCancellationRequested) break;
-                    spin.SpinOnce();
+                    // Linux, and Windows without a high-resolution timer: the original
+                    // pacing, unchanged.
+                    int delayMs = (int)(remaining * 1000 / Stopwatch.Frequency);
+                    if (delayMs > 1)
+                    {
+                        if (sleeper.Sleep(delayMs - 1)) break;
+                    }
+
+                    var spin = new SpinWait();
+                    while (Stopwatch.GetTimestamp() < nextDeadline)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        spin.SpinOnce();
+                    }
                 }
 
                 nextDeadline += periodTicks;
