@@ -223,6 +223,8 @@ public class SnapshotTraceTests(ITestOutputHelper output)
         const int ProbeTrials = 200;
         const int WarmupCalls = 100;
         long totalAllocated = 0;
+        // Background GCs on purpose, not by luck of the schedule (SC-003, see ThreadAllocation).
+        using var pressure = BackgroundGcPressure.Start();
         for (int trial = 0; trial < ProbeTrials; trial++)
         {
             measurePhases = false;
@@ -234,7 +236,7 @@ public class SnapshotTraceTests(ITestOutputHelper output)
             gatherBytes = 0;
             claimBytes = 0;
             measurePhases = true;
-            long before = GC.GetAllocatedBytesForCurrentThread();
+            long before = ThreadAllocation.Begin();
             for (int i = 0; i < 200; i++) Round();
             long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
             long outsideGatherAndClaim = allocated - gatherBytes - claimBytes;

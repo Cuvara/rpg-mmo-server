@@ -1,3 +1,4 @@
+using GameServer.Tests.Infrastructure;
 using GameServer.Gameplay;
 using GameServer.Net;
 using GameServer.Server;
@@ -507,7 +508,7 @@ public class SnapshotV3EncoderTests
         }
 
         Run(1, 200); // warm every pool, both keyframe and delta paths
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        long before = ThreadAllocation.Begin();
         Run(200, 1200);
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.True(allocated == 0, $"steady-state v3 encode allocated {allocated} B over 1000 snapshots");

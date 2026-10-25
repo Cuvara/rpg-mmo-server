@@ -21,6 +21,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Documented the `gameserver_tick_timer_fallbacks_total` metric for Windows tick-timer fallback.
 
 ### Fixed
+- Zero-allocation test guards no longer flake under background GC (SC-003). The end of a background
+  GC's mark phase voids every thread's allocation context without subtracting its unused tail from
+  `alloc_bytes` (`gc_heap::background_mark_phase` -> `repair_allocation_contexts(FALSE)` ->
+  `void_allocation`), so `GC.GetAllocatedBytesForCurrentThread()` of a thread that allocates nothing
+  jumps by up to ~one allocation quantum. Guards now start their window with
+  `ThreadAllocation.Begin()` (a blocking gen0 GC, which empties the thread's context the balanced
+  way). The assertions stay exactly zero; an injected 24 B allocation still fails each guard under
+  concurrent and non-concurrent GC. No product code changed and the test host GC mode is unchanged.
 - **Windows tick timer failure no longer busy-spins.** When `SetWaitableTimer` (or
   `CreateWaitableTimerExW`) fails, `TickSleeper` falls back permanently to the Linux-equivalent
   `WaitOne` + yielding `SpinOnce` pacing, logs once, and increments

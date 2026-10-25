@@ -1,3 +1,4 @@
+using GameServer.Tests.Infrastructure;
 using GameServer.Input;
 using GameServer.World;
 using Shared.GameLogic.Components;
@@ -38,7 +39,7 @@ public class GameplayAllocationTests
         var state = new Driver(f.Handler);
         for (int i = 0; i < 300; i++) state.Tick(f.World); // warm-up: JIT, buffer growth
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        long before = ThreadAllocation.Begin();
         for (int i = 0; i < 600; i++) state.Tick(f.World);
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 

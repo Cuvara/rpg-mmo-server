@@ -1,3 +1,4 @@
+using GameServer.Tests.Infrastructure;
 using Shared.GameLogic.World;
 
 namespace GameServer.Tests.Shared;
@@ -111,7 +112,7 @@ public class ProjectileLogicTests
         var s = new ProjectileState(new Vec3(0f, 0f, 1f), new Vec3(20f, 0.1f, 0f), 0.25f, 30f);
         ProjectileLogic.Step(s, Dt, geo, out _, out _);
         ProjectileLogic.SegmentCapsuleHit(Vec3.Zero, new Vec3(5f, 0f, 1f), 0.2f, new Vec3(3f, 0f, 0f), R, H, out _);
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        long before = ThreadAllocation.Begin();
         for (int i = 0; i < 1000; i++)
         {
             ProjectileLogic.Step(s, Dt, geo, out var next, out _);
