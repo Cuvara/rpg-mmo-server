@@ -1,3 +1,4 @@
+using GameServer.Tests.Infrastructure;
 using System.Globalization;
 using GameServer.Input;
 using GameServer.Scaffolding;
@@ -468,7 +469,7 @@ public class EnemyAttackTests
             drained.Clear();
         }
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        long before = ThreadAllocation.Begin();
         for (ulong t = 201; t <= 1200; t++)
         {
             fight.Ai.Tick(t);

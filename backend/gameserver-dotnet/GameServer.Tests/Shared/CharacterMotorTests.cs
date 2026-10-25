@@ -1,3 +1,4 @@
+using GameServer.Tests.Infrastructure;
 using Shared.GameLogic.World;
 
 namespace GameServer.Tests.Shared;
@@ -263,7 +264,7 @@ public class CharacterMotorTests
         var geo = WithBoxes(new StaticBox(2f, -2f, 0f, 4f, 2f, 0.3f), new StaticBox(6f, -2f, 0f, 7f, 2f, 3f));
         var s = MotorState.StandingAt(Vec3.Zero);
         CharacterMotor.Step(s, 1f, 0.2f, true, Speed, Dt, geo, P, out s); // warm up
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        long before = ThreadAllocation.Begin();
         for (int i = 0; i < 1000; i++)
             CharacterMotor.Step(s, 1f, 0.2f, (i & 7) == 0, Speed, Dt, geo, P, out s);
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());

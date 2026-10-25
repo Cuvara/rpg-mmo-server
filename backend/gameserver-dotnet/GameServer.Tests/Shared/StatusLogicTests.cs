@@ -1,3 +1,4 @@
+using GameServer.Tests.Infrastructure;
 using Shared.GameLogic.Content;
 
 namespace GameServer.Tests.Shared;
@@ -184,7 +185,7 @@ public class StatusLogicTests
         var buf = new StatusTickResult[set.MaxResultsPerTick];
         set.Tick(1, buf); // warm up
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        long before = ThreadAllocation.Begin();
         for (ulong t = 2; t < 1000; t++)
         {
             set.Tick(t, buf);

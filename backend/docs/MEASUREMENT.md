@@ -308,6 +308,7 @@ Specific to this development box, and each has cost real time:
 | `tail -f` on `/mnt/e` | DrvFs has no inotify, so a watch never fires and the silence reads as "still running" |
 | Unity batch mode exit code | returned 0 with tests failing, and `result=Failed` still leaves a plausible `.exe` on disk |
 | A rendered diff | has twice called differing files identical; prove sameness with `cmp`, a hash, or a tree id |
+| `GC.GetAllocatedBytesForCurrentThread()` | reads a few KB (96 B ... 7 KB) on a thread that allocates nothing, whenever a **background** GC ends its mark phase inside the window: `void_allocation` zeroes every thread's allocation context without subtracting the unused tail from `alloc_bytes`, and the getter is `alloc_bytes - (alloc_limit - alloc_ptr)`. Start every zero-allocation window with `ThreadAllocation.Begin()` (`GameServer.Tests/Infrastructure`), which empties the context first; never raise the threshold (SC-003) |
 
 **A running player locks `lib_burst_generated.dll`** and fails the next build with
 `result=Failed` — while leaving the previous, working executable in place.

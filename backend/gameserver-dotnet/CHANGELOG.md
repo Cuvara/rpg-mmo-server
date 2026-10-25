@@ -18,6 +18,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Protocol version is unchanged for old-peer safety.
 
 ### Fixed
+- Zero-allocation test guards no longer flake under background GC (SC-003). The end of a background
+  GC's mark phase voids every thread's allocation context without subtracting its unused tail from
+  `alloc_bytes` (`gc_heap::background_mark_phase` -> `repair_allocation_contexts(FALSE)` ->
+  `void_allocation`), so `GC.GetAllocatedBytesForCurrentThread()` of a thread that allocates nothing
+  jumps by up to ~one allocation quantum. Guards now start their window with
+  `ThreadAllocation.Begin()` (a blocking gen0 GC, which empties the thread's context the balanced
+  way). The assertions stay exactly zero; an injected 24 B allocation still fails each guard under
+  concurrent and non-concurrent GC. No product code changed and the test host GC mode is unchanged.
 - Restore a Debug-level record of unknown post-join message type ids; the `IsEnabled` guard keeps disabled Debug logging allocation-free.
 - Wait for KCP acknowledgement before closing reason-bearing refusals and kicks, so the
   client receives refusal text and duplicate-login reasons before teardown.

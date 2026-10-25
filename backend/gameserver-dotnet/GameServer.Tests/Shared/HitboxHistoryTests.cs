@@ -1,3 +1,4 @@
+using GameServer.Tests.Infrastructure;
 namespace GameServer.Tests.Shared;
 
 /// <summary>
@@ -147,7 +148,7 @@ public class HitboxHistoryTests
     {
         var h = new HitboxHistory(15, 64);
         h.Record(1, 0, Vec3.Zero);
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        long before = ThreadAllocation.Begin();
         for (ulong t = 2; t < 500; t++)
         {
             for (int k = 0; k < 64; k++) h.Record(t, k, new Vec3(k, t, 0f));
