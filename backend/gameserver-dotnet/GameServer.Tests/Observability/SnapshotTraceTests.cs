@@ -223,6 +223,27 @@ public class SnapshotTraceTests(ITestOutputHelper output)
         const int ProbeTrials = 200;
         const int WarmupCalls = 100;
         long totalAllocated = 0;
+
+        // Foreign allocation pressure for the whole measurement. In a full parallel run other
+        // tests allocate on other threads; with background GC on, that inflated this thread's
+        // counter at random instructions (SC-003). Running the guard against a thread that
+        // allocates continuously makes the condition part of the test instead of luck of the
+        // schedule. See AllocationCounterIsolationTests.
+        bool noiseStop = false;
+        var noise = new Thread(() =>
+        {
+            var keep = new List<object>();
+            while (!Volatile.Read(ref noiseStop))
+            {
+                for (int i = 0; i < 3000; i++) keep.Add(new byte[300 + (i & 7) * 100]);
+                // Survivors, so gen1/gen2 (and with them background GCs) actually happen.
+                if (keep.Count > 20000) keep.Clear();
+                Thread.Sleep(0);
+            }
+        });
+        noise.Start();
+        try
+        {
         for (int trial = 0; trial < ProbeTrials; trial++)
         {
             measurePhases = false;
@@ -245,6 +266,13 @@ public class SnapshotTraceTests(ITestOutputHelper output)
             Assert.Equal(0L, allocated);
             Assert.Equal(0L, gatherBytes);
             Assert.Equal(0L, claimBytes);
+        }
+
+        }
+        finally
+        {
+            Volatile.Write(ref noiseStop, true);
+            noise.Join();
         }
 
         output.WriteLine($"traced={traced}: {ProbeTrials} windows x 200 gathers, total={totalAllocated} bytes, dropped_oldest={conn.SendDroppedOldest}");

@@ -6,6 +6,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- Background GC off for the test host. With it on, a background GC running on another
+         thread inflates GC.GetAllocatedBytesForCurrentThread() for a thread that allocates
+         nothing (steps of 136 + n*1344 B), so every zero-allocation guard flakes whenever
+         parallel tests allocate. See Infrastructure/AllocationCounterIsolationTests.cs. -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

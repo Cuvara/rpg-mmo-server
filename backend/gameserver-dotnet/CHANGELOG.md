@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Test host runs with background GC off (`ConcurrentGarbageCollection=false` in `GameServer.Tests.csproj`). A background GC on another thread inflated `GC.GetAllocatedBytesForCurrentThread()` of an idle thread by 136 + n*1344 B, which made every zero-allocation guard (`SnapshotTraceTests.TheGatherPath_AllocatesNothing_TraceOnOrOff`, `SnapshotV3EncoderTests.SteadyState_AllocatesNothing`, `HitboxHistoryTests.RecordAndLookup_DoNotAllocate`) fail in about half of the full parallel runs (SC-003). The zero assertions are unchanged; `AllocationCounterIsolationTests` pins the setting, and the gather guard now runs against a thread that allocates continuously.
+
 ### Changed
 
 - Warm the snapshot trace allocation guard for 100 rounds before measurement to cover Dynamic TieredPGO tier-up, preserving its zero-allocation assertion.
