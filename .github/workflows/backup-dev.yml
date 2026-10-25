@@ -9,9 +9,10 @@ on:
         required: false
         default: false
 
-# Share the dev deployment lock so this operation cannot overlap CD.
+# Keep backup runs serialized independently from CD. Neither workflow can
+# cancel a run in the other's concurrency group.
 concurrency:
-  group: cd-dev
+  group: backup-dev
   cancel-in-progress: false
 
 permissions:
@@ -20,9 +21,26 @@ permissions:
 jobs:
   backup:
     name: Backup dev databases
+    if: github.ref == 'refs/heads/develop'
     runs-on: [self-hosted, dev]
     environment: dev
     steps:
+      - name: Require write or admin permission
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const actor = context.actor;
+            const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner,
+              repo,
+              username: actor,
+            });
+            core.info(`Dispatch actor permission: ${data.permission}`);
+            if (!['write', 'admin'].includes(data.permission)) {
+              core.setFailed(`Actor ${actor} needs write or admin permission; got ${data.permission}.`);
+            }
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -33,9 +51,9 @@ jobs:
           # The testlab currently has no shared lock-file contract. Inspect the
           # local process table as a guard; operators must still reserve a
           # no-soak window because process visibility may differ by runner host.
-          if pgrep -af '[t]estlab[.]py.*(S09|soak)' >/dev/null; then
+          if pgrep -f '[t]estlab[.]py.*(S09|soak)' >/dev/null; then
             echo "::error::A testlab soak appears active; refusing dev backup rehearsal."
-            pgrep -af '[t]estlab[.]py.*(S09|soak)' || true
+            pgrep -l -f '[t]estlab[.]py.*(S09|soak)' || true
             exit 1
           fi
 
@@ -50,6 +68,7 @@ jobs:
           POSTGRES_GAME_USER: ${{ vars.POSTGRES_GAME_USER || 'game' }}
           BACKUP_KUBE_CONTEXT: ${{ vars.DEPLOY_MODE == 'k8s' && (vars.KUBE_CONTEXT || 'k3d-rpg-dev') || '' }}
           BACKUP_KUBE_NAMESPACE: rpg-k8s-data
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
@@ -84,9 +103,13 @@ jobs:
           set -euo pipefail
           stamp="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           for db in meta gamestate; do
-            relative="$(awk -F '\t' -v prefix="$db/" 'index($1, prefix) == 1 && $1 ~ /\.dump$/ { print $1 }' "$METADATA_DIR/files.tsv")"
+            mapfile -t matches < <(awk -F '\t' -v prefix="$db/" 'index($1, prefix) == 1 && $1 ~ /\.dump$/ { print $1 }' "$METADATA_DIR/files.tsv")
+            if [ "${#matches[@]}" -ne 1 ] || [ -z "${matches[0]}" ]; then
+              echo "::error::Expected exactly one fresh PostgreSQL dump for '$db'; found ${#matches[@]}."
+              exit 1
+            fi
+            relative="${matches[0]}"
             file="$BACKUP_DIR/$relative"
-            test -n "$file"
             bash backend/deploy/db/restore.sh --file "$file" --db "$db" --target "${db}_scratch_${stamp}" --yes
           done
 
@@ -98,9 +121,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          relative="$(awk -F '\t' '$1 ~ /^redis\/.*\.rdb$/ { print $1 }' "$METADATA_DIR/files.tsv")"
+          mapfile -t matches < <(awk -F '\t' '$1 ~ /^redis\/.*\.rdb$/ { print $1 }' "$METADATA_DIR/files.tsv")
+          if [ "${#matches[@]}" -ne 1 ] || [ -z "${matches[0]}" ]; then
+            echo "::error::Expected exactly one fresh Redis RDB; found ${#matches[@]}."
+            exit 1
+          fi
+          relative="${matches[0]}"
           file="$BACKUP_DIR/$relative"
-          test -n "$file"
           bash backend/deploy/db/redis-restore.sh --file "$file" --mode scratch
 
       - name: Upload metadata only
