@@ -18,6 +18,7 @@ namespace GameServer.Tests.Server;
 /// every attempt at ~7 ms, so best-of-three cannot hide it, while a one-off stall cannot
 /// fail the test. Thresholds: before the fix &gt; 3 ms, after &lt; 1.5 ms.</para>
 /// </summary>
+[Collection(TickPacingTimingCollection.Name)]
 public class TickPacingWindowsTests
 {
     private const int BaseHz = 60;

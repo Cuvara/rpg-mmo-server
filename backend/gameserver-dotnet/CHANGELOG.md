@@ -23,8 +23,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   in bursts: stdev of 4-tick snapshot intervals 6.9 ms against 0.4 ms on Linux. The sleep now
   uses a private high-resolution waitable timer (`TickSleeper`, `LibraryImport`, NativeAOT-safe,
   no system-wide timer change, no per-tick allocation) and the spin no longer sleeps; stdev is
-  now ~0.02 ms in the regression test. Linux behaviour is unchanged. Adds
-  `AllowUnsafeBlocks` (required by the `LibraryImport` generator).
+  now ~0.02 ms in the regression test. Adds `AllowUnsafeBlocks` (required by the
+  `LibraryImport` generator). The high-resolution path is Windows-only: it sleeps to 0.25 ms
+  before the deadline and spins the rest without `Thread.Sleep(1)`, so the spin is bounded
+  (idle-world process CPU per 60 Hz tick: Windows ~1100 us with an unbounded no-sleep spin,
+  ~110-215 us now). Linux, and Windows without the timer, keep the previous `WaitOne` +
+  `SpinOnce()` pacing exactly (idle CPU per tick ~180-200 us, identical to before).
+  `TickPacingCpuTests` guards the per-tick CPU cost.
 - Restore a Debug-level record of unknown post-join message type ids; the `IsEnabled` guard keeps disabled Debug logging allocation-free.
 - Wait for KCP acknowledgement before closing reason-bearing refusals and kicks, so the
   client receives refusal text and duplicate-login reasons before teardown.

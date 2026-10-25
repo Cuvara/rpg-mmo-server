@@ -389,6 +389,7 @@ public sealed class TickLoop
         // truncation at 15Hz (1000/15 is exact); the base rate cannot.
         long periodTicks = Stopwatch.Frequency / _rates.BaseHz;
         double periodMs = 1000.0 / _rates.BaseHz;
+        long spinMarginTicks = Stopwatch.Frequency / 4000; // 0.25 ms: busy-wait bound on Windows
 
         _logger.LogInformation(
             "Tick loop starting: base {BaseHz}Hz ({PeriodMs:F2}ms budget), {Rates}",
@@ -430,23 +431,40 @@ public sealed class TickLoop
                 // immediately on shutdown), then spin the last stretch: the OS timer's
                 // granularity is coarser than the 16.6 ms base period, and its lateness
                 // used to be inherited by every tick as jitter. SpinOnce yields once its
-                // internal threshold passes, so the busy window is bounded. On Windows the
-                // sleep is a high-resolution timer (TickSleeper): the default 15.625 ms
-                // quantum otherwise overshoots the deadline and the spin never runs.
-                int delayMs = (int)(remaining * 1000 / Stopwatch.Frequency);
-                if (delayMs > 1)
+                // internal threshold passes, so the busy window is bounded.
+                if (sleeper.IsHighResolution)
                 {
-                    if (sleeper.Sleep(delayMs - 1)) break;
-                }
+                    // Windows: the default 15.625 ms quantum would overshoot the deadline
+                    // and the spin would never run, so sleep on a high-resolution timer to
+                    // spinMarginTicks short of the deadline, with 100 ns precision. The spin
+                    // is therefore bounded by that margin (0.25 ms) and never calls
+                    // Thread.Sleep(1), which lasts a whole quantum here.
+                    long sleepTicks = remaining - spinMarginTicks;
+                    if (sleepTicks > 0 && sleeper.SleepHighResolution(sleepTicks)) break;
 
-                var spin = new SpinWait();
-                while (Stopwatch.GetTimestamp() < nextDeadline)
+                    var spin = new SpinWait();
+                    while (Stopwatch.GetTimestamp() < nextDeadline)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        spin.SpinOnce(sleep1Threshold: -1);
+                    }
+                }
+                else
                 {
-                    if (ct.IsCancellationRequested) break;
-                    // -1 disables SpinWait's Thread.Sleep(1): on Windows without a fine
-                    // system timer that sleep lasts a whole 15.625 ms quantum and would
-                    // reintroduce the overshoot the sleeper just removed.
-                    spin.SpinOnce(sleep1Threshold: -1);
+                    // Linux, and Windows without a high-resolution timer: the original
+                    // pacing, unchanged.
+                    int delayMs = (int)(remaining * 1000 / Stopwatch.Frequency);
+                    if (delayMs > 1)
+                    {
+                        if (sleeper.Sleep(delayMs - 1)) break;
+                    }
+
+                    var spin = new SpinWait();
+                    while (Stopwatch.GetTimestamp() < nextDeadline)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        spin.SpinOnce();
+                    }
                 }
 
                 nextDeadline += periodTicks;

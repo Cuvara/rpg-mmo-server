@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -64,6 +65,23 @@ internal sealed partial class TickSleeper : IDisposable
         long dueTime = -(long)milliseconds * 10_000;
         if (!SetWaitableTimer(_timer.SafeWaitHandle.DangerousGetHandle(), in dueTime, 0, 0, 0, 0))
             return _cancel.WaitOne(milliseconds);
+
+        return WaitHandle.WaitAny(_handles!) == 1;
+    }
+
+    /// <summary>
+    /// High-resolution sleep for <paramref name="stopwatchTicks"/> <see cref="Stopwatch"/>
+    /// ticks, at 100 ns resolution rather than whole milliseconds, so the caller can leave a
+    /// sub-millisecond residual to spin. Only valid when <see cref="IsHighResolution"/>.
+    /// Returns true when cancellation woke it.
+    /// </summary>
+    public bool SleepHighResolution(long stopwatchTicks)
+    {
+        // Relative due time: negative, in 100 ns units.
+        long dueTime = -(stopwatchTicks * 10_000_000 / Stopwatch.Frequency);
+        if (dueTime >= 0) return _cancel.WaitOne(0);
+        if (!SetWaitableTimer(_timer!.SafeWaitHandle.DangerousGetHandle(), in dueTime, 0, 0, 0, 0))
+            return _cancel.WaitOne((int)(stopwatchTicks * 1000 / Stopwatch.Frequency));
 
         return WaitHandle.WaitAny(_handles!) == 1;
     }
