@@ -396,6 +396,9 @@ public sealed class TickLoop
 
         long nextDeadline = Stopwatch.GetTimestamp() + periodTicks;
 
+        // Owned for the loop's lifetime; disposed on every exit path, exceptions included.
+        using var sleeper = new TickSleeper(ct);
+
         while (!ct.IsCancellationRequested)
         {
             long tickStart = Stopwatch.GetTimestamp();
@@ -427,18 +430,23 @@ public sealed class TickLoop
                 // immediately on shutdown), then spin the last stretch: the OS timer's
                 // granularity is coarser than the 16.6 ms base period, and its lateness
                 // used to be inherited by every tick as jitter. SpinOnce yields once its
-                // internal threshold passes, so the busy window is bounded.
+                // internal threshold passes, so the busy window is bounded. On Windows the
+                // sleep is a high-resolution timer (TickSleeper): the default 15.625 ms
+                // quantum otherwise overshoots the deadline and the spin never runs.
                 int delayMs = (int)(remaining * 1000 / Stopwatch.Frequency);
                 if (delayMs > 1)
                 {
-                    if (ct.WaitHandle.WaitOne(delayMs - 1)) break;
+                    if (sleeper.Sleep(delayMs - 1)) break;
                 }
 
                 var spin = new SpinWait();
                 while (Stopwatch.GetTimestamp() < nextDeadline)
                 {
                     if (ct.IsCancellationRequested) break;
-                    spin.SpinOnce();
+                    // -1 disables SpinWait's Thread.Sleep(1): on Windows without a fine
+                    // system timer that sleep lasts a whole 15.625 ms quantum and would
+                    // reintroduce the overshoot the sleeper just removed.
+                    spin.SpinOnce(sleep1Threshold: -1);
                 }
 
                 nextDeadline += periodTicks;

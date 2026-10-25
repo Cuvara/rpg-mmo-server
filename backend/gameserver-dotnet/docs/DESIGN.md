@@ -158,6 +158,21 @@ times — the right tradeoff for a tick-loop server.
 - The tick loop itself is synchronous and never awaits I/O. Persistence is
   dispatched to a background task on a configurable interval (30-60s).
 
+### Windows timer resolution
+
+Production runs Linux; developers and native-Windows soak hosts do not. A Windows process
+that has not requested a finer timer wakes from a sleep on the 15.625 ms system quantum, so
+a sleep-then-spin loop overshoots its deadline and issues ticks on quantum boundaries (98.4%
+of 4-tick snapshot intervals at 62.5 or 78.1 ms, stdev 6.9 ms; Linux 0.4 ms). `TickLoop`
+therefore sleeps through `TickSleeper`, which on Windows waits on a private
+`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer (Windows 10 1803+), and its spin uses
+`SpinOnce(sleep1Threshold: -1)` because `Thread.Sleep(1)` has the same quantum. This was
+chosen over `timeBeginPeriod(1)` because it does not change the system-wide timer. On Linux,
+or where the timer cannot be created, the previous `WaitHandle.WaitOne` is used.
+`TickPacingWindowsTests` (Windows-only, skipped elsewhere) guards it: stdev of 4-tick
+intervals must be under 1.5 ms (best of three attempts, to absorb CI stalls; the unfixed
+loop measures ~6.9 ms every attempt).
+
 ### Invariant Globalization
 
 `<InvariantGlobalization>true</InvariantGlobalization>` is set. The game server

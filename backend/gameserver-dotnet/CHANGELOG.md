@@ -18,6 +18,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Protocol version is unchanged for old-peer safety.
 
 ### Fixed
+- **Windows tick pacing.** On native Windows the dedicated tick thread slept on the 15.625 ms
+  system timer quantum (and `SpinWait` fell back to `Thread.Sleep(1)`), so ticks were issued
+  in bursts: stdev of 4-tick snapshot intervals 6.9 ms against 0.4 ms on Linux. The sleep now
+  uses a private high-resolution waitable timer (`TickSleeper`, `LibraryImport`, NativeAOT-safe,
+  no system-wide timer change, no per-tick allocation) and the spin no longer sleeps; stdev is
+  now ~0.02 ms in the regression test. Linux behaviour is unchanged. Adds
+  `AllowUnsafeBlocks` (required by the `LibraryImport` generator).
 - Restore a Debug-level record of unknown post-join message type ids; the `IsEnabled` guard keeps disabled Debug logging allocation-free.
 - Wait for KCP acknowledgement before closing reason-bearing refusals and kicks, so the
   client receives refusal text and duplicate-login reasons before teardown.
