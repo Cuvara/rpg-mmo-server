@@ -31,7 +31,7 @@ How to read the tables:
 
 | | |
 |---|---|
-| Gate | Base-tick p99 `<` budget fraction (see D2) of `1 / SIM_CRITICAL_HZ`, **and** zero sustained overruns at steady state |
+| Gate | Base-tick p99 `<` proposed profile budget fraction of `1 / SIM_CRITICAL_HZ`, **and** zero sustained overruns at steady state |
 | Budget | `1 / SIM_CRITICAL_HZ`. At the 60 Hz default that is **16.67 ms**. The 66.67 ms figure is the *world* interval (15 Hz) and governs snapshot cadence, not the base tick. `BENCHMARK.md` Part XIII (item 30) records the harness grading a 60 Hz server against 66.67 ms. |
 | Source | ADR-7 acceptance table, `ARCHITECTURE-DECISIONS.md:766-770`: p99 `<` half the budget "for GC and spikes", overruns zero at steady state. Base-tick vs world-interval budget: `BENCHMARK.md:2495-2515` (Part XIII item 30). The "half the budget" fraction is ADR-7's; applying it to the 60 Hz base tick (8.33 ms) is the A4 OE-01 proposal and is **ASSUMPTION**. |
 | Instrument | `gameserver_tick_duration_seconds` (histogram) and `gameserver.tick.overruns` (counter) on the game server metrics endpoint; `/status` `tick_rate`. Testlab `server_tick` check (`p99_budget_ratio` 1.0 = the whole `1 / SIM_CRITICAL_HZ`, `min_rate_ratio` 0.98). `backend/loadtest` for the sweep. |
@@ -46,7 +46,7 @@ How to read the tables:
 | Gate | `< 50 KB/s` per client at the declared entity mix |
 | Source | ADR-7 acceptance table (mobile-network assumption). |
 | Instrument | `snapshot_bytes` on `/status`; `backend/loadtest` per-client downlink. Predictive model from `CORE-BASELINE-V1.md` §2: `KB/s = AOI population x 24.9 B x SIM_WORLD_HZ / 1000`. |
-| Evidence | 45.9 KB/s per client at 200 players on `develop@cb31656`, 2026-08-07 (`BENCHMARK.md:42-43`, table row `:1360`, Part IV; commit named at `:1852`). 0.3% spread across six quiet runs at a fixed 200-player level (`BENCHMARK.md:1158-1180`, `:1292`). Bandwidth does not depend on host load, so this reading is **valid from a shared host**. Not re-measured at `cc7884f`. A later entry records bandwidth 8% higher than Part XIII measured, because of `action_seq` (`BENCHMARK.md:2723`, item 41), so treat 45.9 as the Part IV figure, not a current one. |
+| Evidence | BENCHMARK.md Part XIII items 24-25: 61.7 KB/s/client at 200 and 45.9 at 150 on the `2026-09-07-develop-c05f715` run, so the 200-player reading exceeds this threshold. Part IV's 45.9 at 200 on `develop@cb31656` (2026-08-07) is superseded (`BENCHMARK.md:42-43`, table row `:1360`, Part XIII `:1841-1853`). Bandwidth reproduces to 0.3% across six quiet runs at fixed 200 (`BENCHMARK.md:1158-1180`, `:1292`); this is BENCHMARK.md evidence. The readings are shared-host and synthetic-profile measurements. Item 41's later ~8% comparison is against the Part XIII control (cluster 75.0→80.9; spread 36.3→39.4), not Part IV (`BENCHMARK.md:2723-2728`). |
 | Watch | `GAMESERVER_MAX_SNAPSHOT_BYTES` (8192) sheds entities silently; read `snapshot_entities_shed` beside the bandwidth figure. A low bandwidth reading with a high shed count is a pass for the wrong reason. |
 
 ### G3. Snapshot delivery gap
@@ -62,7 +62,7 @@ How to read the tables:
 
 | | |
 |---|---|
-| Gate | Frame time p95 `<=` 16.7 ms and p99 `<=` 33.3 ms **at the target connected workload on the minimum device tier** (see D3, D4) |
+| Gate | Frame time p95 `<=` 16.7 ms and p99 `<=` 33.3 ms **at the target connected workload on the approved minimum device tier** |
 | Source | A4 OE-02 proposal. **ASSUMPTION**: no product frame or GPU target exists today. |
 | Instrument | Client `docs/DEVICE-BENCHMARK.md` (250/500/1000 synthetic entities; GC median target 0). Testlab `render_jumps`, `render_freshness`, `host_stalls` for smoothness. |
 | Status | The device benchmark is synthetic; connected-client mode is instrument-only. It does not yet establish shipped-gameplay performance on a device. GPU time must be measured on the device, not inferred from CPU frame time. |
@@ -80,34 +80,30 @@ How to read the tables:
 
 | | |
 |---|---|
-| Gate | Gateway auth p99 `< 100 ms`. Enter-world and join-token-to-in-world latency: **no target exists** (D5) |
-| Source | Auth p99 `< 100ms`: `ARCHITECTURE-DECISIONS.md:773` (ADR-7 acceptance table). Enter-world/join: **ASSUMPTION**, proposal in D5. |
+| Gate | Gateway auth p99 `< 100 ms`. Enter-world and join-token-to-in-world latency: **no target exists** (outside this operating profile). |
+| Source | Auth p99 `< 100ms`: `ARCHITECTURE-DECISIONS.md:773` (ADR-7 acceptance table). Enter-world/join: **unmeasured**. |
 | Instrument | `backend/loadtest` login -> enter-world -> join loop with latency histograms (ADR-7 benchmark plan item 5, `ARCHITECTURE-DECISIONS.md:754`); testlab S01 bootstrap/connect timings. The gateway has no auth-latency histogram of its own at this baseline; if one is needed for production alerting, that is a separate change. |
 | Status | No auth-latency reading at the current baseline is recorded in this repo's docs, and none is claimed here. |
 
 ### G7. Memory (carried from ADR-7)
 
-`< 128Mi` per pod at target capacity (the Agones pod limit; `ARCHITECTURE-DECISIONS.md:772`). Instrument: pod RSS; measured
-~82 MiB at 200 players (`BENCHMARK.md:176`, `:253-256`; Part IV era, `cb31656`), ~30 MiB idle (`CLAUDE.md` capacity table, same source). Listed so the set is complete; it is not one of the six
+`< 128Mi` per pod at target capacity (the Agones pod limit; `ARCHITECTURE-DECISIONS.md:772`). Instrument: pod RSS; the older Part IV-era run on `cb31656` measured ~82 MiB at 200 (`BENCHMARK.md:176`, `:253-256`), while the later Part XIII item 24 run measured 48 MiB at 200 (`BENCHMARK.md:1842`); ~30 MiB idle is from the `CLAUDE.md` capacity table (same older source). Listed so the set is complete; it is not one of the six
 requested gates and has no open decision.
 
 ---
 
-## 2. HUMAN DECISIONS — left open
+## 2. HUMAN DECISIONS — four decisions remain open
 
-None of these may be settled by an engineer or an agent from the code. Each blocks a gate
-above from being more than provisional.
+These recommendations are proposals for approval, not validated capacity claims.
 
-| # | Decision | Blocks | Proposed default | Reasoning for the default |
-|---|---|---|---|---|
-| D1 | **Target CCU per map**, and entity mix (players / mobs / projectiles per AOI) | G1, G2, G7 | **Leave unset** until an independent-host bracketed sweep exists. Then set it to a point the sweep passed, with headroom chosen by the owner. | Any number chosen now is a guess dressed as a requirement. The only defensible placeholder for *measurement* is to sweep over a declared range and publish the passing points. |
-| D2 | **Tick budget fraction** and which rate it is graded against: 60 Hz base (16.67 ms period) vs the 15 Hz world interval (66.67 ms) | G1 | Grade the **base tick** against `1 / SIM_CRITICAL_HZ`. Gate p99 at **half** that (8.33 ms at 60 Hz). | The base tick is what the harness times. Half is ADR-7's own headroom rule carried to the real rate. The looser 33 ms (half of 66.67) would pass a server running 2x over its base budget. The stricter reading may prove unreachable; if so, the decision is to relax the fraction with evidence, not to quietly switch rate. |
-| D3 | **Minimum device tier** (and a named reference device) | G4 | One named mid-range Android device as the floor, plus one current iPhone. | The client targets mobile and PC; the floor device sets the frame budget. A tier named in prose with no device cannot be measured. |
-| D4 | **Frame budget and workload** on that tier | G4 | p95 `<=` 16.7 ms, p99 `<=` 33.3 ms (60 fps target, one dropped frame tolerated at the tail), at the D1 entity mix in connected mode. | 60 fps is the stated render rate (`CLAUDE.md` netcode model). A 30 fps floor is a legitimate alternative for the lowest tier and is the owner's call. |
-| D5 | **Gameplay RTT budget** (input-to-render and server round-trip, p95/p99) and enter-world latency | G3, G6 | Network RTT p95 `<=` 100 ms for full-quality play; enter-world p95 `<=` 3 s. | Interpolation cover is 150 ms and a real client at 40 ms one-way with +/-60 ms jitter read 110 ms median / 179 ms p95 RTT with no resyncs or drops (`CORE-BASELINE-V1.md:141`; transport only, not rendering). 100 ms keeps the p95 inside the cover with room for tick and render delay. The 3 s enter-world figure is a plain ASSUMPTION; nothing measures it. |
+| Decision | Recommended provisional default | Reasoning |
+|---|---|---|
+| CCU per map | 25 players/map as the first validation target only; no production ceiling is proposed. | S07/S07P and the F17 batch exercised 25 bots. That makes 25 a useful first bracket, not a demonstrated limit: those runs used a shared host and bots rather than real gameplay. |
+| Entity mix per map | 25 players, up to 300 enemies, with projectile and loot counts explicitly undecided until representative gameplay instrumentation exists. | The enemy budget is 300, while #468 reports replication degradation from about 13 players with AI. A proposed 25-player mix is therefore a validation target that may fail, not an inference that the current server supports it. No cited run establishes projectile or loot load. |
+| Minimum device tier | Mid-range Android as the floor; name a reference Android device and define WebGL and Windows reference configurations before approval. | Mobile is the limiting product class, but DEVICE-BENCHMARK.md uses synthetic entities and does not establish connected gameplay performance. A named device and workload make the decision measurable. |
+| Gameplay RTT budget | p95 ≤ 100 ms and p99 ≤ 150 ms end-to-end RTT, as a starting point. | CORE-BASELINE-V1.md records 150 ms interpolation cover and a transport-only run with 179 ms RTT p95 under injected delay/jitter. The proposed p99 matches the cover, while 100 ms p95 leaves room for render/tick delay; the run does not validate gameplay responsiveness. |
 
-A decision is recorded by editing the row: replace the proposal with the decided value, the
-name of who decided it, and the date. Until then the gate reads PROVISIONAL.
+The owner may approve or change each default. Record the decision, decision-maker, and date in the corresponding row before promoting any profile value beyond provisional.
 
 ---
 
@@ -118,9 +114,9 @@ name of who decided it, and the date. Until then the gate reads PROVISIONAL.
 | G1 | Independent-host server + load generator; bracketed sweep (find the first failing point, then the last passing one); host telemetry kept | #205, A4 OE-01/OE-03 |
 | G2 | Nothing further for the 200-player shape; re-run if wire encoding or AOI changes | `BENCHMARK.md` |
 | G3 | Clean quiet-host 1 h S09 with the sampler on; bracketed server clock exchange before any one-way-latency claim | #473, A4 OE-03 |
-| G4 | D3/D4 decided; connected workload run on the reference device | A4 OE-02 |
+| G4 | Minimum device tier decided; connected workload run on the reference device | A4 OE-02 |
 | G5 | Disconnect/rejoin churn matrix scenario | A4 OE-04 |
-| G6 | D5 decided; loadtest run at the current baseline | A4 OE-02 |
+| G6 | Gameplay RTT budget decided; loadtest run at the current baseline | A4 OE-02 |
 
 Missing scenarios named in A4 OE-04 (packet loss/jitter injection, malformed-input
 survival, churn) are not gates yet because no instrument exists. Add the gate when the
@@ -138,3 +134,24 @@ scenario lands.
 
 Related: `ARCHITECTURE-DECISIONS.md` ADR-7, `CORE-BASELINE-V1.md`, `BENCHMARK.md`,
 `MEASUREMENT.md`, `RELEASE-RUNBOOK.md`.
+
+## 5. Proposed operating profile
+
+This profile is for review and measurement planning. **No CCU ceiling is proven.** The provisional targets below are kept separate from validated capacity; they must not be read as claims that the current server can sustain them.
+
+| Profile entry | Provisional target | Source evidence and limitations | Status | Measurement that would validate the target |
+|---|---|---|---|---|
+| CCU per map | 25 players/map as an initial validation target only; approval open. | F17 lab report (`C:\Workspaces\UnityIndie\.orca-lead\reports\remediation\F17-LAB-FINAL.md:40-53`, outside this repo): runs `20261024T133353Z-S07-3cyz` / `20261024T133533Z-S07P-ypxc` used 25 bots. X12 lab report (`C:\Workspaces\UnityIndie\.orca-lead\reports\completion\X12-LAB-FINAL.md:32-39`, outside this repo): runs `20261023T133245Z-S07-h82e` / `20261023T133425Z-S07P-3vnr` also used 25 bots. These were shared-host bot runs, did not establish full real-gameplay load, and cannot prove a ceiling. | provisional | Dedicated server host, separate generator, bracketed CCU sweep with the proposed entity mix and host telemetry. |
+| Entity mix per map | Proposal: 25 players and up to 300 enemies; projectile and loot populations remain TBD. Approval open. | X12 S07 `20261023T133245Z-S07-h82e` exercised 25 bots with AI and the 300/300 enemy budget; S07P `20261023T133425Z-S07P-3vnr` was players-only (external lab report `C:\Workspaces\UnityIndie\.orca-lead\reports\completion\X12-LAB-FINAL.md:32-39`). F17 runs `20261024T133353Z-S07-3cyz` / `20261024T133533Z-S07P-ypxc` repeated the 25-bot observations (external lab report `C:\Workspaces\UnityIndie\.orca-lead\reports\remediation\F17-LAB-FINAL.md:40-53`). #468's sweep `20261022T022957Z-S07` used the pre-clamp enemy cap of 30 + 45/player (165..4530); the 300-budget clamp came later, so its ~13-player degradation and 25-bot 533 ms gap are not comparable to the later capped S07 pass. It is a diagnostic issue report, not an independent-host capacity run at the proposed mix. The 300 enemy budget is configured, not a measured safe population (external PR-body report `C:\Workspaces\UnityIndie\.orca-lead\reports\T67-SRV-PRBODY.md:66`; this file is outside the repo). #449/#452 95-player AI-on runs show KCP receive collapse before the fix and recovery after it (`loadtest/results/2026-10-14-kcp-449/README.md`); they used a co-located generator/server and synthetic movement, so they are diagnostic, not capacity. | provisional | Repeatable workload matrix that varies players, enemies, projectiles, and loot independently; record replication, snapshot shedding, tick, bandwidth, and memory during the capacity sweep. |
+| Minimum device tier (Android / WebGL / Windows) | Mid-range Android floor; use named Android, WebGL, and Windows reference configurations, with provisional connected-client frame targets p95 ≤ 16.7 ms and p99 ≤ 33.3 ms. Approval open. | DEVICE-BENCHMARK.md:1-20 describes the synthetic workload; its connected-client mode is instrument-only and does not establish shipped gameplay performance. CORE-BASELINE-V1.md:74 has three Windows clients and ~300 entities, not a minimum-tier comparison. No cited evidence sets a WebGL tier. | unmeasured | Run the connected workload on named reference devices/configurations and capture CPU/GPU frame-time percentiles and GC; include the approved entity mix. |
+| Gameplay RTT budget (p95/p99) | p95 ≤ 100 ms; p99 ≤ 150 ms. Approval open. | CORE-BASELINE-V1.md:141 records 110 ms median / 179 ms p95 under 40 ms one-way delay with ±60 ms jitter, without resyncs/drops; this is transport evidence, not end-to-end gameplay/render latency. CORE-BASELINE-V1.md:145-154 documents 150 ms interpolation cover. | provisional | Clock-calibrated network RTT plus client input-to-render measurements under clean and impaired links, on the approved device tier and workload; report p95/p99 and resync/drop counts. |
+| Per-client downstream bandwidth | < 50 KB/s per client at the declared entity mix. | The current cited measurement is BENCHMARK.md Part XIII items 24-25: 61.7 KB/s/client at 200 and 45.9 KB/s/client at 150 on the `2026-09-07-develop-c05f715` run; thus the 200-player point is over the threshold. Earlier Part IV (`develop@cb31656`, 2026-08-07) measured 45.9 KB/s at 200 and ~82 MiB RSS (`BENCHMARK.md:42-43`, `:1360`, `:176`, `:253-256`) but that reading is superseded by the later measurement. The later run also reports 48 MiB RSS at 200 (Part XIII item 24). Bandwidth is reproducible to 0.3% across six quiet fixed-200 runs (`BENCHMARK.md:43`, `:1158-1180`, `:1292`); this attribution is BENCHMARK.md, not ADR-7. Item 41's ~8% increase compares cluster 75.0→80.9 KB/s and spread 36.3→39.4 KB/s against the Part XIII control, not against Part IV. The generator shared the host and the profile did not exercise real gameplay. ADR-7's threshold remains a mobile-network assumption. | provisional | Measure per-client snapshot bytes and shed counts during the declared real-gameplay profile on the current head; repeat across the sweep and include p95/p99 rates. |
+| Server tick budget | 60 Hz base-tick period 16.67 ms; proposed p99 budget ≤ 8.33 ms (half-period) with zero sustained overruns. | ADR-7 acceptance rule (ARCHITECTURE-DECISIONS.md:766-770) documents p99 <33 ms at 15 Hz (half of its 66.67 ms world interval). The stricter 8.33 ms target is the A4 OE-01 proposal/ASSUMPTION applying half-budget to the 60 Hz base tick, not an ADR-7 requirement. CORE-BASELINE-V1.md §2/§4 records that capacity is unknown. X12 S07 `20261023T133245Z-S07-h82e` and F17 S07 `20261024T133353Z-S07-3cyz` measured tick p99 buckets on a shared host; those bot runs are smoke evidence, not dedicated-host gameplay capacity. #468's AI replication degradation and #449/#452's 95-player KCP tests are diagnostic, not a validated tick budget. | provisional | On a dedicated server host with a separate generator, collect monotonic tick histograms and overrun counters at each bracket; compare p99 against the base-tick period, not the 15 Hz world interval. |
+
+### Validated capacity
+
+| Capacity measure | Validated result |
+|---|---|
+| CCU ceiling | **None proven.** No current evidence establishes a maximum CCU per map or server. |
+
+Capacity validation requires exactly: (1) a dedicated server host, (2) a separate load-generator host, and (3) a bracketed sweep that finds and records passing and failing load points. Until all three are complete with attributable run evidence, keep CCU and capacity claims provisional.

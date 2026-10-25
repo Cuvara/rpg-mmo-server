@@ -16,9 +16,9 @@ namespace GameServer.Tests.Infrastructure;
 /// <c>repair_allocation_contexts(FALSE)</c> ("We need to void alloc contexts here 'cause while
 /// background_ephemeral_sweep is running we can't let the user code consume the left over
 /// parts"), which runs <c>void_allocation</c>. That zeroes <c>alloc_ptr</c>/<c>alloc_limit</c> on
-/// every thread and leaves <c>alloc_bytes</c> alone, so the unused tail (up to roughly one 8 KB
-/// allocation quantum) is added to the counter of every thread, including a thread that
-/// allocates nothing. In a full parallel run other tests allocate, background GCs happen, and a
+/// each thread with a live allocation context and leaves <c>alloc_bytes</c> alone, so the unused
+/// tail (up to roughly one 8 KB allocation quantum) is added to the counter of each such thread,
+/// including a thread that allocates nothing. In a full parallel run other tests allocate, background GCs happen, and a
 /// guard window that spans one reads a few KB (SC-003: 96 B ... 7 KB) it never allocated.</para>
 ///
 /// <para><b>The fix.</b> <c>void_allocation</c> and <c>fix_allocation_context</c> both return early

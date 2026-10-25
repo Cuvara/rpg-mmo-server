@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and from zero, remain delta-visible; unchanged speed stays absent on field-level deltas.
   Protocol version is unchanged for old-peer safety.
 
+### Added
+- Documented the `gameserver_tick_timer_fallbacks_total` metric for Windows tick-timer fallback.
+
 ### Fixed
 - Zero-allocation test guards no longer flake under background GC (SC-003). The end of a background
   GC's mark phase voids every thread's allocation context without subtracting its unused tail from
@@ -26,6 +29,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `ThreadAllocation.Begin()` (a blocking gen0 GC, which empties the thread's context the balanced
   way). The assertions stay exactly zero; an injected 24 B allocation still fails each guard under
   concurrent and non-concurrent GC. No product code changed and the test host GC mode is unchanged.
+- **Windows tick timer failure no longer busy-spins.** When `SetWaitableTimer` (or
+  `CreateWaitableTimerExW`) fails, `TickSleeper` falls back permanently to the Linux-equivalent
+  `WaitOne` + yielding `SpinOnce` pacing, logs once, and increments
+  `gameserver.tick.timer_fallbacks`. Previously a failed set left the no-sleep spin running for
+  the whole residual. `TickSleeperFallbackTests` injects the failure through an internal seam.
+- **Windows tick pacing.** On native Windows the dedicated tick thread slept on the 15.625 ms
+  system timer quantum (and `SpinWait` fell back to `Thread.Sleep(1)`), so ticks were issued
+  in bursts: stdev of 4-tick snapshot intervals 6.9 ms against 0.4 ms on Linux. The sleep now
+  uses a private high-resolution waitable timer (`TickSleeper`, `LibraryImport`, NativeAOT-safe,
+  no system-wide timer change, no per-tick allocation) and the spin no longer sleeps; stdev is
+  now ~0.02 ms in the regression test. Adds `AllowUnsafeBlocks` (required by the
+  `LibraryImport` generator). The high-resolution path is Windows-only: it sleeps to 0.25 ms
+  before the deadline and spins the rest without `Thread.Sleep(1)`, so the spin is bounded
+  (idle-world process CPU per 60 Hz tick: Windows ~1100 us with an unbounded no-sleep spin,
+  ~110-215 us now). Linux, and Windows without the timer, keep the previous `WaitOne` +
+  `SpinOnce()` pacing exactly (idle CPU per tick ~180-200 us, identical to before).
+  `TickPacingCpuTests` guards the per-tick CPU cost.
 - Restore a Debug-level record of unknown post-join message type ids; the `IsEnabled` guard keeps disabled Debug logging allocation-free.
 - Wait for KCP acknowledgement before closing reason-bearing refusals and kicks, so the
   client receives refusal text and duplicate-login reasons before teardown.

@@ -6,6 +6,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `docs/RUNNER.md` documents the dev self-hosted runner trust boundary and JIT lifecycle, manual soak exclusion, and metadata-only backup rehearsal. `.github/workflows/backup-dev.yml` adds a `develop`-only, write/admin-guarded, dispatch-only backup path with fatal missing-target behavior and optional scratch restore; it never deploys or uploads database dumps. Required reviewers and a deployment branch policy for Environment `dev` remain an admin configuration prerequisite. Backup concurrency is isolated from CD's `cd-dev` group and does not cancel in-progress runs.
 - The restore rehearsal now runs weekly and on manual dispatch, uses PostgreSQL 16 and Redis 7.4 clients, and verifies restored string, hash, stream, and expiring-key data.
 - `docs/RELEASE-RUNBOOK.md` and `docs/READINESS-GATES.md` (backend docs): the cross-repo release
   order (SGL tag, Netcode/UnityDots tags, client pins, server image) with per-step verification
