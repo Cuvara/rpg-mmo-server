@@ -949,7 +949,13 @@ Rehearse, do not assume. Minimum:
   `rpg-*` Docker state before and after (container id, image, `StartedAt`/`FinishedAt`,
   `RestartCount`, health, volumes, networks; a restart fails the run), starts from a
   sanitised environment and refuses any non-`rpgr-<run-id>` target, and removes only
-  resources it created by exact name. `bash backend/deploy/db/tests/rehearsal_test.sh`
+  resources it created: every container, volume and network (including the Redis scratch
+  restore resources made by `redis-restore.sh`) carries the label
+  `org.rpg.rehearsal.run=<run-id>` and its exact name is written to
+  `ownership-manifest.tsv` in the run directory before it is created. Cleanup deletes
+  only entries that are in the manifest AND still carry that label; any other
+  `rpgr-r1-<run-id>-*` resource is left in place and named in `cleanup.log` as
+  `left untouched`. `bash backend/deploy/db/tests/rehearsal_test.sh`
   proves these guards offline. Its dated directory retains the dump/RDB files, checksums and logs under
   `.testlab-runs/r1/`; review `docker-ps-before.txt`, `docker-ps-after.txt`,
   `metadata.tsv` and `rehearsal.log`. This does not exercise the dev cluster or prove a

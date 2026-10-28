@@ -35,9 +35,8 @@ REDIS_SRC_VOL="$REDIS_SRC-data"
 META_DST_VOL="$META_DST-data"
 GAME_DST_VOL="$GAME_DST-data"
 PG_PASSWORD="rpgr-synthetic-$RANDOM-$(date -u +%s)"
-CREATED_CONTAINERS=""
-CREATED_VOLUMES=""
-NETWORK_CREATED=0
+RUN_LABEL="org.rpg.rehearsal.run=$RUN_ID"
+MANIFEST="$RUN_DIR/ownership-manifest.tsv"
 STATE_CAPTURED=0
 CLEANUP_FAILED=0
 GITHUB_OUTPUT="$(printenv GITHUB_OUTPUT 2>/dev/null || true)"
@@ -50,6 +49,7 @@ if [ -e "$RUN_DIR" ]; then
 fi
 mkdir -p "$RUN_DIR"
 chmod 700 "$RUN_DIR" 2>/dev/null || true
+: > "$MANIFEST"
 exec > >(tee -a "$RUN_DIR/rehearsal.log") 2>&1
 
 save_normal_state() {
@@ -65,26 +65,9 @@ cleanup() {
 	local result=$?
 	trap - EXIT
 	set +e
-	local name
-	for name in $(docker ps -a --format '{{.Names}}' | awk -v p="$PREFIX-redis-restore-scratch-" 'index($0,p)==1'); do
-		CREATED_CONTAINERS="$CREATED_CONTAINERS $name"
-	done
-	for name in $(docker volume ls --format '{{.Name}}' | awk -v p="$PREFIX-redis-restore-vol-" 'index($0,p)==1'); do
-		CREATED_VOLUMES="$CREATED_VOLUMES $name"
-	done
-	for name in $CREATED_CONTAINERS; do
-		if docker inspect "$name" >/dev/null 2>&1; then
-			docker rm -f "$name" >> "$RUN_DIR/cleanup.log" 2>&1 || CLEANUP_FAILED=1
-		fi
-	done
-	for name in $CREATED_VOLUMES; do
-		if docker volume inspect "$name" >/dev/null 2>&1; then
-			docker volume rm "$name" >> "$RUN_DIR/cleanup.log" 2>&1 || CLEANUP_FAILED=1
-		fi
-	done
-	if [ "$NETWORK_CREATED" -eq 1 ] && docker network inspect "$NETWORK" >/dev/null 2>&1; then
-		docker network rm "$NETWORK" >> "$RUN_DIR/cleanup.log" 2>&1 || CLEANUP_FAILED=1
-	fi
+	# Delete only what is BOTH in the ownership manifest AND carries this run's
+	# label; anything else with a matching prefix is left alone and reported.
+	r1_cleanup_owned "$MANIFEST" "$RUN_DIR/cleanup.log" || CLEANUP_FAILED=1
 	if [ "$STATE_CAPTURED" -eq 1 ]; then
 		save_normal_state after || CLEANUP_FAILED=1
 		r1_compare_normal_state "$RUN_DIR/normal-rpg-before.txt" "$RUN_DIR/normal-rpg-after.txt" || CLEANUP_FAILED=1
@@ -140,25 +123,28 @@ STATE_CAPTURED=1
 log "run id: $RUN_ID"
 log "Docker context: $(docker context show 2>/dev/null || echo default)"
 log 'normal rpg-* Docker state captured before resource creation'
+# Every created object is recorded in the ownership manifest immediately before
+# its create call. The preflight above proved the name free, and cleanup still
+# requires this run's label, so a recorded name can only ever delete our own object.
+r1_record_owned network "$NETWORK"
 docker network create --internal --label org.rpg.rehearsal.task=R1 \
-	--label "org.rpg.rehearsal.run=$RUN_ID" "$NETWORK" >/dev/null
-NETWORK_CREATED=1
+	--label "$RUN_LABEL" "$NETWORK" >/dev/null
 
 create_volume() {
 	local volume="$1"
+	r1_record_owned volume "$volume"
 	docker volume create --label org.rpg.rehearsal.task=R1 \
-		--label "org.rpg.rehearsal.run=$RUN_ID" "$volume" >/dev/null
-	CREATED_VOLUMES="$CREATED_VOLUMES $volume"
+		--label "$RUN_LABEL" "$volume" >/dev/null
 }
 create_postgres() {
 	local name="$1" volume="$2" user="$3" database="$4"
 	create_volume "$volume"
+	r1_record_owned container "$name"
 	docker run -d --name "$name" --network "$NETWORK" \
-		--label org.rpg.rehearsal.task=R1 --label "org.rpg.rehearsal.run=$RUN_ID" \
+		--label org.rpg.rehearsal.task=R1 --label "$RUN_LABEL" \
 		-e "POSTGRES_USER=$user" \
 		-e "POSTGRES_PASSWORD=$PG_PASSWORD" -e "POSTGRES_DB=$database" \
 		-v "$volume:/var/lib/postgresql/data" "$POSTGRES_IMAGE" >/dev/null
-	CREATED_CONTAINERS="$CREATED_CONTAINERS $name"
 	log "created $name on private network $NETWORK at service port 5432"
 }
 create_postgres "$META_SRC" "$META_SRC_VOL" nakama nakama
@@ -166,11 +152,11 @@ create_postgres "$GAME_SRC" "$GAME_SRC_VOL" game gamestate
 create_postgres "$META_DST" "$META_DST_VOL" nakama nakama
 create_postgres "$GAME_DST" "$GAME_DST_VOL" game gamestate
 create_volume "$REDIS_SRC_VOL"
+r1_record_owned container "$REDIS_SRC"
 docker run -d --name "$REDIS_SRC" --network "$NETWORK" \
-	--label org.rpg.rehearsal.task=R1 --label "org.rpg.rehearsal.run=$RUN_ID" \
+	--label org.rpg.rehearsal.task=R1 --label "$RUN_LABEL" \
 	-v "$REDIS_SRC_VOL:/data" "$REDIS_IMAGE" \
 	redis-server --appendonly yes --dir /data --dbfilename dump.rdb >/dev/null
-CREATED_CONTAINERS="$CREATED_CONTAINERS $REDIS_SRC"
 log "created $REDIS_SRC on private network $NETWORK at service port 6379"
 
 wait_pg() {
@@ -313,24 +299,25 @@ ROW_COUNTS="$(docker exec "$GAME_DST" psql -At -U game -d "$GAME_DB" -c \
 GAME_VALUE="$(docker exec "$GAME_DST" psql -At -U game -d "$GAME_DB" -c 'SELECT user_id || chr(58) || map_id || chr(58) || hp FROM player_states')"
 [ "$GAME_VALUE" = 'r1-synthetic-user:r1-map:80' ] || die 'game-state restored value differs'
 
-# Preserve the helper's fresh Redis target briefly to check each synthetic value.
-docker ps -a --format '{{.Names}}' | awk -v p="$PREFIX-redis-restore-scratch-" 'index($0,p)==1' | sort > "$RUN_DIR/redis-restore-containers-before.txt"
-docker volume ls --format '{{.Name}}' | awk -v p="$PREFIX-redis-restore-vol-" 'index($0,p)==1' | sort > "$RUN_DIR/redis-restore-volumes-before.txt"
+# redis-restore.sh creates its own scratch container and volume. It is handed this
+# run's label and the ownership manifest, labels what it creates and appends the
+# exact names to the manifest; they are not discovered by prefix afterwards.
 log 'running repository Redis restore in scratch mode'
 r1_require_rpgr_name "$PREFIX-redis-restore" 'redis restore prefix'
 R1_CHILD_ENV=(
 	"REDIS_CONTAINER=$REDIS_SRC" "REDIS_IMAGE=$REDIS_IMAGE"
 	"REDIS_RESTORE_SCRATCH_PREFIX=$PREFIX-redis-restore" "REDIS_RESTORE_NETWORK=$NETWORK"
+	"REDIS_RESTORE_RUN_LABEL=$RUN_LABEL" "REDIS_RESTORE_MANIFEST=$MANIFEST"
 )
 r1_run_child "$DB_DIR/redis-restore.sh" --file "$REDIS_BACKUP" --mode scratch --keep-scratch
-docker ps -a --format '{{.Names}}' | awk -v p="$PREFIX-redis-restore-scratch-" 'index($0,p)==1' | sort > "$RUN_DIR/redis-restore-containers-after.txt"
-docker volume ls --format '{{.Name}}' | awk -v p="$PREFIX-redis-restore-vol-" 'index($0,p)==1' | sort > "$RUN_DIR/redis-restore-volumes-after.txt"
-comm -13 "$RUN_DIR/redis-restore-containers-before.txt" "$RUN_DIR/redis-restore-containers-after.txt" > "$RUN_DIR/redis-restore-new-containers.txt"
-comm -13 "$RUN_DIR/redis-restore-volumes-before.txt" "$RUN_DIR/redis-restore-volumes-after.txt" > "$RUN_DIR/redis-restore-new-volumes.txt"
-[ "$(wc -l < "$RUN_DIR/redis-restore-new-containers.txt")" -eq 1 ] || die 'Redis restore did not create exactly one new scratch container'
-[ "$(wc -l < "$RUN_DIR/redis-restore-new-volumes.txt")" -eq 1 ] || die 'Redis restore did not create exactly one new scratch volume'
+awk -F '\t' -v p="$PREFIX-redis-restore-scratch-" '$1=="container" && index($2,p)==1 && $2 !~ /-inject$/ {print $2}' "$MANIFEST" > "$RUN_DIR/redis-restore-new-containers.txt"
+awk -F '\t' -v p="$PREFIX-redis-restore-vol-" '$1=="volume" && index($2,p)==1 {print $2}' "$MANIFEST" > "$RUN_DIR/redis-restore-new-volumes.txt"
+[ "$(wc -l < "$RUN_DIR/redis-restore-new-containers.txt")" -eq 1 ] || die 'Redis restore did not record exactly one scratch container'
+[ "$(wc -l < "$RUN_DIR/redis-restore-new-volumes.txt")" -eq 1 ] || die 'Redis restore did not record exactly one scratch volume'
 REDIS_RESTORE_TARGET="$(cat "$RUN_DIR/redis-restore-new-containers.txt")"
 REDIS_RESTORE_VOLUME="$(cat "$RUN_DIR/redis-restore-new-volumes.txt")"
+r1_require_rpgr_container "$REDIS_RESTORE_TARGET"
+r1_require_rpgr_volume "$REDIS_RESTORE_VOLUME"
 KEY_PREFIX="r1:$RUN_ID:"
 [ "$(docker exec "$REDIS_RESTORE_TARGET" redis-cli --raw GET "$KEY_PREFIX"string)" = synthetic-string-value ] || die 'Redis string value differs'
 [ "$(docker exec "$REDIS_RESTORE_TARGET" redis-cli --raw HGET "$KEY_PREFIX"hash field-a)" = synthetic-hash-value ] || die 'Redis hash value differs'
@@ -338,8 +325,7 @@ KEY_PREFIX="r1:$RUN_ID:"
 [ "$(docker exec "$REDIS_RESTORE_TARGET" redis-cli --raw GET "$KEY_PREFIX"ttl)" = synthetic-expiring-value ] || die 'Redis TTL value differs'
 [ "$(docker exec "$REDIS_RESTORE_TARGET" redis-cli --raw TTL "$KEY_PREFIX"ttl)" -gt 0 ] || die 'Redis TTL did not survive restore'
 [ "$(docker exec "$REDIS_RESTORE_TARGET" redis-cli DBSIZE | tr -d '\r')" -eq 4 ] || die 'Redis key count differs'
-docker rm -f "$REDIS_RESTORE_TARGET" >/dev/null
-docker volume rm "$REDIS_RESTORE_VOLUME" >/dev/null
+# Removed by the EXIT cleanup with every other manifest entry.
 
 {
 	printf 'artifact\tbytes\tsha256\n'

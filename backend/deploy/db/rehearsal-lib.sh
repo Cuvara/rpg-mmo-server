@@ -126,3 +126,57 @@ r1_compare_normal_state() {
 	diff -u "$before" "$after" >&2 || true
 	return 1
 }
+
+# --- ownership manifest -----------------------------------------------------
+# One "<kind>\t<name>" line per created object (kind: container|volume|network),
+# written before the create call. Cleanup never discovers objects by prefix.
+r1_record_owned() {
+	printf '%s\t%s\n' "$1" "$2" >> "$MANIFEST"
+}
+
+# Remove every manifest entry that still exists AND carries this run's label.
+# Entries that exist without the label, or whose name is outside this run's
+# prefix, are left in place and reported. Objects that match the run prefix but
+# are not in the manifest are never touched; they are reported too.
+# Usage: r1_cleanup_owned <manifest> <cleanup-log>. Returns 1 if a removal failed.
+r1_cleanup_owned() {
+	local manifest="$1" clog="$2" rc=0 kind k name label entries found
+	[ -f "$manifest" ] || { echo '[rehearsal] no ownership manifest; nothing removed' >> "$clog"; return 0; }
+	entries="$(awk -F '\t' 'NF==2 && !seen[$0]++' "$manifest")"
+	for kind in container volume network; do
+		while IFS=$'\t' read -r k name; do
+			[ "$k" = "$kind" ] || continue
+			case "$name" in
+				"$PREFIX"-*) ;;
+				*) echo "[rehearsal] left untouched: $kind '$name' is outside run prefix $PREFIX" | tee -a "$clog" >&2; continue ;;
+			esac
+			case "$kind" in
+				container) label="$(docker inspect -f '{{index .Config.Labels "org.rpg.rehearsal.run"}}' "$name" 2>/dev/null)" || continue ;;
+				volume) label="$(docker volume inspect -f '{{index .Labels "org.rpg.rehearsal.run"}}' "$name" 2>/dev/null)" || continue ;;
+				network) label="$(docker network inspect -f '{{index .Labels "org.rpg.rehearsal.run"}}' "$name" 2>/dev/null)" || continue ;;
+			esac
+			if [ "$label" != "$RUN_ID" ]; then
+				echo "[rehearsal] left untouched: $kind '$name' is in the manifest but carries run label '$label', not '$RUN_ID'" | tee -a "$clog" >&2
+				continue
+			fi
+			case "$kind" in
+				container) docker rm -f "$name" >> "$clog" 2>&1 || rc=1 ;;
+				volume) docker volume rm "$name" >> "$clog" 2>&1 || rc=1 ;;
+				network) docker network rm "$name" >> "$clog" 2>&1 || rc=1 ;;
+			esac
+		done <<< "$entries"
+	done
+	# Report (never delete) other resources that merely share the run prefix.
+	found="$({
+		docker ps -a --format '{{.Names}}' | awk -v p="$PREFIX-" 'index($0,p)==1 {print "container\t" $0}'
+		docker volume ls --format '{{.Name}}' | awk -v p="$PREFIX-" 'index($0,p)==1 {print "volume\t" $0}'
+		docker network ls --format '{{.Name}}' | awk -v p="$PREFIX-" 'index($0,p)==1 {print "network\t" $0}'
+	} 2>/dev/null)"
+	while IFS=$'\t' read -r kind name; do
+		[ -n "$name" ] || continue
+		if ! printf '%s\n' "$entries" | grep -qxF "$kind"$'\t'"$name"; then
+			echo "[rehearsal] left untouched: $kind '$name' matches the run prefix but is not in the ownership manifest" | tee -a "$clog" >&2
+		fi
+	done <<< "$found"
+	return "$rc"
+}

@@ -24,6 +24,11 @@
 #   --container NAME live container name                     (default rpg-redis)
 #   REDIS_RESTORE_SCRATCH_PREFIX / REDIS_RESTORE_NETWORK
 #                    optional scratch names/network for isolated rehearsals
+#   REDIS_RESTORE_RUN_LABEL    optional "key=value" label put on every scratch
+#                    container/volume this script creates (scratch mode)
+#   REDIS_RESTORE_MANIFEST     optional file; each scratch container/volume name is
+#                    appended as "<kind><TAB><name>" before it is created, so a caller
+#                    can delete exactly these and nothing found by prefix
 #   --kube-context C --mode live against statefulset/redis in rpg-k8s-data on cluster C
 #                    (dev and staging keep Redis in k3d). Scratch mode needs no cluster:
 #                    it only loads the file, so it rehearses a k3d backup unchanged.
@@ -64,6 +69,14 @@ KEEP_SCRATCH=0
 REDIS_CONTAINER="${REDIS_CONTAINER:-rpg-redis}"
 REDIS_RESTORE_SCRATCH_PREFIX="${REDIS_RESTORE_SCRATCH_PREFIX:-rpg-redis-restore}"
 REDIS_RESTORE_NETWORK="${REDIS_RESTORE_NETWORK:-}"
+REDIS_RESTORE_RUN_LABEL="${REDIS_RESTORE_RUN_LABEL:-}"
+REDIS_RESTORE_MANIFEST="${REDIS_RESTORE_MANIFEST:-}"
+LABEL_ARGS=()
+if [ -n "$REDIS_RESTORE_RUN_LABEL" ]; then LABEL_ARGS=(--label "$REDIS_RESTORE_RUN_LABEL"); fi
+# record_owned <kind> <name>: note a scratch object this script is about to create.
+record_owned() {
+	if [ -n "$REDIS_RESTORE_MANIFEST" ]; then printf '%s\t%s\n' "$1" "$2" >> "$REDIS_RESTORE_MANIFEST"; fi
+}
 REDIS_IMAGE="${REDIS_IMAGE:-}"
 KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
 KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
@@ -342,7 +355,8 @@ inject() {
 	if [ "$MODE" = "scratch" ] && [ -n "$REDIS_RESTORE_NETWORK" ]; then
 		local helper="$SC-inject"
 		"$DOCKER" inspect "$helper" >/dev/null 2>&1 && die "scratch helper '$helper' already exists"
-		"$DOCKER" run --rm --name "$helper" --network "$REDIS_RESTORE_NETWORK" -i -v "$vol:/data" "$IMAGE" \
+		record_owned container "$helper"
+		"$DOCKER" run --rm --name "$helper" --network "$REDIS_RESTORE_NETWORK" ${LABEL_ARGS[@]+"${LABEL_ARGS[@]}"} -i -v "$vol:/data" "$IMAGE" \
 			sh -ec 'rm -rf /data/appendonlydir /data/appendonly.aof /data/dump.rdb; cat > /data/dump.rdb; ls -l /data/dump.rdb' \
 			<"$FILE"
 	else
@@ -391,15 +405,17 @@ if [ "$MODE" = "scratch" ]; then
 
 	log "rehearsing '$FILE' in a scratch container (live '$REDIS_CONTAINER' untouched)"
 	log "image: $IMAGE"
-	"$DOCKER" volume create "$VOL" >/dev/null || die "cannot create scratch volume"
+	record_owned volume "$VOL"
+	"$DOCKER" volume create ${LABEL_ARGS[@]+"${LABEL_ARGS[@]}"} "$VOL" >/dev/null || die "cannot create scratch volume"
 	inject "$VOL" >/dev/null || die "cannot write dump.rdb into scratch volume"
 	# No published port and no AOF: this instance exists only to prove the file
 	# parses and to count what is in it.
+	record_owned container "$SC"
 	if [ -n "$REDIS_RESTORE_NETWORK" ]; then
-		"$DOCKER" run -d --name "$SC" --network "$REDIS_RESTORE_NETWORK" -v "$VOL:/data" "$IMAGE" \
+		"$DOCKER" run -d --name "$SC" --network "$REDIS_RESTORE_NETWORK" ${LABEL_ARGS[@]+"${LABEL_ARGS[@]}"} -v "$VOL:/data" "$IMAGE" \
 			redis-server --appendonly no --dbfilename dump.rdb --dir /data >/dev/null || die "cannot start scratch container"
 	else
-		"$DOCKER" run -d --name "$SC" -v "$VOL:/data" "$IMAGE" \
+		"$DOCKER" run -d --name "$SC" ${LABEL_ARGS[@]+"${LABEL_ARGS[@]}"} -v "$VOL:/data" "$IMAGE" \
 			redis-server --appendonly no --dbfilename dump.rdb --dir /data >/dev/null || die "cannot start scratch container"
 	fi
 	log "scratch target: container '$SC', volume '$VOL'"

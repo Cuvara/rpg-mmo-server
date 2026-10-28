@@ -110,7 +110,13 @@ case "$cmd" in
 	network)
 		sub="$1"; shift
 		case "$sub" in
-			ls) awk 'NF {print "network|" $1 "|" $2}' "$D/normal-networks.txt" 2>/dev/null ;;
+			ls)
+				if printf '%s' "$*" | grep -q 'network|'; then
+					awk 'NF {print "network|" $1 "|" $2}' "$D/normal-networks.txt" 2>/dev/null
+				else
+					{ awk 'NF {print $2}' "$D/normal-networks.txt" 2>/dev/null; created n; }
+				fi
+				;;
 			create) record n "$(last_arg "$@")" "$(label_arg "$@")" "" ;;
 			inspect) inspect_obj n "$@"; exit $? ;;
 			rm) for a in "$@"; do rm -f "$D/objects/n_$a"; done ;;

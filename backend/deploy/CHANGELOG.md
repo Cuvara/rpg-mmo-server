@@ -39,6 +39,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the server defaults.
 
 ### Fixed
+- `db/rehearsal.sh` cleanup no longer adopts resources by name prefix (review finding F9). Every container, volume and network of a run carries `org.rpg.rehearsal.run=<run-id>` and its exact name is recorded in `ownership-manifest.tsv` before it is created, including the Redis scratch restore container, volume and inject helper: `redis-restore.sh` takes the new optional `REDIS_RESTORE_RUN_LABEL` and `REDIS_RESTORE_MANIFEST` and labels and records what it creates. Cleanup deletes only objects that are in the manifest AND carry the run label; a prefix-matching object that is unowned, labelled but unrecorded, or recorded but carrying another label survives and is reported in `cleanup.log`. `db/tests/rehearsal_test.sh` gains three fake-docker tests for this (16 total).
 - **`stack.sh --scratch` collided with the default stack.** Compose loads
   `docker-compose.override.yml` whenever no `-f` is given, and that file publishes the default
   stack's fixed host ports (8000, 9101/9102, 9000/udp, 9002/udp, 9103). It also pinned

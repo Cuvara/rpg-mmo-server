@@ -220,6 +220,119 @@ mkdir -p "$F6/objects"; printf 'run\n\n' > "$F6/objects/c_rpgr-r1-x-meta-src"
 snapshot "$F6" "$WORK/scratch.txt"
 check 'rpgr-* scratch objects are not part of the normal-stack comparison' compare "$WORK/before.txt" "$WORK/scratch.txt"
 
+# --- 6. cleanup deletes only manifest-owned AND labelled objects -------------
+t_cleanup_ownership() (
+	local fake; fake="$(new_fake cleanup)"
+	export FAKE_DOCKER_DIR="$fake" PATH="$fake/bin:$PATH"
+	source "$DB_DIR/rehearsal-lib.sh"
+	MANIFEST="$WORK/manifest-cleanup.tsv"
+	local o="$fake/objects" clog="$WORK/cleanup-cleanup.log"
+	: > "$MANIFEST"
+	# owned: recorded in the manifest and labelled with this run
+	printf '%s\n%s \n' "$RUN_ID" "$NETWORK" > "$o/c_$PREFIX-meta-src"; r1_record_owned container "$PREFIX-meta-src"
+	printf '%s\n%s \n' "$RUN_ID" "$NETWORK" > "$o/c_$PREFIX-redis-restore-scratch-1"; r1_record_owned container "$PREFIX-redis-restore-scratch-1"
+	printf '%s\n\n' "$RUN_ID" > "$o/v_$PREFIX-meta-src-data"; r1_record_owned volume "$PREFIX-meta-src-data"
+	printf '%s\n\n' "$RUN_ID" > "$o/v_$PREFIX-redis-restore-vol-1"; r1_record_owned volume "$PREFIX-redis-restore-vol-1"
+	printf '%s\n\n' "$RUN_ID" > "$o/n_$NETWORK"; r1_record_owned network "$NETWORK"
+	# unowned: matching prefix, no label, not in the manifest
+	printf 'none\n%s \n' "$NETWORK" > "$o/c_$PREFIX-redis-restore-scratch-unowned"
+	printf 'none\n\n' > "$o/v_$PREFIX-redis-restore-vol-unowned"
+	printf 'none\n\n' > "$o/n_$PREFIX-other-net"
+	# labelled with this run but never recorded
+	printf '%s\n%s \n' "$RUN_ID" "$NETWORK" > "$o/c_$PREFIX-redis-restore-scratch-unrecorded"
+	printf '%s\n\n' "$RUN_ID" > "$o/v_$PREFIX-redis-restore-vol-unrecorded"
+	# recorded but carrying somebody else's label (name collision)
+	printf 'other-run\n%s \n' "$NETWORK" > "$o/c_$PREFIX-game-src"; r1_record_owned container "$PREFIX-game-src"
+	printf 'other-run\n\n' > "$o/v_$PREFIX-game-src-data"; r1_record_owned volume "$PREFIX-game-src-data"
+	# recorded, but outside the run prefix: a normal stack name must never go
+	printf '%s\n\n' "$RUN_ID" > "$o/c_rpg-redis"; r1_record_owned container rpg-redis
+	r1_cleanup_owned "$MANIFEST" "$clog" >/dev/null 2>&1 || { echo 'cleanup reported failure' >&2; exit 1; }
+	local gone survive
+	for gone in "c_$PREFIX-meta-src" "c_$PREFIX-redis-restore-scratch-1" "v_$PREFIX-meta-src-data" "v_$PREFIX-redis-restore-vol-1" "n_$NETWORK"; do
+		[ ! -e "$o/$gone" ] || { echo "owned object survived: $gone" >&2; exit 2; }
+	done
+	for survive in "c_$PREFIX-redis-restore-scratch-unowned" "v_$PREFIX-redis-restore-vol-unowned" "n_$PREFIX-other-net" \
+		"c_$PREFIX-redis-restore-scratch-unrecorded" "v_$PREFIX-redis-restore-vol-unrecorded" \
+		"c_$PREFIX-game-src" "v_$PREFIX-game-src-data" c_rpg-redis; do
+		[ -e "$o/$survive" ] || { echo "foreign object was removed: $survive" >&2; exit 3; }
+	done
+	grep -q "scratch-unowned' matches the run prefix but is not in the ownership manifest" "$clog" || { echo 'unowned object not reported' >&2; exit 4; }
+	grep -q "scratch-unrecorded' matches the run prefix but is not in the ownership manifest" "$clog" || { echo 'unrecorded object not reported' >&2; exit 5; }
+	grep -q "carries run label 'other-run'" "$clog" || { echo 'wrong-label object not reported' >&2; exit 6; }
+	grep -q "container 'rpg-redis' is outside run prefix" "$clog" || { echo 'outside-prefix entry not reported' >&2; exit 7; }
+	# nothing outside the owned set was ever passed to a removal call
+	! grep -E '^(rm|volume rm|network rm) .*(unowned|unrecorded|other-net|game-src|rpg-redis)' "$fake/calls.log" || exit 8
+)
+check 'cleanup removes manifest+label objects and leaves unowned, unrecorded, mislabelled and rpg-* ones' t_cleanup_ownership
+
+# Look-alike resources that appear under the run prefix mid-run must survive the
+# real EXIT trap of the full script (a failing backup stub forces the cleanup).
+t_full_script_unowned_survives() (
+	local fake; fake="$(new_fake fullunowned)"
+	local sandbox="$WORK/sandbox-fullunowned"
+	rm -rf "$sandbox"; mkdir -p "$sandbox"
+	cp "$DB_DIR/rehearsal.sh" "$DB_DIR/rehearsal-lib.sh" "$sandbox/"
+	cp -r "$DB_DIR/migrations" "$sandbox/migrations"
+	local s
+	for s in backup.sh restore.sh redis-backup.sh redis-restore.sh; do
+		# backup.sh plants look-alikes under the run prefix, then fails
+		cat > "$sandbox/$s" <<EOF
+#!/usr/bin/env bash
+if [ "$s" = backup.sh ]; then
+	p="\$(printenv META_CONTAINER | sed 's/-meta-src\$//')"
+	printf 'none\n\n' > "$fake/objects/c_\$p-redis-restore-scratch-unowned"
+	printf 'none\n\n' > "$fake/objects/v_\$p-redis-restore-vol-unowned"
+	printf '%s\n\n' "\${p#rpgr-r1-}" > "$fake/objects/v_\$p-labelled-unrecorded"
+fi
+exit 42
+EOF
+	done
+	export FAKE_DOCKER_DIR="$fake" PATH="$fake/bin:$PATH"
+	if bash "$sandbox/rehearsal.sh" "$WORK/artifacts-fullunowned" > "$WORK/fullunowned.out" 2>&1; then exit 1; fi
+	# the planted -labelled-unrecorded volume carries THIS run's label but is not in the manifest
+	local o="$fake/objects" f
+	ls "$o" | grep -q -- '-redis-restore-scratch-unowned$' || { echo 'unowned container removed' >&2; cat "$WORK/fullunowned.out" >&2; exit 2; }
+	ls "$o" | grep -q -- '-redis-restore-vol-unowned$' || { echo 'unowned volume removed' >&2; exit 3; }
+	ls "$o" | grep -q -- '-labelled-unrecorded$' || { echo 'planted volume removed' >&2; exit 4; }
+	# every object the run created itself is gone
+	for f in "$o"/*; do
+		case "$(basename "$f")" in
+			*-redis-restore-scratch-unowned|*-redis-restore-vol-unowned|*-labelled-unrecorded) ;;
+			*) echo "owned object left behind: $(basename "$f")" >&2; exit 5 ;;
+		esac
+	done
+	grep -q 'left untouched:.*unowned' "$WORK/fullunowned.out" || { echo 'survivor not reported' >&2; exit 6; }
+	ls "$WORK"/artifacts-fullunowned/*/ownership-manifest.tsv >/dev/null || exit 7
+)
+check 'full script: look-alike resources created mid-run survive the EXIT cleanup' t_full_script_unowned_survives
+
+# --- 7. redis-restore.sh labels and records exactly what it creates ----------
+t_redis_restore_manifest() (
+	local fake; fake="$(new_fake redisrestore)"
+	export FAKE_DOCKER_DIR="$fake" PATH="$fake/bin:$PATH"
+	local rdb="$WORK/test.rdb"; printf 'REDIS0011' > "$rdb"
+	local m="$WORK/manifest-redis.tsv"; : > "$m"
+	printf '%s\n\n' "$RUN_ID" > "$fake/objects/n_$NETWORK"
+	env -i PATH="$PATH" HOME="$HOME" FAKE_DOCKER_DIR="$fake" REDIS_CONTAINER="$PREFIX-redis-src" REDIS_IMAGE=redis:test \
+		REDIS_RESTORE_SCRATCH_PREFIX="$PREFIX-redis-restore" REDIS_RESTORE_NETWORK="$NETWORK" \
+		REDIS_RESTORE_RUN_LABEL="org.rpg.rehearsal.run=$RUN_ID" REDIS_RESTORE_MANIFEST="$m" \
+		bash "$DB_DIR/redis-restore.sh" --file "$rdb" --mode scratch --keep-scratch >/dev/null 2>&1 || true
+	grep -qE "^volume	$PREFIX-redis-restore-vol-" "$m" || { echo 'scratch volume not recorded' >&2; cat "$m" >&2; exit 1; }
+	grep -qE "^container	$PREFIX-redis-restore-scratch-[0-9]+$" "$m" || { echo 'scratch container not recorded' >&2; exit 2; }
+	# the transient inject helper is recorded too (and must not be taken for the scratch target)
+	grep -qE "^container	$PREFIX-redis-restore-scratch-[0-9]+-inject$" "$m" || { echo 'inject helper not recorded' >&2; exit 6; }
+	# every create call carries the run label
+	local create
+	create="$(grep -E '^(volume create|run) ' "$fake/calls.log")"
+	[ -n "$create" ] || { echo 'no create calls seen' >&2; exit 3; }
+	! printf '%s\n' "$create" | grep -v -- "--label org.rpg.rehearsal.run=$RUN_ID" || { echo 'a create call lacks the run label' >&2; exit 4; }
+	local f
+	for f in "$fake"/objects/c_"$PREFIX"-redis-restore-scratch-* "$fake"/objects/v_"$PREFIX"-redis-restore-vol-*; do
+		[ "$(sed -n 1p "$f")" = "$RUN_ID" ] || { echo "unlabelled: $f" >&2; exit 5; }
+	done
+)
+check 'redis-restore.sh passes the run label to every scratch object and records exact names' t_redis_restore_manifest
+
 echo
 echo "passed: $PASS failed: $FAIL"
 [ "$FAIL" -eq 0 ]
