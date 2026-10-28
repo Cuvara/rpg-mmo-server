@@ -4,6 +4,12 @@
 set -euo pipefail
 
 DB_DIR="$(cd -- "$(dirname -- "$BASH_SOURCE")" && pwd)"
+# shellcheck source=rehearsal-lib.sh
+source "$DB_DIR/rehearsal-lib.sh"
+# Start from a sanitised environment: nothing inherited may select a target for
+# backup.sh / restore.sh / redis-backup.sh / redis-restore.sh. The rpgr-* targets
+# are passed to each child explicitly through r1_run_child (env -i allowlist).
+r1_sanitise_env
 MIGRATIONS_DIR="$DB_DIR/migrations/gamestate"
 if [ "$#" -ne 1 ]; then
 	echo "usage: rehearsal.sh <durable-artifact-root>" >&2
@@ -48,17 +54,12 @@ exec > >(tee -a "$RUN_DIR/rehearsal.log") 2>&1
 
 save_normal_state() {
 	local side="$1"
+	# Raw docker ps text: informational only (uptime text hides restarts).
 	docker ps -a --no-trunc \
 		--format '{{.ID}}|{{.Image}}|{{.Names}}|{{.State}}|{{.Status}}' \
 		> "$RUN_DIR/docker-ps-$side.txt"
-	awk -F '|' '$3 ~ /^rpg-/ && $3 !~ /^rpgr-/ {
-		status=$5
-		if (status ~ /^Up /) sub(/^Up [^()]*/, "Up", status)
-		else if (status ~ /^Exited /) sub(/ [0-9]+ (seconds?|minutes?|hours?|days?|weeks?|months?|years?) ago$/, "", status)
-		else if (status ~ /^Restarting /) { split(status, parts, " "); status="Restarting " parts[2] }
-		print $1 "|" $2 "|" $3 "|" $4 "|" status
-	}' "$RUN_DIR/docker-ps-$side.txt" |
-		sort > "$RUN_DIR/normal-rpg-$side.txt"
+	# The comparison input: ids, StartedAt, RestartCount, health, volumes, networks.
+	r1_snapshot_normal_state "$RUN_DIR/normal-rpg-$side.txt"
 }
 cleanup() {
 	local result=$?
@@ -86,11 +87,7 @@ cleanup() {
 	fi
 	if [ "$STATE_CAPTURED" -eq 1 ]; then
 		save_normal_state after || CLEANUP_FAILED=1
-		if ! cmp -s "$RUN_DIR/normal-rpg-before.txt" "$RUN_DIR/normal-rpg-after.txt"; then
-			echo '[rehearsal] ERROR: normal rpg-* Docker state changed' >&2
-			diff -u "$RUN_DIR/normal-rpg-before.txt" "$RUN_DIR/normal-rpg-after.txt" >&2 || true
-			CLEANUP_FAILED=1
-		fi
+		r1_compare_normal_state "$RUN_DIR/normal-rpg-before.txt" "$RUN_DIR/normal-rpg-after.txt" || CLEANUP_FAILED=1
 	fi
 	[ "$CLEANUP_FAILED" -eq 0 ] || result=1
 	log "run evidence: $RUN_DIR"
@@ -100,17 +97,25 @@ trap cleanup EXIT
 
 command -v docker >/dev/null 2>&1 || die 'docker is required'
 docker info >/dev/null 2>&1 || die 'Docker daemon is unavailable'
-if command -v pgrep >/dev/null 2>&1 && pgrep -af '[t]estlab[.]py.*(S09|soak)' >/dev/null; then
-	pgrep -af '[t]estlab[.]py.*(S09|soak)' >&2 || true
-	die 'a testlab soak process is active; request a new no-soak window'
+# Best effort until testlab publishes a lock file: refuse on any testlab run,
+# soak or scratch-stack process visible here, or on an operator-provided lock.
+# Process visibility differs per host, so a granted no-soak window is still needed.
+SOAK_RE='[t]estlab[.]py.*(run|suite|sweep|build-client|S09|soak)|[s]tack[.]sh.*--scratch'
+if command -v pgrep >/dev/null 2>&1 && pgrep -af "$SOAK_RE" >/dev/null; then
+	pgrep -af "$SOAK_RE" >&2 || true
+	die 'a testlab process is active; request a new no-soak window'
+fi
+R1_LAB_LOCK="$(printenv R1_LAB_LOCK 2>/dev/null || true)"
+if [ -n "$R1_LAB_LOCK" ] && [ -e "$R1_LAB_LOCK" ]; then
+	die "testlab lock file present: $R1_LAB_LOCK"
 fi
 for file in backup.sh restore.sh redis-backup.sh redis-restore.sh; do
 	[ -f "$DB_DIR/$file" ] || die "missing repository script: $DB_DIR/$file"
 done
 [ -d "$MIGRATIONS_DIR" ] || die "missing repository migrations: $MIGRATIONS_DIR"
 
-# Run resources join only an internal network; published ports bind loopback
-# only and are allocated dynamically, so no normal service ports are reused.
+# Run resources join only an internal network and publish no ports, so no
+# normal service port is touched.
 for image in "$POSTGRES_IMAGE" "$REDIS_IMAGE"; do
 	if ! docker image inspect "$image" >/dev/null 2>&1; then
 		log "pulling rehearsal image $image"
@@ -223,18 +228,51 @@ docker exec "$GAME_SRC" psql -At -U game -d gamestate -c \
 docker exec "$GAME_SRC" psql -At -U game -d gamestate -c \
 	'SELECT count(*) FROM player_states; SELECT count(*) FROM character_state; SELECT count(*) FROM character_items; SELECT count(*) FROM item_grants' > "$RUN_DIR/gamestate-source-row-counts.txt"
 docker exec "$REDIS_SRC" redis-cli DBSIZE > "$RUN_DIR/redis-source-key-count.txt"
+# Full object signature (tables, indexes, constraints) of each source database,
+# compared with the restored copy, so a partial schema restore fails.
+schema_signature() {
+	docker exec "$1" psql -At -U "$2" -d "$3" -c "SELECT s FROM (
+		SELECT 'table|' || tablename FROM pg_tables WHERE schemaname = 'public'
+		UNION ALL SELECT 'index|' || indexname || '|' || indexdef FROM pg_indexes WHERE schemaname = 'public'
+		UNION ALL SELECT 'constraint|' || conrelid::regclass || '|' || conname || '|' || pg_get_constraintdef(oid)
+			FROM pg_constraint WHERE connamespace = 'public'::regnamespace
+		) x(s) ORDER BY s"
+}
+schema_signature "$META_SRC" nakama nakama > "$RUN_DIR/meta-source-schema.txt"
+schema_signature "$GAME_SRC" game gamestate > "$RUN_DIR/gamestate-source-schema.txt"
+[ "$(grep -c '^table|' "$RUN_DIR/gamestate-source-schema.txt")" -ge 4 ] || die 'source game-state schema signature is incomplete'
 [ "$(cat "$RUN_DIR/meta-source-count.txt")" = 2 ] || die 'source meta synthetic row count mismatch'
 [ "$(cat "$RUN_DIR/gamestate-source-schema-count.txt")" = 4 ] || die 'source game-state schema is incomplete'
 [ "$(tr '\n' ',' < "$RUN_DIR/gamestate-source-row-counts.txt" | sed 's/,$//')" = '1,1,1,1' ] || die 'source game-state row count mismatch'
 [ "$(tr -d '\r' < "$RUN_DIR/redis-source-key-count.txt")" = 4 ] || die 'source Redis key count mismatch'
 
-export META_CONTAINER="$META_SRC" GAME_CONTAINER="$GAME_SRC"
-export POSTGRES_USER=nakama POSTGRES_DB=nakama POSTGRES_GAME_USER=game POSTGRES_GAME_DB=gamestate
+# Target assertion: every container, network and volume the children touch must
+# be a labelled rpgr-r1-<run-id>-* object of this run, attached to this run's
+# network only, and must not be a running rpg-* object.
+assert_targets() {
+	local c v
+	r1_require_rpgr_network "$NETWORK"
+	for c in "$@"; do r1_require_rpgr_container "$c"; done
+	for v in "$META_SRC_VOL" "$GAME_SRC_VOL" "$REDIS_SRC_VOL" "$META_DST_VOL" "$GAME_DST_VOL"; do
+		r1_require_rpgr_volume "$v"
+	done
+}
+assert_targets "$META_SRC" "$GAME_SRC" "$REDIS_SRC" "$META_DST" "$GAME_DST"
+log "target assertion passed: all targets are $PREFIX-* objects of this run"
+
+R1_CHILD_ENV=(
+	"META_CONTAINER=$META_SRC" "GAME_CONTAINER=$GAME_SRC"
+	POSTGRES_USER=nakama POSTGRES_DB=nakama POSTGRES_GAME_USER=game POSTGRES_GAME_DB=gamestate
+	"BACKUP_DIR=$RUN_DIR/backups" BACKUP_KEEP=1
+)
 log 'running repository PostgreSQL backup script against dedicated sources'
-bash "$DB_DIR/backup.sh" --dir "$RUN_DIR/backups/postgres" --keep 1
-export REDIS_CONTAINER="$REDIS_SRC"
+r1_run_child "$DB_DIR/backup.sh" --dir "$RUN_DIR/backups/postgres" --keep 1
+R1_CHILD_ENV=(
+	"REDIS_CONTAINER=$REDIS_SRC" "REDIS_IMAGE=$REDIS_IMAGE"
+	"BACKUP_DIR=$RUN_DIR/backups" BACKUP_KEEP=1
+)
 log 'running repository Redis backup script against dedicated source'
-bash "$DB_DIR/redis-backup.sh" --dir "$RUN_DIR/backups/redis" --keep 1
+r1_run_child "$DB_DIR/redis-backup.sh" --dir "$RUN_DIR/backups/redis" --keep 1
 
 META_BACKUP="$(find "$RUN_DIR/backups/postgres/meta" -maxdepth 1 -type f -name 'meta-*.dump' -print -quit)"
 GAME_BACKUP="$(find "$RUN_DIR/backups/postgres/gamestate" -maxdepth 1 -type f -name 'gamestate-*.dump' -print -quit)"
@@ -243,20 +281,29 @@ REDIS_BACKUP="$(find "$RUN_DIR/backups/redis" -maxdepth 1 -type f -name 'redis-*
 [ -n "$GAME_BACKUP" ] && [ "$(find "$RUN_DIR/backups/postgres/gamestate" -maxdepth 1 -name 'gamestate-*.dump' | wc -l)" -eq 1 ] || die 'expected exactly one game-state dump'
 [ -n "$REDIS_BACKUP" ] && [ "$(find "$RUN_DIR/backups/redis" -maxdepth 1 -name 'redis-*.rdb' | wc -l)" -eq 1 ] || die 'expected exactly one Redis RDB'
 
-export META_CONTAINER="$META_DST"
-log 'restoring meta backup into fresh dedicated target database'
-bash "$DB_DIR/restore.sh" --file "$META_BACKUP" --db meta --target "$SAFE_ID"_meta_restore --yes
-export GAME_CONTAINER="$GAME_DST"
-log 'restoring game-state backup into fresh dedicated target database'
-bash "$DB_DIR/restore.sh" --file "$GAME_BACKUP" --db gamestate --target "$SAFE_ID"_game_restore --yes
-
 META_DB="$SAFE_ID"_meta_restore
 GAME_DB="$SAFE_ID"_game_restore
+assert_targets "$META_DST" "$GAME_DST"
+r1_require_db_absent "$META_DST" nakama "$META_DB"
+r1_require_db_absent "$GAME_DST" game "$GAME_DB"
+R1_CHILD_ENV=(
+	"META_CONTAINER=$META_DST" "GAME_CONTAINER=$GAME_DST"
+	POSTGRES_USER=nakama POSTGRES_DB=nakama POSTGRES_GAME_USER=game POSTGRES_GAME_DB=gamestate
+)
+log 'restoring meta backup into fresh dedicated target database'
+r1_run_child "$DB_DIR/restore.sh" --file "$META_BACKUP" --db meta --target "$META_DB" --yes
+log 'restoring game-state backup into fresh dedicated target database'
+r1_run_child "$DB_DIR/restore.sh" --file "$GAME_BACKUP" --db gamestate --target "$GAME_DB" --yes
+
 META_COUNT="$(docker exec "$META_DST" psql -At -U nakama -d "$META_DB" -c 'SELECT count(*) FROM rehearsal_synthetic_accounts')"
 [ "$META_COUNT" = 2 ] || die "meta restore has $META_COUNT rows; expected 2"
 META_VALUES="$(docker exec "$META_DST" psql -At -U nakama -d "$META_DB" -c \
 	'SELECT string_agg(account_key || chr(61) || account_value, chr(44) ORDER BY account_key) FROM rehearsal_synthetic_accounts')"
 [ "$META_VALUES" = 'r1-account-001=synthetic-meta-value-001,r1-account-002=synthetic-meta-value-002' ] || die 'meta restored values differ'
+schema_signature "$META_DST" nakama "$META_DB" > "$RUN_DIR/meta-restored-schema.txt"
+schema_signature "$GAME_DST" game "$GAME_DB" > "$RUN_DIR/gamestate-restored-schema.txt"
+cmp -s "$RUN_DIR/meta-source-schema.txt" "$RUN_DIR/meta-restored-schema.txt" || die 'meta restored schema differs from source'
+cmp -s "$RUN_DIR/gamestate-source-schema.txt" "$RUN_DIR/gamestate-restored-schema.txt" || die 'game-state restored schema differs from source'
 TABLE_COUNT="$(docker exec "$GAME_DST" psql -At -U game -d "$GAME_DB" -c \
 	"SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename IN ('player_states','character_state','character_items','item_grants')")"
 [ "$TABLE_COUNT" = 4 ] || die "game-state schema table count is $TABLE_COUNT; expected 4"
@@ -270,8 +317,12 @@ GAME_VALUE="$(docker exec "$GAME_DST" psql -At -U game -d "$GAME_DB" -c 'SELECT 
 docker ps -a --format '{{.Names}}' | awk -v p="$PREFIX-redis-restore-scratch-" 'index($0,p)==1' | sort > "$RUN_DIR/redis-restore-containers-before.txt"
 docker volume ls --format '{{.Name}}' | awk -v p="$PREFIX-redis-restore-vol-" 'index($0,p)==1' | sort > "$RUN_DIR/redis-restore-volumes-before.txt"
 log 'running repository Redis restore in scratch mode'
-REDIS_RESTORE_SCRATCH_PREFIX="$PREFIX-redis-restore" REDIS_RESTORE_NETWORK="$NETWORK" \
-	bash "$DB_DIR/redis-restore.sh" --file "$REDIS_BACKUP" --mode scratch --keep-scratch
+r1_require_rpgr_name "$PREFIX-redis-restore" 'redis restore prefix'
+R1_CHILD_ENV=(
+	"REDIS_CONTAINER=$REDIS_SRC" "REDIS_IMAGE=$REDIS_IMAGE"
+	"REDIS_RESTORE_SCRATCH_PREFIX=$PREFIX-redis-restore" "REDIS_RESTORE_NETWORK=$NETWORK"
+)
+r1_run_child "$DB_DIR/redis-restore.sh" --file "$REDIS_BACKUP" --mode scratch --keep-scratch
 docker ps -a --format '{{.Names}}' | awk -v p="$PREFIX-redis-restore-scratch-" 'index($0,p)==1' | sort > "$RUN_DIR/redis-restore-containers-after.txt"
 docker volume ls --format '{{.Name}}' | awk -v p="$PREFIX-redis-restore-vol-" 'index($0,p)==1' | sort > "$RUN_DIR/redis-restore-volumes-after.txt"
 comm -13 "$RUN_DIR/redis-restore-containers-before.txt" "$RUN_DIR/redis-restore-containers-after.txt" > "$RUN_DIR/redis-restore-new-containers.txt"
@@ -299,6 +350,7 @@ docker volume rm "$REDIS_RESTORE_VOLUME" >/dev/null
 	done
 } > "$RUN_DIR/metadata.tsv"
 log "meta synthetic rows restored: $META_COUNT"
+log "schema signatures (tables, indexes, constraints) identical; game-state objects: $(wc -l < "$RUN_DIR/gamestate-source-schema.txt" | tr -d ' ')"
 log "game-state migration tables restored: $TABLE_COUNT; table row counts: $ROW_COUNTS"
 log 'Redis string, hash, stream, TTL and key count verified after restore'
 log "archives and evidence retained in $RUN_DIR"

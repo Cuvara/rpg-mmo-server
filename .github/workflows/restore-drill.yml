@@ -54,6 +54,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Offline rehearsal safety tests (fake docker)
+        run: bash backend/deploy/db/tests/rehearsal_test.sh
+
       - name: Install PostgreSQL and Redis clients
         run: |
           sudo apt-get update

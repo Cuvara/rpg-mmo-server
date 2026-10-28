@@ -945,10 +945,12 @@ Rehearse, do not assume. Minimum:
   an internal network and dedicated `rpgr-*` PostgreSQL/Redis sources with no host ports
   published, plus fresh PostgreSQL restore targets; it seeds only synthetic meta rows, repository
   game-state migrations and synthetic Redis keys. It invokes the repository backup and
-  restore scripts, checks restored schemas, row counts and values, records normal
-  `rpg-*` `docker ps` state before and after, compares container identity/state/health
-  while ignoring elapsed uptime text, and removes only resources it created by exact
-  name. Its dated directory retains the dump/RDB files, checksums and logs under
+  restore scripts, checks restored schemas (full table/index/constraint signature), row counts and values, records normal
+  `rpg-*` Docker state before and after (container id, image, `StartedAt`/`FinishedAt`,
+  `RestartCount`, health, volumes, networks; a restart fails the run), starts from a
+  sanitised environment and refuses any non-`rpgr-<run-id>` target, and removes only
+  resources it created by exact name. `bash backend/deploy/db/tests/rehearsal_test.sh`
+  proves these guards offline. Its dated directory retains the dump/RDB files, checksums and logs under
   `.testlab-runs/r1/`; review `docker-ps-before.txt`, `docker-ps-after.txt`,
   `metadata.tsv` and `rehearsal.log`. This does not exercise the dev cluster or prove a
   production restore. The JIT alternative is `.github/workflows/backup-dev.yml` with

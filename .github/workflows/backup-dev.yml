@@ -59,9 +59,10 @@ jobs:
           # The testlab currently has no shared lock-file contract. Inspect the
           # local process table as a guard; operators must still reserve a
           # no-soak window because process visibility may differ by runner host.
-          if pgrep -f '[t]estlab[.]py.*(S09|soak)' >/dev/null; then
-            echo "::error::A testlab soak appears active; refusing dev backup rehearsal."
-            pgrep -l -f '[t]estlab[.]py.*(S09|soak)' || true
+          re='[t]estlab[.]py.*(run|suite|sweep|build-client|S09|soak)|[s]tack[.]sh.*--scratch'
+          if pgrep -f "$re" >/dev/null; then
+            echo "::error::A testlab process appears active; refusing dev backup rehearsal."
+            pgrep -l -f "$re" || true
             exit 1
           fi
 
