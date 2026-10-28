@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Add an internal KCP clock seam (defaults to the existing Stopwatch; no behaviour change) and `KcpDeadLinkBudgetTests`, which characterize the dead-link close after ACK silence: 3.18 s, 10.45 s and 31.35 s at 30, 100 and 300 ms RTO.
 - Warm the snapshot trace allocation guard for 100 rounds before measurement to cover Dynamic TieredPGO tier-up, preserving its zero-allocation assertion.
 
 ### Changed
