@@ -942,8 +942,8 @@ Rehearse, do not assume. Minimum:
 - **Isolated workstation rehearsal**: after soak #11 has completed and the Lead confirms
   a no-soak window, run `bash backend/deploy/db/rehearsal.sh
   /mnt/c/Workspaces/UnityIndie/.testlab-runs/r1` from the server repo in WSL. It creates
-  an internal network and dedicated loopback-only `rpgr-*` PostgreSQL/Redis sources plus
-  fresh PostgreSQL restore targets; it seeds only synthetic meta rows, repository
+  an internal network and dedicated `rpgr-*` PostgreSQL/Redis sources with no host ports
+  published, plus fresh PostgreSQL restore targets; it seeds only synthetic meta rows, repository
   game-state migrations and synthetic Redis keys. It invokes the repository backup and
   restore scripts, checks restored schemas, row counts and values, records normal
   `rpg-*` `docker ps` state before and after, and removes only resources it created by

@@ -51,7 +51,10 @@ save_normal_state() {
 	docker ps -a --no-trunc \
 		--format '{{.ID}}|{{.Image}}|{{.Names}}|{{.State}}|{{.Status}}' \
 		> "$RUN_DIR/docker-ps-$side.txt"
-	awk -F '|' '$3 ~ /^rpg-/ && $3 !~ /^rpgr-/' "$RUN_DIR/docker-ps-$side.txt" |
+	while IFS= read -r id; do
+		docker inspect -f '{{.Id}}|{{.Config.Image}}|{{.Name}}|{{.State.Status}}|{{.State.ExitCode}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id"
+	done < <(docker ps -aq) |
+		awk -F '|' '$3 ~ /^\/rpg-/ && $3 !~ /^\/rpgr-/ {sub(/^\//,"",$3); print}' |
 		sort > "$RUN_DIR/normal-rpg-$side.txt"
 }
 cleanup() {
@@ -144,11 +147,11 @@ create_postgres() {
 	create_volume "$volume"
 	docker run -d --name "$name" --network "$NETWORK" \
 		--label org.rpg.rehearsal.task=R1 --label "org.rpg.rehearsal.run=$RUN_ID" \
-		-p '127.0.0.1::5432' -e "POSTGRES_USER=$user" \
+		-e "POSTGRES_USER=$user" \
 		-e "POSTGRES_PASSWORD=$PG_PASSWORD" -e "POSTGRES_DB=$database" \
 		-v "$volume:/var/lib/postgresql/data" "$POSTGRES_IMAGE" >/dev/null
 	CREATED_CONTAINERS="$CREATED_CONTAINERS $name"
-	log "created $name on loopback port $(docker port "$name" 5432/tcp | sed 's/.*://')"
+	log "created $name on private network $NETWORK at service port 5432"
 }
 create_postgres "$META_SRC" "$META_SRC_VOL" nakama nakama
 create_postgres "$GAME_SRC" "$GAME_SRC_VOL" game gamestate
@@ -157,10 +160,10 @@ create_postgres "$GAME_DST" "$GAME_DST_VOL" game gamestate
 create_volume "$REDIS_SRC_VOL"
 docker run -d --name "$REDIS_SRC" --network "$NETWORK" \
 	--label org.rpg.rehearsal.task=R1 --label "org.rpg.rehearsal.run=$RUN_ID" \
-	-p '127.0.0.1::6379' -v "$REDIS_SRC_VOL:/data" "$REDIS_IMAGE" \
+	-v "$REDIS_SRC_VOL:/data" "$REDIS_IMAGE" \
 	redis-server --appendonly yes --dir /data --dbfilename dump.rdb >/dev/null
 CREATED_CONTAINERS="$CREATED_CONTAINERS $REDIS_SRC"
-log "created $REDIS_SRC on loopback port $(docker port "$REDIS_SRC" 6379/tcp | sed 's/.*://')"
+log "created $REDIS_SRC on private network $NETWORK at service port 6379"
 
 wait_pg() {
 	local container="$1" user="$2" db="$3" deadline=$((SECONDS + 90))
