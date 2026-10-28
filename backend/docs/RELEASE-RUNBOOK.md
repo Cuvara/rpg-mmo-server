@@ -129,20 +129,22 @@ the live ones.
 
 ---
 
-## 4. Compatibility matrix — current baseline
+## 4. Compatibility matrix — core-baseline-v2 candidate
 
-Source: A4 OE-05 snapshot of the audited baselines (2026-10-24). Values are claims about
-named commits; **re-derive them** with the §2 commands before relying on them.
+Source: re-derived on 2026-10-29 with the §2 commands from `origin` refs (`git ls-remote`,
+`git show <ref>:Packages/packages-lock.json`). The audited v1.1 values are in
+`CORE-BASELINE-V1.md`. Values are claims about named commits; **re-derive them** before
+relying on them.
 
-| Component | Baseline | Released pin | Tag commit | Lock hash (client `d70e854`) | Notes |
+| Component | Baseline | Released pin | Tag commit | Lock hash (client `6dce2c2`) | Notes |
 |---|---|---|---|---|---|
-| Server | `cc7884f1` (`origin/develop`) | n/a (commit-based) | n/a | n/a | No `release.yml`. Wire protocol `WireProtocolVersion` = 3. |
-| Shared.GameLogic | server lineage | `sgl-v0.7.0` | `86a654f7c491` | `86a654f7c491` | Client lock equals the tag commit. |
-| Netcode | develop `3375d8e` | `v0.48.0` | `51b083e3d8a8` | `51b083e3d8a8` | `develop` is **2 commits ahead** of the tag; the client does not have them. |
-| UnityDots | `a041c0a` = `v0.32.0` | `v0.32.0` | `a041c0aae285` | `a041c0aae285` | `main` equals the tag. |
-| UIToolkit | n/a | `v0.7.2` | `3c6fde9ac818` | `3c6fde9ac818` | 1 commit ahead of tag, package version unchanged. |
-| Client | `d70e854` (`develop`) | n/a | n/a | n/a | Pins Netcode `v0.48.0`, UnityDots `v0.32.0`, UIToolkit `v0.7.2`, SGL `sgl-v0.7.0`. |
-| rpg-factory | `308c94e` (`origin/main`) | n/a | n/a | n/a | No `release.yml`. |
+| Server | `a69af59` (`origin/develop`) | n/a (commit-based) | n/a | n/a | No `release.yml`. `ProtocolVersion` = 3, `MinSupportedProtocolVersion` = 2. |
+| Shared.GameLogic | server lineage | `sgl-v0.7.0` | `86a654f7c491` | `86a654f7c491` | `develop` differs from the tag by a doc-comment-only commit (`ec06d9a`). |
+| Netcode | develop `f9d9e96` | `v0.49.0` | `2ea640130e3e` | `2ea640130e3e` | `develop` is **3 merges ahead** of the tag (#206-#208); the client does not have them. `Wire.cs` md5 equals the server's. |
+| UnityDots | `1ac175d` = `v0.33.0` | `v0.33.0` | `1ac175ddb245` | `1ac175ddb245` | `main` equals the tag. |
+| UIToolkit | `ac871bb` | `v0.7.2` | `3c6fde9ac818` | `3c6fde9ac818` | 1 commit ahead of tag, package version unchanged. |
+| Client | `6dce2c2` (`develop`) | n/a | n/a | n/a | Pins Netcode `v0.49.0`, UnityDots `v0.33.0`, UIToolkit `v0.7.2`, SGL `sgl-v0.7.0`. |
+| rpg-factory | `dc81773` (`origin/main`) | n/a | n/a | n/a | No `release.yml`. |
 
 Open items this matrix exposes (A4 OE-05, not fixed here):
 
