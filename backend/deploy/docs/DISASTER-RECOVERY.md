@@ -939,6 +939,30 @@ Rehearse, do not assume. Minimum:
   game-state migrations and restores synthetic PostgreSQL and Redis data into fresh
   disposable services/containers. This CI rehearsal checks tables, rows and key values;
   it complements, but does not replace, the live-mode release drill below.
+- **Isolated workstation rehearsal**: after soak #11 has completed and the Lead confirms
+  a no-soak window, run `bash backend/deploy/db/rehearsal.sh
+  /mnt/c/Workspaces/UnityIndie/.testlab-runs/r1` from the server repo in WSL. It creates
+  an internal network and dedicated `rpgr-*` PostgreSQL/Redis sources with no host ports
+  published, plus fresh PostgreSQL restore targets; it seeds only synthetic meta rows, repository
+  game-state migrations and synthetic Redis keys. It invokes the repository backup and
+  restore scripts, checks restored schemas (full table/index/constraint signature), row counts and values, records normal
+  `rpg-*` Docker state before and after (container id, image, `StartedAt`/`FinishedAt`,
+  `RestartCount`, health, volumes, networks; a restart fails the run), starts from a
+  sanitised environment and refuses any non-`rpgr-<run-id>` target, and removes only
+  resources it created: every container, volume and network (including the Redis scratch
+  restore resources made by `redis-restore.sh`) carries the label
+  `org.rpg.rehearsal.run=<run-id>` and its exact name is written to
+  `ownership-manifest.tsv` in the run directory before it is created. Cleanup deletes
+  only entries that are in the manifest AND still carry that label; any other
+  `rpgr-r1-<run-id>-*` resource is left in place and named in `cleanup.log` as
+  `left untouched`. `bash backend/deploy/db/tests/rehearsal_test.sh`
+  proves these guards offline. Its dated directory retains the dump/RDB files, checksums and logs under
+  `.testlab-runs/r1/`; review `docker-ps-before.txt`, `docker-ps-after.txt`,
+  `metadata.tsv` and `rehearsal.log`. This does not exercise the dev cluster or prove a
+  production restore. The JIT alternative is `.github/workflows/backup-dev.yml` with
+  `target=rehearsal` from `develop`; its protected `dev` environment requires an
+  explicit reviewer approval click and `R1_REHEARSAL_ROOT` must point to durable,
+  restricted runner storage. See [RUNNER.md](RUNNER.md).
 - **Monthly**: `db/redis-restore.sh --file <newest>` and
   `db/restore.sh --target <scratch> --yes` — a backup nobody has restored is a
   hypothesis, not a backup. **The monthly scratch rehearsal is not sufficient on

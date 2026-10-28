@@ -1,6 +1,6 @@
 # Dev runner and backup rehearsal
 
-This runbook covers the self-hosted `dev` jobs in `.github/workflows/cd.yml` and the guarded backup-only rehearsal in `.github/workflows/backup-dev.yml`. The latter is a manual, backup-only path: it never deploys. Both use GitHub Environment `dev` and the `[self-hosted, dev]` runner labels. The repository's `dev` environment has not been verified to have protection rules or a deployment branch policy; configure and verify those settings before registering a runner. A repository runner inventory showed zero registered runners during the P3A investigation, so neither workflow can complete until an authorized operator provisions a suitable runner. This document does not authorize registering one.
+This runbook covers the self-hosted `dev` jobs in `.github/workflows/cd.yml` and the guarded backup workflow in `.github/workflows/backup-dev.yml`. The backup workflow is manual and never deploys. Both use GitHub Environment `dev` and the `[self-hosted, dev]` runner labels. On 2026-10-28, the environment was verified protected with required reviewer `dyCuong03`, deployment branch policy restricted to `develop`, and admin bypass disabled; snapshots are `C:\Workspaces\UnityIndie\.orca-lead\env-dev-before.json` and `env-dev-after.json`. A JIT runner still needs to be provisioned for an approved workflow run; this document does not authorize registering one.
 
 ## Runner trust boundary
 
@@ -25,7 +25,16 @@ Do not run a dev backup, restore rehearsal, or deployment during a testlab soak.
 
 The testlab currently has no shared lock-file convention, and process visibility can differ between a runner and the testlab host. The preflight is a secondary guard, not a reservation system: the operator must confirm the lab slot is idle before dispatch and keep it idle for the run. Propose that the factory testlab acquire and release `.testlab-runs/LAB-SLOT.lock` for every run/suite/sweep/soak operation, with the backup and CD preflight checking that same host-visible lock before starting. This task does not change the factory.
 
-## Backup-only rehearsal
+## Backup-only workflow targets
+
+`.github/workflows/backup-dev.yml` exposes `workflow_dispatch` input `target`, defaulting to `dev`:
+
+- `dev` runs the existing dev backup flow, with optional scratch restore. It uses the configured k3d context and its protected backup directory.
+- `rehearsal` runs `backend/deploy/db/rehearsal.sh` on the local Docker daemon of the JIT runner. It creates only uniquely named `rpgr-*` PostgreSQL, Redis, volume and network resources; each service listens only on its container port inside a dedicated internal network, with no host ports published. It loads the repository game-state migrations and synthetic rows/keys, backs them up, restores into fresh disposable targets, verifies tables/counts/values, records before/after `docker ps` for normal `rpg-*` containers, and tears down its exact named resources. Dated archives and evidence remain under the protected environment variable `R1_REHEARSAL_ROOT`; configure this to durable, restricted runner storage (for the workstation run, `C:\Workspaces\UnityIndie\.testlab-runs\r1`). Only the checksum/size metadata TSV is uploaded.
+
+For the JIT runner route, dispatch from `develop`, select `target=rehearsal`, and provision a repo-scoped one-job JIT runner with labels `[self-hosted, dev]` on the Docker host that has the durable `R1_REHEARSAL_ROOT` path. GitHub Environment `dev` protection pauses the job until a required reviewer approves it; the workflow cannot proceed without that approval click. The job checks the actor's write/admin permission, refuses a detected soak, and does not use the `k3d-rpg-dev` context. Keep the testlab idle for the full job and cleanup; the process check is only a secondary guard. The task can also run locally after the Lead confirms a no-soak interval, without a runner or environment approval.
+
+## Dev backup-only path
 
 Use `.github/workflows/backup-dev.yml` from `develop`, manually, in a reserved no-soak and no-CD window. The job is restricted to `refs/heads/develop` and actors with write or admin permission. It runs on `[self-hosted, dev]` in Environment `dev`. Its concurrency group is `backup-dev` with `cancel-in-progress: false`, separate from CD's `cd-dev` group: backup runs cannot cancel or be cancelled by CD, and vice versa. This does not serialize backup against deployment, so operators must schedule a no-CD window; within the backup group, a newer queued backup may replace an older pending backup while an active run is allowed to finish. It calls `backup.sh` and `redis-backup.sh` without `--skip-missing`; a missing target must fail. It requires exactly two newly created PostgreSQL `.dump` files and one Redis `.rdb` file. Its only uploaded artifact is a TSV containing relative file names, byte sizes, and SHA-256 checksums; it never uploads dump contents. The files remain in the configured restricted `BACKUP_DIR`, which must be provisioned with sufficient free space and durable, access-controlled storage.
 
