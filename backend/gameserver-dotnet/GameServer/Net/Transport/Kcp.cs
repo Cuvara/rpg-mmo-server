@@ -152,13 +152,21 @@ public sealed class Kcp
     /// and <see cref="Flush"/>, and only the first <c>size</c> bytes are valid.
     /// </summary>
     public Kcp(uint conv, Action<byte[], int> output)
+        : this(conv, output, SystemClock)
+    {
+    }
+
+    internal Kcp(uint conv, Action<byte[], int> output, Func<uint> clock)
     {
         _conv = conv;
         _output = output;
+        _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _buffer = new byte[(_mtu + Overhead) * 3];
     }
 
     private static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+    private static readonly Func<uint> SystemClock = CurrentMs;
+    private readonly Func<uint> _clock;
 
     /// <summary>
     /// Monotonic millisecond clock. Only differences within one peer are ever
@@ -518,7 +526,7 @@ public sealed class Kcp
 
         if (updateRtt)
         {
-            uint current = CurrentMs();
+            uint current = _clock();
             if (Diff(current, latest) >= 0) UpdateAck(Diff(current, latest));
         }
 
@@ -612,7 +620,7 @@ public sealed class Kcp
         // Phase 2: schedule a window probe while the peer advertises a zero window.
         if (_rmtWnd == 0)
         {
-            uint now = CurrentMs();
+            uint now = _clock();
             if (_probeWait == 0)
             {
                 _probeWait = ProbeInit;
@@ -670,7 +678,7 @@ public sealed class Kcp
         uint resent = _fastresend > 0 ? (uint)_fastresend : 0xFFFFFFFFu;
 
         // Phase 5: (re)transmit from the send buffer.
-        uint current = CurrentMs();
+        uint current = _clock();
         ulong change = 0, lostSegs = 0;
         uint nextUpdate = _interval;
 
@@ -716,7 +724,7 @@ public sealed class Kcp
 
                 if (needsend)
                 {
-                    current = CurrentMs();
+                    current = _clock();
                     if (segment.Xmit > 0) _retransmitted++;
                     segment.Xmit++;
                     segment.Ts = current;
@@ -776,7 +784,7 @@ public sealed class Kcp
     /// </summary>
     public void Update()
     {
-        uint current = CurrentMs();
+        uint current = _clock();
         if (_updated == 0)
         {
             _updated = 1;
@@ -804,7 +812,7 @@ public sealed class Kcp
     /// </summary>
     public uint CheckDelay()
     {
-        uint current = CurrentMs();
+        uint current = _clock();
         if (_updated == 0) return 0;
 
         uint tsFlush = _tsFlush;
