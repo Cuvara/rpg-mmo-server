@@ -51,10 +51,13 @@ save_normal_state() {
 	docker ps -a --no-trunc \
 		--format '{{.ID}}|{{.Image}}|{{.Names}}|{{.State}}|{{.Status}}' \
 		> "$RUN_DIR/docker-ps-$side.txt"
-	while IFS= read -r id; do
-		docker inspect -f '{{.Id}}|{{.Config.Image}}|{{.Name}}|{{.State.Status}}|{{.State.ExitCode}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id"
-	done < <(docker ps -aq) |
-		awk -F '|' '$3 ~ /^\/rpg-/ && $3 !~ /^\/rpgr-/ {sub(/^\//,"",$3); print}' |
+	awk -F '|' '$3 ~ /^rpg-/ && $3 !~ /^rpgr-/ {
+		status=$5
+		if (status ~ /^Up /) sub(/^Up [^()]*/, "Up", status)
+		else if (status ~ /^Exited /) sub(/ [0-9]+ (seconds?|minutes?|hours?|days?|weeks?|months?|years?) ago$/, "", status)
+		else if (status ~ /^Restarting /) { split(status, parts, " "); status="Restarting " parts[2] }
+		print $1 "|" $2 "|" $3 "|" $4 "|" status
+	}' "$RUN_DIR/docker-ps-$side.txt" |
 		sort > "$RUN_DIR/normal-rpg-$side.txt"
 }
 cleanup() {

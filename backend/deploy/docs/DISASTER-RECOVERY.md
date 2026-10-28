@@ -946,8 +946,9 @@ Rehearse, do not assume. Minimum:
   published, plus fresh PostgreSQL restore targets; it seeds only synthetic meta rows, repository
   game-state migrations and synthetic Redis keys. It invokes the repository backup and
   restore scripts, checks restored schemas, row counts and values, records normal
-  `rpg-*` `docker ps` state before and after, and removes only resources it created by
-  exact name. Its dated directory retains the dump/RDB files, checksums and logs under
+  `rpg-*` `docker ps` state before and after, compares container identity/state/health
+  while ignoring elapsed uptime text, and removes only resources it created by exact
+  name. Its dated directory retains the dump/RDB files, checksums and logs under
   `.testlab-runs/r1/`; review `docker-ps-before.txt`, `docker-ps-after.txt`,
   `metadata.tsv` and `rehearsal.log`. This does not exercise the dev cluster or prove a
   production restore. The JIT alternative is `.github/workflows/backup-dev.yml` with
