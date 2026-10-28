@@ -22,6 +22,8 @@
 #   --yes            required acknowledgement for --mode live
 #   --keep-scratch   leave the scratch container/volume up for poking around
 #   --container NAME live container name                     (default rpg-redis)
+#   REDIS_RESTORE_SCRATCH_PREFIX / REDIS_RESTORE_NETWORK
+#                    optional scratch names/network for isolated rehearsals
 #   --kube-context C --mode live against statefulset/redis in rpg-k8s-data on cluster C
 #                    (dev and staging keep Redis in k3d). Scratch mode needs no cluster:
 #                    it only loads the file, so it rehearses a k3d backup unchanged.
@@ -60,6 +62,8 @@ MODE="scratch"
 CONFIRMED=0
 KEEP_SCRATCH=0
 REDIS_CONTAINER="${REDIS_CONTAINER:-rpg-redis}"
+REDIS_RESTORE_SCRATCH_PREFIX="${REDIS_RESTORE_SCRATCH_PREFIX:-rpg-redis-restore}"
+REDIS_RESTORE_NETWORK="${REDIS_RESTORE_NETWORK:-}"
 REDIS_IMAGE="${REDIS_IMAGE:-}"
 KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
 KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
@@ -335,9 +339,17 @@ wait_ready() {
 # docker.exe rejects absolute /mnt/* paths, which rules out `docker cp`.
 inject() {
 	local vol="$1"
-	"$DOCKER" run --rm -i -v "$vol:/data" "$IMAGE" \
-		sh -ec 'rm -rf /data/appendonlydir /data/appendonly.aof /data/dump.rdb; cat > /data/dump.rdb; ls -l /data/dump.rdb' \
-		<"$FILE"
+	if [ "$MODE" = "scratch" ] && [ -n "$REDIS_RESTORE_NETWORK" ]; then
+		local helper="$SC-inject"
+		"$DOCKER" inspect "$helper" >/dev/null 2>&1 && die "scratch helper '$helper' already exists"
+		"$DOCKER" run --rm --name "$helper" --network "$REDIS_RESTORE_NETWORK" -i -v "$vol:/data" "$IMAGE" \
+			sh -ec 'rm -rf /data/appendonlydir /data/appendonly.aof /data/dump.rdb; cat > /data/dump.rdb; ls -l /data/dump.rdb' \
+			<"$FILE"
+	else
+		"$DOCKER" run --rm -i -v "$vol:/data" "$IMAGE" \
+			sh -ec 'rm -rf /data/appendonlydir /data/appendonly.aof /data/dump.rdb; cat > /data/dump.rdb; ls -l /data/dump.rdb' \
+			<"$FILE"
+	fi
 }
 
 # report <container> — what actually came back.
@@ -356,8 +368,15 @@ report() {
 # ------------------------------------------------------------------- scratch
 if [ "$MODE" = "scratch" ]; then
 	STAMP="$(date -u +%Y%m%d%H%M%S)"
-	SC="rpg-redis-restore-scratch-$STAMP"
-	VOL="rpg-redis-restore-vol-$STAMP"
+	SC="$REDIS_RESTORE_SCRATCH_PREFIX-scratch-$STAMP"
+	VOL="$REDIS_RESTORE_SCRATCH_PREFIX-vol-$STAMP"
+	"$DOCKER" inspect "$SC" >/dev/null 2>&1 && die "scratch container '$SC' already exists"
+	"$DOCKER" inspect "$SC-inject" >/dev/null 2>&1 && die "scratch helper '$SC-inject' already exists"
+	"$DOCKER" volume inspect "$VOL" >/dev/null 2>&1 && die "scratch volume '$VOL' already exists"
+	if [ -n "$REDIS_RESTORE_NETWORK" ]; then
+		"$DOCKER" network inspect "$REDIS_RESTORE_NETWORK" >/dev/null 2>&1 ||
+			die "scratch network '$REDIS_RESTORE_NETWORK' does not exist"
+	fi
 
 	cleanup() {
 		if [ "$KEEP_SCRATCH" -eq 1 ]; then
@@ -374,12 +393,16 @@ if [ "$MODE" = "scratch" ]; then
 	log "image: $IMAGE"
 	"$DOCKER" volume create "$VOL" >/dev/null || die "cannot create scratch volume"
 	inject "$VOL" >/dev/null || die "cannot write dump.rdb into scratch volume"
-
 	# No published port and no AOF: this instance exists only to prove the file
 	# parses and to count what is in it.
-	"$DOCKER" run -d --name "$SC" -v "$VOL:/data" "$IMAGE" \
-		redis-server --appendonly no --dbfilename dump.rdb --dir /data >/dev/null ||
-		die "cannot start scratch container"
+	if [ -n "$REDIS_RESTORE_NETWORK" ]; then
+		"$DOCKER" run -d --name "$SC" --network "$REDIS_RESTORE_NETWORK" -v "$VOL:/data" "$IMAGE" \
+			redis-server --appendonly no --dbfilename dump.rdb --dir /data >/dev/null || die "cannot start scratch container"
+	else
+		"$DOCKER" run -d --name "$SC" -v "$VOL:/data" "$IMAGE" \
+			redis-server --appendonly no --dbfilename dump.rdb --dir /data >/dev/null || die "cannot start scratch container"
+	fi
+	log "scratch target: container '$SC', volume '$VOL'"
 
 	wait_ready "$SC" || {
 		warn "scratch redis never answered PING; last logs:"
