@@ -102,7 +102,8 @@ r1_require_db_absent() {
 
 # Everything is captured without normalisation: container id, image id, status,
 # StartedAt/FinishedAt, RestartCount and health, so that a `docker restart`
-# changes the snapshot. Volumes and networks named rpg-* are listed too.
+# changes the snapshot. (`index .State "Health"`: a plain `.State.Health` is a
+# template error on containers without a healthcheck.) Volumes and networks named rpg-* are listed too.
 # Uptime text (docker ps) is saved separately and is informational only.
 r1_snapshot_normal_state() {
 	local out="$1" names
@@ -110,7 +111,7 @@ r1_snapshot_normal_state() {
 	{
 		if [ -n "$names" ]; then
 			# shellcheck disable=SC2086
-			docker inspect --format 'container|{{.Id}}|{{.Name}}|{{.Image}}|{{.State.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.RestartCount}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' $names
+			docker inspect --format 'container|{{.Id}}|{{.Name}}|{{.Image}}|{{.State.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.RestartCount}}|{{with index .State "Health"}}{{.Status}}{{else}}none{{end}}' $names
 		fi
 		docker volume ls --format 'volume|{{.Name}}' | awk '/^volume\|rpg-/'
 		docker network ls --no-trunc --format 'network|{{.ID}}|{{.Name}}' | awk -F '|' '$3 ~ /^rpg-/'
