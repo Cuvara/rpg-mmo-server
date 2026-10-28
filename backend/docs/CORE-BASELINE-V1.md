@@ -9,7 +9,8 @@ the reasoning that gameplay written before the flows are proven has to be rewrit
 flow changes. That gate is **open on both sides** as of 2026-09-13. This file exists so that
 what was proven can be relied on without re-deriving it.
 
-**Baselined:** 2026-09-25 as **v1.1** (v1: 2026-09-24).
+**Baselined:** 2026-09-25 as **v1.1** (v1: 2026-09-24). A v2 candidate is drafted in
+`CORE-BASELINE-V2.md`; until it is tagged, this file's version table is still the released one.
 
 | | |
 |---|---|
