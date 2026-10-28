@@ -38,6 +38,10 @@ GITHUB_OUTPUT="$(printenv GITHUB_OUTPUT 2>/dev/null || true)"
 
 die() { echo "[rehearsal] ERROR: $*" >&2; exit 1; }
 log() { echo "[rehearsal] $*"; }
+if [ -e "$RUN_DIR" ]; then
+	echo "[rehearsal] ERROR: run directory already exists; refusing to reuse: $RUN_DIR" >&2
+	exit 1
+fi
 mkdir -p "$RUN_DIR"
 chmod 700 "$RUN_DIR" 2>/dev/null || true
 exec > >(tee -a "$RUN_DIR/rehearsal.log") 2>&1
