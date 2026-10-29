@@ -1731,7 +1731,7 @@ public sealed class GameServerHost : IAsyncDisposable
                 {
                     // A fresh placement at the spawn point is spread per player; a restored
                     // position is where the player left and is kept exactly.
-                    Vec2 scattered = _world.Gameplay.ScatterSpawn(userId, new Vec2(spawn.Position.X, spawn.Position.Y));
+                    Vec2 scattered = ScatterJoinSpawn(userId, new Vec2(spawn.Position.X, spawn.Position.Y));
                     spawn = spawn with { Position = new Vec3(scattered.X, scattered.Y, spawn.Position.Z) };
                 }
                 if (spawn.DiscardedMapId != null)
@@ -1777,7 +1777,7 @@ public sealed class GameServerHost : IAsyncDisposable
                     saved, _options.MapId, _bounds, hasMapSpawn ? new Vec2(mapSpawn.X, mapSpawn.Y) : null);
                 if (!spawn.PositionRestored)
                 {
-                    spawn = spawn with { Position = _world.Gameplay.ScatterSpawn(userId, spawn.Position) };
+                    spawn = spawn with { Position = ScatterJoinSpawn(userId, spawn.Position) };
                 }
 
                 if (spawn.DiscardedMapId != null)
@@ -2878,6 +2878,23 @@ public sealed class GameServerHost : IAsyncDisposable
     /// Place a freshly spawned player: height (never below the ground under it), the
     /// <c>level</c> stat from the character row, and facing from its saved yaw.
     /// </summary>
+    /// <summary>
+    /// Spawn-scatter placement for a join, avoiding the players already in the world. Join
+    /// handshakes are serialised per connection, not globally, so two joins can read the same
+    /// population; the spiral cursor still separates them, and only a join racing a walker is
+    /// left to the clearance margin.
+    /// </summary>
+    private Vec2 ScatterJoinSpawn(string userId, Vec2 point)
+    {
+        Vec2[] buffer = System.Buffers.ArrayPool<Vec2>.Shared.Rent(64);
+        try
+        {
+            int n = _world.CopyLivePlayerPositions(ref buffer, userId);
+            return _world.Gameplay.ScatterSpawn(userId, point, buffer.AsSpan(0, n));
+        }
+        finally { System.Buffers.ArrayPool<Vec2>.Shared.Return(buffer); }
+    }
+
     private void PlaceSpawnedPlayer(string userId, float z, int? level, float? yaw)
     {
         _world.WithEntity(userId, (z, level, yaw), static (writer, in h, args) =>

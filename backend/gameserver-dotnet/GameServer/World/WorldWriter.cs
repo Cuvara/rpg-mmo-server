@@ -123,6 +123,13 @@ public sealed class WorldWriter
         _world.QueryWithLocked<TTag>(destination);
 
     /// <summary>
+    /// Positions of the live players other than <paramref name="exceptId"/>; see
+    /// <see cref="EcsWorld.CopyLivePlayerPositions"/>. The respawn system's placement input.
+    /// </summary>
+    public int CopyLivePlayerPositions(ref Vec2[] buffer, string? exceptId) =>
+        _world.CopyLivePlayerPositionsLocked(ref buffer, exceptId);
+
+    /// <summary>
     /// Run <paramref name="visitor"/> over the chunks of entities carrying
     /// <typeparamref name="TTag"/>, giving it the component arrays directly instead of
     /// one entity at a time. This is the shape a system should be in unless it has a

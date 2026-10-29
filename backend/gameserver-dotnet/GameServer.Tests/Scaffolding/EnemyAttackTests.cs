@@ -613,6 +613,41 @@ public class EnemyAttackTests
     }
 
     /// <summary>
+    /// S04 20261028T232609Z-S04-r2iw: a respawn landed 0.462 units from a player who was
+    /// walking past the spiral slot, because the placement ignored who was standing where.
+    /// Slot 7 of a radius-3 spiral sits 2.05 units from the spawn point; the bystander is put
+    /// at the 0.462 offset the run measured. The respawn must pick another slot.
+    /// </summary>
+    [Fact]
+    public void ARespawnKeepsClearOfAPlayerStandingOnTheNextSpiralSlot()
+    {
+        using var fight = new Fight(Settings(attacks: false));
+        fight.World.Gameplay.SpawnScatter = 3f;
+
+        // Advance the spiral cursor to slot 7 and compute where slot 7 sits.
+        for (int i = 0; i < 7; i++) fight.World.Gameplay.ScatterSpawn("warmup", Vec2.Zero);
+        float angle7 = 7 * 2.39996323f, r7 = 3f * MathF.Sqrt(7.5f / 16f);
+        var slot7 = new Vec2(MathF.Cos(angle7) * r7, MathF.Sin(angle7) * r7);
+        var bystander = new Vec2(slot7.X + 0.462f, slot7.Y);
+
+        AddPlayer(fight, "p1", at: new Vec2(20f, 20f));
+        AddPlayer(fight, "p2", at: bystander);
+        fight.World.UpdateComponents(writer =>
+        {
+            EntityHandle h = writer.Resolve("p1");
+            writer.HealthOf(in h).Hp = 0;
+            writer.HealthOf(in h).Dead = true;
+        });
+
+        fight.Run(3);
+
+        Assert.True(fight.Ai.Attacks.Respawns > 0, "the player was never respawned");
+        Vec2 p1 = fight.Entity("p1").Position, p2 = fight.Entity("p2").Position;
+        float dist = MathF.Sqrt(((p1.X - p2.X) * (p1.X - p2.X)) + ((p1.Y - p2.Y) * (p1.Y - p2.Y)));
+        Assert.True(dist >= GameplayState.SpawnClearance, $"respawned {dist:F3} units from a live player");
+    }
+
+    /// <summary>
     /// A respawned player accepts input again. This is the assertion that makes the
     /// respawn worth having: the entity being alive in the world is not the same as the
     /// player being able to play, because <c>InputHandler</c> refuses a dead entity's

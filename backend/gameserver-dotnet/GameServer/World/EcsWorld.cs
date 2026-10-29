@@ -1912,6 +1912,50 @@ public sealed class EcsWorld : IDisposable
     }
 
     /// <summary>
+    /// Positions of every live (not dead) player except <paramref name="exceptId"/>, into
+    /// <paramref name="buffer"/>, which grows (rarely) when the population outgrows it;
+    /// returns the count. Placement input for <see cref="GameplayState.ScatterSpawn(string?, Vec2, ReadOnlySpan{Vec2})"/>:
+    /// a join or a respawn is rare, so this runs a handful of times a minute and not per tick.
+    /// Bots count: they are players to everybody who looks at the world.
+    /// </summary>
+    public int CopyLivePlayerPositions(ref Vec2[] buffer, string? exceptId)
+    {
+        _rwLock.EnterReadLock();
+        try { return CopyLivePlayerPositionsLocked(ref buffer, exceptId); }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// <see cref="CopyLivePlayerPositions"/> for a caller already holding either lock.
+    /// </summary>
+    internal int CopyLivePlayerPositionsLocked(ref Vec2[] buffer, string? exceptId)
+    {
+        int n = 0;
+        _iterationDepth++;
+        try
+        {
+            // _playersQuery, never _arch.Query(...) - see ScanRangeLocked and #176.
+            foreach (ref var chunk in _playersQuery.GetChunkIterator())
+            {
+                var ids = chunk.GetSpan<EntityIdRef>();
+                var positions = chunk.GetSpan<Position>();
+                var healths = chunk.GetSpan<Health>();
+                int count = chunk.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    if (healths[i].Dead) continue;
+                    if (exceptId != null && string.Equals(ids[i].Value, exceptId, StringComparison.Ordinal)) continue;
+                    if (n == buffer.Length) Array.Resize(ref buffer, Math.Max(16, buffer.Length * 2));
+                    buffer[n++] = positions[i].Value;
+                }
+            }
+        }
+        finally { _iterationDepth--; }
+
+        return n;
+    }
+
+    /// <summary>
     /// Player-type entities that may be written to the player store: every
     /// <see cref="PlayerStates"/> entry except the synthetic ones carrying
     /// <see cref="GameServer.Scaffolding.BotTag"/>.
