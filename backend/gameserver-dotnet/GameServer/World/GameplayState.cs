@@ -403,7 +403,7 @@ public sealed class GameplayState
     /// <summary>
     /// <see cref="ScatterSpawn(string?, Vec2)"/> that also avoids <paramref name="occupied"/>,
     /// the positions of the live players already in the world, and every placement a join has
-    /// reserved but not yet spawned (see <see cref="TryReserveScatterSpawn"/>). The first slot
+    /// reserved but not yet spawned (see <see cref="ReserveScatterSpawn"/>). The first slot
     /// of the spiral, in order from the next one, that is at least <see cref="SpawnClearance"/>
     /// from all of them wins, and the cursor moves past it; with nobody in the way that is the
     /// next slot, exactly as before. When no slot clears everybody (a crowd denser than the
@@ -418,41 +418,35 @@ public sealed class GameplayState
         if (!(SpawnScatter > 0f)) return point;
         lock (_spawnLock)
         {
-            Vec2 placed = ClaimSlotLocked(playerId, point, occupied);
-            _spawnEpoch++;
-            return placed;
+            return ClaimSlotLocked(playerId, point, occupied);
         }
-    }
-
-    /// <summary>
-    /// Counter bumped by every placement and every reservation release. A join reads it before
-    /// it copies the live positions and hands it back to <see cref="TryReserveScatterSpawn"/>;
-    /// a mismatch means the copy may have missed a player placed in between.
-    /// </summary>
-    public long SpawnEpoch
-    {
-        get { lock (_spawnLock) return _spawnEpoch; }
     }
 
     /// <summary>
     /// Place a joining player and reserve the spot until <see cref="ReleaseSpawnReservation"/>.
     /// Joins run on per-connection handlers and a player is invisible to the position copy until
     /// its entity is added, so without the reservation two in-flight joins both see an empty
-    /// world and both take the same slot. Returns false, placing nothing, when
-    /// <paramref name="epoch"/> is stale: re-copy the positions and retry. Every failure means
-    /// another placement succeeded, so the retry loop is bounded by the number of joiners.
+    /// world and both take the same slot. The caller must hold a world lock (read is enough)
+    /// from the moment it copied <paramref name="occupied"/> until this returns: every entity
+    /// insertion takes the write lock, so the copy cannot go stale, and the reservation covers
+    /// the time from here until the entity is added. See <c>EcsWorld.ReserveJoinSpawn</c>.
+    /// Lock order is world lock then <c>_spawnLock</c>, as in the respawn system.
     /// </summary>
-    public bool TryReserveScatterSpawn(string playerId, Vec2 point, ReadOnlySpan<Vec2> occupied, long epoch, out Vec2 placed)
+    public Vec2 ReserveScatterSpawn(string playerId, Vec2 point, ReadOnlySpan<Vec2> occupied)
     {
-        if (!(SpawnScatter > 0f)) { placed = point; return true; }
+        if (!(SpawnScatter > 0f)) return point;
         lock (_spawnLock)
         {
-            if (epoch != _spawnEpoch) { placed = point; return false; }
-            placed = ClaimSlotLocked(playerId, point, occupied);
+            Vec2 placed = ClaimSlotLocked(playerId, point, occupied);
             SetPendingLocked(playerId, placed);
-            _spawnEpoch++;
-            return true;
+            return placed;
         }
+    }
+
+    /// <summary>Number of reserved, not yet released join placements. Diagnostics and tests.</summary>
+    internal int PendingSpawnCount
+    {
+        get { lock (_spawnLock) return _pendingCount; }
     }
 
     /// <summary>
@@ -470,7 +464,6 @@ public sealed class GameplayState
                 _pendingIds[i] = _pendingIds[last];
                 _pendingPositions[i] = _pendingPositions[last];
                 _pendingIds[last] = null!;
-                _spawnEpoch++;
                 return;
             }
         }
@@ -567,7 +560,7 @@ public sealed class GameplayState
     }
 
     /// <summary>
-    /// Guards the spiral cursor, the pending reservations and the epoch. The respawn system
+    /// Guards the spiral cursor and the pending reservations. The respawn system
     /// takes it while holding the world write lock, so nothing may take a world lock while
     /// holding this one.
     /// </summary>
@@ -576,7 +569,6 @@ public sealed class GameplayState
     /// <summary>Next spiral slot for <see cref="ScatterSpawn(string?, Vec2, ReadOnlySpan{Vec2})"/>. Guarded by <c>_spawnLock</c>.</summary>
     private int _spawnSlot;
 
-    private long _spawnEpoch;
     private int _pendingCount;
     private string[] _pendingIds = new string[8];
     private Vec2[] _pendingPositions = new Vec2[8];

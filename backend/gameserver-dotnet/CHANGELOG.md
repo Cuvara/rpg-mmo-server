@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Concurrent joins no longer land on the same spawn slot (S01 3r4s: three players at one point, nearest 0.0). The spiral cursor and the occupant check are now atomic in `GameplayState`, and a join's placement is reserved until its entity is added (or the join fails), so in-flight joins count as occupants. Respawn shares the same lock. Adds `SpawnJoinRaceTests`.
+- Concurrent joins no longer land on the same spawn slot (S01 3r4s: three players at one point, nearest 0.0). The spiral cursor and the occupant check are now atomic in `GameplayState`, and a join's placement is reserved until its entity is added (or the join fails), so in-flight joins count as occupants. Respawn shares the same lock. Adds `SpawnJoinRaceTests`. The join copies the live positions and reserves its slot in one world read-lock section (`EcsWorld.ReserveJoinSpawn`), so a bot, join or respawn insertion can never land between the copy and the reservation; this replaces the epoch-and-retry loop (no unbounded retry). The reservation is released in a `finally` that starts immediately after it (`GameServerHost.PlaceJoiningPlayer`), so a throw while admitting the player cannot leak it.
 
 ### Changed
 

@@ -1926,6 +1926,26 @@ public sealed class EcsWorld : IDisposable
     }
 
     /// <summary>
+    /// Join placement: copy the live player positions and reserve the spawn slot in one read-lock
+    /// section. Every entity insertion (join, bot, respawn) takes the write lock, so the copy
+    /// cannot go stale before the reservation lands, and the reservation then keeps the player
+    /// counted until its entity is added. Lock order is <c>_rwLock</c> then the spawn lock, the
+    /// order the respawn system already uses. Holds the read lock for one copy plus one
+    /// 16-slot claim, a few microseconds, and allocates nothing but the pooled buffer growth.
+    /// The caller must call <see cref="GameplayState.ReleaseSpawnReservation"/>.
+    /// </summary>
+    internal Vec2 ReserveJoinSpawn(string playerId, Vec2 point, ref Vec2[] buffer)
+    {
+        _rwLock.EnterReadLock();
+        try
+        {
+            int n = CopyLivePlayerPositionsLocked(ref buffer, playerId);
+            return Gameplay.ReserveScatterSpawn(playerId, point, buffer.AsSpan(0, n));
+        }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
+    /// <summary>
     /// <see cref="CopyLivePlayerPositions"/> for a caller already holding either lock.
     /// </summary>
     internal int CopyLivePlayerPositionsLocked(ref Vec2[] buffer, string? exceptId)
