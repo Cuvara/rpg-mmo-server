@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Concurrent joins no longer land on the same spawn slot (S01 3r4s: three players at one point, nearest 0.0). The spiral cursor and the occupant check are now atomic in `GameplayState`, and a join's placement is reserved until its entity is added (or the join fails), so in-flight joins count as occupants. Respawn shares the same lock. Adds `SpawnJoinRaceTests`. The join copies the live positions and reserves its slot in one world read-lock section (`EcsWorld.ReserveJoinSpawn`), so a bot, join or respawn insertion can never land between the copy and the reservation; this replaces the epoch-and-retry loop (no unbounded retry). The reservation is released in a `finally` that starts immediately after it (`GameServerHost.PlaceJoiningPlayer`), so a throw while admitting the player cannot leak it.
+
+- Join placement returns the array it rented to `ArrayPool` even when the live-player copy outgrows the 64-slot rental (previously the `Array.Resize` replacement was returned, losing the rental and seeding the pool with a non-pooled array). `PlaceJoiningPlayer` takes an optional pool for the test seam; placement is unchanged. Test: `JoinWithMorePlayersThanTheRental_ReturnsTheRentedArrayAndPlacesClear`.
+
 ### Changed
 
 - Add an internal KCP clock seam (defaults to the existing Stopwatch; no behaviour change) and `KcpDeadLinkBudgetTests`, which characterize the dead-link close after ACK silence: 3.18 s, 10.45 s and 31.35 s at 30, 100 and 300 ms RTO.

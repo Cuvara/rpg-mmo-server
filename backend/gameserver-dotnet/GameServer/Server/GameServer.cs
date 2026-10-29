@@ -1727,39 +1727,41 @@ public sealed class GameServerHost : IAsyncDisposable
                 }
 
                 var spawn = PlayerSpawn.Resolve(loaded, _options.MapId, _bounds, _world.Gameplay.DefaultSpawn());
-                if (!spawn.PositionRestored)
+                // A fresh placement at the spawn point is spread per player; a restored
+                // position is where the player left and is kept exactly.
+                PlaceJoiningPlayer(_world, userId, !spawn.PositionRestored, new Vec2(spawn.Position.X, spawn.Position.Y), placedAt =>
                 {
-                    // A fresh placement at the spawn point is spread per player; a restored
-                    // position is where the player left and is kept exactly.
-                    Vec2 scattered = ScatterJoinSpawn(userId, new Vec2(spawn.Position.X, spawn.Position.Y));
-                    spawn = spawn with { Position = new Vec3(scattered.X, scattered.Y, spawn.Position.Z) };
-                }
-                if (spawn.DiscardedMapId != null)
-                {
-                    _logger.LogInformation(
-                        "Character {CharacterId} of {UserId} last saved on map {SavedMapId}; spawning at the " +
-                        "{MapId} spawn point instead of stale coordinates",
-                        characterId, userId, spawn.DiscardedMapId, _options.MapId);
-                }
+                    if (!spawn.PositionRestored)
+                    {
+                        spawn = spawn with { Position = new Vec3(placedAt.X, placedAt.Y, spawn.Position.Z) };
+                    }
+                    if (spawn.DiscardedMapId != null)
+                    {
+                        _logger.LogInformation(
+                            "Character {CharacterId} of {UserId} last saved on map {SavedMapId}; spawning at the " +
+                            "{MapId} spawn point instead of stale coordinates",
+                            characterId, userId, spawn.DiscardedMapId, _options.MapId);
+                    }
 
-                _characterSessions.Bind(new CharacterBinding(
-                    characterId,
-                    userId,
-                    loaded ?? new CharacterState(
-                        characterId, userId, _options.MapId,
-                        spawn.Position.X, spawn.Position.Y, spawn.Position.Z, 0f,
-                        spawn.Hp, spawn.MaxHp, Level: 1, Xp: 0)));
+                    _characterSessions.Bind(new CharacterBinding(
+                        characterId,
+                        userId,
+                        loaded ?? new CharacterState(
+                            characterId, userId, _options.MapId,
+                            spawn.Position.X, spawn.Position.Y, spawn.Position.Z, 0f,
+                            spawn.Hp, spawn.MaxHp, Level: 1, Xp: 0)));
 
-                _world.AddEntity(new EntityState
-                {
-                    Id = userId,
-                    Type = "player",
-                    Position = new Vec2(spawn.Position.X, spawn.Position.Y),
-                    Hp = spawn.Hp,
-                    MaxHp = spawn.MaxHp,
-                    Speed = ServerDefaults.DefaultPlayerSpeed,
-                    Attack = ServerDefaults.DefaultPlayerAttack,
-                    Defense = ServerDefaults.DefaultPlayerDefense
+                    _world.AddEntity(new EntityState
+                    {
+                        Id = userId,
+                        Type = "player",
+                        Position = new Vec2(spawn.Position.X, spawn.Position.Y),
+                        Hp = spawn.Hp,
+                        MaxHp = spawn.MaxHp,
+                        Speed = ServerDefaults.DefaultPlayerSpeed,
+                        Attack = ServerDefaults.DefaultPlayerAttack,
+                        Defense = ServerDefaults.DefaultPlayerDefense
+                    });
                 });
                 PlaceSpawnedPlayer(userId, spawn.Position.Z, spawn.Level, spawn.Yaw);
             }
@@ -1775,31 +1777,30 @@ public sealed class GameServerHost : IAsyncDisposable
                 bool hasMapSpawn = _world.Gameplay.TryGetDefaultSpawn(out Vec3 mapSpawn);
                 var spawn = PlayerSpawn.Resolve(
                     saved, _options.MapId, _bounds, hasMapSpawn ? new Vec2(mapSpawn.X, mapSpawn.Y) : null);
-                if (!spawn.PositionRestored)
+                PlaceJoiningPlayer(_world, userId, !spawn.PositionRestored, spawn.Position, placedAt =>
                 {
-                    spawn = spawn with { Position = ScatterJoinSpawn(userId, spawn.Position) };
-                }
+                    if (!spawn.PositionRestored) spawn = spawn with { Position = placedAt };
 
-                if (spawn.DiscardedMapId != null)
-                {
-                    _logger.LogInformation(
-                        "Player {UserId} last saved on map {SavedMapId}; spawning at {MapId} spawn point " +
-                        "instead of stale coordinates ({X:F2}, {Y:F2})",
-                        userId, spawn.DiscardedMapId, _options.MapId, saved!.X, saved.Y);
-                }
+                    if (spawn.DiscardedMapId != null)
+                    {
+                        _logger.LogInformation(
+                            "Player {UserId} last saved on map {SavedMapId}; spawning at {MapId} spawn point " +
+                            "instead of stale coordinates ({X:F2}, {Y:F2})",
+                            userId, spawn.DiscardedMapId, _options.MapId, saved!.X, saved.Y);
+                    }
 
-                var entity = new EntityState
-                {
-                    Id = userId,
-                    Type = "player",
-                    Position = spawn.Position,
-                    Hp = spawn.Hp,
-                    MaxHp = spawn.MaxHp,
-                    Speed = ServerDefaults.DefaultPlayerSpeed,
-                    Attack = ServerDefaults.DefaultPlayerAttack,
-                    Defense = ServerDefaults.DefaultPlayerDefense
-                };
-                _world.AddEntity(entity);
+                    _world.AddEntity(new EntityState
+                    {
+                        Id = userId,
+                        Type = "player",
+                        Position = spawn.Position,
+                        Hp = spawn.Hp,
+                        MaxHp = spawn.MaxHp,
+                        Speed = ServerDefaults.DefaultPlayerSpeed,
+                        Attack = ServerDefaults.DefaultPlayerAttack,
+                        Defense = ServerDefaults.DefaultPlayerDefense
+                    });
+                });
                 if (hasMapSpawn && !spawn.PositionRestored)
                 {
                     PlaceSpawnedPlayer(userId, mapSpawn.Z, null, null);
@@ -2875,26 +2876,47 @@ public sealed class GameServerHost : IAsyncDisposable
     }
 
     /// <summary>
+    /// Run a join's placement and entity insertion. For a fresh placement (<paramref name="fresh"/>)
+    /// the spawn slot is chosen and reserved in one world-read-lock section
+    /// (<see cref="EcsWorld.ReserveJoinSpawn"/>) and the reservation is released in a
+    /// <c>finally</c> that starts immediately after it, so nothing that throws in
+    /// <paramref name="admit"/> can leak it. Join handshakes are serialised per connection, not
+    /// globally, and a joining player is invisible to the position copy until
+    /// <c>AddEntity</c>; the reservation is what makes in-flight joins count as occupants.
+    /// <paramref name="admit"/> receives the placed position (or <paramref name="point"/> when
+    /// not fresh), must add the entity and must not await. A join racing a walker is left to the
+    /// clearance margin.
+    /// </summary>
+    internal static void PlaceJoiningPlayer(EcsWorld world, string userId, bool fresh, Vec2 point, Action<Vec2> admit,
+        System.Buffers.ArrayPool<Vec2>? pool = null)
+    {
+        if (!fresh)
+        {
+            admit(point);
+            return;
+        }
+
+        pool ??= System.Buffers.ArrayPool<Vec2>.Shared;
+        // The position copy may grow `buffer` past the rental (Array.Resize swaps in a plain
+        // array). Return the rented array itself, never the replacement.
+        Vec2[] rented = pool.Rent(64);
+        Vec2[] buffer = rented;
+        Vec2 placed;
+        try { placed = world.ReserveJoinSpawn(userId, point, ref buffer); }
+        finally { pool.Return(rented); }
+
+        try { admit(placed); }
+        finally
+        {
+            // The entity is visible to the next placement now, or the join failed.
+            world.Gameplay.ReleaseSpawnReservation(userId);
+        }
+    }
+
+    /// <summary>
     /// Place a freshly spawned player: height (never below the ground under it), the
     /// <c>level</c> stat from the character row, and facing from its saved yaw.
     /// </summary>
-    /// <summary>
-    /// Spawn-scatter placement for a join, avoiding the players already in the world. Join
-    /// handshakes are serialised per connection, not globally, so two joins can read the same
-    /// population; the spiral cursor still separates them, and only a join racing a walker is
-    /// left to the clearance margin.
-    /// </summary>
-    private Vec2 ScatterJoinSpawn(string userId, Vec2 point)
-    {
-        Vec2[] buffer = System.Buffers.ArrayPool<Vec2>.Shared.Rent(64);
-        try
-        {
-            int n = _world.CopyLivePlayerPositions(ref buffer, userId);
-            return _world.Gameplay.ScatterSpawn(userId, point, buffer.AsSpan(0, n));
-        }
-        finally { System.Buffers.ArrayPool<Vec2>.Shared.Return(buffer); }
-    }
-
     private void PlaceSpawnedPlayer(string userId, float z, int? level, float? yaw)
     {
         _world.WithEntity(userId, (z, level, yaw), static (writer, in h, args) =>
