@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Concurrent joins no longer land on the same spawn slot (S01 3r4s: three players at one point, nearest 0.0). The spiral cursor and the occupant check are now atomic in `GameplayState`, and a join's placement is reserved until its entity is added (or the join fails), so in-flight joins count as occupants. Respawn shares the same lock. Adds `SpawnJoinRaceTests`.
+
 ### Changed
 
 - Add an internal KCP clock seam (defaults to the existing Stopwatch; no behaviour change) and `KcpDeadLinkBudgetTests`, which characterize the dead-link close after ACK silence: 3.18 s, 10.45 s and 31.35 s at 30, 100 and 300 ms RTO.

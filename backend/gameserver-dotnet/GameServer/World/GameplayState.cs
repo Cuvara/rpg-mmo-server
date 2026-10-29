@@ -402,17 +402,101 @@ public sealed class GameplayState
 
     /// <summary>
     /// <see cref="ScatterSpawn(string?, Vec2)"/> that also avoids <paramref name="occupied"/>,
-    /// the positions of the live players already in the world. The first slot of the spiral,
-    /// in order from the next one, that is at least <see cref="SpawnClearance"/> from all of
-    /// them wins, and the cursor moves past it; with nobody in the way that is the next slot,
-    /// exactly as before. When no slot clears everybody (a crowd denser than the disc), the
-    /// slot farthest from its nearest player is used, so the result is as apart as the disc
-    /// allows. Bounded by 16 slots times <c>occupied.Length</c>, no allocation, deterministic.
+    /// the positions of the live players already in the world, and every placement a join has
+    /// reserved but not yet spawned (see <see cref="TryReserveScatterSpawn"/>). The first slot
+    /// of the spiral, in order from the next one, that is at least <see cref="SpawnClearance"/>
+    /// from all of them wins, and the cursor moves past it; with nobody in the way that is the
+    /// next slot, exactly as before. When no slot clears everybody (a crowd denser than the
+    /// disc), the slot farthest from its nearest player is used, so the result is as apart as
+    /// the disc allows. Bounded by 16 slots times the occupant count, no allocation,
+    /// deterministic. Slot selection holds <c>_spawnLock</c>, so concurrent callers never share
+    /// a cursor value. This overload does not reserve: the respawn system writes the position
+    /// before it releases the world lock.
     /// </summary>
     public Vec2 ScatterSpawn(string? playerId, Vec2 point, ReadOnlySpan<Vec2> occupied)
     {
         if (!(SpawnScatter > 0f)) return point;
+        lock (_spawnLock)
+        {
+            Vec2 placed = ClaimSlotLocked(playerId, point, occupied);
+            _spawnEpoch++;
+            return placed;
+        }
+    }
 
+    /// <summary>
+    /// Counter bumped by every placement and every reservation release. A join reads it before
+    /// it copies the live positions and hands it back to <see cref="TryReserveScatterSpawn"/>;
+    /// a mismatch means the copy may have missed a player placed in between.
+    /// </summary>
+    public long SpawnEpoch
+    {
+        get { lock (_spawnLock) return _spawnEpoch; }
+    }
+
+    /// <summary>
+    /// Place a joining player and reserve the spot until <see cref="ReleaseSpawnReservation"/>.
+    /// Joins run on per-connection handlers and a player is invisible to the position copy until
+    /// its entity is added, so without the reservation two in-flight joins both see an empty
+    /// world and both take the same slot. Returns false, placing nothing, when
+    /// <paramref name="epoch"/> is stale: re-copy the positions and retry. Every failure means
+    /// another placement succeeded, so the retry loop is bounded by the number of joiners.
+    /// </summary>
+    public bool TryReserveScatterSpawn(string playerId, Vec2 point, ReadOnlySpan<Vec2> occupied, long epoch, out Vec2 placed)
+    {
+        if (!(SpawnScatter > 0f)) { placed = point; return true; }
+        lock (_spawnLock)
+        {
+            if (epoch != _spawnEpoch) { placed = point; return false; }
+            placed = ClaimSlotLocked(playerId, point, occupied);
+            SetPendingLocked(playerId, placed);
+            _spawnEpoch++;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Drop the reservation of <paramref name="playerId"/> once its entity is in the world (the
+    /// position copy sees it now) or the join failed. Idempotent.
+    /// </summary>
+    public void ReleaseSpawnReservation(string playerId)
+    {
+        lock (_spawnLock)
+        {
+            for (int i = 0; i < _pendingCount; i++)
+            {
+                if (!string.Equals(_pendingIds[i], playerId, StringComparison.Ordinal)) continue;
+                int last = --_pendingCount;
+                _pendingIds[i] = _pendingIds[last];
+                _pendingPositions[i] = _pendingPositions[last];
+                _pendingIds[last] = null!;
+                _spawnEpoch++;
+                return;
+            }
+        }
+    }
+
+    private void SetPendingLocked(string playerId, Vec2 at)
+    {
+        for (int i = 0; i < _pendingCount; i++)
+        {
+            if (!string.Equals(_pendingIds[i], playerId, StringComparison.Ordinal)) continue;
+            _pendingPositions[i] = at;
+            return;
+        }
+
+        if (_pendingCount == _pendingIds.Length)
+        {
+            Array.Resize(ref _pendingIds, _pendingCount * 2);
+            Array.Resize(ref _pendingPositions, _pendingCount * 2);
+        }
+
+        _pendingIds[_pendingCount] = playerId;
+        _pendingPositions[_pendingCount++] = at;
+    }
+
+    private Vec2 ClaimSlotLocked(string? playerId, Vec2 point, ReadOnlySpan<Vec2> occupied)
+    {
         const float clearSq = SpawnClearance * SpawnClearance;
         int bestSlot = -1;
         Vec2 best = point;
@@ -427,6 +511,14 @@ public sealed class GameplayState
             for (int i = 0; i < occupied.Length; i++)
             {
                 float dx = candidate.X - occupied[i].X, dy = candidate.Y - occupied[i].Y;
+                float d = (dx * dx) + (dy * dy);
+                if (d < nearestSq) nearestSq = d;
+            }
+
+            for (int i = 0; i < _pendingCount; i++)
+            {
+                if (playerId != null && string.Equals(_pendingIds[i], playerId, StringComparison.Ordinal)) continue;
+                float dx = candidate.X - _pendingPositions[i].X, dy = candidate.Y - _pendingPositions[i].Y;
                 float d = (dx * dx) + (dy * dy);
                 if (d < nearestSq) nearestSq = d;
             }
@@ -474,8 +566,20 @@ public sealed class GameplayState
         return candidate;
     }
 
-    /// <summary>Next spiral slot for <see cref="ScatterSpawn"/>.</summary>
+    /// <summary>
+    /// Guards the spiral cursor, the pending reservations and the epoch. The respawn system
+    /// takes it while holding the world write lock, so nothing may take a world lock while
+    /// holding this one.
+    /// </summary>
+    private readonly object _spawnLock = new();
+
+    /// <summary>Next spiral slot for <see cref="ScatterSpawn(string?, Vec2, ReadOnlySpan{Vec2})"/>. Guarded by <c>_spawnLock</c>.</summary>
     private int _spawnSlot;
+
+    private long _spawnEpoch;
+    private int _pendingCount;
+    private string[] _pendingIds = new string[8];
+    private Vec2[] _pendingPositions = new Vec2[8];
 
     /// <summary>The default spawn (map spawn named <c>default</c>), if the map has one.</summary>
     public bool TryGetDefaultSpawn(out Vec3 position)

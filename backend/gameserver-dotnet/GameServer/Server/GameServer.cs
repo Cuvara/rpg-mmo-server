@@ -1726,6 +1726,7 @@ public sealed class GameServerHost : IAsyncDisposable
                     return;
                 }
 
+                bool spawnReserved = false;
                 var spawn = PlayerSpawn.Resolve(loaded, _options.MapId, _bounds, _world.Gameplay.DefaultSpawn());
                 if (!spawn.PositionRestored)
                 {
@@ -1733,6 +1734,7 @@ public sealed class GameServerHost : IAsyncDisposable
                     // position is where the player left and is kept exactly.
                     Vec2 scattered = ScatterJoinSpawn(userId, new Vec2(spawn.Position.X, spawn.Position.Y));
                     spawn = spawn with { Position = new Vec3(scattered.X, scattered.Y, spawn.Position.Z) };
+                    spawnReserved = true;
                 }
                 if (spawn.DiscardedMapId != null)
                 {
@@ -1742,25 +1744,33 @@ public sealed class GameServerHost : IAsyncDisposable
                         characterId, userId, spawn.DiscardedMapId, _options.MapId);
                 }
 
-                _characterSessions.Bind(new CharacterBinding(
-                    characterId,
-                    userId,
-                    loaded ?? new CharacterState(
-                        characterId, userId, _options.MapId,
-                        spawn.Position.X, spawn.Position.Y, spawn.Position.Z, 0f,
-                        spawn.Hp, spawn.MaxHp, Level: 1, Xp: 0)));
-
-                _world.AddEntity(new EntityState
+                try
                 {
-                    Id = userId,
-                    Type = "player",
-                    Position = new Vec2(spawn.Position.X, spawn.Position.Y),
-                    Hp = spawn.Hp,
-                    MaxHp = spawn.MaxHp,
-                    Speed = ServerDefaults.DefaultPlayerSpeed,
-                    Attack = ServerDefaults.DefaultPlayerAttack,
-                    Defense = ServerDefaults.DefaultPlayerDefense
-                });
+                    _characterSessions.Bind(new CharacterBinding(
+                        characterId,
+                        userId,
+                        loaded ?? new CharacterState(
+                            characterId, userId, _options.MapId,
+                            spawn.Position.X, spawn.Position.Y, spawn.Position.Z, 0f,
+                            spawn.Hp, spawn.MaxHp, Level: 1, Xp: 0)));
+
+                    _world.AddEntity(new EntityState
+                    {
+                        Id = userId,
+                        Type = "player",
+                        Position = new Vec2(spawn.Position.X, spawn.Position.Y),
+                        Hp = spawn.Hp,
+                        MaxHp = spawn.MaxHp,
+                        Speed = ServerDefaults.DefaultPlayerSpeed,
+                        Attack = ServerDefaults.DefaultPlayerAttack,
+                        Defense = ServerDefaults.DefaultPlayerDefense
+                    });
+                }
+                finally
+                {
+                    // The entity is visible to the next placement now, or the join failed.
+                    if (spawnReserved) _world.Gameplay.ReleaseSpawnReservation(userId);
+                }
                 PlaceSpawnedPlayer(userId, spawn.Position.Z, spawn.Level, spawn.Yaw);
             }
             else if (existing == null)
@@ -1775,9 +1785,11 @@ public sealed class GameServerHost : IAsyncDisposable
                 bool hasMapSpawn = _world.Gameplay.TryGetDefaultSpawn(out Vec3 mapSpawn);
                 var spawn = PlayerSpawn.Resolve(
                     saved, _options.MapId, _bounds, hasMapSpawn ? new Vec2(mapSpawn.X, mapSpawn.Y) : null);
+                bool spawnReserved = false;
                 if (!spawn.PositionRestored)
                 {
                     spawn = spawn with { Position = ScatterJoinSpawn(userId, spawn.Position) };
+                    spawnReserved = true;
                 }
 
                 if (spawn.DiscardedMapId != null)
@@ -1799,7 +1811,8 @@ public sealed class GameServerHost : IAsyncDisposable
                     Attack = ServerDefaults.DefaultPlayerAttack,
                     Defense = ServerDefaults.DefaultPlayerDefense
                 };
-                _world.AddEntity(entity);
+                try { _world.AddEntity(entity); }
+                finally { if (spawnReserved) _world.Gameplay.ReleaseSpawnReservation(userId); }
                 if (hasMapSpawn && !spawn.PositionRestored)
                 {
                     PlaceSpawnedPlayer(userId, mapSpawn.Z, null, null);
@@ -2875,26 +2888,40 @@ public sealed class GameServerHost : IAsyncDisposable
     }
 
     /// <summary>
-    /// Place a freshly spawned player: height (never below the ground under it), the
-    /// <c>level</c> stat from the character row, and facing from its saved yaw.
+    /// Spawn-scatter placement for a join, avoiding the players already in the world and the
+    /// placements of other joins still in flight. Join handshakes are serialised per
+    /// connection, not globally, and a joining player is invisible to the position copy until
+    /// <c>AddEntity</c>, so the placement is reserved in <see cref="GameplayState"/>. The
+    /// caller must call <c>ReleaseSpawnReservation</c> once the entity is added or the join
+    /// fails. The copy is retried when another placement lands between it and the claim; only
+    /// a join racing a walker is left to the clearance margin.
     /// </summary>
-    /// <summary>
-    /// Spawn-scatter placement for a join, avoiding the players already in the world. Join
-    /// handshakes are serialised per connection, not globally, so two joins can read the same
-    /// population; the spiral cursor still separates them, and only a join racing a walker is
-    /// left to the clearance margin.
-    /// </summary>
-    private Vec2 ScatterJoinSpawn(string userId, Vec2 point)
+    private Vec2 ScatterJoinSpawn(string userId, Vec2 point) => ScatterJoinSpawn(_world, userId, point);
+
+    /// <summary>The join placement against <paramref name="world"/>; see <see cref="ScatterJoinSpawn(string, Vec2)"/>.</summary>
+    internal static Vec2 ScatterJoinSpawn(EcsWorld world, string userId, Vec2 point)
     {
+        GameplayState gameplay = world.Gameplay;
         Vec2[] buffer = System.Buffers.ArrayPool<Vec2>.Shared.Rent(64);
         try
         {
-            int n = _world.CopyLivePlayerPositions(ref buffer, userId);
-            return _world.Gameplay.ScatterSpawn(userId, point, buffer.AsSpan(0, n));
+            while (true)
+            {
+                long epoch = gameplay.SpawnEpoch;
+                int n = world.CopyLivePlayerPositions(ref buffer, userId);
+                if (gameplay.TryReserveScatterSpawn(userId, point, buffer.AsSpan(0, n), epoch, out Vec2 placed))
+                {
+                    return placed;
+                }
+            }
         }
         finally { System.Buffers.ArrayPool<Vec2>.Shared.Return(buffer); }
     }
 
+    /// <summary>
+    /// Place a freshly spawned player: height (never below the ground under it), the
+    /// <c>level</c> stat from the character row, and facing from its saved yaw.
+    /// </summary>
     private void PlaceSpawnedPlayer(string userId, float z, int? level, float? yaw)
     {
         _world.WithEntity(userId, (z, level, yaw), static (writer, in h, args) =>
