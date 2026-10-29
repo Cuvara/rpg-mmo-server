@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Documented the `gameserver_tick_timer_fallbacks_total` metric for Windows tick-timer fallback.
 
 ### Fixed
+- **Spawn placement keeps clear of live players.** The 16-slot spawn spiral (`GAMESERVER_SPAWN_SCATTER`, #469) advanced a global cursor and ignored where players actually stood, so a fresh join or respawn could land beside a player who had walked onto or past the slot (testlab S04 run `20261028T232609Z-S04-r2iw`: a respawn 0.462 units from a walking player, against the 0.5 `spawn_overlap` policy; 1 of 111 judged S04 spawns over 13 runs). `GameplayState.ScatterSpawn` now takes the live players' positions and picks the first slot, in cursor order, at least `GameplayState.SpawnClearance` (1.5 units) from all of them, falling back to the slot farthest from its nearest player when the crowd leaves none. With nobody in the way the result is the same slot sequence as before; scatter 0 is unchanged. The join and respawn paths gather positions under the world lock (no per-tick allocation; a respawn or join is rare). Covered by `SpawnMinDistanceTests` (the 0.462 case, a 5000-seed property) and `EnemyAttackTests.ARespawnKeepsClearOfAPlayerStandingOnTheNextSpiralSlot`.
 - Zero-allocation test guards no longer flake under background GC (SC-003). The end of a background
   GC's mark phase voids every thread's allocation context without subtracting its unused tail from
   `alloc_bytes` (`gc_heap::background_mark_phase` -> `repair_allocation_contexts(FALSE)` ->

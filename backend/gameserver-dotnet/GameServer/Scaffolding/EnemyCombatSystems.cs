@@ -318,6 +318,10 @@ internal sealed class PlayerRespawnSystem : IEcsSystem
     [SimulationScratch]
     private EntityHandle[] _handles = Array.Empty<EntityHandle>();
 
+    // Other live players' positions for the placement; grows only with the population.
+    [SimulationScratch]
+    private Vec2[] _occupied = Array.Empty<Vec2>();
+
     public PlayerRespawnSystem(
         EnemyAiSettings settings, EnemyAttackStats stats, int oneShotHoldTicks, ILogger logger)
     {
@@ -372,8 +376,11 @@ internal sealed class PlayerRespawnSystem : IEcsSystem
                 ? _settings.Bounds.Clamp(new Vec2(spawn.X, spawn.Y))
                 : _settings.Bounds.Clamp(PlayerSpawn.SpawnPoint);
             // Same scatter as the join path, so a respawned player does not land on top of
-            // everyone else who respawned (rpg-mmo-server#469).
-            at.Value = writer.Gameplay.ScatterSpawn(writer.IdRefOf(in player).Value, at.Value);
+            // everyone else who respawned (rpg-mmo-server#469) - nor on a player who simply
+            // walked past the slot: the live players' positions are the placement's input.
+            string playerId = writer.IdRefOf(in player).Value;
+            int others = writer.CopyLivePlayerPositions(ref _occupied, playerId);
+            at.Value = writer.Gameplay.ScatterSpawn(playerId, at.Value, _occupied.AsSpan(0, others));
             at.Z = writer.Gameplay.GroundAt(at.Value.X, at.Value.Y) > spawn.Z
                 ? writer.Gameplay.GroundAt(at.Value.X, at.Value.Y)
                 : spawn.Z;

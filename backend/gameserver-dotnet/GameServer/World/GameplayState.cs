@@ -388,18 +388,78 @@ public sealed class GameplayState
     /// placed somewhere standable (rpg-mmo-server#469). <paramref name="playerId"/> is accepted
     /// for logging and future per-player policy; placement order decides the slot.
     /// </summary>
-    public Vec2 ScatterSpawn(string? playerId, Vec2 point)
+    public Vec2 ScatterSpawn(string? playerId, Vec2 point) =>
+        ScatterSpawn(playerId, point, ReadOnlySpan<Vec2>.Empty);
+
+    /// <summary>
+    /// Minimum distance, in world units, a fresh placement keeps from every live player in
+    /// <c>occupied</c> when the spiral has a slot that allows it. Three times the 0.5 the
+    /// testlab <c>spawn_overlap</c> check asks for, so a player who walks (5 units/s, one
+    /// unit per 5 Hz sample) between the placement and the sample still reads as apart.
+    /// A placement rule like the spiral itself, not a per-encounter gameplay number.
+    /// </summary>
+    public const float SpawnClearance = 1.5f;
+
+    /// <summary>
+    /// <see cref="ScatterSpawn(string?, Vec2)"/> that also avoids <paramref name="occupied"/>,
+    /// the positions of the live players already in the world. The first slot of the spiral,
+    /// in order from the next one, that is at least <see cref="SpawnClearance"/> from all of
+    /// them wins, and the cursor moves past it; with nobody in the way that is the next slot,
+    /// exactly as before. When no slot clears everybody (a crowd denser than the disc), the
+    /// slot farthest from its nearest player is used, so the result is as apart as the disc
+    /// allows. Bounded by 16 slots times <c>occupied.Length</c>, no allocation, deterministic.
+    /// </summary>
+    public Vec2 ScatterSpawn(string? playerId, Vec2 point, ReadOnlySpan<Vec2> occupied)
     {
         if (!(SpawnScatter > 0f)) return point;
 
-        // Vogel spiral over 16 slots, one slot per placement in order: point k sits at the golden
-        // angle times k and at radius R x sqrt((k + 0.5) / 16), so consecutive arrivals are
-        // spread evenly over the disc (about 0.44 R apart) instead of landing where a hash of
-        // their id happens to point. Deterministic for a given join/respawn order.
-        int k = _spawnSlot;
-        _spawnSlot = (_spawnSlot + 1) % 16;
+        const float clearSq = SpawnClearance * SpawnClearance;
+        int bestSlot = -1;
+        Vec2 best = point;
+        float bestNearestSq = -1f;
+
+        for (int j = 0; j < SpawnSlots; j++)
+        {
+            int k = (_spawnSlot + j) % SpawnSlots;
+            Vec2 candidate = SlotCandidate(k, point);
+
+            float nearestSq = float.MaxValue;
+            for (int i = 0; i < occupied.Length; i++)
+            {
+                float dx = candidate.X - occupied[i].X, dy = candidate.Y - occupied[i].Y;
+                float d = (dx * dx) + (dy * dy);
+                if (d < nearestSq) nearestSq = d;
+            }
+
+            if (nearestSq >= clearSq)
+            {
+                _spawnSlot = (k + 1) % SpawnSlots;
+                return candidate;
+            }
+
+            if (nearestSq > bestNearestSq)
+            {
+                bestNearestSq = nearestSq;
+                bestSlot = k;
+                best = candidate;
+            }
+        }
+
+        _spawnSlot = (bestSlot + 1) % SpawnSlots;
+        return best;
+    }
+
+    private const int SpawnSlots = 16;
+
+    /// <summary>
+    /// Slot <paramref name="k"/> of the Vogel spiral: golden angle times k, radius
+    /// R x sqrt((k + 0.5) / 16), so consecutive slots spread evenly over the disc (about
+    /// 0.44 R apart). Clamped into the map; a slot inside a static box is the point itself.
+    /// </summary>
+    private Vec2 SlotCandidate(int k, Vec2 point)
+    {
         float angle = k * 2.39996323f;
-        float r = SpawnScatter * MathF.Sqrt((k + 0.5f) / 16f);
+        float r = SpawnScatter * MathF.Sqrt((k + 0.5f) / SpawnSlots);
         Vec2 candidate = Geometry.Bounds.Clamp(new Vec2(point.X + (MathF.Cos(angle) * r), point.Y + (MathF.Sin(angle) * r)));
 
         foreach (StaticBox box in Geometry.Boxes)
