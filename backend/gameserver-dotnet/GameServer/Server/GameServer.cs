@@ -2887,7 +2887,8 @@ public sealed class GameServerHost : IAsyncDisposable
     /// not fresh), must add the entity and must not await. A join racing a walker is left to the
     /// clearance margin.
     /// </summary>
-    internal static void PlaceJoiningPlayer(EcsWorld world, string userId, bool fresh, Vec2 point, Action<Vec2> admit)
+    internal static void PlaceJoiningPlayer(EcsWorld world, string userId, bool fresh, Vec2 point, Action<Vec2> admit,
+        System.Buffers.ArrayPool<Vec2>? pool = null)
     {
         if (!fresh)
         {
@@ -2895,10 +2896,14 @@ public sealed class GameServerHost : IAsyncDisposable
             return;
         }
 
-        Vec2[] buffer = System.Buffers.ArrayPool<Vec2>.Shared.Rent(64);
+        pool ??= System.Buffers.ArrayPool<Vec2>.Shared;
+        // The position copy may grow `buffer` past the rental (Array.Resize swaps in a plain
+        // array). Return the rented array itself, never the replacement.
+        Vec2[] rented = pool.Rent(64);
+        Vec2[] buffer = rented;
         Vec2 placed;
         try { placed = world.ReserveJoinSpawn(userId, point, ref buffer); }
-        finally { System.Buffers.ArrayPool<Vec2>.Shared.Return(buffer); }
+        finally { pool.Return(rented); }
 
         try { admit(placed); }
         finally

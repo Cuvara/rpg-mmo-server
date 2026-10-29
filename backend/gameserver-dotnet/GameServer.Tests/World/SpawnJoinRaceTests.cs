@@ -273,4 +273,69 @@ public class SpawnJoinRaceTests
         Assert.True(finished, "joins did not complete while the cursor was contended");
         Assert.Equal(0, world.Gameplay.PendingSpawnCount);
     }
+
+    /// <summary>Records what a join rents and returns, to pin the pool contract.</summary>
+    private sealed class RecordingPool : System.Buffers.ArrayPool<Vec2>
+    {
+        public readonly List<Vec2[]> Rented = new();
+        public readonly List<Vec2[]> Returned = new();
+        public override Vec2[] Rent(int minimumLength)
+        {
+            var a = new Vec2[minimumLength];
+            Rented.Add(a);
+            return a;
+        }
+        public override void Return(Vec2[] array, bool clearArray = false) => Returned.Add(array);
+    }
+
+    [Fact]
+    public void JoinWithMorePlayersThanTheRental_ReturnsTheRentedArrayAndPlacesClear()
+    {
+        var world = new EcsWorld();
+        world.Gameplay.SpawnScatter = Scatter;
+        // More live players than the 64-slot rental, spread wide so the disc has room.
+        for (int i = 0; i < 70; i++)
+        {
+            world.AddEntity(new EntityState
+            {
+                Id = "e" + i, Type = "player", Position = new Vec2(100f + (i * 10f), 100f), Hp = 100, MaxHp = 100,
+            });
+        }
+
+        var pool = new RecordingPool();
+        Vec2 at = default;
+        GameServerHost.PlaceJoiningPlayer(world, "joiner", fresh: true, Vec2.Zero, placed =>
+        {
+            at = placed;
+            world.AddEntity(new EntityState { Id = "joiner", Type = "player", Position = placed, Hp = 100, MaxHp = 100 });
+        }, pool);
+
+        Assert.Single(pool.Rented);
+        Assert.Single(pool.Returned);
+        Assert.Same(pool.Rented[0], pool.Returned[0]);
+        Assert.Equal(64, pool.Rented[0].Length);
+        Assert.Equal(0, world.Gameplay.PendingSpawnCount);
+        Assert.True(Dist(at, Vec2.Zero) <= Scatter + GameplayState.SpawnClearance);
+
+        // A second join with the crowd close to the origin must still keep clear of all of it.
+        var crowd = new EcsWorld();
+        crowd.Gameplay.SpawnScatter = Scatter;
+        for (int i = 0; i < 70; i++)
+        {
+            crowd.AddEntity(new EntityState
+            {
+                Id = "c" + i, Type = "player", Position = new Vec2(-20f + (i % 10) * 4f, -20f + (i / 10) * 4f), Hp = 100, MaxHp = 100,
+            });
+        }
+        var pool2 = new RecordingPool();
+        Vec2 near = default;
+        GameServerHost.PlaceJoiningPlayer(crowd, "j2", fresh: true, Vec2.Zero, placed => near = placed, pool2);
+        Assert.Same(pool2.Rented[0], pool2.Returned[0]);
+        for (int i = 0; i < 70; i++)
+        {
+            var o = new Vec2(-20f + (i % 10) * 4f, -20f + (i / 10) * 4f);
+            Assert.True(Dist(near, o) >= GameplayState.SpawnClearance);
+        }
+        crowd.Gameplay.ReleaseSpawnReservation("j2");
+    }
 }
