@@ -652,6 +652,13 @@ if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr) && useAg
         "registered in its place. If that read fails, this value is registered instead and " +
         "clients will not be able to dial it.", publicAddr);
 }
+else if (!string.IsNullOrWhiteSpace(redisAddr) && !useAgones && AdvertisedAddress.IsLoopbackHost(publicAddr))
+{
+    logger.LogWarning(
+        "  GAMESERVER_PUBLIC_ADDR is set to '{PublicAddr}', which is a loopback address. " +
+        "Clients on other machines cannot reach it; set it to a host or IP reachable by clients. " +
+        "Loopback is valid for local development.", publicAddr);
+}
 else if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
 {
     if (publicAddr == addr)
