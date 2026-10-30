@@ -3,30 +3,22 @@ using System.Diagnostics;
 namespace GameServer.Tests.Infrastructure;
 
 /// <summary>
-/// An independent witness to host stalls (#510): a dedicated thread that sleeps a
-/// millisecond at a time and records every time it was not scheduled again for a long while.
+/// A <b>diagnostic</b> witness for timing tests (#510): dedicated threads that sleep a
+/// millisecond at a time, plus a thread-pool latency probe, recording every wake-up that came
+/// late. It shares the caller's <see cref="Stopwatch"/>, so the recorded intervals can be
+/// printed next to the instants the test took its own readings at.
 ///
-/// <para><b>Why it exists.</b> A timing test that fails because the machine stopped running
-/// the test process for 200ms is reporting on the machine, and "re-run until green" teaches
-/// people to stop reading failures. The sentinel turns that suspicion into a measurement: it
-/// shares the caller's <see cref="Stopwatch"/>, so a stall is a pair of instants that can be
-/// compared with the instants the test took its own readings at. A stall that does not
-/// overlap the readings in question explains nothing, and a quiet sentinel proves the host
-/// was fine — so the failure stands.</para>
-///
-/// <para><b>At normal priority, deliberately.</b> The threads whose starvation produces the
-/// gaps under test (the server's tick and KCP threads, the observer's client loop) run at
-/// normal priority. A sentinel boosted above them is scheduled ahead of a contended core
-/// while they wait, and reports a quiet host during exactly the stall it exists to witness
-/// (measured: 312ms gaps with zero stalls recorded by an above-normal sentinel).</para>
-///
-/// <para>It runs on its own thread, not the thread pool, for the same reason the
-/// <see cref="AdversityProxy"/> pumps do: pool starvation is one of the stalls it has to be
-/// able to see, so it cannot depend on the pool.</para>
+/// <para><b>It excuses nothing.</b> Its output goes into failure messages only, to help tell
+/// "the machine was starved" from "the scheduler regressed". It is not proof of either: it
+/// runs in the same process as the server (GC pauses stop it too), its probe measures the
+/// shared thread pool rather than the host, its watcher threads run at normal priority while
+/// the server's tick and KCP threads may run above it, and Windows <c>Sleep(1)</c> returns at
+/// roughly 15.6ms granularity. A recorded interval is therefore a "late wake-up", never a
+/// verified host stall, and no assertion may depend on it.</para>
 /// </summary>
 internal sealed class HostStallSentinel : IDisposable
 {
-    /// <summary>One interval during which the sentinel thread was not scheduled.</summary>
+    /// <summary>One late wake-up of a watcher thread or of the thread-pool probe.</summary>
     internal readonly record struct Stall(double StartMs, double EndMs)
     {
         internal double DurationMs => EndMs - StartMs;
