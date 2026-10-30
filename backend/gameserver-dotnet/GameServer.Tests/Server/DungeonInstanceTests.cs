@@ -366,6 +366,39 @@ public class DungeonInstanceTests
     }
 
     /// <summary>
+    /// The control for the two tests that drive the deadline with <see cref="ManualClock"/>:
+    /// the same clock, never joined, DOES release the instance once it passes the deadline.
+    /// Without this they could pass against a watcher that never consults the injected clock.
+    /// </summary>
+    [Fact]
+    public async Task InstanceThatIsNeverJoined_ReleasesItselfWhenTheClockPassesTheDeadline()
+    {
+        var agones = new RecordingAgonesSdk();
+        var deadline = TimeSpan.FromMilliseconds(200);
+        var clock = new ManualClock();
+        await using var h = await Harness.StartAsync(
+            mode: "dungeon", agones: agones, joinDeadline: deadline, joinClock: clock.Elapsed);
+
+        // Before the deadline by the injected clock: the watcher has polled and declined.
+        Assert.False(h.Server.ShutdownStarted);
+
+        clock.Set(deadline);
+        await h.WaitForShutdownAsync(TimeSpan.FromSeconds(60));
+        Assert.Equal(1, agones.ShutdownCalls);
+        Assert.False(h.Server.EverHadPlayer);
+    }
+
+    /// <summary>A deadline clock the test advances by hand.</summary>
+    private sealed class ManualClock
+    {
+        private long _ticks;
+
+        public TimeSpan Elapsed() => TimeSpan.FromTicks(Interlocked.Read(ref _ticks));
+
+        public void Set(TimeSpan value) => Interlocked.Exchange(ref _ticks, value.Ticks);
+    }
+
+    /// <summary>
     /// <b>A pod mid-run is never killed by the deadline.</b> The player is still connected
     /// long after a deadline that has lapsed several times over; the instance must not
     /// notice. This is the failure that would destroy a live party's dungeon.
@@ -374,15 +407,21 @@ public class DungeonInstanceTests
     public async Task InstanceMidRun_IsNeverKilledByTheDeadline()
     {
         var agones = new RecordingAgonesSdk();
+        var deadline = TimeSpan.FromMilliseconds(200);
+        var clock = new ManualClock();
         await using var h = await Harness.StartAsync(
             mode: "dungeon", agones: agones,
             hold: TimeSpan.FromSeconds(30),
-            joinDeadline: TimeSpan.FromMilliseconds(200));
+            joinDeadline: deadline, joinClock: clock.Elapsed);
 
+        // The join runs against a clock that has not started, so no host stall can make the
+        // deadline fire under it: with a real 200ms clock the instance released itself, as it
+        // should, whenever the join took longer than that, and the join reply read null (#515).
         using var delver = await h.JoinAsync("delver-mid-run");
         Assert.True(h.Server.EverHadPlayer);
 
-        // Comfortably longer than the deadline, which by now has lapsed several times over.
+        // The deadline now lapses several times over, by the clock rather than by sleeping.
+        clock.Set(deadline * 10);
         await h.AssertStaysUpAsync();
         Assert.Equal(0, agones.ShutdownCalls);
         Assert.Equal(1, h.Server.EntityCount);
@@ -402,13 +441,17 @@ public class DungeonInstanceTests
     {
         var agones = new RecordingAgonesSdk();
         var hold = TimeSpan.FromSeconds(5);
+        var deadline = TimeSpan.FromMilliseconds(200);
+        var clock = new ManualClock();
         await using var h = await Harness.StartAsync(
             mode: "dungeon", agones: agones,
             hold: hold,
-            joinDeadline: TimeSpan.FromMilliseconds(200));
+            joinDeadline: deadline, joinClock: clock.Elapsed);
 
+        // Joined against a clock that has not started; see InstanceMidRun_IsNeverKilledByTheDeadline.
         (await h.JoinAsync("delver-dropped")).Dispose();
         await h.WaitForAsync(() => h.Server.PendingHolds == 1);
+        clock.Set(deadline * 10);
 
         // Well past the deadline, well short of the hold: nobody is connected and the
         // deadline has lapsed, and the pod must still be up because a player DID arrive.
@@ -473,7 +516,8 @@ public class DungeonInstanceTests
             RecordingRegistry? registry = null,
             TimeSpan? hold = null,
             string? mapId = null,
-            TimeSpan? joinDeadline = null)
+            TimeSpan? joinDeadline = null,
+            Func<TimeSpan>? joinClock = null)
         {
             string effectiveMapId = mapId ?? (mode == "dungeon" ? "dungeon_test" : "map_test");
             var options = new ServerOptions
@@ -489,6 +533,7 @@ public class DungeonInstanceTests
                 JoinTokenSecret = JwtSecret,
                 HoldTtl = hold ?? ShortHold,
                 DungeonJoinDeadline = joinDeadline ?? ServerOptions.DefaultDungeonJoinDeadline,
+                JoinDeadlineElapsed = joinClock,
                 SaveInterval = TimeSpan.FromHours(1),
                 AgonesSdk = agones,
                 ServerRegistry = registry,

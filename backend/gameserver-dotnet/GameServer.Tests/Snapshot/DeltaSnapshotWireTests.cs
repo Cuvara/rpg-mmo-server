@@ -52,30 +52,94 @@ public class DeltaSnapshotWireTests : IDisposable
         return (loop, world, connections);
     }
 
-    private static async Task<List<(SnapshotMessage msg, int payloadBytes)>> ReadSnapshotsAsync(
-        Stream stream, int count)
+    /// <summary>
+    /// Reads snapshot frames in the background from the moment it is created, and lets the
+    /// test wait for the one it is waiting FOR rather than for a count or a clock.
+    /// </summary>
+    /// <remarks>
+    /// <para>The reader used to be <c>ReadSnapshotsAsync(stream, count)</c>: read until
+    /// <c>count</c> snapshots or a 5s deadline, whichever came first. Both stops were wrong
+    /// for this suite. The count is not reachable once a lagging writer coalesces (that is
+    /// the designed back-pressure), so the reader sat out its full deadline; and the 5s ran
+    /// from the moment the reader was created, so it covered the whole tick-producing phase
+    /// as well as the drain. Sixty or a hundred <c>Task.Delay(1)</c> iterations are about a
+    /// second on a quiet host and several on a contended one, so the deadline could expire
+    /// while the test was still ticking and the client then reconstructed a state several
+    /// ticks old (#515: expected X=20, actual 17.9999962, which is exactly six ticks at
+    /// 5 units/s and 15Hz). That is a test race, not a netcode defect: the data the client
+    /// lacked had not been produced yet when the reader gave up.</para>
+    /// <para>Waiting until a snapshot stamped with the final server tick has arrived is the
+    /// convergence condition itself. Coalescing can drop intermediate frames but never the
+    /// newest, so the wait is reachable under any load, and its budget starts only after
+    /// the last tick.</para>
+    /// </remarks>
+    private sealed class SnapshotCollector : IDisposable
     {
-        var result = new List<(SnapshotMessage, int)>(count);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        try
-        {
-            while (result.Count < count)
-            {
-                var env = await WireProtocol.DecodeAsync(stream, cts.Token);
-                if (env == null) break;
-                if ((MsgType)env.Type != MsgType.Snapshot) continue;
+        private readonly List<(SnapshotMessage msg, int payloadBytes)> _snapshots = new();
+        private readonly CancellationTokenSource _cts = new();
+        private readonly Task _pump;
 
-                var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
-                string raw = System.Text.Encoding.UTF8.GetString(env.Payload);
-                result.Add((msg, System.Text.Encoding.UTF8.GetByteCount(raw)));
+        public SnapshotCollector(Stream stream) => _pump = Task.Run(() => PumpAsync(stream));
+
+        private async Task PumpAsync(Stream stream)
+        {
+            try
+            {
+                while (true)
+                {
+                    var env = await WireProtocol.DecodeAsync(stream, _cts.Token);
+                    if (env == null) return;
+                    if ((MsgType)env.Type != MsgType.Snapshot) continue;
+
+                    var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
+                    string raw = System.Text.Encoding.UTF8.GetString(env.Payload);
+                    lock (_snapshots) _snapshots.Add((msg, System.Text.Encoding.UTF8.GetByteCount(raw)));
+                }
+            }
+            catch (OperationCanceledException) { /* disposed */ }
+            catch (IOException) { /* the connection closed under the pump */ }
+        }
+
+        /// <summary>
+        /// Wait until a snapshot stamped with <paramref name="finalTick"/> or later has
+        /// arrived, then return everything received. Fails loudly, with what did arrive, if it
+        /// never does within <paramref name="budget"/>.
+        /// </summary>
+        public async Task<List<(SnapshotMessage msg, int payloadBytes)>> UntilTickAsync(
+            ulong finalTick, TimeSpan? budget = null)
+        {
+            var limit = budget ?? TimeSpan.FromSeconds(30);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (true)
+            {
+                lock (_snapshots)
+                {
+                    if (_snapshots.Count > 0 && _snapshots[^1].msg.Tick >= finalTick)
+                        return new List<(SnapshotMessage, int)>(_snapshots);
+                }
+                if (sw.Elapsed >= limit)
+                {
+                    ulong last;
+                    int count;
+                    lock (_snapshots)
+                    {
+                        count = _snapshots.Count;
+                        last = count == 0 ? 0 : _snapshots[^1].msg.Tick;
+                    }
+                    Assert.Fail(
+                        $"no snapshot for tick {finalTick} within {limit.TotalSeconds:F0}s of the last " +
+                        $"tick: {count} received, newest is tick {last} ({KcpTestClient.Ambient()})");
+                }
+                await Task.Delay(10);
             }
         }
-        catch (OperationCanceledException)
+
+        public void Dispose()
         {
-            // Fewer snapshots than ticks is legitimate: a writer that cannot keep up
-            // coalesces staged snapshots to the newest. Return what arrived.
+            _cts.Cancel();
+            try { _pump.Wait(TimeSpan.FromSeconds(5)); } catch { /* teardown */ }
+            _cts.Dispose();
         }
-        return result;
     }
 
     /// <summary>
@@ -98,7 +162,7 @@ public class DeltaSnapshotWireTests : IDisposable
         // Far mob: outside the AOI radius, must never appear.
         world.AddEntity(TestHelpers.CreateMob("mob_far", GameConstants.DefaultAoiRadius * 4, 0));
 
-        var reader = ReadSnapshotsAsync(clientStream, ticks);
+        using var reader = new SnapshotCollector(clientStream);
 
         for (int i = 1; i <= ticks; i++)
         {
@@ -110,7 +174,7 @@ public class DeltaSnapshotWireTests : IDisposable
             await Task.Delay(1);
         }
 
-        var snapshots = await reader;
+        var snapshots = await reader.UntilTickAsync(loop.CurrentTick);
 
         // Not `== ticks`. Since snapshot encoding moved to the connection's write task,
         // a writer that lags coalesces staged snapshots to the newest, so ticks and
@@ -170,8 +234,8 @@ public class DeltaSnapshotWireTests : IDisposable
         world.AddEntity(TestHelpers.CreatePlayer("pa", 0, 0, speed: 5f));
         world.AddEntity(TestHelpers.CreatePlayer("pb", 1, 0, speed: 5f));
 
-        var readerA = ReadSnapshotsAsync(streamA, 5);
-        var readerB = ReadSnapshotsAsync(streamB, 5);
+        using var readerA = new SnapshotCollector(streamA);
+        using var readerB = new SnapshotCollector(streamB);
 
         for (int i = 1; i <= 5; i++)
         {
@@ -182,8 +246,8 @@ public class DeltaSnapshotWireTests : IDisposable
             await Task.Delay(1);
         }
 
-        var snapsA = await readerA;
-        var snapsB = await readerB;
+        var snapsA = await readerA.UntilTickAsync(loop.CurrentTick);
+        var snapsB = await readerB.UntilTickAsync(loop.CurrentTick);
 
         Assert.Equal(5u, snapsA[^1].msg.AckTick);
         Assert.Equal(2u, snapsB[^1].msg.AckTick);
@@ -213,14 +277,14 @@ public class DeltaSnapshotWireTests : IDisposable
             world.AddEntity(TestHelpers.CreatePlayer("p1", 0, 0, speed: 5f));
             for (int i = 0; i < 8; i++) world.AddEntity(TestHelpers.CreateMob($"mob{i}", 3 + i, 4));
 
-            var reader = ReadSnapshotsAsync(stream, ticks);
+            using var reader = new SnapshotCollector(stream);
             for (int i = 1; i <= ticks; i++)
             {
                 world.PushInput("p1", new InputData((ulong)i, 1f, 0f, null));
                 loop.TickOnce();
                 await Task.Delay(1);
             }
-            var snaps = await reader;
+            var snaps = await reader.UntilTickAsync(loop.CurrentTick);
 
             conn.Close();
             await pump;

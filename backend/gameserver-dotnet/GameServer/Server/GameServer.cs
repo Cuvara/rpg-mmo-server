@@ -399,6 +399,16 @@ public class ServerOptions
     /// </summary>
     public TimeSpan DungeonJoinDeadline { get; set; } = DefaultDungeonJoinDeadline;
 
+    /// <summary>
+    /// Test seam: the elapsed time the join-deadline watcher compares against
+    /// <see cref="DungeonJoinDeadline"/>. Null (production) is a <see cref="Stopwatch"/>
+    /// started when the watch begins. A test that needs a short deadline to have "lapsed"
+    /// supplies its own clock instead of sleeping, because with a real clock the deadline
+    /// also races the test's own join: a host stall longer than the deadline between start
+    /// and the join makes the instance release itself, correctly, under the player (#515).
+    /// </summary>
+    internal Func<TimeSpan>? JoinDeadlineElapsed { get; set; }
+
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
 
@@ -2640,7 +2650,8 @@ public sealed class GameServerHost : IAsyncDisposable
                 _options.ServerId, deadline.TotalSeconds);
         }
 
-        var waited = Stopwatch.StartNew();
+        var stopwatch = Stopwatch.StartNew();
+        Func<TimeSpan> waited = _options.JoinDeadlineElapsed ?? (() => stopwatch.Elapsed);
         var slice = JoinDeadlinePollInterval(deadline);
 
         while (!ct.IsCancellationRequested)
@@ -2650,7 +2661,7 @@ public sealed class GameServerHost : IAsyncDisposable
             // the log — it must never be what protects a live party, because then a wrong
             // rule would be invisible to every test that drives a real host.
             if (ShouldShutdownUnjoinedInstance(
-                    _isDungeon, EverHadPlayer, PendingHandshakes, waited.Elapsed, deadline))
+                    _isDungeon, EverHadPlayer, PendingHandshakes, waited(), deadline))
             {
                 if (Volatile.Read(ref _shutdownStarted) != 0)
                     return;
@@ -2681,7 +2692,7 @@ public sealed class GameServerHost : IAsyncDisposable
                 _logger.LogInformation(
                     "Dungeon instance {ServerId} received its first player after {Elapsed:F1}s; " +
                     "the join deadline no longer applies",
-                    _options.ServerId, waited.Elapsed.TotalSeconds);
+                    _options.ServerId, waited().TotalSeconds);
                 return;
             }
 
