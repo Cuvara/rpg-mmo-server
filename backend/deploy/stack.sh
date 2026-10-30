@@ -302,7 +302,7 @@ do_up() {
 			echo "==> building nakama plugin (modules/nakama.so — missing or older than its sources)"
 			mkdir -p modules
 			# A running nakama holds the file open on Windows-backed mounts; stop it first.
-			$COMPOSE -p "$PROJECT" --env-file "$ENV_FILE" stop nakama >/dev/null 2>&1 || true
+			dc stop nakama >/dev/null 2>&1 || true
 			DOCKER_BUILDKIT=1 docker build \
 				-f nakama-plugin.Dockerfile \
 				--build-arg "NAKAMA_VERSION=${NAKAMA_VERSION:-3.40.0}" \
