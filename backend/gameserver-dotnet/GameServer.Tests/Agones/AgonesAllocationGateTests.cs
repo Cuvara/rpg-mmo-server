@@ -44,10 +44,18 @@ public class AgonesAllocationGateTests
     public async Task NonAllocatedStates_KeepItShut(string state)
     {
         var sdk = new ScriptedStateSdk(state);
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        using var cts = new CancellationTokenSource();
 
-        Assert.False(await AgonesAllocationGate.WaitForAllocatedAsync(
-            sdk, cts.Token, NullLogger.Instance, Poll));
+        var wait = AgonesAllocationGate.WaitForAllocatedAsync(
+            sdk, cts.Token, NullLogger.Instance, Poll);
+
+        // Cancel on an observed count of reads, not on a wall-clock timer. A 300ms timer
+        // started before the first read could expire on a loaded host before the gate had
+        // polled twice, failing the "kept polling" assertion on a gate that was behaving.
+        await sdk.ObservedAtLeast(3);
+        cts.Cancel();
+
+        Assert.False(await wait.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.True(sdk.Calls > 1, "the gate stopped polling instead of waiting");
     }
 
@@ -76,10 +84,16 @@ public class AgonesAllocationGateTests
     public async Task AnUnreadableState_IsNotTreatedAsAllocated()
     {
         var sdk = new ScriptedStateSdk(null);
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        using var cts = new CancellationTokenSource();
 
-        Assert.False(await AgonesAllocationGate.WaitForAllocatedAsync(
-            sdk, cts.Token, NullLogger.Instance, Poll));
+        var wait = AgonesAllocationGate.WaitForAllocatedAsync(
+            sdk, cts.Token, NullLogger.Instance, Poll);
+
+        // Observed-count cancel, for the reason given on NonAllocatedStates_KeepItShut.
+        await sdk.ObservedAtLeast(3);
+        cts.Cancel();
+
+        Assert.False(await wait.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.True(sdk.Calls > 1, "a null read ended the wait");
     }
 

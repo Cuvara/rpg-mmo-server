@@ -17,6 +17,16 @@ namespace GameServer.Tests.Server;
 /// </summary>
 public class HandshakeHardeningTests
 {
+    /// <summary>
+    /// A failure message that says which rejection counters moved and what else the process
+    /// was doing. These tests close a peer at a 300ms deadline and were seen failing once
+    /// with a bare "False" under host contention (#515); a number that is not attributable
+    /// to a cause cannot be fixed, so the next occurrence has to name its own.
+    /// </summary>
+    private static string Diagnosis(GameMetrics metrics, string what) =>
+        $"{what}: timeout={metrics.HandshakesRejectedTimeout} malformed={metrics.HandshakesRejectedMalformed} " +
+        $"pool_full={metrics.HandshakesRejectedPoolFull} ({KcpTestClient.Ambient()})";
+
     private static GameMetrics NewMetrics() => new(HardeningHarness.MapId, $"test.{Guid.NewGuid():N}");
 
     /// <summary>An idle socket is closed at the deadline and counted as a timeout.</summary>
@@ -96,9 +106,11 @@ public class HandshakeHardeningTests
         using var client = await h.ConnectAsync();
         await client.GetStream().WriteAsync(new byte[] { 0x00, 0x00 });
 
-        Assert.True(await HardeningHarness.ObservesEofAsync(client, TimeSpan.FromSeconds(5)));
+        Assert.True(await HardeningHarness.ObservesEofAsync(client, TimeSpan.FromSeconds(5)),
+            Diagnosis(metrics, "partial length prefix was not closed at the deadline"));
         await h.WaitForAsync(() => h.Server.PendingHandshakes == 0);
-        Assert.Equal(1, metrics.HandshakesRejectedTimeout);
+        Assert.True(metrics.HandshakesRejectedTimeout == 1,
+            Diagnosis(metrics, "partial length prefix was not counted as exactly one timeout"));
     }
 
     /// <summary>A length prefix promising 100 bytes, 10 delivered, then silence: closed at the deadline.</summary>
@@ -114,9 +126,11 @@ public class HandshakeHardeningTests
         BinaryPrimitives.WriteInt32BigEndian(frame, 100);
         await client.GetStream().WriteAsync(frame);
 
-        Assert.True(await HardeningHarness.ObservesEofAsync(client, TimeSpan.FromSeconds(5)));
+        Assert.True(await HardeningHarness.ObservesEofAsync(client, TimeSpan.FromSeconds(5)),
+            Diagnosis(metrics, "partial length prefix was not closed at the deadline"));
         await h.WaitForAsync(() => h.Server.PendingHandshakes == 0);
-        Assert.Equal(1, metrics.HandshakesRejectedTimeout);
+        Assert.True(metrics.HandshakesRejectedTimeout == 1,
+            Diagnosis(metrics, "partial length prefix was not counted as exactly one timeout"));
     }
 
     /// <summary>

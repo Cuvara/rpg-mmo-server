@@ -27,6 +27,13 @@ public class EntityLifecycleTests
     private static readonly TimeSpan ShortHold = TimeSpan.FromMilliseconds(300);
 
     /// <summary>
+    /// The idle timeout for tests that vanish a client: the only way the server learns of a
+    /// vanished KCP peer. It is the original 1000ms, unchanged. The tests that disconnect
+    /// cleanly use the production default instead, because they never rely on idle detection.
+    /// </summary>
+    private const int AbruptIdleMs = 1000;
+
+    /// <summary>
     /// #401: an ABRUPT disconnect — an RST, the shape <c>taskkill /F</c> on the client
     /// produces — must drop the connection out of the registry the snapshot broadcast
     /// iterates, not only out of <c>players_online</c>.
@@ -50,7 +57,7 @@ public class EntityLifecycleTests
     public async Task AbruptDisconnect_DropsTheConnectionTheBroadcastIterates()
     {
         using var metrics = new GameMetrics("map_lifecycle", $"test.{Guid.NewGuid():N}");
-        await using var h = await Harness.StartAsync(metrics);
+        await using var h = await Harness.StartAsync(metrics, idleTimeoutMs: AbruptIdleMs);
 
         var client = await h.JoinAsync("user-abrupt");
 
@@ -72,9 +79,9 @@ public class EntityLifecycleTests
         // below fails on a state that is one line old rather than on a defect. That is the
         // first thing this test did, and it read exactly like a real leak in the other
         // direction.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         while ((h.Server.Connections != 0 || metrics.PlayersOnline != 0)
-               && DateTime.UtcNow < deadline)
+               && sw.Elapsed < TimeSpan.FromSeconds(15))
         {
             await Task.Delay(25);
         }
@@ -123,7 +130,7 @@ public class EntityLifecycleTests
     public async Task ClientVanishingDuringJoin_StillReleasesItsEntity()
     {
         using var metrics = new GameMetrics("map_lifecycle", $"test.{Guid.NewGuid():N}");
-        await using var h = await Harness.StartAsync(metrics);
+        await using var h = await Harness.StartAsync(metrics, idleTimeoutMs: AbruptIdleMs);
 
         // Several attempts, not one: whether the server gets far enough to attach the
         // entity before the RST lands is a timing race, and a single attempt that lost
@@ -160,7 +167,7 @@ public class EntityLifecycleTests
     public async Task AbortedJoin_DoesNotDisturbAnotherPlayersOnlineCount()
     {
         using var metrics = new GameMetrics("map_lifecycle", $"test.{Guid.NewGuid():N}");
-        await using var h = await Harness.StartAsync(metrics);
+        await using var h = await Harness.StartAsync(metrics, idleTimeoutMs: AbruptIdleMs);
 
         using var stayer = await h.JoinAsync("user-stayer");
         // Wait, do not assert immediately: the server records PlayerJoined() AFTER
@@ -252,7 +259,8 @@ public class EntityLifecycleTests
         public required Task RunTask { get; init; }
 
         public static async Task<Harness> StartAsync(
-            GameMetrics metrics, int capacity = 100, TimeSpan? hold = null)
+            GameMetrics metrics, int capacity = 100, TimeSpan? hold = null,
+            int? idleTimeoutMs = null)
         {
             var options = new ServerOptions
             {
@@ -261,10 +269,16 @@ public class EntityLifecycleTests
                 MapId = "map_lifecycle",
                 Mode = "map",
                 Transport = TransportKind.Kcp,
-                // A vanished KCP peer is only ever detected by silence. One second keeps the
-                // abrupt-disconnect cases fast without racing a live client: every joined
-                // client here ACKs a 20Hz snapshot stream.
-                KcpLimits = KcpListenerOptions.Default with { IdleTimeoutMs = 1000 },
+                // A vanished KCP peer is only ever detected by silence, so the tests that
+                // vanish a client ask for a short idle timeout (AbruptIdleMs). Every other
+                // test leaves the production default: it disconnects cleanly and has no use
+                // for a one-second budget, which a live client can lose to a host stall
+                // longer than a second (its ACKs come from one shared update thread) and
+                // then be dropped by the server mid-test, so the entity count it asserts on
+                // is already gone (#515).
+                KcpLimits = idleTimeoutMs is int idle
+                    ? KcpListenerOptions.Default with { IdleTimeoutMs = idle }
+                    : KcpListenerOptions.Default,
                 TickRate = 20,
                 Capacity = capacity,
                 JwtSecret = JwtSecret,
@@ -305,8 +319,8 @@ public class EntityLifecycleTests
         public async Task WaitForAsync(Func<bool> predicate, TimeSpan? timeout = null)
         {
             var limit = timeout ?? TimeSpan.FromSeconds(15);
-            var deadline = DateTime.UtcNow + limit;
-            while (DateTime.UtcNow < deadline)
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.Elapsed < limit)
             {
                 if (predicate()) return;
                 await Task.Delay(25);
