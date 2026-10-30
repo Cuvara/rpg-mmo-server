@@ -216,11 +216,11 @@ public class EntityIntervalUnderAdversityTests
         /// makes this false and the budget assertion stands.
         /// </summary>
         public bool OverBudgetBecauseOfHostStall =>
-            P99Ms > ReplicationSchedule.ClientInterpolationBudgetMs && Diag.Offenders > 0 && Diag.Unexplained == 0;
+            InconclusiveAllowed && P99Ms > ReplicationSchedule.ClientInterpolationBudgetMs && Diag.Offenders > 0 && Diag.Unexplained == 0;
 
         /// <summary>The same test applied to the snapshot cadence instead of the per-entity gap.</summary>
         public bool CadenceOverBudgetBecauseOfHostStall =>
-            CadenceP99Ms > ReplicationSchedule.ClientInterpolationBudgetMs
+            InconclusiveAllowed && CadenceP99Ms > ReplicationSchedule.ClientInterpolationBudgetMs
             && Diag.CadenceOffenders > 0 && Diag.CadenceUnexplained == 0;
 
         public override string ToString() =>
@@ -260,6 +260,16 @@ public class EntityIntervalUnderAdversityTests
 
     /// <summary>The server stops a held movement after this much input silence (250ms).</summary>
     private const double MoverHoldMs = 250;
+
+    /// <summary>
+    /// False under CI (<c>CI</c> or <c>GITHUB_ACTIONS</c> set to true): there an over-budget
+    /// reading is never excused, it fails. The dedicated CI job must execute and assert all
+    /// cases; the inconclusive path exists only for a developer's loaded workstation.
+    /// </summary>
+    internal static bool InconclusiveAllowed { get; } = !(IsTrue("CI") || IsTrue("GITHUB_ACTIONS"));
+
+    private static bool IsTrue(string name) =>
+        string.Equals(Environment.GetEnvironmentVariable(name), "true", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Shortest sentinel wake-up gap recorded (and printed) as a host stall.</summary>
     private const double StallThresholdMs = 20;
