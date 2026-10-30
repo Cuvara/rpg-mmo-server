@@ -28,14 +28,10 @@ public class EntityLifecycleTests
 
     /// <summary>
     /// The idle timeout for tests that vanish a client: the only way the server learns of a
-    /// vanished KCP peer. It was 1000ms, on the reasoning that every joined client ACKs a
-    /// 20Hz snapshot stream, but a client's datagrams all come from one shared update thread
-    /// and a full-suite run on a contended host (a Unity editor and other agents running)
-    /// lost the join of three tests in one run to that second: the server idle-closed a live
-    /// client mid-join and the join reply read null (#515, local runs 4-6 of the 10-run
-    /// check). 4s is past the stalls seen there and still inside the 15s detection waits.
+    /// vanished KCP peer. It is the original 1000ms, unchanged. The tests that disconnect
+    /// cleanly use the production default instead, because they never rely on idle detection.
     /// </summary>
-    private const int AbruptIdleMs = 4000;
+    private const int AbruptIdleMs = 1000;
 
     /// <summary>
     /// #401: an ABRUPT disconnect — an RST, the shape <c>taskkill /F</c> on the client

@@ -366,21 +366,23 @@ public class DungeonInstanceTests
     }
 
     /// <summary>
-    /// The control for the two tests that drive the deadline with <see cref="ManualClock"/>:
-    /// the same clock, never joined, DOES release the instance once it passes the deadline.
-    /// Without this they could pass against a watcher that never consults the injected clock.
+    /// The control for the two tests that drive the deadline with <see cref="ManualClock"/>.
+    /// The deadline is an hour, which real time cannot reach inside a test run, so the only
+    /// thing that can release the instance is the injected clock passing it. A watcher that
+    /// ignored the injected clock would stay up forever and fail the last assertion.
     /// </summary>
     [Fact]
     public async Task InstanceThatIsNeverJoined_ReleasesItselfWhenTheClockPassesTheDeadline()
     {
         var agones = new RecordingAgonesSdk();
-        var deadline = TimeSpan.FromMilliseconds(200);
+        var deadline = TimeSpan.FromHours(1);
         var clock = new ManualClock();
         await using var h = await Harness.StartAsync(
-            mode: "dungeon", agones: agones, joinDeadline: deadline, joinClock: clock.Elapsed);
+            mode: "dungeon", agones: agones, joinDeadline: deadline, joinClock: clock);
 
-        // Before the deadline by the injected clock: the watcher has polled and declined.
-        Assert.False(h.Server.ShutdownStarted);
+        // The clock has not reached the deadline: the instance stays up.
+        await h.AssertStaysUpAsync();
+        Assert.Equal(0, agones.ShutdownCalls);
 
         clock.Set(deadline);
         await h.WaitForShutdownAsync(TimeSpan.FromSeconds(60));
@@ -388,12 +390,14 @@ public class DungeonInstanceTests
         Assert.False(h.Server.EverHadPlayer);
     }
 
-    /// <summary>A deadline clock the test advances by hand.</summary>
-    private sealed class ManualClock
+    /// <summary>A deadline clock the test advances by hand; it reads zero until it is set.</summary>
+    private sealed class ManualClock : TimeProvider
     {
         private long _ticks;
 
-        public TimeSpan Elapsed() => TimeSpan.FromTicks(Interlocked.Read(ref _ticks));
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override long GetTimestamp() => Interlocked.Read(ref _ticks);
 
         public void Set(TimeSpan value) => Interlocked.Exchange(ref _ticks, value.Ticks);
     }
@@ -412,7 +416,7 @@ public class DungeonInstanceTests
         await using var h = await Harness.StartAsync(
             mode: "dungeon", agones: agones,
             hold: TimeSpan.FromSeconds(30),
-            joinDeadline: deadline, joinClock: clock.Elapsed);
+            joinDeadline: deadline, joinClock: clock);
 
         // The join runs against a clock that has not started, so no host stall can make the
         // deadline fire under it: with a real 200ms clock the instance released itself, as it
@@ -440,26 +444,31 @@ public class DungeonInstanceTests
     public async Task InstanceThatEmptied_FollowsDecisionSixAndNotTheDeadline()
     {
         var agones = new RecordingAgonesSdk();
-        var hold = TimeSpan.FromSeconds(5);
+        // The hold runs on real time and is the one clock this test cannot inject, so it is
+        // long enough that no host stall can expire it during the stays-up check below.
+        var hold = TimeSpan.FromSeconds(10);
         var deadline = TimeSpan.FromMilliseconds(200);
         var clock = new ManualClock();
         await using var h = await Harness.StartAsync(
             mode: "dungeon", agones: agones,
             hold: hold,
-            joinDeadline: deadline, joinClock: clock.Elapsed);
+            joinDeadline: deadline, joinClock: clock);
 
         // Joined against a clock that has not started; see InstanceMidRun_IsNeverKilledByTheDeadline.
         (await h.JoinAsync("delver-dropped")).Dispose();
         await h.WaitForAsync(() => h.Server.PendingHolds == 1);
         clock.Set(deadline * 10);
 
-        // Well past the deadline, well short of the hold: nobody is connected and the
-        // deadline has lapsed, and the pod must still be up because a player DID arrive.
-        await Task.Delay(hold / 2);
+        // Past the deadline by the injected clock, well short of the hold: nobody is
+        // connected and the deadline has lapsed, and the pod must still be up because a
+        // player DID arrive. AssertStaysUpAsync waits ~1.2s, a small fraction of the hold.
         Assert.True(h.Server.EverHadPlayer);
         Assert.Equal(1, h.Server.PendingHolds);
+        await h.AssertStaysUpAsync(
+            "the instance shut down while the reconnect hold was still pending, after the " +
+            "join deadline lapsed: the deadline must not end a pod that had a player");
+        Assert.Equal(1, h.Server.PendingHolds);
         Assert.Equal(0, agones.ShutdownCalls);
-        Assert.False(h.Server.ShutdownStarted, "the join deadline killed a pod that had a player");
 
         // Then the hold lapses and decision 6 — not the deadline — ends the instance.
         await h.WaitForShutdownAsync(TimeSpan.FromSeconds(60));
@@ -517,7 +526,7 @@ public class DungeonInstanceTests
             TimeSpan? hold = null,
             string? mapId = null,
             TimeSpan? joinDeadline = null,
-            Func<TimeSpan>? joinClock = null)
+            TimeProvider? joinClock = null)
         {
             string effectiveMapId = mapId ?? (mode == "dungeon" ? "dungeon_test" : "map_test");
             var options = new ServerOptions
@@ -533,7 +542,7 @@ public class DungeonInstanceTests
                 JoinTokenSecret = JwtSecret,
                 HoldTtl = hold ?? ShortHold,
                 DungeonJoinDeadline = joinDeadline ?? ServerOptions.DefaultDungeonJoinDeadline,
-                JoinDeadlineElapsed = joinClock,
+                JoinDeadlineClock = joinClock,
                 SaveInterval = TimeSpan.FromHours(1),
                 AgonesSdk = agones,
                 ServerRegistry = registry,
@@ -613,14 +622,14 @@ public class DungeonInstanceTests
         /// Assert the server is STILL running after comfortably longer than a hold window.
         /// A fixed wait, because the proposition under test is the absence of an event.
         /// </summary>
-        public async Task AssertStaysUpAsync()
+        public async Task AssertStaysUpAsync(string? because = null)
         {
             await Task.Delay(ShortHold + ShortHold + TimeSpan.FromMilliseconds(600));
             // ShutdownStarted, not RunTask.IsCompleted: a teardown takes a further 2s to
             // drain its clients, so waiting on the task would let a server that HAD
             // decided to stop still look alive at this point.
-            Assert.False(Server.ShutdownStarted, "the server shut itself down and should not have");
-            Assert.False(RunTask.IsCompleted, "the server shut itself down and should not have");
+            Assert.False(Server.ShutdownStarted, because ?? "the server shut itself down and should not have");
+            Assert.False(RunTask.IsCompleted, because ?? "the server shut itself down and should not have");
         }
 
         public async ValueTask DisposeAsync()

@@ -211,11 +211,8 @@ public class KcpGameplayTests
     public async Task VanishedClient_IsDetectedBySilence_AndThePlayerLeaves()
     {
         using var metrics = NewMetrics();
-        // 4s, not 800ms: a live client's datagrams come from one shared update thread, and a
-        // host stall past the idle timeout during the join made the server drop it and the
-        // join reply read null (#515). Detection by silence still lands inside the 10s wait.
         await using var h = await HardeningHarness.StartAsync(metrics,
-            kcpLimits: KcpListenerOptions.Default with { IdleTimeoutMs = 4000 });
+            kcpLimits: KcpListenerOptions.Default with { IdleTimeoutMs = 800 });
 
         var client = await h.JoinAsync("kcp-vanisher");
         await h.WaitForAsync(() => metrics.PlayersOnline == 1, what: "joined");

@@ -400,14 +400,15 @@ public class ServerOptions
     public TimeSpan DungeonJoinDeadline { get; set; } = DefaultDungeonJoinDeadline;
 
     /// <summary>
-    /// Test seam: the elapsed time the join-deadline watcher compares against
-    /// <see cref="DungeonJoinDeadline"/>. Null (production) is a <see cref="Stopwatch"/>
-    /// started when the watch begins. A test that needs a short deadline to have "lapsed"
+    /// Test seam: the clock the join-deadline watcher measures elapsed time on, to compare
+    /// against <see cref="DungeonJoinDeadline"/>. Null (production) is
+    /// <see cref="TimeProvider.System"/>, the same monotonic timestamp a <see cref="Stopwatch"/>
+    /// reads, taken when the watch begins. A test that needs a short deadline to have "lapsed"
     /// supplies its own clock instead of sleeping, because with a real clock the deadline
     /// also races the test's own join: a host stall longer than the deadline between start
     /// and the join makes the instance release itself, correctly, under the player (#515).
     /// </summary>
-    internal Func<TimeSpan>? JoinDeadlineElapsed { get; set; }
+    internal TimeProvider? JoinDeadlineClock { get; set; }
 
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
@@ -2650,8 +2651,9 @@ public sealed class GameServerHost : IAsyncDisposable
                 _options.ServerId, deadline.TotalSeconds);
         }
 
-        var stopwatch = Stopwatch.StartNew();
-        Func<TimeSpan> waited = _options.JoinDeadlineElapsed ?? (() => stopwatch.Elapsed);
+        var clock = _options.JoinDeadlineClock ?? TimeProvider.System;
+        long started = clock.GetTimestamp();
+        TimeSpan waited() => clock.GetElapsedTime(started);
         var slice = JoinDeadlinePollInterval(deadline);
 
         while (!ct.IsCancellationRequested)
