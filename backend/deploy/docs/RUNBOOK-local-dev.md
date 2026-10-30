@@ -147,6 +147,7 @@ game server knobs for a scratch stack, write `KEY=value` lines to a file and pas
 `STACK_SCRATCH_EXTRA_ENV=<file>`; they are appended last to `.env.scratch`. This is
 how the rpg-factory testlab configures its runs (`GAMESERVER_DEBUG_ENTITIES=on`,
 `GAMESERVER_ENEMY_SEED`, `GAMESERVER_MAP_ID`, `GATEWAY_CONN_RATE_PER_MIN=0`).
+The plugin rebuild's preliminary Nakama stop uses this same explicit compose file set.
 
 To record which commit a stack runs, pass `STACK_GIT_REVISION=<sha>` to `up`. The SHA is
 stamped into the gateway and game server images as the `org.opencontainers.image.revision`
