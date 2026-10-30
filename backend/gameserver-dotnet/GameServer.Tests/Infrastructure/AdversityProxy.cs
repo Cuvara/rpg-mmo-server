@@ -83,6 +83,7 @@ internal sealed class AdversityProxy : IAsyncDisposable
         private long _toServerChunks, _toClientChunks, _toServerBytes, _toClientBytes;
         private long _lost, _blackedOut, _duplicated, _queueDropped, _reordered;
         private long _blackoutMicros;
+        private long _maxLatenessMicros, _lateReleases;
 
         /// <summary>Datagrams delivered to the server.</summary>
         internal long ToServerChunks => Interlocked.Read(ref _toServerChunks);
@@ -100,6 +101,15 @@ internal sealed class AdversityProxy : IAsyncDisposable
         internal long QueueDropped => Interlocked.Read(ref _queueDropped);
         /// <summary>Datagrams scheduled to overtake one sent before them.</summary>
         internal long Reordered => Interlocked.Read(ref _reordered);
+        /// <summary>
+        /// The most a datagram was released after its scheduled instant. On a healthy host
+        /// this is a millisecond or two; a large value means the relay itself stalled, which
+        /// is a fault the test injected by accident rather than the one it asked for.
+        /// </summary>
+        internal double MaxPumpLatenessMs => Interlocked.Read(ref _maxLatenessMicros) / 1000.0;
+        /// <summary>Datagrams released more than <see cref="LateReleaseMs"/> late.</summary>
+        internal long LateReleases => Interlocked.Read(ref _lateReleases);
+        internal const double LateReleaseMs = 20;
         internal double BlackoutMs => Interlocked.Read(ref _blackoutMicros) / 1000.0;
 
         internal void Delivered(bool toServer, int bytes)
@@ -114,6 +124,15 @@ internal sealed class AdversityProxy : IAsyncDisposable
                 Interlocked.Increment(ref _toClientChunks);
                 Interlocked.Add(ref _toClientBytes, bytes);
             }
+        }
+
+        internal void RecordLateness(double ms)
+        {
+            long micros = (long)(ms * 1000);
+            long seen;
+            while (micros > (seen = Interlocked.Read(ref _maxLatenessMicros))
+                   && Interlocked.CompareExchange(ref _maxLatenessMicros, micros, seen) != seen) { }
+            if (ms > LateReleaseMs) Interlocked.Increment(ref _lateReleases);
         }
 
         internal void CountLost() => Interlocked.Increment(ref _lost);
@@ -342,6 +361,7 @@ internal sealed class AdversityProxy : IAsyncDisposable
                 Item item = default;
                 bool due = false;
                 double wait = 50;
+                double scheduled = 0;
                 lock (d)
                 {
                     if (d.Queue.TryPeek(out var head, out var pri))
@@ -352,6 +372,7 @@ internal sealed class AdversityProxy : IAsyncDisposable
                             d.Queue.Dequeue();
                             d.QueuedBytes -= head.Data.Length;
                             item = head;
+                            scheduled = pri.Release;
                             due = true;
                         }
                     }
@@ -364,6 +385,7 @@ internal sealed class AdversityProxy : IAsyncDisposable
                         Stats.CountBlackedOut();
                         continue;
                     }
+                    Stats.RecordLateness(_clock.Elapsed.TotalMilliseconds - scheduled);
                     try
                     {
                         item.Via.SendTo(item.Data, SocketFlags.None, item.To);

@@ -184,13 +184,50 @@ public class EntityIntervalUnderAdversityTests
         string Profile, int JitterMs, int Entities, int Samples,
         double MedianMs, double P95Ms, double P99Ms, double MaxMs,
         double CadenceMedianMs, double CadenceP99Ms, long Snapshots,
-        int IdlerSamples, double IdlerMaxMs)
+        int IdlerSamples, double IdlerMaxMs, Diagnostics Diag)
     {
         public override string ToString() =>
             $"[interval profile={Profile} jitter=±{JitterMs}ms] entities={Entities} samples={Samples} " +
             $"perEntity med={MedianMs:F1} p95={P95Ms:F1} p99={P99Ms:F1} max={MaxMs:F1} | " +
             $"cadence med={CadenceMedianMs:F1} p99={CadenceP99Ms:F1} snapshots={Snapshots} " +
-            $"ceiling={ReplicationSchedule.MaxIntervalMs}ms budget={ReplicationSchedule.ClientInterpolationBudgetMs}ms";
+            $"ceiling={ReplicationSchedule.MaxIntervalMs}ms budget={ReplicationSchedule.ClientInterpolationBudgetMs}ms | {Diag}";
+    }
+
+    /// <summary>
+    /// What the machine and the harness were doing during the window, so a number that is
+    /// over the budget can be attributed (stall, input starvation, relay lateness,
+    /// retransmit) from the failure message alone instead of by re-running.
+    /// </summary>
+    /// <param name="Offenders">Gaps longer than the budget.</param>
+    /// <param name="CadenceOffenders">Snapshot-to-snapshot gaps longer than the budget.</param>
+    /// <param name="GcPauseMs">Total GC pause in this process during the window.</param>
+    /// <param name="Worst">The longest gaps as "start..end=length" in test-clock ms.</param>
+    internal sealed record Diagnostics(
+        int Offenders, string Worst,
+        int CadenceOffenders, double GcPauseMs, int Gen2Collections,
+        int Stalls, double MaxStallMs, string StallList,
+        double MoverMaxSendGapMs, int MoverGapsOverHold,
+        double ProxyMaxLateMs, long ProxyLateReleases,
+        long ServerRetransmits)
+    {
+        public override string ToString() =>
+            $"offenders={Offenders} worst=[{Worst}] cadenceOffenders={CadenceOffenders} " +
+            $"gcPause={GcPauseMs:F0}ms gen2={Gen2Collections} " +
+            $"sentinelWakeGaps>=20ms={Stalls} (diagnostic only, includes thread-pool delays; max {MaxStallMs:F0}ms{(Stalls > 0 ? ": " + StallList : "")}) " +
+            $"moverSendGap max={MoverMaxSendGapMs:F0}ms over{(int)MoverHoldMs}ms={MoverGapsOverHold} " +
+            $"proxyPumpLate max={ProxyMaxLateMs:F0}ms over{(int)AdversityProxy.Counters.LateReleaseMs}ms={ProxyLateReleases} " +
+            $"serverKcpRetransmits={ServerRetransmits}";
+    }
+
+    /// <summary>The server stops a held movement after this much input silence (250ms).</summary>
+    private const double MoverHoldMs = 250;
+
+    /// <summary>Shortest sentinel wake-up gap recorded in the diagnostics.</summary>
+    private const double StallThresholdMs = 20;
+
+    private readonly record struct Gap(double StartMs, double EndMs)
+    {
+        internal double Length => EndMs - StartMs;
     }
 
     private async Task<Reading> MeasureAsync(string profile, int jitterMs, bool withIdler = false)
@@ -215,7 +252,9 @@ public class EntityIntervalUnderAdversityTests
         var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
         var moverSockets = new List<KcpTestClient>();
-        var moverTasks = new List<Task>();
+        var moverStreams = new List<Stream>();
+        MoverPump? pump = null;
+        HostStallSentinel? sentinel = null;
         var moverIds = new List<string>();
 
         // Only the OBSERVER's link is degraded. The movers connect straight to the server,
@@ -240,7 +279,7 @@ public class EntityIntervalUnderAdversityTests
                 await ConnectWithRetryAsync(c, port);
                 var s = c.GetStream();
                 await JoinAsync(s, id, cts.Token);
-                moverTasks.Add(Task.Run(() => MoveForeverAsync(s, cts.Token), cts.Token));
+                moverStreams.Add(s);
             }
 
             // An entity that joins and never moves. Delta encoding omits it once it stops
@@ -267,9 +306,18 @@ public class EntityIntervalUnderAdversityTests
             var arrivals = new Dictionary<string, List<double>>();
             var idlerArrivals = new List<double>();
             var cadence = new List<double>();
+            var cadenceSpans = new List<Gap>();
+            long gcPauseAtStart = (long)GC.GetTotalPauseDuration().TotalMilliseconds;
+            int gen2AtStart = GC.CollectionCount(2);
             long snapshots = 0;
             double prevSnapshotMs = -1;
             var clock = Stopwatch.StartNew();
+            long retransmitsAtStart = server.TransportStats?.SegmentsRetransmitted ?? 0;
+
+            // Everything that timestamps below shares `clock`: the arrivals, the movers'
+            // sends and the sentinel, so their instants can be compared directly.
+            sentinel = new HostStallSentinel(clock, StallThresholdMs);
+            pump = new MoverPump(moverStreams, clock, cts.Token);
 
             while (clock.Elapsed.TotalSeconds < WarmupSeconds + WindowSeconds)
             {
@@ -282,7 +330,11 @@ public class EntityIntervalUnderAdversityTests
                 if (clock.Elapsed.TotalSeconds < WarmupSeconds) { prevSnapshotMs = now; continue; }
 
                 snapshots++;
-                if (prevSnapshotMs >= 0) cadence.Add(now - prevSnapshotMs);
+                if (prevSnapshotMs >= 0)
+                {
+                    cadence.Add(now - prevSnapshotMs);
+                    cadenceSpans.Add(new Gap(prevSnapshotMs, now));
+                }
                 prevSnapshotMs = now;
 
                 foreach (var e in msg.Entities)
@@ -294,9 +346,10 @@ public class EntityIntervalUnderAdversityTests
                 }
             }
 
-            var gaps = new List<double>();
+            var spans = new List<Gap>();
             foreach (var list in arrivals.Values)
-                for (int i = 1; i < list.Count; i++) gaps.Add(list[i] - list[i - 1]);
+                for (int i = 1; i < list.Count; i++) spans.Add(new Gap(list[i - 1], list[i]));
+            var gaps = spans.Select(g => g.Length).ToList();
 
             var idlerGaps = new List<double>();
             for (int i = 1; i < idlerArrivals.Count; i++) idlerGaps.Add(idlerArrivals[i] - idlerArrivals[i - 1]);
@@ -304,17 +357,32 @@ public class EntityIntervalUnderAdversityTests
             gaps.Sort();
             cadence.Sort();
             idlerGaps.Sort();
+
+            var stalls = sentinel.Snapshot();
+            var offenders = spans.Where(g => g.Length > ReplicationSchedule.ClientInterpolationBudgetMs).ToList();
+            var cadenceOffenders = cadenceSpans.Where(g => g.Length > ReplicationSchedule.ClientInterpolationBudgetMs).ToList();
+            var diag = new Diagnostics(
+                offenders.Count,
+                string.Join(", ", spans.OrderByDescending(g => g.Length).Take(4).Select(g => $"{g.StartMs:F0}..{g.EndMs:F0}={g.Length:F0}")),
+                cadenceOffenders.Count,
+                GC.GetTotalPauseDuration().TotalMilliseconds - gcPauseAtStart, GC.CollectionCount(2) - gen2AtStart,
+                stalls.Length, stalls.Length > 0 ? stalls.Max(x => x.DurationMs) : 0,
+                string.Join(", ", stalls.OrderByDescending(x => x.DurationMs).Take(4).Select(x => $"{x.StartMs:F0}..{x.EndMs:F0}")),
+                pump.MaxSendGapMs, pump.GapsOverHold,
+                proxy.Stats.MaxPumpLatenessMs, proxy.Stats.LateReleases,
+                (server.TransportStats?.SegmentsRetransmitted ?? 0) - retransmitsAtStart);
             return new Reading(
                 profile, jitterMs, arrivals.Count, gaps.Count,
                 Pick(gaps, 0.50), Pick(gaps, 0.95), Pick(gaps, 0.99), gaps.Count > 0 ? gaps[^1] : 0,
                 Pick(cadence, 0.50), Pick(cadence, 0.99), snapshots,
-                idlerGaps.Count, idlerGaps.Count > 0 ? idlerGaps[^1] : 0);
+                idlerGaps.Count, idlerGaps.Count > 0 ? idlerGaps[^1] : 0, diag);
         }
         finally
         {
             cts.Cancel();
+            pump?.Dispose();
+            sentinel?.Dispose();
             foreach (var c in moverSockets) { try { c.Close(); } catch { } }
-            foreach (var t in moverTasks) { try { await t; } catch { } }
             await server.ShutdownAsync();
             try { await runTask; } catch (OperationCanceledException) { }
             cts.Dispose();
@@ -325,28 +393,89 @@ public class EntityIntervalUnderAdversityTests
         sorted.Count == 0 ? 0 : sorted[Math.Min(sorted.Count - 1, (int)(sorted.Count * q))];
 
     /// <summary>
-    /// A mover walks in a circle. Position change alone does NOT raise the importance score
-    /// — <c>ReplicationImportance.Score</c> counts `change` only for HP and action — so a
-    /// walking, non-combat player scores distance + type and lands in the schedule's bottom
-    /// band, which is the ordinary case this measurement is about.
+    /// The movers walk in circles, all driven from <b>one dedicated thread</b>. Position
+    /// change alone does NOT raise the importance score — <c>ReplicationImportance.Score</c>
+    /// counts `change` only for HP and action — so a walking, non-combat player scores
+    /// distance + type and lands in the schedule's bottom band, which is the ordinary case
+    /// this measurement is about.
+    ///
+    /// <para><b>Why a thread and not <c>Task.Delay</c> loops (#510).</b> The movers used to
+    /// send from the thread pool, which a loaded host can starve for longer than the 250ms of
+    /// input silence after which the server stops a held movement. The entity then stops
+    /// changing, the delta encoder omits it, and the observer records a delivery gap that is
+    /// really an input gap. The thread sends on an absolute schedule, never bursts to catch
+    /// up, and records its own worst gap so that failure mode shows in the message instead of
+    /// being guessed at.</para>
     /// </summary>
-    private static async Task MoveForeverAsync(Stream stream, CancellationToken ct)
+    private sealed class MoverPump : IDisposable
     {
-        ulong t = 0;
-        try
+        private const double PeriodMs = 66;
+        private readonly List<Stream> _streams;
+        private readonly Stopwatch _clock;
+        private readonly CancellationToken _ct;
+        private readonly Thread _thread;
+        private volatile bool _stop;
+
+        internal double MaxSendGapMs { get; private set; }
+        internal int GapsOverHold { get; private set; }
+
+        internal MoverPump(List<Stream> streams, Stopwatch clock, CancellationToken ct)
         {
-            while (!ct.IsCancellationRequested)
-            {
-                double a = t * 0.05;
-                await WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.Input,
-                    new InputMessage { Tick = ++t, MoveX = (float)Math.Cos(a), MoveY = (float)Math.Sin(a) },
-                    WireEncoding.Json), ct);
-                await Task.Delay(66, ct);
-            }
+            _streams = streams;
+            _clock = clock;
+            _ct = ct;
+            _thread = new Thread(Run) { IsBackground = true, Name = "interval-movers", Priority = ThreadPriority.AboveNormal };
+            _thread.Start();
         }
-        catch (OperationCanceledException) { }
-        catch (IOException) { }
-        catch (ObjectDisposedException) { }
+
+        private void Run()
+        {
+            ulong t = 0;
+            double next = _clock.Elapsed.TotalMilliseconds;
+            double lastSend = -1;
+            try
+            {
+                while (!_stop && !_ct.IsCancellationRequested)
+                {
+                    double now = _clock.Elapsed.TotalMilliseconds;
+                    if (lastSend >= 0)
+                    {
+                        double gap = now - lastSend;
+                        if (gap > MaxSendGapMs) MaxSendGapMs = gap;
+                        if (gap > MoverHoldMs) GapsOverHold++;
+                    }
+                    lastSend = now;
+
+                    double a = t * 0.05;
+                    ++t;
+                    foreach (var stream in _streams)
+                    {
+                        byte[] frame = WireProtocol.Encode(WireProtocol.NewEnvelope(MsgType.Input,
+                            new InputMessage { Tick = t, MoveX = (float)Math.Cos(a), MoveY = (float)Math.Sin(a) },
+                            WireEncoding.Json));
+                        stream.Write(frame, 0, frame.Length);
+                    }
+
+                    next += PeriodMs;
+                    now = _clock.Elapsed.TotalMilliseconds;
+                    if (next < now) next = now; // late: resume the cadence, do not burst
+                    while (!_stop)
+                    {
+                        double left = next - _clock.Elapsed.TotalMilliseconds;
+                        if (left <= 0) break;
+                        Thread.Sleep(left > 3 ? (int)(left - 2) : 1);
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (ObjectDisposedException) { }
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            _thread.Join(TimeSpan.FromSeconds(2));
+        }
     }
 
     private static async Task JoinAsync(Stream stream, string userId, CancellationToken ct)
