@@ -65,32 +65,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `registry/watcher_test.go`, `server/multi_game_routing_test.go`,
     `transfer/join_token_character_test.go`, `transfer/dungeon_test.go`,
     `transfer/party_http_test.go`, `transfer/map_assign_test.go`.
-
-### Changed
-- **Go API (breaking for callers in this module):** `registry.Allocator.AllocateServer(ctx,
-  gameID, mapID)`, `RegistryService.AllocateDungeon(ctx, gameID, contentID)`,
-  `transfer.DungeonAllocator.AllocateDungeon` likewise, `transfer.PartyMembership.IsMember(ctx,
-  gameID, partyID, userID)`, `transfer.GenerateJoinTokenCharacter(userID, serverID,
-  characterID, gameID, keys)`, `transfer.AssignMapCharacter(ctx, userID, characterID, gameID,
-  mapID, reg, keys)`, and `transfer.DungeonDeps.GameID`. `AllocationRequest.Game` (empty =
-  `cuvara`). The `*Keyring` / `FindServer` convenience forms keep their signatures and use
-  `cuvara`.
-- **`gateway_enter_world_total` and `gateway_allocations_total` carry the routed game.**
-  Allocations now record the requested game (`AllocationResultGame`) instead of always
-  `cuvara`, and **dungeon allocations are now counted** (ok or fail) in
-  `gateway_allocations_total`; before, only map allocations were.
-- **Allocated dungeon servers are tracked by the registry watcher**, so a dead dungeon
-  server produces `server_down` like a map server.
-
-### Fixed
-- **An expired session now untracks the connection.** `checkSession` cleared the identity
-  but left the `(game, user)` entry in `userConns`, so a later login could find and kick a
-  connection that was no longer authenticated. It now uses `ClearIdentityGame` and
-  `untrackUser`, as teardown does.
-- `registry.ServerDownChannel` and the `Publisher` comments said Redis Pub/Sub; `server_down`
-  goes through the gateway's event stream (Redis Streams, ADR-5). Comment only.
-
-### Added
 - **Game-scoped sessions and kicks, ADR-33 leg 3 (session and kicks).** The default game
   (`cuvara`) behaves as before, apart from the explicit `game_id` and the metric label below.
   - **`GAMES` env** (`session.ParseGames`, `session.EnvGames`, `server.WithGames`): the games
@@ -131,6 +105,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     with `game not routable` for a configured game without a join secret.
 
 ### Changed
+- **Go API (breaking for callers in this module):** `registry.Allocator.AllocateServer(ctx,
+  gameID, mapID)`, `RegistryService.AllocateDungeon(ctx, gameID, contentID)`,
+  `transfer.DungeonAllocator.AllocateDungeon` likewise, `transfer.PartyMembership.IsMember(ctx,
+  gameID, partyID, userID)`, `transfer.GenerateJoinTokenCharacter(userID, serverID,
+  characterID, gameID, keys)`, `transfer.AssignMapCharacter(ctx, userID, characterID, gameID,
+  mapID, reg, keys)`, and `transfer.DungeonDeps.GameID`. `AllocationRequest.Game` (empty =
+  `cuvara`). The `*Keyring` / `FindServer` convenience forms keep their signatures and use
+  `cuvara`.
+- **`gateway_enter_world_total` and `gateway_allocations_total` carry the routed game.**
+  Allocations now record the requested game (`AllocationResultGame`) instead of always
+  `cuvara`, and **dungeon allocations are now counted** (ok or fail) in
+  `gateway_allocations_total`; before, only map allocations were.
+- **Allocated dungeon servers are tracked by the registry watcher**, so a dead dungeon
+  server produces `server_down` like a map server.
 - **`game` label on `gateway_auth_total`, `gateway_enter_world_total`,
   `gateway_allocations_total` and `gateway_session_checks_total`** (ADR-33 leg 3). The value
   comes from the verified `gid` claim only, mapped through `GAMES`: an unconfigured game, or a
@@ -142,6 +130,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that matches the exact label set needs the new `game` label. The transport gauges,
   `gateway_rate_limited_total`, `gateway_kick_publish_total` and the runtime collectors are
   unchanged.
+
+### Fixed
+- **An expired session now untracks the connection.** `checkSession` cleared the identity
+  but left the `(game, user)` entry in `userConns`, so a later login could find and kick a
+  connection that was no longer authenticated. It now uses `ClearIdentityGame` and
+  `untrackUser`, as teardown does.
+- `registry.ServerDownChannel` and the `Publisher` comments said Redis Pub/Sub; `server_down`
+  goes through the gateway's event stream (Redis Streams, ADR-5). Comment only.
 
 ### Added
 - **`SessionSupersededEvent.GameID` (ADR-33 leg 1 part 2).** Optional `game_id` field

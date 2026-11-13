@@ -19,6 +19,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
 	"github.com/duycuong/rpg-mmo/shared/config"
 	"github.com/duycuong/rpg-mmo/shared/constants"
+	sharedjwt "github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/storage"
@@ -138,8 +139,11 @@ func main() {
 		}
 		envName := "JOIN_TOKEN_SECRET_" + strings.ToUpper(game)
 		secret := os.Getenv(envName)
-		if strings.TrimSpace(secret) == "" {
-			log.Warn("game join-token secret is missing; EnterWorld for this game is refused",
+		// Parse exactly as WithGameJoinTokenSecret does, so a setting it would
+		// drop (blank, or separators only such as ",,") warns here instead of
+		// vanishing. The error is not logged: it quotes the setting's value.
+		if _, perr := sharedjwt.ParseKeyring(secret); perr != nil {
+			log.Warn("game join-token secret is missing or unparseable; EnterWorld for this game is refused",
 				"game", game, "setting", envName)
 			continue
 		}
@@ -147,7 +151,8 @@ func main() {
 			log.Warn("game join-token secret and JWT_SECRET are the same value -- use distinct secrets before launch",
 				"game", game, "setting", envName)
 		}
-		for _, key := range strings.Split(secret, ",") {
+		// Same split and trim as ParseKeyring, which does not expose its keys.
+		for _, key := range strings.Split(secret, sharedjwt.KeyringSeparator) {
 			key = strings.TrimSpace(key)
 			if key == "" {
 				continue
