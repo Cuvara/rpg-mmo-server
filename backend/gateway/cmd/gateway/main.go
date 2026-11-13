@@ -124,6 +124,13 @@ func main() {
 	if joinSecret == cfg.JWTSecret {
 		log.Warn("JOIN_TOKEN_SECRET and JWT_SECRET are the same value -- a leak of either secret compromises both the Nakama auth hop and the game-server hop. Use distinct secrets before launch.")
 	}
+	// Compare individual rotation keys as well as complete secret settings.
+	joinSecretOwners := make(map[string]string)
+	for _, key := range strings.Split(joinSecret, ",") {
+		if key = strings.TrimSpace(key); key != "" {
+			joinSecretOwners[key] = constants.DefaultGameID
+		}
+	}
 	var gameJoinOptions []server.Option
 	for _, game := range games.IDs() {
 		if game == constants.DefaultGameID {
@@ -139,6 +146,18 @@ func main() {
 		if secret == cfg.JWTSecret {
 			log.Warn("game join-token secret and JWT_SECRET are the same value -- use distinct secrets before launch",
 				"game", game, "setting", envName)
+		}
+		for _, key := range strings.Split(secret, ",") {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if owner, ok := joinSecretOwners[key]; ok && owner != game {
+				log.Warn("games share a join-token secret; a game server can forge another game's tokens",
+					"game", game, "other_game", owner, "setting", envName)
+			} else {
+				joinSecretOwners[key] = game
+			}
 		}
 		gameJoinOptions = append(gameJoinOptions, server.WithGameJoinTokenSecret(game, secret))
 	}
