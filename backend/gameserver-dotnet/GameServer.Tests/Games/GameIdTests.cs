@@ -22,8 +22,8 @@ public class GameIdTests
     [InlineData("a.", false)]
     [InlineData("ab\n", false)]
     [InlineData("a b", false)]
-    [InlineData("a?", false)]
-    [InlineData("a?", false)]
+    [InlineData("caf\u00e9", false)]
+    [InlineData("ab\uff11", false)]
     public void GameIds(string? id, bool valid) => Assert.Equal(valid, GameId.IsValidGameId(id));
 
     [Theory]
@@ -40,8 +40,8 @@ public class GameIdTests
     [InlineData(".", false)]
     [InlineData("map\n", false)]
     [InlineData("map name", false)]
-    [InlineData("?", false)]
-    [InlineData("?", false)]
+    [InlineData("caf\u00e9", false)]
+    [InlineData("ab\uff11", false)]
     public void MapIds(string? id, bool valid) => Assert.Equal(valid, GameId.IsValidMapId(id));
 
     [Fact]
@@ -96,11 +96,21 @@ public class GameIdTests
         using var document = JsonDocument.Parse(File.ReadAllText(fixture));
         var root = document.RootElement;
         Assert.Equal(root.GetProperty("default_game_id").GetString(), GameId.DefaultGameId);
-        foreach (var item in root.GetProperty("game_ids").EnumerateArray())
-            Assert.Equal(item.GetProperty("valid").GetBoolean(), GameId.IsValidGameId(item.GetProperty("id").GetString()));
-        foreach (var item in root.GetProperty("map_ids").EnumerateArray())
-            Assert.Equal(item.GetProperty("valid").GetBoolean(), GameId.IsValidMapId(item.GetProperty("id").GetString()));
-        foreach (var item in root.GetProperty("server_ids").EnumerateArray())
-            Assert.Equal(item.GetProperty("valid").GetBoolean(), GameId.IsValidServerId(item.GetProperty("game").GetString(), item.GetProperty("id").GetString()));
+        foreach (var section in new[] { "game_ids", "map_ids", "server_ids" })
+        {
+            foreach (var item in root.GetProperty(section).EnumerateArray())
+            {
+                var id = item.GetProperty("id").GetString();
+                var game = section == "server_ids" ? item.GetProperty("game").GetString() : null;
+                var expected = item.GetProperty("valid").GetBoolean();
+                var actual = section switch
+                {
+                    "game_ids" => GameId.IsValidGameId(id),
+                    "map_ids" => GameId.IsValidMapId(id),
+                    _ => GameId.IsValidServerId(game, id),
+                };
+                Assert.True(expected == actual, $"{section} game={game} id={id}: expected {expected}, actual {actual}");
+            }
+        }
     }
 }
