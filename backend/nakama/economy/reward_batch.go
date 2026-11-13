@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
+	"github.com/duycuong/rpg-mmo/shared/gameid"
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -57,6 +60,7 @@ const (
 
 // RewardKillsRequest is the payload the game server sends.
 type RewardKillsRequest struct {
+	GameID string `json:"game_id,omitempty"`
 	UserID string `json:"user_id"`
 	Kills  int64  `json:"kills"`
 	MapID  string `json:"map_id"`
@@ -161,14 +165,22 @@ func rewardKillsCore(ctx context.Context, logger runtime.Logger, nk killGranter,
 		return "", runtime.NewError(
 			fmt.Sprintf("kills must be in 1..%d", MaxKillsPerBatch), CodeKillsOutOfRange)
 	}
+	game, err := gamectx.GameFromContext(ctx, req.GameID)
+	if errors.Is(err, gamectx.ErrGamesConfig) {
+		logger.Error("resolve reward_kills game: %v", err)
+		return "", runtime.NewError("internal error", 13)
+	}
+	if err != nil {
+		return "", err
+	}
 
 	// Fast path: already granted? Replay from the receipt.
-	receipt, err := readReceipt(ctx, nk, req.UserID, req.BatchID)
+	receipt, err := readReceipt(ctx, nk, game, req.UserID, req.BatchID)
 	if err != nil {
 		return "", runtime.NewError(fmt.Sprintf("receipt lookup failed: %v", err), 13) // INTERNAL
 	}
 	if receipt != nil {
-		return replayFromReceipt(ctx, logger, nk, receipt)
+		return replayFromReceipt(ctx, logger, nk, game, receipt)
 	}
 
 	gold := GoldPerKill * req.Kills
@@ -181,6 +193,15 @@ func rewardKillsCore(ctx context.Context, logger runtime.Logger, nk killGranter,
 		GrantedAt: now().Unix(),
 	}
 	receiptJSON, _ := json.Marshal(receipt)
+	metadata := map[string]interface{}{
+		"source":   "enemy_kills",
+		"kills":    req.Kills,
+		"map_id":   req.MapID,
+		"batch_id": req.BatchID,
+	}
+	if !gameid.IsDefaultGame(game) {
+		metadata["game_id"] = game
+	}
 
 	// Receipt (create-only: Version "*") and wallet update in ONE transaction.
 	// Either both commit or neither does; a concurrent duplicate loses on the
@@ -188,7 +209,7 @@ func rewardKillsCore(ctx context.Context, logger runtime.Logger, nk killGranter,
 	_, results, err := nk.MultiUpdate(ctx,
 		nil,
 		[]*runtime.StorageWrite{{
-			Collection:      ReceiptCollection,
+			Collection:      gamectx.Scoped(game, ReceiptCollection),
 			Key:             req.BatchID,
 			UserID:          req.UserID,
 			Value:           string(receiptJSON),
@@ -199,21 +220,16 @@ func rewardKillsCore(ctx context.Context, logger runtime.Logger, nk killGranter,
 		nil,
 		[]*runtime.WalletUpdate{{
 			UserID:    req.UserID,
-			Changeset: map[string]int64{"gold": gold},
-			Metadata: map[string]interface{}{
-				"source":   "enemy_kills",
-				"kills":    req.Kills,
-				"map_id":   req.MapID,
-				"batch_id": req.BatchID,
-			},
+			Changeset: map[string]int64{gamectx.Scoped(game, CurrencyGold): gold},
+			Metadata:  metadata,
 		}},
 		true)
 	if err != nil {
 		// Two duplicates racing: the loser's write is rejected on the version
 		// check. Whether that or a real failure, the transaction rolled back;
 		// the receipt tells the two apart.
-		if existing, rerr := readReceipt(ctx, nk, req.UserID, req.BatchID); rerr == nil && existing != nil {
-			return replayFromReceipt(ctx, logger, nk, existing)
+		if existing, rerr := readReceipt(ctx, nk, game, req.UserID, req.BatchID); rerr == nil && existing != nil {
+			return replayFromReceipt(ctx, logger, nk, game, existing)
 		}
 		logger.Error("batch grant failed for %s (%d kills, batch %s): %v", req.UserID, req.Kills, req.BatchID, err)
 		return "", runtime.NewError(fmt.Sprintf("wallet update failed: %v", err), 13) // INTERNAL
@@ -221,9 +237,9 @@ func rewardKillsCore(ctx context.Context, logger runtime.Logger, nk killGranter,
 
 	resp := RewardKillsResponse{Success: true, Gold: gold}
 	if len(results) > 0 && results[0] != nil {
-		resp.Balance = results[0].Updated["gold"]
+		resp.Balance = results[0].Updated[gamectx.Scoped(game, CurrencyGold)]
 	}
-	writeLeaderboard(ctx, logger, nk, receipt, &resp)
+	writeLeaderboard(ctx, logger, nk, game, receipt, &resp)
 
 	// One line per FLUSH, not per kill — reward_kill's per-kill Info line was
 	// itself part of the amplification this RPC removes.
@@ -236,14 +252,14 @@ func rewardKillsCore(ctx context.Context, logger runtime.Logger, nk killGranter,
 
 // replayFromReceipt answers a re-sent batch id: gold is never granted twice;
 // the leaderboard is retried only if the receipt says it is still pending.
-func replayFromReceipt(ctx context.Context, logger runtime.Logger, nk killGranter, receipt *rewardReceipt) (string, error) {
+func replayFromReceipt(ctx context.Context, logger runtime.Logger, nk killGranter, game string, receipt *rewardReceipt) (string, error) {
 	resp := RewardKillsResponse{Success: true, Replayed: true, Gold: receipt.Gold}
 	if receipt.LeaderboardDone {
 		resp.Status = StatusGranted
 		resp.Score = receipt.Score
 		resp.Rank = receipt.Rank
 	} else {
-		writeLeaderboard(ctx, logger, nk, receipt, &resp)
+		writeLeaderboard(ctx, logger, nk, game, receipt, &resp)
 	}
 	logger.Debug("Replayed batch %s for %s (%d kills): status %s", receipt.BatchID, receipt.UserID, receipt.Kills, resp.Status)
 	out, _ := json.Marshal(resp)
@@ -254,9 +270,9 @@ func replayFromReceipt(ctx context.Context, logger runtime.Logger, nk killGrante
 // the outcome in the receipt so a later replay does not increment again. It
 // never returns an error: gold is already committed at this point, and an
 // error would invite a retry of the wallet — the response carries the state.
-func writeLeaderboard(ctx context.Context, logger runtime.Logger, nk killGranter, receipt *rewardReceipt, resp *RewardKillsResponse) {
+func writeLeaderboard(ctx context.Context, logger runtime.Logger, nk killGranter, game string, receipt *rewardReceipt, resp *RewardKillsResponse) {
 	record, err := nk.LeaderboardRecordWrite(ctx,
-		LeaderboardKillsAllTime, receipt.UserID, "", receipt.Kills, 0, nil, nil)
+		gamectx.Scoped(game, LeaderboardKillsAllTime), receipt.UserID, "", receipt.Kills, 0, nil, nil)
 	if err != nil {
 		logger.Error("leaderboard write failed for %s (%d kills, batch %s, gold already granted): %v",
 			receipt.UserID, receipt.Kills, receipt.BatchID, err)
@@ -273,7 +289,7 @@ func writeLeaderboard(ctx context.Context, logger runtime.Logger, nk killGranter
 	receipt.Rank = record.Rank
 	value, _ := json.Marshal(receipt)
 	if _, err := nk.StorageWrite(ctx, []*runtime.StorageWrite{{
-		Collection:      ReceiptCollection,
+		Collection:      gamectx.Scoped(game, ReceiptCollection),
 		Key:             receipt.BatchID,
 		UserID:          receipt.UserID,
 		Value:           string(value),
@@ -289,9 +305,9 @@ func writeLeaderboard(ctx context.Context, logger runtime.Logger, nk killGranter
 	}
 }
 
-func readReceipt(ctx context.Context, nk killGranter, userID, batchID string) (*rewardReceipt, error) {
+func readReceipt(ctx context.Context, nk killGranter, game, userID, batchID string) (*rewardReceipt, error) {
 	objs, err := nk.StorageRead(ctx, []*runtime.StorageRead{{
-		Collection: ReceiptCollection, Key: batchID, UserID: userID,
+		Collection: gamectx.Scoped(game, ReceiptCollection), Key: batchID, UserID: userID,
 	}})
 	if err != nil {
 		return nil, err

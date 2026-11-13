@@ -16,7 +16,7 @@ Depends on: `github.com/duycuong/rpg-mmo/shared` (via `replace ../shared`) and
 | Auth — player profile bootstrap on first login | ✅ | `auth/profile.go` |
 | Auth — email/password pre-auth validation | ✅ | `auth/validate.go` |
 | Auth — multi-game: `GAMES` allow-list hooks on every auth method and refresh, `gid` in `gateway_token` (ADR-33 leg 4) | ✅ | `gamectx/`, `auth/hooks.go`, `auth/token.go` |
-| Multi-game data scoping of `character/`, `economy/`, `social/` (ADR-33 leg 4 data) | Planned | task l4-data |
+| Multi-game data scoping of `character/`, `economy/`, `social/`: roster, wallet key, receipts, party, per-game `<game>.kills_alltime` (ADR-33 leg 4 data) | ✅ | `gamectx.Scoped` call sites; see `API.md` → *Game identity* |
 | Auth — social (Google/Apple/Facebook) | Planned | — |
 | Economy — atomic transactions, wallet, inventory | Planned | — |
 | Leaderboard — `kills_alltime` (authoritative), server-only score writes | Done | season management planned |

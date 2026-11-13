@@ -18,7 +18,7 @@ Request payload (optional, may be an empty string):
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `server_id` | string | no | Pins the token to a specific game server instance. Omitted → the `sid` claim is not emitted. |
-| `character_id` | string | no | ADR-31. Roster character this realtime session plays. Must be in the caller's own roster (`character_list`) — for a non-default game, that game's roster collection `<game>.characters`, with no fallback to `characters`; otherwise code `5` `character not found` (same answer for "not yours" and "does not exist"). Emitted as the `cid` claim, which the gateway copies into the join token. Omitted → no `cid` claim → the account's default character (protocol 2 behaviour). |
+| `character_id` | string | no | ADR-31. Roster character this realtime session plays. Must be in the caller's own roster (`character_list`) for the session game, checked by `character.Owns` in `Scoped(game, "characters")` — `characters` for `cuvara`, `<game>.characters` for any other game, with no fallback to `characters`; otherwise code `5` `character not found` (same answer for "not yours" and "does not exist"). Emitted as the `cid` claim, which the gateway copies into the join token. Omitted → no `cid` claim → the account's default character (protocol 2 behaviour). |
 | `game_id` | string | no | ADR-33. Never selects the game: the game is the session variable `game` (absent = `cuvara`). When supplied it must equal that session game, otherwise code `7` `game_id does not match the session game`. Omitting it is the normal case. |
 
 The game is resolved by `gamectx.GameFromContext` (see *Game identity* below)
@@ -79,10 +79,14 @@ its game-state rows.
 - **Auth**: client session required for all three (code `16` otherwise; a
   `runtime.http_key` call has no subject).
 - **Registered in**: `main.go` → `character.ListRPC`, `character.CreateRPC`, `character.DeleteRPC`.
-- **Storage**: collection `characters`, key `roster`, owner = the user; one object holding the
-  whole roster, permission read `1` (owner), write `0` (only these RPCs). Every mutation is a
-  version-checked write retried up to 5 times, so two concurrent creates cannot exceed the
-  slot cap or share a slot.
+- **Game**: the session var `game` (absent = `cuvara`), resolved after the rate limit and
+  before the payload is read. The RPCs take no `game_id`. See *Game identity* below.
+- **Storage**: collection `Scoped(game, "characters")` — `characters` for `cuvara`,
+  `<game>.characters` for any other game — key `roster`, owner = the user; one object per
+  user per game holding the whole roster, permission read `1` (owner), write `0` (only these
+  RPCs). A character belongs to exactly one game's roster; nothing reads another game's
+  collection. Every mutation is a version-checked write retried up to 5 times, so two
+  concurrent creates cannot exceed the slot cap or share a slot.
 
 **Placeholder limits (pending design, ADR-31 "Consequences")** — `character/character.go`:
 
@@ -121,7 +125,8 @@ Errors:
 | 5 | `character not found` | Delete of an id not in the caller's roster |
 | 10 | `roster is being modified concurrently, retry` | All 5 version-checked attempts lost (retryable) |
 | 8 | `rate limited` | See rate limits below |
-| 13 | `internal error` | Storage failure (detail logged, not returned) |
+| 3 | `game not allowed` | The session game is not in `GAMES` |
+| 13 | `internal error` | Storage failure, or an invalid `GAMES` value (detail logged, not returned) |
 
 Rate limits (per user, in-process — same multi-instance caveat as `gateway_token`):
 
@@ -170,11 +175,12 @@ requests and 2 separate meta-DB transactions per mob kill (rpg-mmo-server#233).
 Request payload:
 
 ```json
-{ "user_id": "3f9c…", "kills": 3, "map_id": "map_01", "batch_id": "9c41…" }
+{ "game_id": "foo", "user_id": "3f9c…", "kills": 3, "map_id": "map_01", "batch_id": "9c41…" }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `game_id` | string | no | ADR-33. The game the kills belong to; absent = `cuvara`. Must be in `GAMES` (code `3`). Selects the wallet currency `Scoped(game, "gold")`, the receipt collection `Scoped(game, "reward_receipts")` and the board `Scoped(game, "kills_alltime")`. The game server fills it from `GAMESERVER_GAME_ID` |
 | `user_id` | string | yes | Nakama user id of the killer |
 | `kills` | int | yes | 1..1000 (`MaxKillsPerBatch`). Out of range → code `11`, nothing granted; the caller splits |
 | `map_id` | string | no | Recorded in the wallet metadata and the receipt |
@@ -192,13 +198,17 @@ Response payload:
 | `status` | string | `granted` — gold and score committed. `partial` — gold committed, leaderboard write failed; **resend the same `batch_id`**, the replay retries only the leaderboard |
 | `replayed` | bool | `true` when this `batch_id` had already been granted by an earlier call; the wallet was not touched again |
 | `gold` | int | Gold granted for this batch (`GoldPerKill × kills`) — on the original call and on replays |
-| `balance` | int | Wallet gold after the grant; present only on the call that performed it |
+| `balance` | int | Wallet balance of the game's currency key (`gold`, or `<game>.gold`) after the grant; present only on the call that performed it |
 | `score`, `rank` | int | Leaderboard state; `0` with `status: partial` |
 | `leaderboard_error` | string | Set with `status: partial` |
 
+**Wallet ledger metadata**: `source: "enemy_kills"`, `kills`, `map_id`,
+`batch_id`, plus `game_id` for a non-default game (omitted for `cuvara`, so its
+ledger rows are unchanged).
+
 **Exactly-once mechanics.** The wallet update and a receipt
-(`storage collection "reward_receipts"`, key = `batch_id`, owner = `user_id`,
-permissions read 0 / write 0) are committed in one transaction via
+(storage collection `Scoped(game, "reward_receipts")`, key = `batch_id`,
+owner = `user_id`, permissions read 0 / write 0) are committed in one transaction via
 `nk.MultiUpdate`, with the receipt written create-only (`version: "*"`). A
 resent `batch_id` finds the receipt and is answered as a replay; two duplicates
 racing past the lookup both reach `MultiUpdate`, the loser fails the version
@@ -222,13 +232,15 @@ twice.
 | 7 | `server-only rpc` | Caller is a client session, not `runtime.http_key`; nothing granted, do not retry |
 | 3 | `invalid payload` / `user_id is required` / `batch_id is required` | Malformed request; nothing granted |
 | 11 | `kills must be in 1..1000` | `OUT_OF_RANGE` (`CodeKillsOutOfRange`); nothing granted. Split the batch — each part under a **new** id, since this one never reached the wallet |
+| 3 | `game not allowed` | `game_id` not in `GAMES` (checked after the payload checks, before the receipt lookup); nothing granted, do not retry until `GAMES` is fixed |
 | 13 | `receipt lookup failed: …` / `wallet update failed: …` | Storage or transaction failure; nothing granted, safe to resend the same id |
+| 13 | `internal error` | Invalid `GAMES` value at request time (logged); nothing granted |
 
 **Receipt retention.** One receipt per granted batch, i.e. one per killer per
 game-server flush that carried kills (a 3s flush ≈ ≤1,200 rows per grinding
 player per hour, a few hundred bytes each). Nothing prunes them yet; they are
 the audit trail for a disputed grant (`SELECT` on storage collection
-`reward_receipts`, or the Console's Storage page). A retention job is a
+`reward_receipts`, or `<game>.reward_receipts` for a non-default game, or the Console's Storage page). A retention job is a
 follow-up, not a blocker at current scale.
 
 ### `reward_kill`, `submit_kill` (legacy per-kill pair)
@@ -241,12 +253,31 @@ callers should use `reward_kills`.
 Both are **server-only** under the same guard as `reward_kills`: a client
 session gets code `7` `server-only rpc` before the payload is read.
 
+Request payloads:
+
+```json
+{ "game_id": "foo", "user_id": "3f9c…", "victim_id": "mob_17", "map_id": "map_01" }
+{ "game_id": "foo", "user_id": "3f9c…" }
+```
+
+`game_id` is optional on both (ADR-33), absent = `cuvara`, and must be in
+`GAMES` (code `3`; an invalid `GAMES` answers code `13` `internal error`). It is
+checked after `user_id` and before any write. `reward_kill` credits
+`Scoped(game, "gold")` and adds `game_id` to the ledger metadata for a
+non-default game; `submit_kill` writes `Scoped(game, "kills_alltime")`, so a
+non-default game never touches `kills_alltime`.
+
 ### `get_leaderboard`
 
-Returns the top 10 of `kills_alltime` as
+Returns the top 10 of the game's kills board as
 `{ "leaderboard_id": …, "records": [{ "rank", "user_id", "username", "score" }] }`.
+`leaderboard_id` is the board read: `kills_alltime` for `cuvara`,
+`<game>.kills_alltime` for any other game. The game is the session var `game`;
+the RPC takes no `game_id`, so an `http_key` call (no session) reads
+`kills_alltime`. A session game not in `GAMES` gets code `3` before any read;
+an invalid `GAMES` gets code `13`.
 Read-only, so it carries no caller guard: callable with `http_key` or by a
-client session. The `kills_alltime` board is **authoritative** — records can be
+client session. Every kills board is **authoritative** — records can be
 written only by the runtime (the server-only RPCs above); a client's own
 `WriteLeaderboardRecord` against it is refused by Nakama. Clients may still
 *read* it through Nakama's own REST API.
@@ -263,12 +294,26 @@ Nakama's realtime/socket Party API — see `DESIGN.md` for why.
   **`party_get` accepts both** — the gateway calls it server-to-server to
   verify party membership before allocating a dungeon instance.
 
+- **Game** (ADR-33): `party_create` and `party_leave` use the session var
+  `game`. `party_join` and `party_get` resolve it through
+  `gamectx.GameFromContext` after the `party_id` check: with a client session
+  the session var decides and a differing `game_id` is refused with code `7`;
+  without a session (the gateway's `http_key` call to `party_get`) the payload
+  `game_id` selects the game, absent = `cuvara`. The gateway fills it from the
+  session's latched `gid`. Every party RPC reads and writes only that game's
+  collections, so a party cannot span games.
+
 Request payload — `party_join` and `party_get` only (`party_create` and
 `party_leave` act on the caller and take no payload):
 
 ```json
-{ "party_id": "8f14e45fceea167a5a36dedd4bea2543" }
+{ "party_id": "8f14e45fceea167a5a36dedd4bea2543", "game_id": "foo" }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `party_id` | string | yes | Party to join or read |
+| `game_id` | string | no | Selects the game only without a session (absent = `cuvara`); with a session it must equal the session game. Must be in `GAMES` |
 
 Response payload (all four RPCs share it):
 
@@ -314,14 +359,16 @@ Errors:
 | 9 | `not in a party` | `party_leave` with no membership |
 | 10 | `party is being modified concurrently, retry` | 5 optimistic-concurrency attempts all lost the version check. The **one** party error worth retrying. |
 | 8 | `rate limited` | Mutation rate limit (below). `party_get` is not limited. |
-| 13 | `internal error` | Storage failure. Detail is logged, never returned. |
+| 3 | `game not allowed` | The resolved game is not in `GAMES`; refused before any storage access |
+| 7 | `game_id does not match the session game` | `party_join` / `party_get` from a client session with a `game_id` other than the session var |
+| 13 | `internal error` | Storage failure, or an invalid `GAMES` value. Detail is logged, never returned. |
 
 Storage records:
 
 | Property | Party | Membership index |
 |----------|-------|------------------|
-| Collection | `party` | `party_member` |
-| Key | party id | `current` (one per user — the fixed key is what makes the create-only write enforce one party per user) |
+| Collection | `Scoped(game, "party")`: `party` (`cuvara`), `<game>.party` | `Scoped(game, "party_member")`: `party_member` (`cuvara`), `<game>.party_member` |
+| Key | party id | `current` (one per user per game — the fixed key is what makes the create-only write enforce one party per user in each game) |
 | Owner | **system** (empty user id) | the member |
 | Permission read | `0` | `1` (owner may read "which party am I in" without an RPC) |
 | Permission write | `0` | `0` |
@@ -361,12 +408,36 @@ refused with code `3` `game not allowed`.
 
 | Error | Code | Raised by |
 |-------|------|-----------|
-| `game not allowed` (`gamectx.ErrGameNotAllowed`) | 3 | Every before-auth hook, `BeforeSessionRefresh`, `gateway_token` |
-| `game_id does not match the session game` (`gamectx.ErrGameMismatch`) | 7 | `gateway_token` (any `GameFromContext` caller with a session) |
+| `game not allowed` (`gamectx.ErrGameNotAllowed`) | 3 | Every before-auth hook, `BeforeSessionRefresh`, and every RPC below |
+| `game_id does not match the session game` (`gamectx.ErrGameMismatch`) | 7 | `gateway_token`, `party_join`, `party_get` called with a session and a differing `game_id` |
 | `internal error` | 13 | Invalid `GAMES` reached at request time (normally `InitModule` already refused to start) |
 
+Which game each RPC uses:
+
+| RPC | Game source |
+|-----|-------------|
+| `gateway_token`, `character_list`, `character_create`, `character_delete`, `party_create`, `party_leave`, `get_leaderboard` | Session var `game` (absent = `cuvara`). `gateway_token` also accepts a matching `game_id`; the others take none, so `get_leaderboard` over `http_key` reads `cuvara`'s board |
+| `party_join`, `party_get` | Session var with a session (payload `game_id` must match); payload `game_id` without one (absent = `cuvara`) |
+| `reward_kill`, `reward_kills`, `submit_kill` | Payload `game_id` (absent = `cuvara`). Server-only, so there is never a session |
+
 Per-game data names come from `gamectx.Scoped(game, name)`: `name` for `cuvara`,
-`<game>.<name>` otherwise (profile `<game>.player`, roster `<game>.characters`).
+`<game>.<name>` otherwise (ADR-33 D4). No call ever reads another game's name,
+and the default game's names, data and payloads are exactly as before:
+
+| Data | Kind | `cuvara` | other game |
+|------|------|----------|------------|
+| Profile | collection | `player` | `<game>.player` |
+| Roster | collection | `characters` | `<game>.characters` |
+| Gold | wallet currency key | `gold` | `<game>.gold` |
+| Reward receipts | collection | `reward_receipts` | `<game>.reward_receipts` |
+| Party | collection | `party` | `<game>.party` |
+| Party membership | collection | `party_member` | `<game>.party_member` |
+| Kills board | leaderboard id | `kills_alltime` | `<game>.kills_alltime` |
+
+The wallet is one Nakama object per user, so a player of two games holds both
+`gold` and `<game>.gold` in it; no currency is shared between games.
+`InitModule` creates `<game>.kills_alltime` for each non-default game in
+`GAMES` (*Leaderboards* in `RUNBOOK.md`).
 
 ## Hooks
 
@@ -451,11 +522,12 @@ to `Player-<first 8 chars of user id>`.
 | `economy.RPCRewardKill`, `RPCRewardKills`, `RPCSubmitKill`, `RPCGetLeaderboard` | RPC id constants |
 | `economy.RewardKillRPC`, `RewardKillsRPC`, `SubmitKillRPC`, `GetLeaderboardRPC` | RPC handlers |
 | `economy.ErrServerOnly` | Code `7` error returned to client sessions by the mutation RPCs |
-| `economy.SetupLeaderboards(ctx, logger, nk)` | Creates `kills_alltime` (authoritative) or fails init if an existing board is not |
+| `economy.SetupLeaderboards(ctx, logger, nk, games)` | Creates `kills_alltime` and `<game>.kills_alltime` for each non-default game in `games` (authoritative), or fails init if an existing board is not |
+| `economy.CurrencyGold` | `"gold"`, the unscoped wallet currency key (scoped before every wallet access) |
 | `economy.LeaderboardKillsAllTime`, `LeaderboardMigrateEnv`, `GoldPerKill`, `MaxKillsPerBatch`, `CodeKillsOutOfRange`, `ReceiptCollection`, `StatusGranted`, `StatusPartial` | Constants |
 | `social.RPCPartyCreate`, `RPCPartyJoin`, `RPCPartyLeave`, `RPCPartyGet` | RPC id constants |
 | `social.PartyCreateRPC`, `PartyJoinRPC`, `PartyLeaveRPC`, `PartyGetRPC` | RPC handlers |
-| `social.CreateParty` / `JoinParty` / `LeaveParty` / `GetParty` | Party logic against a narrow storage interface (unit-testable without Nakama) |
+| `social.CreateParty` / `JoinParty` / `LeaveParty` / `GetParty` | Party logic against a narrow storage interface (unit-testable without Nakama); each takes the resolved `game` after `nk` |
 | `social.Party` / `Party.IsMember(userID)` | Stored party record; `IsMember` is the gateway's dungeon-entry check |
 | `social.PartyRequest` / `PartyResponse` | RPC payload types |
 | `social.ErrPartyFull`, `ErrAlreadyInParty`, `ErrNotInParty`, `ErrPartyNotFound`, `ErrPartyBusy`, `ErrPartyIDRequired`, `ErrUnauthenticated`, `ErrInvalidPayload`, `ErrRateLimited`, `ErrInternal` | Client-facing runtime errors |
@@ -463,10 +535,10 @@ to `Player-<first 8 chars of user id>`.
 | `social.PartyWriteRatePerSec`, `PartyWriteBurst`, `PartyWriteIdleTTL` | Party mutation rate-limit constants |
 | `character.RPCCharacterList`, `RPCCharacterCreate`, `RPCCharacterDelete` | RPC id constants (ADR-31) |
 | `character.ListRPC`, `CreateRPC`, `DeleteRPC` | RPC handlers |
-| `character.List` / `Create` / `Delete` / `Owns` / `ReadRoster` / `ValidateName` | Roster logic against `character.Store` (StorageRead + StorageWrite) |
+| `character.List` / `Create` / `Delete` / `Owns` / `ReadRoster` / `ValidateName` | Roster logic against `character.Store` (StorageRead + StorageWrite); all but `ValidateName` take the resolved `game` after `nk` |
 | `character.Character`, `Roster`, `CreateRequest`, `DeleteRequest`, `ListResponse`, `CreateResponse`, `DeleteResponse` | Stored record and payload types |
 | `character.MaxCharacterSlots`, `NameMinLength`, `NameMaxLength`, `NamePatternPlaceholder` | **Placeholder** creation limits |
-| `character.Collection`, `RosterKey` | Storage location |
+| `character.Collection`, `RosterKey` | Storage location (`Collection` unscoped; resolved with `gamectx.Scoped`) |
 | `character.ErrCharacterNotFound`, `ErrRosterFull`, `ErrSlotTaken`, `ErrInvalidName`, `ErrInvalidSlot`, `ErrCharacterIDRequired`, `ErrRosterBusy`, `ErrUnauthenticated`, `ErrInvalidPayload`, `ErrRateLimited`, `ErrInternal` | Client-facing runtime errors |
 | `character.RosterWriteRatePerSec`, `RosterWriteBurst`, `RosterReadRatePerSec`, `RosterReadBurst`, `RosterIdleTTL` | Roster rate-limit constants |
 

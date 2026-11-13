@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -43,8 +44,10 @@ type memStore struct {
 	failRead error
 	// conflictNext, when > 0, makes that many next writes fail a version check
 	// as if a concurrent writer had won, to exercise the retry loop.
-	conflictNext int
-	writes       int
+	conflictNext     int
+	writes           int
+	readCollections  []string
+	writeCollections []string
 }
 
 func newMemStore() *memStore { return &memStore{objects: make(map[string]*record)} }
@@ -54,6 +57,9 @@ func objKey(c, k, u string) string { return c + "/" + k + "/" + u }
 func (m *memStore) StorageRead(_ context.Context, reads []*runtime.StorageRead) ([]*api.StorageObject, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for _, r := range reads {
+		m.readCollections = append(m.readCollections, r.Collection)
+	}
 	if m.failRead != nil {
 		return nil, m.failRead
 	}
@@ -73,6 +79,9 @@ func (m *memStore) StorageWrite(_ context.Context, writes []*runtime.StorageWrit
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.writes++
+	for _, w := range writes {
+		m.writeCollections = append(m.writeCollections, w.Collection)
+	}
 	if m.conflictNext > 0 {
 		m.conflictNext--
 		return nil, errVersionConflict
@@ -181,7 +190,7 @@ func TestCreate(t *testing.T) {
 			if tt.seed != nil {
 				st.seedRoster(t, tt.userID, tt.seed...)
 			}
-			c, err := Create(context.Background(), st, tt.userID, tt.charName, tt.slot, fixedNow)
+			c, err := Create(context.Background(), st, constants.DefaultGameID, tt.userID, tt.charName, tt.slot, fixedNow)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("err = %v, want %v", err, tt.wantErr)
@@ -197,11 +206,11 @@ func TestCreate(t *testing.T) {
 			if !uuidV4.MatchString(c.ID) {
 				t.Errorf("id %q is not a UUID v4", c.ID)
 			}
-			owns, err := Owns(context.Background(), st, tt.userID, c.ID)
+			owns, err := Owns(context.Background(), st, constants.DefaultGameID, tt.userID, c.ID)
 			if err != nil || !owns {
 				t.Errorf("Owns after create = %v, %v", owns, err)
 			}
-			list, _ := List(context.Background(), st, tt.userID)
+			list, _ := List(context.Background(), st, constants.DefaultGameID, tt.userID)
 			if len(list) != len(tt.seed)+1 {
 				t.Errorf("roster size = %d, want %d", len(list), len(tt.seed)+1)
 			}
@@ -222,7 +231,7 @@ func TestCreate_RetriesVersionConflict(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			st := newMemStore()
 			st.conflictNext = tt.conflicts
-			_, err := Create(context.Background(), st, "u1", "Alice", -1, fixedNow)
+			_, err := Create(context.Background(), st, constants.DefaultGameID, "u1", "Alice", -1, fixedNow)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("err = %v, want %v", err, tt.wantErr)
@@ -246,11 +255,11 @@ func TestCreate_ConcurrentCannotExceedSlots(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, _ = Create(context.Background(), st, "u1", fmt.Sprintf("Hero%d", i), -1, fixedNow)
+			_, _ = Create(context.Background(), st, constants.DefaultGameID, "u1", fmt.Sprintf("Hero%d", i), -1, fixedNow)
 		}(i)
 	}
 	wg.Wait()
-	list, err := List(context.Background(), st, "u1")
+	list, err := List(context.Background(), st, constants.DefaultGameID, "u1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +298,7 @@ func TestDelete(t *testing.T) {
 			if tt.seed != nil {
 				st.seedRoster(t, tt.userID, tt.seed...)
 			}
-			err := Delete(context.Background(), st, tt.userID, tt.deleteID)
+			err := Delete(context.Background(), st, constants.DefaultGameID, tt.userID, tt.deleteID)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("err = %v, want %v", err, tt.wantErr)
@@ -299,11 +308,11 @@ func TestDelete(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Delete: %v", err)
 			}
-			list, _ := List(context.Background(), st, tt.userID)
+			list, _ := List(context.Background(), st, constants.DefaultGameID, tt.userID)
 			if len(list) != tt.wantLeft {
 				t.Errorf("left = %d, want %d", len(list), tt.wantLeft)
 			}
-			if owns, _ := Owns(context.Background(), st, tt.userID, tt.deleteID); owns {
+			if owns, _ := Owns(context.Background(), st, constants.DefaultGameID, tt.userID, tt.deleteID); owns {
 				t.Error("still owns deleted character")
 			}
 		})
@@ -328,7 +337,7 @@ func TestOwns(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Owns(context.Background(), st, tt.userID, tt.cid)
+			got, err := Owns(context.Background(), st, constants.DefaultGameID, tt.userID, tt.cid)
 			if err != nil {
 				t.Fatalf("Owns: %v", err)
 			}
@@ -342,12 +351,13 @@ func TestOwns(t *testing.T) {
 func TestOwns_StorageErrorPropagates(t *testing.T) {
 	st := newMemStore()
 	st.failRead = errors.New("db down")
-	if _, err := Owns(context.Background(), st, "u1", "c"); err == nil {
+	if _, err := Owns(context.Background(), st, constants.DefaultGameID, "u1", "c"); err == nil {
 		t.Fatal("want error")
 	}
 }
 
 func TestRPCs(t *testing.T) {
+	t.Setenv("GAMES", "")
 	tests := []struct {
 		name    string
 		ctx     context.Context
@@ -452,6 +462,7 @@ func TestRPCs(t *testing.T) {
 
 // TestRPCs_RateLimited drives the shared write bucket past its burst.
 func TestRPCs_RateLimited(t *testing.T) {
+	t.Setenv("GAMES", "")
 	tests := []struct {
 		name string
 		call func(ctx context.Context, st *memStore) error

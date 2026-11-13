@@ -15,7 +15,10 @@
 //
 //	collection "characters", key "roster", owner <user> -> Roster
 //
-// One object per user holding the whole roster, rather than one object per
+// Non-default games use collection "<game>.characters" with no fallback to
+// the default game's collection.
+//
+// One object per user per game holding the whole roster, rather than one object per
 // character, because every rule that matters is a rule about the roster as a
 // whole (slot count, slot uniqueness). A single object makes each mutation one
 // version-checked write: two concurrent creates cannot both take the last slot
@@ -34,6 +37,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -129,9 +133,9 @@ func newCharacterID() (string, error) {
 // ReadRoster loads a user's roster and its storage version. A user with no
 // roster object gets an empty roster and version "" (the next write is then
 // create-only).
-func ReadRoster(ctx context.Context, nk Store, userID string) (Roster, string, error) {
+func ReadRoster(ctx context.Context, nk Store, game, userID string) (Roster, string, error) {
 	objs, err := nk.StorageRead(ctx, []*runtime.StorageRead{{
-		Collection: Collection,
+		Collection: gamectx.Scoped(game, Collection),
 		Key:        RosterKey,
 		UserID:     userID,
 	}})
@@ -139,7 +143,7 @@ func ReadRoster(ctx context.Context, nk Store, userID string) (Roster, string, e
 		return Roster{}, "", fmt.Errorf("read roster %s: %w", userID, err)
 	}
 	for _, o := range objs {
-		if o.GetCollection() != Collection || o.GetKey() != RosterKey {
+		if o.GetCollection() != gamectx.Scoped(game, Collection) || o.GetKey() != RosterKey {
 			continue
 		}
 		var r Roster
@@ -153,7 +157,7 @@ func ReadRoster(ctx context.Context, nk Store, userID string) (Roster, string, e
 
 // writeRoster stores the roster at a known version: "*" (create-only) when
 // none existed, otherwise the version read at the start of the attempt.
-func writeRoster(ctx context.Context, nk Store, userID string, r Roster, version string) error {
+func writeRoster(ctx context.Context, nk Store, game, userID string, r Roster, version string) error {
 	if version == "" {
 		version = "*"
 	}
@@ -162,7 +166,7 @@ func writeRoster(ctx context.Context, nk Store, userID string, r Roster, version
 		return fmt.Errorf("marshal roster: %w", err)
 	}
 	if _, err := nk.StorageWrite(ctx, []*runtime.StorageWrite{{
-		Collection:      Collection,
+		Collection:      gamectx.Scoped(game, Collection),
 		Key:             RosterKey,
 		UserID:          userID,
 		Value:           string(value),
@@ -183,11 +187,11 @@ func sortedBySlot(cs []Character) []Character {
 }
 
 // List returns the caller's characters ordered by slot.
-func List(ctx context.Context, nk Store, userID string) ([]Character, error) {
+func List(ctx context.Context, nk Store, game, userID string) ([]Character, error) {
 	if userID == "" {
 		return nil, ErrUnauthenticated
 	}
-	r, _, err := ReadRoster(ctx, nk, userID)
+	r, _, err := ReadRoster(ctx, nk, game, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list characters: %w", err)
 	}
@@ -196,11 +200,11 @@ func List(ctx context.Context, nk Store, userID string) ([]Character, error) {
 
 // Owns reports whether characterID is in userID's roster. gateway_token calls
 // it before putting a `cid` claim in a token.
-func Owns(ctx context.Context, nk Store, userID, characterID string) (bool, error) {
+func Owns(ctx context.Context, nk Store, game, userID, characterID string) (bool, error) {
 	if userID == "" || characterID == "" {
 		return false, nil
 	}
-	r, _, err := ReadRoster(ctx, nk, userID)
+	r, _, err := ReadRoster(ctx, nk, game, userID)
 	if err != nil {
 		return false, fmt.Errorf("check character ownership: %w", err)
 	}
@@ -214,7 +218,7 @@ func Owns(ctx context.Context, nk Store, userID, characterID string) (bool, erro
 
 // Create adds a character to the caller's roster. slot < 0 means "lowest free
 // slot"; otherwise the slot must be below MaxCharacterSlots and free.
-func Create(ctx context.Context, nk Store, userID, name string, slot int, now func() time.Time) (Character, error) {
+func Create(ctx context.Context, nk Store, game, userID, name string, slot int, now func() time.Time) (Character, error) {
 	if userID == "" {
 		return Character{}, ErrUnauthenticated
 	}
@@ -227,7 +231,7 @@ func Create(ctx context.Context, nk Store, userID, name string, slot int, now fu
 
 	var lastErr error
 	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
-		r, version, err := ReadRoster(ctx, nk, userID)
+		r, version, err := ReadRoster(ctx, nk, game, userID)
 		if err != nil {
 			return Character{}, fmt.Errorf("create character: %w", err)
 		}
@@ -257,7 +261,7 @@ func Create(ctx context.Context, nk Store, userID, name string, slot int, now fu
 		}
 		c := Character{ID: id, Slot: chosen, Name: name, CreatedAt: now().Unix()}
 		updated := Roster{Characters: append(append(make([]Character, 0, len(r.Characters)+1), r.Characters...), c)}
-		if err := writeRoster(ctx, nk, userID, updated, version); err != nil {
+		if err := writeRoster(ctx, nk, game, userID, updated, version); err != nil {
 			lastErr = err
 			continue // lost a version check (or a transient failure): re-read, re-validate
 		}
@@ -268,7 +272,7 @@ func Create(ctx context.Context, nk Store, userID, name string, slot int, now fu
 
 // Delete removes a character from the caller's roster. It does not touch the
 // character's game-state rows (owned by the game server, ADR-1/ADR-31).
-func Delete(ctx context.Context, nk Store, userID, characterID string) error {
+func Delete(ctx context.Context, nk Store, game, userID, characterID string) error {
 	if userID == "" {
 		return ErrUnauthenticated
 	}
@@ -278,7 +282,7 @@ func Delete(ctx context.Context, nk Store, userID, characterID string) error {
 
 	var lastErr error
 	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
-		r, version, err := ReadRoster(ctx, nk, userID)
+		r, version, err := ReadRoster(ctx, nk, game, userID)
 		if err != nil {
 			return fmt.Errorf("delete character: %w", err)
 		}
@@ -291,7 +295,7 @@ func Delete(ctx context.Context, nk Store, userID, characterID string) error {
 		if len(remaining) == len(r.Characters) {
 			return ErrCharacterNotFound
 		}
-		if err := writeRoster(ctx, nk, userID, Roster{Characters: remaining}, version); err != nil {
+		if err := writeRoster(ctx, nk, game, userID, Roster{Characters: remaining}, version); err != nil {
 			lastErr = err
 			continue
 		}

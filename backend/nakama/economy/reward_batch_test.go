@@ -30,21 +30,27 @@ var errVersionConflict = errors.New("Storage write rejected - version check fail
 // mockGranter implements killGranter with an in-memory storage collection and
 // records every mutation, so tests can assert exactly-once behaviour.
 type mockGranter struct {
-	walletCalls  int // legacy WalletUpdate (reward_kill)
-	walletUser   string
-	walletGold   int64
-	walletMeta   map[string]interface{}
-	walletErr    error
-	balance      int64
-	lbCalls      int
-	lbScore      int64
-	lbErr        error
-	returnedRank int64
+	walletCalls     int // legacy WalletUpdate (reward_kill)
+	walletUser      string
+	walletGold      int64
+	walletChangeset map[string]int64
+	walletBalances  map[string]int64
+	walletMeta      map[string]interface{}
+	walletErr       error
+	balance         int64
+	lbCalls         int
+	lbIDs           []string
+	lbScores        map[string]int64
+	lbScore         int64
+	lbErr           error
+	returnedRank    int64
 
 	multiCalls int
 	multiErr   error // forced failure: nothing is written
 	multiMeta  map[string]interface{}
 	storage    map[string]string // collection/key/user -> value
+	reads      []*runtime.StorageRead
+	readCalls  int
 	readErr    error
 	writeErr   error // StorageWrite (receipt update after leaderboard)
 	writeCalls int
@@ -56,26 +62,32 @@ func (m *mockGranter) WalletUpdate(_ context.Context, userID string, changeset m
 	metadata map[string]interface{}, _ bool) (map[string]int64, map[string]int64, error) {
 	m.walletCalls++
 	m.walletUser = userID
-	m.walletGold = changeset["gold"]
+	m.walletChangeset = changeset
 	m.walletMeta = metadata
 	if m.walletErr != nil {
 		return nil, nil, m.walletErr
 	}
-	m.balance += changeset["gold"]
-	return map[string]int64{"gold": m.balance}, nil, nil
+	return m.applyChangeset(changeset), nil, nil
 }
 
-func (m *mockGranter) LeaderboardRecordWrite(_ context.Context, _, _, _ string,
+func (m *mockGranter) LeaderboardRecordWrite(_ context.Context, id, _, _ string,
 	score, _ int64, _ map[string]interface{}, _ *int) (*api.LeaderboardRecord, error) {
 	m.lbCalls++
+	m.lbIDs = append(m.lbIDs, id)
 	if m.lbErr != nil {
 		return nil, m.lbErr
 	}
 	m.lbScore += score
-	return &api.LeaderboardRecord{Score: m.lbScore, Rank: m.returnedRank}, nil
+	if m.lbScores == nil {
+		m.lbScores = map[string]int64{}
+	}
+	m.lbScores[id] += score
+	return &api.LeaderboardRecord{Score: m.lbScores[id], Rank: m.returnedRank}, nil
 }
 
 func (m *mockGranter) StorageRead(_ context.Context, reads []*runtime.StorageRead) ([]*api.StorageObject, error) {
+	m.readCalls++
+	m.reads = append(m.reads, reads...)
 	if m.readErr != nil {
 		return nil, m.readErr
 	}
@@ -125,14 +137,30 @@ func (m *mockGranter) MultiUpdate(_ context.Context, _ []*runtime.AccountUpdate,
 	var results []*runtime.WalletUpdateResult
 	for _, w := range wallets {
 		m.walletUser = w.UserID
-		m.walletGold = w.Changeset["gold"]
+		m.walletChangeset = w.Changeset
 		m.multiMeta = w.Metadata
-		m.balance += w.Changeset["gold"]
 		results = append(results, &runtime.WalletUpdateResult{
-			UserID: w.UserID, Updated: map[string]int64{"gold": m.balance},
+			UserID: w.UserID, Updated: m.applyChangeset(w.Changeset),
 		})
 	}
 	return nil, results, nil
+}
+
+func (m *mockGranter) applyChangeset(changeset map[string]int64) map[string]int64 {
+	if m.walletBalances == nil {
+		m.walletBalances = map[string]int64{}
+	}
+	m.walletGold = 0
+	for key, amount := range changeset {
+		m.walletGold += amount
+		m.balance += amount
+		m.walletBalances[key] += amount
+	}
+	updated := make(map[string]int64, len(m.walletBalances))
+	for key, balance := range m.walletBalances {
+		updated[key] = balance
+	}
+	return updated
 }
 
 func (m *mockGranter) receipt(t *testing.T, user, batch string) rewardReceipt {

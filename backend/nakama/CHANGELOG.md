@@ -32,9 +32,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     (omitted for `cuvara`, so the default token shape is unchanged) and echoes it as the
     response's `game_id` (also omitted for `cuvara`). The request may carry an optional
     `game_id`, which must equal the session game. New `auth.IssueGatewayTokenForGame`.
-  - **Per-game roster check.** For a non-default game, `character_id` is checked against
-    that game's own roster collection `<game>.characters` with no fallback to `characters`;
-    `cuvara` still uses `character.Owns`.
+  - **Per-game roster check.** `character_id` is checked by `character.Owns` against the
+    session game's roster, `Scoped(game, "characters")`: `characters` for `cuvara`,
+    `<game>.characters` for any other game, with no fallback to `characters`.
   - **Per-game profile** `<game>.player`/`profile`, created on the first game-scoped login,
     by the after-authenticate hooks **and** by `gateway_token`, so a player whose account
     predates the game gets one on their first token. New `auth.EnsureGameProfile`
@@ -47,6 +47,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     (build tag `localstack`) proves on a real Nakama that a refresh keeps `vrs.game` and
     the refreshed session still mints `gid`; it is **HUMAN_REQUIRED** until run against a
     local stack (see `docs/RUNBOOK.md`).
+- **Multi-game data, ADR-33 leg 4 (D4 Data under B).** Nakama data is per game; `cuvara`
+  keeps its bare names, data and payloads, so no migration.
+  - **Optional payload `game_id`** on `reward_kill`, `reward_kills`, `submit_kill`,
+    `party_get` and `party_join`, resolved by `gamectx.GameFromContext`. It selects the game
+    only when the call has no session (the game server's or the gateway's `http_key` call);
+    absent = `cuvara`. With a client session (`party_get`, `party_join`) the session var
+    `game` decides and a differing `game_id` is refused with code 7. A game outside `GAMES`
+    is refused with code 3 before any storage, wallet or leaderboard access; an invalid
+    `GAMES` at request time answers code 13.
+  - **Per-game leaderboards.** `SetupLeaderboards(ctx, logger, nk, games)` (was
+    `(ctx, logger, nk)`) creates `<game>.kills_alltime` (authoritative, desc, incr, no reset)
+    for each non-default game in `GAMES`, with the same authoritative check and
+    `LEADERBOARD_MIGRATE=recreate` rule per board. `kills_alltime` is always ensured and stays
+    `cuvara`'s.
+  - **Ledger metadata `game_id`** on `reward_kill` and `reward_kills` wallet updates for a
+    non-default game; omitted for `cuvara`, so its ledger rows are unchanged.
+  - New `economy.CurrencyGold` (`"gold"`), the unscoped wallet currency key.
+  - **Tests.** `TestSubmitKill_NonDefaultGameWritesScopedLeaderboard`,
+    `TestRewardKills_NonDefaultGameWritesScopedLeaderboardAndGold` (write `<game>.kills_alltime`,
+    not `kills_alltime`, and credit `<game>.gold`), `TestRewardKill_NonDefaultGameCreditsScopedGold`,
+    `TestMutationRPCs_DefaultGamePreservesDevelop`, `TestGetLeaderboard_GameFromSession`,
+    `TestSetupLeaderboards_Games` (`economy/game_test.go`); `TestRosterGameIsolation`,
+    `TestRosterDefaultGameAliases`, `TestRosterRPCGame` (`character/character_game_test.go`);
+    `TestPartyRPCs_CannotCrossGames`, `TestPartyMembership_OnePartyPerGame`,
+    `TestPartyGetRPC_ServerGame` (`social/party_game_test.go`).
 - **Character roster RPCs (ADR-31): `character_list`, `character_create`, `character_delete`**
   (`character/`), registered in `InitModule`. One version-checked storage object per user
   (collection `characters`, key `roster`, owner-read / server-write), so concurrent creates
@@ -195,10 +220,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Scoped(game, "player")`. For `cuvara` that is still `player`, so default-game behaviour
   is unchanged. `docs/API.md`, `docs/DESIGN.md`, `docs/README.md` and `docs/RUNBOOK.md`
   describe `GAMES`, the client `vars` contract, the hooks, `gid` and the local-stack test.
+- **Game-scoped names in `character/`, `economy/` and `social/` (ADR-33 D4).** The roster
+  collection `characters`, the wallet currency key `gold`, the receipt collection
+  `reward_receipts`, the party collections `party` and `party_member` and the leaderboard id
+  `kills_alltime` are all resolved through `gamectx.Scoped(game, …)`: bare for `cuvara`,
+  `<game>.<name>` for any other game, with no fallback across games. A party, its membership
+  index and a roster belong to one game; a user can be in one party per game.
+  - Client RPCs (`character_list`, `character_create`, `character_delete`, `party_create`,
+    `party_join`, `party_leave`, `party_get` with a session, `get_leaderboard`) use the
+    session var `game`. `get_leaderboard` reports the board it read in `leaderboard_id`; an
+    `http_key` call to it reads `kills_alltime`.
+  - `character.ReadRoster`, `List`, `Create`, `Delete`, `Owns` and `social.CreateParty`,
+    `JoinParty`, `LeaveParty`, `GetParty` take a `game` argument.
+  - `gateway_token` checks `cid` through the scoped `character.Owns` for every game,
+    replacing the separate non-default-game path.
+  - `docs/API.md`, `docs/DESIGN.md`, `docs/README.md` and `docs/RUNBOOK.md` describe the
+    scoped names, the payload `game_id` rules and the per-game leaderboards.
 - `docs/API.md`, `docs/RUNBOOK.md`, `docs/DESIGN.md`, `docs/README.md` describe the
   server-only contract, error code 7, the leaderboard migration, the exactly-once
   receipt mechanics, `status`/`replayed`, code 11, receipt retention and how to audit
   a disputed batch.
+
+### Removed
+- `auth/roster_game.go` (`ownsGameCharacter`), the non-default-game roster check added with
+  the multi-game auth work. The scoped `character.Owns` covers every game (ADR-33 D4).
 
 ## [0.9.0] - 2026-09-05
 

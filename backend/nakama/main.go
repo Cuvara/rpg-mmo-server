@@ -122,7 +122,7 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	}
 
 	// Create leaderboards (idempotent)
-	if err := economy.SetupLeaderboards(ctx, logger, nk); err != nil {
+	if err := economy.SetupLeaderboards(ctx, logger, nk, games); err != nil {
 		return fmt.Errorf("setup leaderboards: %w", err)
 	}
 
