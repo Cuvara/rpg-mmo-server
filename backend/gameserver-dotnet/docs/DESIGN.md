@@ -1516,10 +1516,20 @@ A `JsonConverterFactory` is invoked only when System.Text.Json builds a `JsonTyp
 for an annotated type, and only the **reflection-based resolver** consults
 `[JsonConverter]` on an arbitrary type. Four facts, each checked separately:
 
-1. This assembly never uses that resolver. All three `JsonSerializer` call sites
-   (`EventPublisher`, and two in `JwtValidator`) pass a source-generated `JsonTypeInfo`.
-   The serialised types — `DeathPayload`, `JwtHeaderJson`, `JwtClaimsJson` — are strings
-   only; no collection of any kind.
+1. This assembly never uses that resolver. Every `JsonSerializer` call site passes a
+   source-generated `JsonTypeInfo` from a `JsonSerializerContext` declared next to it:
+   `AgonesSdk` (`AgonesJsonContext`), `ContentLoader` (`ContentJsonContext`),
+   `GameManifest` (`ManifestJsonContext`), `EventPublisher` (`EventJsonContext`),
+   `KickEvents` (`KickJsonContext`), `MapLoader` (`MapJsonContext`), `NakamaClient`
+   (`NakamaJsonContext`, nine calls), `MetricsEndpoint` (`ServerStatusContext`) and two in
+   `JwtValidator` (`JwtJsonContext`): 18 calls in 9 files, counted 2026-11-13 with
+   `grep -rn "JsonSerializer\." GameServer/`. No call passes a `JsonSerializerOptions` or
+   names a type without its `JsonTypeInfo`. Some serialised types do hold ordinary
+   collections (`ServerStatus.InputsRejectedByReason` is a `Dictionary<string, long>`),
+   and the source generator emits code for those itself; none is a Pooled type (fact 4).
+   An earlier revision of this item said "all three call sites" and "strings only, no
+   collection of any kind"; both stopped being true as the Nakama, Agones, content,
+   manifest, kick and `/status` paths were added.
 2. `Arch.dll` has **zero** System.Text.Json member references. It uses the Pooled
    collections as storage and never serialises them.
 3. `Collections.Pooled` has **no `ModuleInitializer` and no `<Module>` cctor**, so it

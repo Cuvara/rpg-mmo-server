@@ -9,6 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - `IsValidGameId` and Go `ValidGameID` now reserve `other` because the gateway metrics label buckets unknown games as `other`.
+- Game label on every `rpg.gameserver` metric, ADR-33 leg 2 (D3). Every measurement now carries `game` next to `map_id`; its value is the server's game (`GAMESERVER_GAME_ID` / `--game-id`, `ServerOptions.GameId`, passed to `GameMetrics` from `Program.cs`; `cuvara` when unset or empty). One process serves one game, so no metric is added, renamed or removed and the series count per process is unchanged. Wire and protocol version unchanged.
+  - `GameMetrics` builds one base tag set `{map_id, game}` in its constructor and derives every other tag set from it (`With`), including the GC generation pair, the transport pair, the KCP reasons and the lazily built command-reject lists; `GameMetrics.GameId` exposes the effective game.
+  - **Five series that had no `map_id` gain `game` and `map_id`**: `gameserver_player_saves_total` (`status`), `gameserver_events_published_total` (`type`), `gameserver_events_dropped_total`, `gameserver_events_publish_failures_total` and the `gameserver_entities` gauge. Dashboards, alerts and recording rules that match those series by an exact label set, aggregate them `by (map_id)` or join them should be checked.
+  - `gameserver_transport_encrypted` / `gameserver_transport_authenticated` carry `map_id` and `game` before `SetTransportPosture` runs (no labels at all before); after it they carry `transport` and `cipher` as before.
+  - Tests: `GameMetricsGameLabelTests` audits the whole meter through a `MeterListener` (every instrument, every numeric type, no allow-list) and fails on any measurement without exactly one `game` and one `map_id`, or any instrument that records nothing, for an unset, empty and non-default game; `Audit_ReportsAnInstrumentThatOmitsGame` is its negative control. `GameMetricsTests` checks the `gameserver_entities` labels.
+  - Documented in `docs/METRICS.md` ("Labels on every series", the label column of every row, PromQL by `game`) and the `--game-id` row of `docs/README.md`.
 
 ### Added
 
@@ -45,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `docs/DESIGN.md`, NativeAOT "Why it cannot fire", fact 1: it said "all three `JsonSerializer` call sites" (`EventPublisher`, two in `JwtValidator`) serialising strings only. There are 18 calls in 9 files (`AgonesSdk`, `ContentLoader`, `GameManifest`, `EventPublisher`, `KickEvents`, `MapLoader`, `NakamaClient`, `MetricsEndpoint`, `JwtValidator`), each passing a source-generated `JsonTypeInfo`, and some serialised types hold ordinary collections; none is a Pooled type, so the conclusion stands (docs only).
 - `docs/API.md`, join refusal reasons: the counter note now says a `protocol_version_mismatch` refusal counts as `gameserver_handshakes_rejected_total{reason="protocol_version"}` (docs only).
 - Local full-suite instability on a loaded host (#515, partial); test-only except one internal seam. Each fixed family is a wall-clock budget the test did not need, or a read deadline that also covered the work it was waiting for:
   - `DeltaSnapshotWireTests` (3 tests): the snapshot reader stopped at a count or at 5 s from its creation, which also covered the whole tick-producing phase, so a contended host made the client reconstruct a state several ticks old (expected 20, actual 17.9999962 is six ticks). It now collects in the background and waits for the snapshot stamped with the final server tick, with a 30 s budget that starts after the last tick.

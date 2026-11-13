@@ -252,59 +252,111 @@ against Prometheus' own timestamps.
 
 The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`.
 
+## Labels on every series: `map_id` and `game` (ADR-33 D3)
+
+**Every measurement on the `rpg.gameserver` meter carries both labels**, including the
+series not listed in the reference table below (`gameserver_inputs_rejected_total`,
+`gameserver_input_anomaly_alerts_total`, `gameserver_combat_attack_rate_violations_total`
+and the rest). The `Labels` column below lists them on every row; any other label is added
+on top of these two.
+
+| Label | Value |
+|---|---|
+| `map_id` | The map this server simulates (`--map-id` / `GAMESERVER_MAP_ID`) |
+| `game` | The game this server serves (`--game-id` / `GAMESERVER_GAME_ID`, `ServerOptions.GameId`). Unset or empty is the default game, `cuvara`. It is the server's own game, fixed at startup, never a value taken from a token or a client |
+
+Both come from one base tag set `{map_id, game}` that `GameMetrics` builds once in its
+constructor. Every other tag set (the per-reason, per-outcome and per-group lists, the GC
+generation pair, the transport pair, the KCP reasons, the lazily built command-reject lists,
+the per-type event list) is that base set plus its own labels, so an instrument cannot drop
+either base label by re-listing literals.
+
+**One process serves one game, so `game` adds no series**: the series count per process is
+the same as before ADR-33. No metric was added, renamed or removed.
+
+**Five series carried no `map_id` before ADR-33 and now carry both labels:**
+
+| Series | Before | Now |
+|---|---|---|
+| `gameserver_player_saves_total` | `status` | `map_id`, `game`, `status` |
+| `gameserver_events_published_total` | `type` | `map_id`, `game`, `type` |
+| `gameserver_events_dropped_total` | none | `map_id`, `game` |
+| `gameserver_events_publish_failures_total` | none | `map_id`, `game` |
+| `gameserver_entities` | none | `map_id`, `game` |
+
+A selector or a `sum(...)` over them reads as before. Check anything that matched them by
+an exact label set: a `sum by (map_id)` over them used to give one group and now gives one
+per map, and a join (`on(...)`, `ignoring(...)`) or recording rule written against the
+old label set no longer lines up.
+
+`gameserver_transport_encrypted` and `gameserver_transport_authenticated` carry the base
+set even before `GameMetrics.SetTransportPosture` adds `transport` and `cipher`; before
+ADR-33 they carried no label at all until then. `Program.cs` sets the posture before the
+endpoint starts, so a live scrape sees all four labels.
+
+**Enforced by a meter-wide test**, `GameServer.Tests/Observability/GameMetricsGameLabelTests.cs`.
+A `MeterListener` enables every instrument published under the test's meter name (no
+allow-list of instrument names) for every numeric measurement type, drives every
+`GameMetrics` record path and observable callback, and fails on any measurement that does
+not carry exactly one `game` and one `map_id` with the expected values, and on any
+instrument that recorded nothing (the `AllowedSilent` list is empty). It runs for no game
+id, an empty one (both `cuvara`) and `testgame2`. A new instrument that omits `game`, or one
+nobody drives, fails it. `Audit_ReportsAnInstrumentThatOmitsGame` is the negative control:
+a counter and a gauge recorded with `map_id` only must be reported.
+
 ## Metric reference (scraped names)
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `gameserver_tick_duration_seconds` | histogram | `map_id` | Wall time of one **base** tick. Explicit buckets 0.5 ms → 1 s, so they still bracket the 16.7 ms @60 Hz base budget as well as the 66 ms @15 Hz one |
-| `gameserver_tick_processed_inputs_total` | counter | `map_id` | Inputs applied by the tick loop |
-| `gameserver_sim_group_duration_seconds` | histogram | `map_id`, `group` | Wall time of one run of a simulation group — `group=critical\|world\|background` |
-| `gameserver_sim_group_runs_total` | counter | `map_id`, `group` | Times a simulation group has run. The ratio between groups **is** the configured rate ratio |
-| `gameserver_nakama_reward_outcomes_total` | counter | `map_id`, `outcome` | Answers to Nakama's `reward_kills`, one per attempt including retries — `outcome=granted\|partial\|not_granted\|too_large\|unknown`. See below |
-| `gameserver_tick_overruns_total` | counter | `map_id` | Base ticks whose work exceeded the base period — see below |
-| `gameserver_tick_timer_fallbacks_total` | counter | `map_id` | Tick loops where the Windows high-resolution timer failed and pacing fell back to `WaitOne` + `SpinOnce` (at most once per loop) |
-| `gameserver_tick_backlog_dropped_total` | counter | `map_id` | Base ticks discarded because the loop fell too far behind the wall clock — see below |
-| `gameserver_achieved_tick_hz` | gauge | `map_id` | **Measured** base-tick rate over a 2s window, from the monotonic clock. Compare with the configured `SIM_CRITICAL_HZ` — a healthy server has them equal. Never derived from wall time: a wall-clock rate on a host with a fast `CLOCK_REALTIME` reports a healthy loop as slow (#147/#153). `0` = not measured yet |
-| `gameserver_players_online` | gauge | `map_id` | Connected players |
-| `gameserver_connections` | gauge | `map_id` | Connections registered on this server — the set the snapshot broadcast iterates. Deliberately **not** derived from `players_online`, which is an independently balanced counter: the two disagreeing is the signal that one of them is lying (#401). This is the right denominator for `gameserver_snapshots_bytes_total` when they disagree |
-| `gameserver_entities` | gauge | — | Entities in the world |
-| `gameserver_snapshots_sent_total` | counter | `map_id` | Snapshot messages sent |
-| `gameserver_snapshots_bytes_total` | counter | `map_id` | Bytes of snapshot frames written to client sockets, envelope and 4-byte length prefix included. Divide by `gameserver_players_online` and by the scrape interval for the per-client downlink rate — the figure ADR-7's `< 50 KB/s` mobile threshold is about, and the one measured at 45.9 KB/s at 200 players |
-| `gameserver_snapshots_entities_shed_total` | counter | `map_id` | Entity updates **deferred** by the per-connection downlink budget (`GAMESERVER_MAX_SNAPSHOT_BYTES`). Deferred, not dropped: the entity stays dirty and is re-offered on the next snapshot. Read it with `max_shed_age` — a high rate with a low age is the cap doing its job on a crowd; a high age means a client is falling behind. Flat zero is the expected reading at any load the server is known to handle |
-| `gameserver_snapshots_removals_deferred_total` | counter | `map_id` | Despawn notifications deferred by the budget. Worse than a deferred update — the client renders an entity that no longer exists — so despawns outrank every non-self update and this should stay flat at zero. It moves only when the budget is too small for the despawn list on its own, which means the budget is set below one AOI's worth of churn |
-| `gameserver_transport_encrypted` | gauge | `map_id`, `transport`, `cipher` | 1 when packets leave this server as ciphertext, 0 when they are cleartext. **0 is the default** — `TRANSPORT_KEY` defaults to empty and KCP without a key is cleartext — so alert on this being 0 rather than assuming it is 1. A **gauge** on purpose: a never-incremented counter is absent from `/metrics`, and "is this server encrypted" must never answer by being missing |
-| `gameserver_transport_authenticated` | gauge | `map_id`, `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. **Currently 0 on every supported configuration**: the KCP path is AES-CFB with a CRC32, and a CRC32 is linear, not a MAC. Separate from `transport_encrypted` so encryption cannot be read as integrity; published while 0 so that its becoming 1 is a visible event |
-| `gameserver_kcp_sessions` | gauge | `map_id` | KCP sessions in the listener's table, pre-authentication included. Bounded by `GAMESERVER_KCP_MAX_SESSIONS` (default 4096). Compare with `handshakes_pending + connections`: a table much larger than both is sessions that never handed off — normal only for the idle-timeout window |
-| `gameserver_kcp_sessions_created_total` | counter | `map_id` | KCP sessions opened (a `PUSH sn=0` from a new endpoint, or a new conversation from a known one) |
-| `gameserver_kcp_sessions_rejected_total` | counter | `map_id`, `reason` | New sessions refused before any state was created — `reason=global_cap\|per_ip_cap\|rate\|backlog`. A refused opener is retransmitted by the peer, so one blocked client can count several times. Any sustained rate is a flood or a limit set below real load; see RUNBOOK, "KCP listener limits" |
-| `gameserver_kcp_sessions_closed_total` | counter | `map_id`, `reason` | Sessions the transport itself closed — `reason=idle` (no datagram for 60 s), `dead_link` (a segment hit 20 unacknowledged transmissions), `slow_consumer` (send queue past its hard limit). Application closes (kick, refused join, `disconnect`) are not counted here |
-| `gameserver_kcp_datagrams_dropped_total` | counter | `map_id`, `reason` | Inbound UDP datagrams dropped by the listener — `reason=oversize` (> 1500 B, never parsed), `undersize`, `rate` (per-session token bucket; KCP retransmits them), `bad_crypto` (wrong or missing `TRANSPORT_KEY`), `fec`, `no_session` (not a session opener from an unknown endpoint), `conv_mismatch`, `malformed`. `bad_crypto` climbing is the signature of a client built with a different key |
-| `gameserver_kcp_writes_rejected_total` | counter | `map_id` | Application frames larger than one maximum wire frame; each one closes its session. Zero forever on a healthy server |
-| `gameserver_kcp_datagrams_received_total` | counter | `map_id` | Datagrams the single KCP receive thread took off the socket (handled or dropped) |
-| `gameserver_kcp_segments_retransmitted_total` | counter | `map_id` | KCP segments sent more than once (fast, early and timeout retransmissions), every session, closed ones included. Rising while `gameserver_kcp_datagrams_dropped_total` stays flat means loss or ACK delay on the **path**, not in the process (#473) |
-| `gameserver_kcp_receive_busy_seconds_total` | counter | `map_id` | Time that receive thread spent handling datagrams. **Its rate is the thread's utilisation**: every session shares it, and near 1.0 the kernel drops datagrams for every player at once (`/proc/net/snmp` `Udp: RcvbufErrors`), seen as mass `dead_link` closes. Measured ~0.4-0.55 at 95 players with AI enemies on the WSL dev box |
-| `gameserver_gc_collections_total` | counter | `map_id`, `generation=0\|1\|2` | Garbage collections since process start. A gen-2 rate during a load run is the first thing to read when tick p99 jumps |
-| `gameserver_gc_allocated_bytes_total` | counter | `map_id` | Managed bytes allocated since start; its rate over a run is the allocation pressure the hot paths are meant to keep near zero |
-| `gameserver_gc_pause_seconds_total` | counter | `map_id` | Total GC pause time since start. Every second here is a second the tick thread could not run, so it separates "a collector pause missed the budget" from "the tick did too much work" |
-| `gameserver_gc_heap_bytes` | gauge | `map_id` | Managed heap size after the last collection |
-| `gameserver_process_cpu_seconds_total` | counter | `map_id` | Process CPU time (user + system, all threads) since start; its rate is cores used |
-| `gameserver_process_working_set_bytes` | gauge | `map_id` | Resident memory of the process |
-| `gameserver_snapshots_max_shed_age` | gauge | `map_id` | Longest deferral, in snapshots, any entity on any live connection has reached. **High-water mark** — it does not fall while a connection lives, so read the rate of climb, not the level. The scheduler is strictly oldest-first, so it is bounded by the number of dirty entities in one observer's AOI and not by session length; a value that keeps climbing means the budget is too small for the crowd |
-| `gameserver_player_saves_total` | counter | `status=ok\|error` | Persistence results from the async saver, **one increment per player per sweep** — not per sweep. A single stuck player therefore contributes an increment every sweep for as long as it is online, so read this against `players_online` before reading a large `error` total as a large number of distinct victims. Mirrored onto `/status` as `player_saves_ok` / `player_saves_error` / `player_save_error_ratio`, and crossing a per-sweep failure ratio of 50% also raises one `Error` log line (`Player save sweep DEGRADED`), because on a dev box this counter is not scraped by anything (#402) |
-| `gameserver_events_published_total` | counter | `type` | Cross-server events handed to the event stream by `EventPublisher`. With the Redis backend this counts hand-offs into the publish queue, not confirmed `XADD`s — subtract the two counters below for what actually reached the stream |
-| `gameserver_events_dropped_total` | counter | — | Events dropped **oldest-first** because the Redis event stream's bounded publish queue (4096) was full — i.e. Redis was unreachable long enough to fill it — or the event was offered after shutdown. Zero forever on a healthy server; any non-zero rate means the gateway relay is missing events |
-| `gameserver_events_publish_failures_total` | counter | — | Events dropped after exhausting the `XADD` retry budget (3 attempts with short backoff). Distinct from `dropped`: these reached the head of the queue and still could not be written. Sustained increments alongside a flat `dropped` means Redis is up but refusing writes (e.g. OOM under `noeviction`) |
-| `gameserver_resyncs_total` | counter | `map_id` | Keyframes **requested by a client** — see below |
-| `gameserver_players_kicked_total` | counter | `map_id` | Duplicate-login kicks (ADR-20): connections force-closed because a `session_superseded` event on `events:kick` named their join-token jti. Entity released immediately, no reconnect hold. Pair with the gateway's `gateway_kick_publish_total`: publishes without matching kicks means events are being lost or mis-addressed |
-| `gameserver_handshakes_pending` | gauge | `map_id` | Accepted sockets inside the join handshake right now. Outside `players_online` and outside `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` |
-| `gameserver_handshakes_rejected_total` | counter | `map_id`, `reason` | Handshakes refused before authentication: `pool_full` (closed at accept, pending pool at its bound), `timeout` (no complete join frame within `GAMESERVER_HANDSHAKE_TIMEOUT_MS` — idle socket, partial prefix or partial body), `malformed` (first frame was not a well-formed `MsgJoinToken`). Not a capacity refusal |
-| `gameserver_messages_rejected_total` | counter | `map_id`, `reason` | Post-authentication messages ignored because the server does not support their type. Currently `unknown_type`; the connection remains open for forward compatibility. Separate from tick-validated inputs and pre-authentication handshake rejections |
-| `gameserver_inputs_dropped_total` | counter | `map_id`, `reason` | Inputs discarded at ingest: `connection_budget` (one connection exceeded `GAMESERVER_MAX_INPUTS_PER_TICK` between two drains) or `queue_full` (the world-wide queue hit `GAMESERVER_MAX_PENDING_INPUTS`). A rising `connection_budget` from one map with flat `processed_inputs` is one client flooding; a rising `queue_full` is the population as a whole |
-| `gameserver_inputs_coalesced_total` | counter | `map_id` | Movement-only inputs that replaced the sender's previous queued movement in place. **Not a loss** — the tick integrates one direction per player per tick regardless — but the rate says how far above the tick rate clients are sending |
-| `gameserver_transfers_rejected_total` | counter | `map_id` | `MsgTransferMap` refused because one was already in flight on that connection |
-| `gameserver_commands_received_total` | counter | `map_id` | `CommandRequest`s received (MsgType 32), every opcode and outcome |
-| `gameserver_commands_accepted_total` | counter | `map_id` | Commands answered `ok = true` |
-| `gameserver_commands_rejected_total` | counter | `map_id`, `reason` | Commands answered `ok = false`. `reason` is the `CommandResult.error` code (`unknown_opcode`, `invalid_payload`, `rate_limited`, `not_found`, `out_of_range`, `slot_mismatch`, `not_owner`, `unavailable`), or `protocol_version` for a command from a peer below protocol 3 (answered `unknown_opcode`). A climbing `rate_limited` from one map is one client over `CommandLimits` (10 burst, 5/s); a climbing `unavailable` is the character store failing |
+| `gameserver_tick_duration_seconds` | histogram | `map_id`, `game` | Wall time of one **base** tick. Explicit buckets 0.5 ms → 1 s, so they still bracket the 16.7 ms @60 Hz base budget as well as the 66 ms @15 Hz one |
+| `gameserver_tick_processed_inputs_total` | counter | `map_id`, `game` | Inputs applied by the tick loop |
+| `gameserver_sim_group_duration_seconds` | histogram | `map_id`, `game`, `group` | Wall time of one run of a simulation group — `group=critical\|world\|background` |
+| `gameserver_sim_group_runs_total` | counter | `map_id`, `game`, `group` | Times a simulation group has run. The ratio between groups **is** the configured rate ratio |
+| `gameserver_nakama_reward_outcomes_total` | counter | `map_id`, `game`, `outcome` | Answers to Nakama's `reward_kills`, one per attempt including retries — `outcome=granted\|partial\|not_granted\|too_large\|unknown`. See below |
+| `gameserver_tick_overruns_total` | counter | `map_id`, `game` | Base ticks whose work exceeded the base period — see below |
+| `gameserver_tick_timer_fallbacks_total` | counter | `map_id`, `game` | Tick loops where the Windows high-resolution timer failed and pacing fell back to `WaitOne` + `SpinOnce` (at most once per loop) |
+| `gameserver_tick_backlog_dropped_total` | counter | `map_id`, `game` | Base ticks discarded because the loop fell too far behind the wall clock — see below |
+| `gameserver_achieved_tick_hz` | gauge | `map_id`, `game` | **Measured** base-tick rate over a 2s window, from the monotonic clock. Compare with the configured `SIM_CRITICAL_HZ` — a healthy server has them equal. Never derived from wall time: a wall-clock rate on a host with a fast `CLOCK_REALTIME` reports a healthy loop as slow (#147/#153). `0` = not measured yet |
+| `gameserver_players_online` | gauge | `map_id`, `game` | Connected players |
+| `gameserver_connections` | gauge | `map_id`, `game` | Connections registered on this server — the set the snapshot broadcast iterates. Deliberately **not** derived from `players_online`, which is an independently balanced counter: the two disagreeing is the signal that one of them is lying (#401). This is the right denominator for `gameserver_snapshots_bytes_total` when they disagree |
+| `gameserver_entities` | gauge | `map_id`, `game` | Entities in the world |
+| `gameserver_snapshots_sent_total` | counter | `map_id`, `game` | Snapshot messages sent |
+| `gameserver_snapshots_bytes_total` | counter | `map_id`, `game` | Bytes of snapshot frames written to client sockets, envelope and 4-byte length prefix included. Divide by `gameserver_players_online` and by the scrape interval for the per-client downlink rate — the figure ADR-7's `< 50 KB/s` mobile threshold is about, and the one measured at 45.9 KB/s at 200 players |
+| `gameserver_snapshots_entities_shed_total` | counter | `map_id`, `game` | Entity updates **deferred** by the per-connection downlink budget (`GAMESERVER_MAX_SNAPSHOT_BYTES`). Deferred, not dropped: the entity stays dirty and is re-offered on the next snapshot. Read it with `max_shed_age` — a high rate with a low age is the cap doing its job on a crowd; a high age means a client is falling behind. Flat zero is the expected reading at any load the server is known to handle |
+| `gameserver_snapshots_removals_deferred_total` | counter | `map_id`, `game` | Despawn notifications deferred by the budget. Worse than a deferred update — the client renders an entity that no longer exists — so despawns outrank every non-self update and this should stay flat at zero. It moves only when the budget is too small for the despawn list on its own, which means the budget is set below one AOI's worth of churn |
+| `gameserver_transport_encrypted` | gauge | `map_id`, `game`, `transport`, `cipher` | 1 when packets leave this server as ciphertext, 0 when they are cleartext. **0 is the default** — `TRANSPORT_KEY` defaults to empty and KCP without a key is cleartext — so alert on this being 0 rather than assuming it is 1. A **gauge** on purpose: a never-incremented counter is absent from `/metrics`, and "is this server encrypted" must never answer by being missing |
+| `gameserver_transport_authenticated` | gauge | `map_id`, `game`, `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. **Currently 0 on every supported configuration**: the KCP path is AES-CFB with a CRC32, and a CRC32 is linear, not a MAC. Separate from `transport_encrypted` so encryption cannot be read as integrity; published while 0 so that its becoming 1 is a visible event |
+| `gameserver_kcp_sessions` | gauge | `map_id`, `game` | KCP sessions in the listener's table, pre-authentication included. Bounded by `GAMESERVER_KCP_MAX_SESSIONS` (default 4096). Compare with `handshakes_pending + connections`: a table much larger than both is sessions that never handed off — normal only for the idle-timeout window |
+| `gameserver_kcp_sessions_created_total` | counter | `map_id`, `game` | KCP sessions opened (a `PUSH sn=0` from a new endpoint, or a new conversation from a known one) |
+| `gameserver_kcp_sessions_rejected_total` | counter | `map_id`, `game`, `reason` | New sessions refused before any state was created — `reason=global_cap\|per_ip_cap\|rate\|backlog`. A refused opener is retransmitted by the peer, so one blocked client can count several times. Any sustained rate is a flood or a limit set below real load; see RUNBOOK, "KCP listener limits" |
+| `gameserver_kcp_sessions_closed_total` | counter | `map_id`, `game`, `reason` | Sessions the transport itself closed — `reason=idle` (no datagram for 60 s), `dead_link` (a segment hit 20 unacknowledged transmissions), `slow_consumer` (send queue past its hard limit). Application closes (kick, refused join, `disconnect`) are not counted here |
+| `gameserver_kcp_datagrams_dropped_total` | counter | `map_id`, `game`, `reason` | Inbound UDP datagrams dropped by the listener — `reason=oversize` (> 1500 B, never parsed), `undersize`, `rate` (per-session token bucket; KCP retransmits them), `bad_crypto` (wrong or missing `TRANSPORT_KEY`), `fec`, `no_session` (not a session opener from an unknown endpoint), `conv_mismatch`, `malformed`. `bad_crypto` climbing is the signature of a client built with a different key |
+| `gameserver_kcp_writes_rejected_total` | counter | `map_id`, `game` | Application frames larger than one maximum wire frame; each one closes its session. Zero forever on a healthy server |
+| `gameserver_kcp_datagrams_received_total` | counter | `map_id`, `game` | Datagrams the single KCP receive thread took off the socket (handled or dropped) |
+| `gameserver_kcp_segments_retransmitted_total` | counter | `map_id`, `game` | KCP segments sent more than once (fast, early and timeout retransmissions), every session, closed ones included. Rising while `gameserver_kcp_datagrams_dropped_total` stays flat means loss or ACK delay on the **path**, not in the process (#473) |
+| `gameserver_kcp_receive_busy_seconds_total` | counter | `map_id`, `game` | Time that receive thread spent handling datagrams. **Its rate is the thread's utilisation**: every session shares it, and near 1.0 the kernel drops datagrams for every player at once (`/proc/net/snmp` `Udp: RcvbufErrors`), seen as mass `dead_link` closes. Measured ~0.4-0.55 at 95 players with AI enemies on the WSL dev box |
+| `gameserver_gc_collections_total` | counter | `map_id`, `game`, `generation=0\|1\|2` | Garbage collections since process start. A gen-2 rate during a load run is the first thing to read when tick p99 jumps |
+| `gameserver_gc_allocated_bytes_total` | counter | `map_id`, `game` | Managed bytes allocated since start; its rate over a run is the allocation pressure the hot paths are meant to keep near zero |
+| `gameserver_gc_pause_seconds_total` | counter | `map_id`, `game` | Total GC pause time since start. Every second here is a second the tick thread could not run, so it separates "a collector pause missed the budget" from "the tick did too much work" |
+| `gameserver_gc_heap_bytes` | gauge | `map_id`, `game` | Managed heap size after the last collection |
+| `gameserver_process_cpu_seconds_total` | counter | `map_id`, `game` | Process CPU time (user + system, all threads) since start; its rate is cores used |
+| `gameserver_process_working_set_bytes` | gauge | `map_id`, `game` | Resident memory of the process |
+| `gameserver_snapshots_max_shed_age` | gauge | `map_id`, `game` | Longest deferral, in snapshots, any entity on any live connection has reached. **High-water mark** — it does not fall while a connection lives, so read the rate of climb, not the level. The scheduler is strictly oldest-first, so it is bounded by the number of dirty entities in one observer's AOI and not by session length; a value that keeps climbing means the budget is too small for the crowd |
+| `gameserver_player_saves_total` | counter | `map_id`, `game`, `status=ok\|error` | Persistence results from the async saver, **one increment per player per sweep** — not per sweep. A single stuck player therefore contributes an increment every sweep for as long as it is online, so read this against `players_online` before reading a large `error` total as a large number of distinct victims. Mirrored onto `/status` as `player_saves_ok` / `player_saves_error` / `player_save_error_ratio`, and crossing a per-sweep failure ratio of 50% also raises one `Error` log line (`Player save sweep DEGRADED`), because on a dev box this counter is not scraped by anything (#402) |
+| `gameserver_events_published_total` | counter | `map_id`, `game`, `type` | Cross-server events handed to the event stream by `EventPublisher`. With the Redis backend this counts hand-offs into the publish queue, not confirmed `XADD`s — subtract the two counters below for what actually reached the stream |
+| `gameserver_events_dropped_total` | counter | `map_id`, `game` | Events dropped **oldest-first** because the Redis event stream's bounded publish queue (4096) was full — i.e. Redis was unreachable long enough to fill it — or the event was offered after shutdown. Zero forever on a healthy server; any non-zero rate means the gateway relay is missing events |
+| `gameserver_events_publish_failures_total` | counter | `map_id`, `game` | Events dropped after exhausting the `XADD` retry budget (3 attempts with short backoff). Distinct from `dropped`: these reached the head of the queue and still could not be written. Sustained increments alongside a flat `dropped` means Redis is up but refusing writes (e.g. OOM under `noeviction`) |
+| `gameserver_resyncs_total` | counter | `map_id`, `game` | Keyframes **requested by a client** — see below |
+| `gameserver_players_kicked_total` | counter | `map_id`, `game` | Duplicate-login kicks (ADR-20): connections force-closed because a `session_superseded` event on `events:kick` named their join-token jti. Entity released immediately, no reconnect hold. Pair with the gateway's `gateway_kick_publish_total`: publishes without matching kicks means events are being lost or mis-addressed |
+| `gameserver_handshakes_pending` | gauge | `map_id`, `game` | Accepted sockets inside the join handshake right now. Outside `players_online` and outside `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` |
+| `gameserver_handshakes_rejected_total` | counter | `map_id`, `game`, `reason` | Handshakes refused before authentication: `pool_full` (closed at accept, pending pool at its bound), `timeout` (no complete join frame within `GAMESERVER_HANDSHAKE_TIMEOUT_MS` — idle socket, partial prefix or partial body), `malformed` (first frame was not a well-formed `MsgJoinToken`). Not a capacity refusal |
+| `gameserver_messages_rejected_total` | counter | `map_id`, `game`, `reason` | Post-authentication messages ignored because the server does not support their type. Currently `unknown_type`; the connection remains open for forward compatibility. Separate from tick-validated inputs and pre-authentication handshake rejections |
+| `gameserver_inputs_dropped_total` | counter | `map_id`, `game`, `reason` | Inputs discarded at ingest: `connection_budget` (one connection exceeded `GAMESERVER_MAX_INPUTS_PER_TICK` between two drains) or `queue_full` (the world-wide queue hit `GAMESERVER_MAX_PENDING_INPUTS`). A rising `connection_budget` from one map with flat `processed_inputs` is one client flooding; a rising `queue_full` is the population as a whole |
+| `gameserver_inputs_coalesced_total` | counter | `map_id`, `game` | Movement-only inputs that replaced the sender's previous queued movement in place. **Not a loss** — the tick integrates one direction per player per tick regardless — but the rate says how far above the tick rate clients are sending |
+| `gameserver_transfers_rejected_total` | counter | `map_id`, `game` | `MsgTransferMap` refused because one was already in flight on that connection |
+| `gameserver_commands_received_total` | counter | `map_id`, `game` | `CommandRequest`s received (MsgType 32), every opcode and outcome |
+| `gameserver_commands_accepted_total` | counter | `map_id`, `game` | Commands answered `ok = true` |
+| `gameserver_commands_rejected_total` | counter | `map_id`, `game`, `reason` | Commands answered `ok = false`. `reason` is the `CommandResult.error` code (`unknown_opcode`, `invalid_payload`, `rate_limited`, `not_found`, `out_of_range`, `slot_mismatch`, `not_owner`, `unavailable`), or `protocol_version` for a command from a peer below protocol 3 (answered `unknown_opcode`). A climbing `rate_limited` from one map is one client over `CommandLimits` (10 burst, 5/s); a climbing `unavailable` is the character store failing |
 
 > **A counter that has never incremented is not in `/metrics` at all.** The OpenTelemetry
 > Prometheus exporter emits an instrument only once it has recorded a value, so on a
@@ -486,6 +538,8 @@ gameserver_inputs_rejected_total{map_id="map_01",reason="attack_on_cooldown"} 0
 ... all nine reasons, all 0 ...
 ```
 
+(Recorded before ADR-33 D3. The same scrape today also carries `game="cuvara"` on every line.)
+
 > **This did not work at first, and the failure was invisible to every test.** Priming was
 > originally done in the `GameMetrics` constructor, which runs one line *before*
 > `MetricsEndpoint.TryStart` builds the provider — so the measurements had nothing
@@ -587,6 +641,8 @@ rate(gameserver_player_saves_total{status="error"}[5m])                      # s
 sum(rate(gameserver_player_saves_total{status="error"}[5m]))
   / sum(rate(gameserver_player_saves_total[5m]))                             # save FAILURE RATIO - alert >0.1
 sum(gameserver_players_online)                                               # CCU
+sum by (game) (gameserver_players_online)                                    # CCU per game
+sum by (game, map_id) (gameserver_entities)                                  # entities per map
 rate(gameserver_resyncs_total[5m])                                           # interning health
 rate(gameserver_tick_overruns_total[5m])                                     # base rate sustainable?
 rate(gameserver_tick_backlog_dropped_total[5m])                              # sim time vs real time
@@ -859,3 +915,9 @@ here; the expression names them.
 
 `GameServer.Tests/Observability/GameMetricsTests.cs` collects points through the
 OpenTelemetry SDK's in-memory reader — no HTTP server involved.
+
+`GameServer.Tests/Observability/GameMetricsGameLabelTests.cs` is the meter-wide label
+audit: a raw `MeterListener` over every instrument on the meter, which sees each
+measurement with the tags it was recorded with, before any aggregation. It fails when any
+measurement lacks `game` or `map_id`, or when an instrument records nothing. See "Labels on
+every series" above. A new instrument has to be fed in its `DriveEverything`.
