@@ -16,7 +16,9 @@ Foundation module for RPG MMO backend. Contains all shared definitions, types, a
 | `jwt/` | JWT sign/verify with shared secret (HS256 only, header-validated) |
 | `logger/` | slog setup |
 | `errors/` | Error codes shared across services |
-| `constants/` | Tick rates, TTLs, Redis key patterns |
+| `constants/` | Tick rates, TTLs, Redis key patterns, `DefaultGameID` (`"cuvara"`) + `GameOrDefault` (ADR-33) |
+| `gameid/` | ADR-33 identity formats: game id, map id, game-qualified server id validators |
+| `testdata/multigame/` | `identity.json`, the single fixture both the Go and the C# identity tests read |
 
 See `API.md` for exact signatures and `DESIGN.md` for the rationale behind the Redis key
 layout and the streams-with-ACK model.
