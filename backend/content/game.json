@@ -1,0 +1,5 @@
+{
+  "$comment": "Content manifest for ADR-33 D6.",
+  "game_id": "cuvara",
+  "shared_gamelogic_version": "0.7.0"
+}
