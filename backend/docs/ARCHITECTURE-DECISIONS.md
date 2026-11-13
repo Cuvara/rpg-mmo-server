@@ -4617,7 +4617,31 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
     `gameserver-dotnet/GameServer/Program.cs:144`, defaulting to `defaulthttpkey`.
 - **Leaderboards.** There is one leaderboard, `kills_alltime`: authoritative, descending,
   incremental, never reset (`nakama/economy/leaderboard.go:16`, `:94-102`). It is reached
-  through `submit_kill` (`:112`) and `get_leaderboard` (`:166`).
+  through `submit_kill` (`:112`) and `get_leaderboard` (`:166`). `reward_kills` writes it as
+  well, after the wallet commit (`nakama/economy/reward_batch.go:258-259`).
+- **Server-to-server calls carry no game source.** Three RPCs are called with the HTTP key,
+  so the call has no client session and no session vars:
+  - `submit_kill` takes `{user_id}` only (`nakama/economy/leaderboard.go:114-117`), checks
+    the caller (`:128`) and writes `kills_alltime` for that user (`:142-150`). Its C# caller
+    is `NakamaClient.SubmitKillAsync`, which sends only the user id
+    (`gameserver-dotnet/GameServer/Nakama/NakamaClient.cs:68-74`, DTO at `:274-277`). A
+    search of `gameserver-dotnet/` finds no caller of `SubmitKillAsync` or `RewardKillAsync`
+    outside that file. The class comment calls the pair legacy, kept for compatibility
+    (`NakamaClient.cs:12-13`), and the live path is the batcher's `RewardKillsAsync`
+    (`gameserver-dotnet/GameServer/Nakama/KillRewardBatcher.cs:222`). The RPC itself stays
+    registered (`nakama/main.go:49-51`).
+  - `reward_kill` and `reward_kills` take the payloads listed above under wallet and
+    rewards.
+  - `party_get` is the only party RPC that both a client session and the gateway may call
+    (`nakama/social/party.go:606-618`). The gateway sends `{party_id}` only
+    (`gateway/transfer/party.go:189`), over the HTTP key (`:198`), from the dungeon entry
+    path (`gateway/transfer/dungeon.go:100`). The request type has the one field
+    (`nakama/social/party.go:489-491`).
+  - Every one of these handlers decodes with plain `json.Unmarshal`
+    (`nakama/economy/leaderboard.go:132`, `nakama/economy/reward.go:48`,
+    `nakama/economy/reward_batch.go:151`, `nakama/social/party.go:534`), and a search of
+    `nakama/` for `DisallowUnknownFields` finds none. An unknown payload field is therefore
+    ignored, not refused.
 - **Party.** Four storage-backed RPCs, `party_create`, `party_join`, `party_leave` and
   `party_get` (`nakama/main.go:56-72`), with a cap of 4 members
   (`nakama/social/party.go:70`). Data lives in collections `party` and `party_member`
@@ -4777,9 +4801,39 @@ at the end of this ADR.
 
 Terms used below:
 
-- A **game id** is a short, stable slug: `^[a-z][a-z0-9_]{1,23}$`. It contains no `:`, `/`
-  or `.`, so it can be joined into Redis keys, Nakama collection names and Prometheus label
-  values without escaping.
+- A **game id** is a short, stable slug: `^[a-z][a-z0-9]{1,23}$`, lowercase letters and
+  digits only, 2 to 24 characters. The alphabet is the intersection of every place the id
+  is joined into a name, so it is used as is everywhere and never needs a mapping:
+  - **Kubernetes and Agones names** (fleet, GameServer, pod, namespace, Secret) must be
+    RFC 1123 labels: lowercase alphanumerics and `-`, at most 63 characters. `_` is not
+    allowed there, which is why the id has none.
+  - **Upper-cased into env var names** (`ALLOCATOR_FLEET_MAP_<GAME>`, D2) it stays
+    `[A-Z0-9]`, so no character needs replacing.
+  - **Postgres identifiers** (`gamestate_<game>`, D5) are unquoted lowercase, at most 34
+    characters.
+  - **Redis keys, Nakama collection, currency and leaderboard names, Prometheus label
+    values and image tags** accept it unchanged.
+  - **Separators stay unambiguous.** The id contains no `-`, so the first `-` of a server id
+    ends its game prefix and one game's prefix can never be the start of another's (`foo-`
+    is not a prefix of `foobar-…`). It contains no `.`, so `<game>.<name>` (D4) splits at the
+    first `.`, and none of today's unprefixed Nakama names contains a `.` (current state §4).
+    It contains no `:`, so composed Redis keys (D1, D2) split cleanly.
+  - **Length.** The 24-character cap is set by the longest derived Kubernetes name, the
+    fleet name (D2 S1).
+
+  Names derived from a game id `<game>`, for a non-default game (the default game keeps
+  today's names):
+
+  | Where | Name | Decided in |
+  |---|---|---|
+  | Server id | `<game>-…` | D2 S1 |
+  | Fleets | `<game>-map-servers-dotnet-<env>`, `<game>-dungeon-servers-dotnet-<env>` | D2 S1 |
+  | Namespace | `<stack namespace>-<game>`, e.g. `rpg-k8s-realtime-<game>` | D7 |
+  | Allocator env | `ALLOCATOR_FLEET_MAP_<GAME>`, `ALLOCATOR_FLEET_DUNGEON_<GAME>` | D2 |
+  | Redis | `servers:map:{game}:{map_id}`, `session:{game}:{user_id}` | D2, D1 |
+  | Nakama | `<game>.<name>` for collections, the currency key and the leaderboard id | D4 |
+  | Game-state database and role | database `gamestate_<game>`, login role `gamestate_<game>` | D5 |
+  | Content and image | `content/<game>/`, image tag `gameserver-dotnet:<game>-<version>` | D6 |
 - The **default game** is the single game that exists today. Its id is one compile-time
   constant, `DefaultGameID`, declared once in Go (`shared/constants`) and once in C#, with a
   parity test that pins the two equal. It is not a configuration value. Three components
@@ -4817,6 +4871,14 @@ every RPC can read.
     default game when the var is absent, and returns an error for a value outside the
     allow-list. This second check means an auth method added later without a hook cannot
     bring in an unknown game.
+  - **Server-to-server calls.** A call made with the HTTP key has no session and so no var
+    (current state §4: `submit_kill`, `reward_kill`, `reward_kills`, and the gateway's
+    `party_get`). For these the game comes from an optional `game_id` payload field, set by
+    the caller from its own configuration or session, absent meaning the default game. The
+    helper takes the payload value only when the call has no session; when a client
+    session calls `party_get`, the session var decides and a payload `game_id` that
+    differs is refused. The payload value is checked against the same allow-list. D4 lists
+    each RPC.
   - **Costs.** Two hooks and one helper in `nakama/auth`, plus a call to the helper in
     every handler. The client of a non-default game passes `vars: {game: <id>}` when it
     authenticates. The existing client changes nothing.
@@ -4975,6 +5037,17 @@ find only that game's servers.
     `<game>-…` so that Agones-generated names carry the prefix, and a second game's compose
     service sets `GAMESERVER_ID` explicitly. A default-game id that happens to start with a
     game's prefix is caught by the registration check, not by construction.
+  - **Name length budget.** Agones names a GameServer after its fleet plus generated
+    suffixes, and the pod is named after the GameServer. Those names must stay within 63
+    characters, the RFC 1123 label limit that applies to a pod's hostname and to label
+    values. This ADR
+    budgets 12 characters for the suffixes (two `-` plus 5 random characters, the Kubernetes
+    `generateName` pattern), which leg 5 must confirm against the deployed Agones version,
+    so a fleet name may be at most 51 characters. The longest fleet today is
+    `dungeon-servers-dotnet-k8s`, 26 characters (`deploy/k8s/app/60-fleet-dungeon.yaml:29`).
+    `<game>-` adds at most 25, so `<game>-dungeon-servers-dotnet-k8s` is at most 51. That
+    is what caps the game id at 24 characters. A longer fleet base name needs a shorter
+    game id, or a shorter base.
 - **Option S2: game-namespaced id keys.** The id stays game-local and the game joins every
   key and comparison: `servers:id:{game}:{id}`, a `(gid, sid)` pair on the join check, the
   watcher keyed by `(game, id)`, the kick group `gs:{game}:{id}`, and `game_id` added to
@@ -5209,9 +5282,20 @@ Every name listed in current state §4 goes through the resolver:
   - No currency is shared between games (open question 7).
   - Ledger metadata gains `game_id` (`nakama/economy/reward.go:58-62`,
     `nakama/economy/reward_batch.go:203-208`).
-- **Reward RPCs.**
-  - `reward_kill` and `reward_kills` take an optional `game_id`, absent meaning the default
-    game. The game server sets it from its own `GAMESERVER_GAME_ID`.
+- **Reward and kill RPCs (server to server).**
+  - `reward_kill`, `reward_kills` and `submit_kill` each take an optional `game_id`, absent
+    meaning the default game (D1 Option B, server-to-server calls). The game server sets it
+    from its own `GAMESERVER_GAME_ID`, in `RewardKillsAsync`, `RewardKillAsync` and
+    `SubmitKillAsync` and their DTOs
+    (`gameserver-dotnet/GameServer/Nakama/NakamaClient.cs:49-81`, `:106-112`, `:259-277`).
+    The two per-kill methods have no caller today (current state §4), but the RPCs stay
+    registered, so they get the field rather than staying default-game only by accident.
+    Removing `reward_kill` and `submit_kill` instead is an option outside this ADR.
+  - `submit_kill` today takes only `user_id` (`nakama/economy/leaderboard.go:114-117`). With
+    `game_id` it writes the game's scoped leaderboard (below), not `kills_alltime`.
+  - Old Nakama builds ignore the new field (current state §4: no handler refuses unknown
+    fields), so the game server may send it before the Nakama leg ships. Until then every
+    call lands on the default game, which is the only game until leg 5.
   - The receipt collection `reward_receipts` is scoped like the rest
     (`nakama/economy/reward_batch.go:46`).
   - The caller is trusted on `game_id` only because it holds `NAKAMA_HTTP_KEY`
@@ -5220,11 +5304,22 @@ Every name listed in current state §4 goes through the resolver:
     games the studio itself operates.
 - **Leaderboards.** `InitModule` creates `<game>.kills_alltime` for each game in `GAMES`.
   `kills_alltime` stays the default game's leaderboard (`nakama/economy/leaderboard.go:16`,
-  `:94-102`).
+  `:94-102`). Every write and read selects the board through `scoped(game, …)`:
+  - `submit_kill` (`nakama/economy/leaderboard.go:142-150`) and the leaderboard write of
+    `reward_kills` (`nakama/economy/reward_batch.go:258-259`) use the payload's `game_id`;
+  - `get_leaderboard` (`nakama/economy/leaderboard.go:172-173`) is a client call and uses
+    the session var.
 - **Party.**
   - The collections `party` and `party_member` are scoped (`nakama/social/party.go:77-84`),
     so a party cannot span games.
-  - The gateway's `party_get` call (`nakama/main.go:56-58`) passes the session's game.
+  - `party_get` from the gateway carries no session (current state §4). Its request
+    (`nakama/social/party.go:489-491`) gains an optional `game_id`, absent meaning the
+    default game. The gateway fills it from the session's latched `gid` in
+    `NakamaParty.IsMember` (`gateway/transfer/party.go:189`), which the dungeon entry path
+    (`gateway/transfer/dungeon.go:100`) calls with the game added to its arguments. Without
+    it, a non-default game's dungeon entry would look its party up in the default game's
+    collections and find nothing.
+  - Old Nakama builds ignore the field, so the gateway can send it before the Nakama leg.
 - **Not built yet:** friends, chat, groups and matchmaking (current state §4). Each feature
   decides when it is built whether it is studio-wide (friends, plausibly) or per game
   (guilds, matchmaking). This ADR does not decide them.
@@ -5256,7 +5351,8 @@ Every name listed in current state §4 goes through the resolver:
 - A game that needs its own tables gets its own migration set, in its own image (D6).
 - Set a connection limit on each database (`ALTER DATABASE … CONNECTION LIMIT`), so one
   game cannot take every connection (D7).
-- Give each database its own login role, named in that game's `game-db-url`, so one game's
+- Give each database its own login role, `gamestate_<game>` (Terms), named in that game's
+  `game-db-url`, so one game's
   credentials cannot open another game's database (D7, residual risk).
 
 ### D6 — Content and Shared.GameLogic
@@ -5324,7 +5420,7 @@ What one game can do to the others:
 | `NAKAMA_HTTP_KEY` | Any game's server can credit any game's wallet (D4) | None inside one Nakama, which has a single HTTP key |
 | Redis credentials | Every game-server pod holds the stack's Redis password (`deploy/agones/fleet-map-dotnet-dev.yaml:420-424`). A compromised pod can write another game's registry entries and map index (and so steer that game's joiners to an address it controls, with an identity key it publishes itself), publish `server_down` or kick events for its servers, or fill Redis | Accepted on a shared stack. Per-game Redis ACL users are possible only for keys that carry the game, and the default game's keys do not (D2). A stack per game removes it |
 | `TRANSPORT_KEY` | One value per stack, a shared PSK by design (ADR-21) | Accepted |
-| Nodes and Agones | One game's fleet grows and starves another game's allocations | Put each game's fleets in its own namespace with a `ResourceQuota`. The allocator's namespace then becomes per game, like its fleet (D2) |
+| Nodes and Agones | One game's fleet grows and starves another game's allocations | Put each game's fleets in its own namespace, `<stack namespace>-<game>` (e.g. `rpg-k8s-realtime-<game>`; today's is `rpg-k8s-realtime`, `deploy/k8s/app/50-fleet-map.yaml:21`), with a `ResourceQuota`. The allocator's namespace then becomes per game, like its fleet (D2) |
 | A bad game server image | Breaks only that game's fleet, under D6 Option B | — |
 
 **A game gets its own stack (its own Redis, Postgres, Nakama and gateway) when any one of
@@ -5376,9 +5472,9 @@ a game to its own stack when that trust does not hold.
 |---|---|---|---|
 | 0 | This ADR | — | Accepted answers to the open questions. Nothing else changes, and the hub stays at one game per cluster |
 | 1 | wire-contract: `shared/jwt` and C# `JwtValidator`; the `shared/storage` and C# `RedisServerRegistry` constants; `game_id` in `SessionSupersededEvent` (Go), `SessionSupersededPayload` (C#) and `docs/API.md`; `DefaultGameID` in Go and C#, with a parity test; validators for the game id, map id and game-qualified server id formats | JoinToken / JWT claims (`gid`, additive). Registry hash (the `game_id` field and the per-game map index key, both additive; the server-id format of D2 S1). Kick event payload (`game_id`, additive). **wire.proto: no change. Protocol version: no bump** | The names and the "absent = default" rule are fixed. Behaviour does not change |
-| 2 | server-realtime: `GAMESERVER_GAME_ID`; the server-id prefix check at startup; `game_id` written into every registry entry through the guarded (check-and-set) registration, and the per-game index key; the `gid` check on join; the `game` tag on every recording and observable path, with the meter-wide test (D3); `game_id` in `entity_killed`; tolerating and logging `game_id` on `events:kick`; the content manifest check; `game_id` on reward RPC calls; dropping the `JWT_SECRET` read and the unused option | Registry hash (writer side, including the check-and-set). Join token (reader side). Kick event payload (C# reader side). Content manifest (new, server only) | Every registry entry names its game, and every game server series carries `game`. Both read `DefaultGameID` for now |
-| 3 | server-services, gateway: latch `gid`; the per-game session key; the local connection map and every eviction path keyed by `(game, user)`; the `events:gateway_kick` consumer targeting `(game_id, user_id)` with the `jti` guard; `game_id` written into every `SessionSupersededEvent`; map id validation; lookup by `(game, map)` with the per-entry check; the allocator's server-id prefix check; fleets and mismatch memory per `(game, kind)`; a join-token keyring per game; the `game` label on the four families; `game_id` in `server_down` | JoinToken claims (writer side). Registry hash (reader side). Kick event payload (writer side and Go reader side). The gateway's `session:` Redis keys (gateway only) | Gateway series carry `game`, and events carry `game_id`. A supersede can no longer close another game's connection. Once a second game's configuration exists, the gateway can route it |
-| 4 | server-services, Nakama: before-authenticate hooks; the `GAMES` allow-list; `gameFromContext`; `gid` in `gateway_token`; `scoped()` on every collection, leaderboard and wallet key; `game_id` on the reward RPCs | Gateway JWT claims (minting side). Nakama RPC payloads (additive) | Nakama data is per game. The hub's players page can filter on the per-game profile object. The default game's data is untouched |
+| 2 | server-realtime: `GAMESERVER_GAME_ID`; the server-id prefix check at startup; `game_id` written into every registry entry through the guarded (check-and-set) registration, and the per-game index key; the `gid` check on join; the `game` tag on every recording and observable path, with the meter-wide test (D3); `game_id` in `entity_killed`; tolerating and logging `game_id` on `events:kick`; the content manifest check; `game_id` on every Nakama RPC the server calls (`reward_kills`, `reward_kill`, `submit_kill`: `NakamaClient` and its DTOs, D4); dropping the `JWT_SECRET` read and the unused option | Registry hash (writer side, including the check-and-set). Join token (reader side). Kick event payload (C# reader side). Nakama server-to-server RPC payloads (caller side, additive `game_id`; old Nakama ignores it). Content manifest (new, server only) | Every registry entry names its game, and every game server series carries `game`. Both read `DefaultGameID` for now |
+| 3 | server-services, gateway: latch `gid`; the per-game session key; the local connection map and every eviction path keyed by `(game, user)`; the `events:gateway_kick` consumer targeting `(game_id, user_id)` with the `jti` guard; `game_id` written into every `SessionSupersededEvent`; map id validation; lookup by `(game, map)` with the per-entry check; the allocator's server-id prefix check; fleets and mismatch memory per `(game, kind)`; a join-token keyring per game; the `game` label on the four families; `game_id` in `server_down`; `game_id` in the `party_get` payload from the session's `gid` (D4) | JoinToken claims (writer side). Registry hash (reader side). Kick event payload (writer side and Go reader side). `party_get` payload (caller side, additive). The gateway's `session:` Redis keys (gateway only) | Gateway series carry `game`, and events carry `game_id`. A supersede can no longer close another game's connection. Once a second game's configuration exists, the gateway can route it |
+| 4 | server-services, Nakama: before-authenticate hooks; the `GAMES` allow-list; `gameFromContext`; `gid` in `gateway_token`; `scoped()` on every collection, leaderboard and wallet key; the optional payload `game_id` read by `reward_kill`, `reward_kills`, `submit_kill` and `party_get` when the call has no session, each selecting its scoped names (D1, D4) | Gateway JWT claims (minting side). Nakama RPC payloads (additive) | Nakama data is per game. The hub's players page can filter on the per-game profile object. The default game's data is untouched |
 | 5 | server-ops: a game-state database, a login role and Secrets per game (game DB URL, join-token secret); **`JWT_SECRET` removed from every game-server fleet and the compose game server**; the "join secret differs from JWT secret" check moved to the deploy-time secret check; fleets named `<game>-…` and a namespace per game; the image-per-game build in CI; the gateway's per-game allocator env; dashboards and alerts `by (game, map_id)` | None across languages. Deploy manifests and monitoring only | A cluster can carry a second game end to end, and the hub's per-game filters are complete. No game-server pod can sign a gateway token |
 | 6 | Client of the new game: pass `vars: {game: <id>}` when authenticating with Nakama. **Netcode: no change. Existing client: no change** | None | — |
 
@@ -5422,7 +5518,7 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
    - It gives one studio login and one Nakama to run. D7's criteria move a game to its own
      stack when sharing stops being safe.
 2. **What is the existing game's id?**
-   - Recommended: its permanent short slug, chosen now (`^[a-z][a-z0-9_]{1,23}$`), not the
+   - Recommended: its permanent short slug, chosen now (`^[a-z][a-z0-9]{1,23}$`, Terms), not the
      literal `default`.
    - The id ends up in metric labels, hub bindings and registry entries, and renaming it
      there means a migration.
@@ -5482,14 +5578,18 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
   and the format validators (game id, map id, game-qualified server id).
 - **M**: Leg 2, the game server side: `GAMESERVER_GAME_ID`, the server-id check, the guarded
   registration, the join check, the metrics tag on every path with its meter-wide test, the
-  event payloads, the content manifest, the reward payload, and removing the `JWT_SECRET`
-  read.
+  event payloads, the content manifest, `game_id` on the `reward_kills`, `reward_kill` and
+  `submit_kill` calls, and removing the `JWT_SECRET` read.
 - **M**: Leg 3, the gateway: the session key, the `(game, user)` connection map and kick
   targeting with the `jti` guard, the lookup, the per-game allocator with its server-id
-  check, the join-token keyring, the metrics, and map id validation.
+  check, the join-token keyring, the metrics, map id validation, and `game_id` in the
+  `party_get` payload.
 - **M**: Leg 4, the Nakama plugin: the hooks, the allow-list, the resolver over every name,
-  per-game leaderboards and `gid` minting. Include a test that a session refresh keeps the
-  `game` var.
+  per-game leaderboards and `gid` minting, and the optional payload `game_id` on
+  `reward_kill`, `reward_kills`, `submit_kill` and `party_get` for calls without a session.
+  Include a test that a session refresh keeps the `game` var, and one that `submit_kill`
+  and `reward_kills` with a non-default `game_id` write `<game>.kills_alltime`, not
+  `kills_alltime`.
 - **M**: Leg 5, ops: a database and a login role per game, the Secrets, `JWT_SECRET` removed
   from game-server pods, `<game>-`-prefixed fleets and a namespace per game with a quota, the
   image-per-game CI build, and dashboards and alerts by game.
