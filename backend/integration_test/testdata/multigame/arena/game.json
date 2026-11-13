@@ -1,0 +1,5 @@
+{
+  "$comment": "Content manifest for the ADR-33 multi-game e2e tests: the arena server refuses to boot without it.",
+  "game_id": "arena",
+  "shared_gamelogic_version": "0.7.0"
+}
