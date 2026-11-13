@@ -4331,10 +4331,14 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
   runtime env (`nakama/auth/config.go:41-45`). Lifetime is `constants.SessionTTL`
   (`nakama/auth/config.go:37`).
 - **Claims.** `shared/jwt/jwt.go:26-38` is the whole claim set: `sub` (user id), `sid`
-  (server id), `jti`, `cid` (character, ADR-31), `iat` and `exp`. A `jti` is generated only
-  when `sid` is non-empty, which means only on join tokens (`shared/jwt/jwt.go:72-78`). The
-  same struct serves the gateway token and the join token. There is no game claim, no `iss`
-  and no `aud`. The C# game server parses the same claim names
+  (server id), `jti`, `cid` (character, ADR-31), `iat` and `exp`. A `jti` is generated
+  whenever `sid` is non-empty (`shared/jwt/jwt.go:72-78`). That is every join token, and also
+  a gateway token that the caller pinned to a server through the optional `server_id` field
+  of the `gateway_token` payload (`nakama/auth/token.go:18-21`). The RPC passes that field
+  through to signing (`nakama/auth/token.go:128`, signed at `:61` through
+  `shared/jwt/keyring.go:97-101`). A gateway token without `server_id` carries no `sid` and no
+  `jti`. The same struct serves the gateway token and the join token. There is no game claim,
+  no `iss` and no `aud`. The C# game server parses the same claim names
   (`gameserver-dotnet/GameServer/Server/JwtValidator.cs:25`, `:33-45`).
 - **Gateway, `MsgAuth`** (`gateway/server/server.go:806-948`). The order is:
   1. the protocol version check runs before the token is looked at (`:823-851`);
@@ -4368,8 +4372,18 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
   `findServer` (`gateway/registry/registry.go:389-486`):
   1. reads the `servers:map:{map_id}` index (`:390`);
   2. refuses entries whose own `map_id` differs from the query (`:403-410`);
-  3. picks the least-loaded entry that has spare capacity (`:445-468`);
-  4. refuses when every entry is full (`:471-473`);
+  3. skips every entry that is full (`:448`) and picks one of the rest (`:441-462`):
+     - **one entry:** it is taken if it has spare capacity;
+     - **several entries**, which is a split world and a violated ADR-2 invariant (logged at
+       `:412-420`): the **lowest `ServerID`** with spare capacity is taken, and player count
+       is ignored (`:441`, `:454-458`). The reason is in the comment at `:422-440` (#203):
+       least-loaded would steer joiners into the emptier half and keep both halves alive,
+       while a deterministic choice sends every gateway to the same half so the other drains;
+     - the least-loaded comparison with a `ServerID` tie-break (`:459-461`) runs only for a
+       second entry when `multiServer` is false. That cannot happen, because `multiServer`
+       is true whenever there is more than one entry, so the branch is unreachable today;
+  4. returns the pick (`:464-466`), or refuses when entries exist and every one is full
+     (`:471-473`);
   5. calls the allocator only when no entry exists (`:475-483`).
 
   The Agones allocator selects a Fleet by **kind** (`map` or `dungeon`,
@@ -4447,6 +4461,16 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
   (`shared/storage/redisstore/registry.go:75-96`) writes the same layout. The gateway does
   not write an entry for a server it allocated; it waits for the pod's own entry
   (`gateway/registry/registry.go:358-365`).
+- **Server ids.** A game server's id is `--server-id`, else `GAMESERVER_ID`, else
+  `POD_NAME`, else a random `gs-<12 hex>` (`gameserver-dotnet/GameServer/Program.cs:31`).
+  Under Agones the GameServer name is the id: the allocator returns it and the pod registers
+  under it (`gateway/registry/agones_allocator.go:215-218`). The compose stack defaults it
+  from the map id alone, `gs-dotnet-${GAMESERVER_MAP_ID}` (`deploy/docker-compose.yml:416`).
+  Nothing checks that an id is unique. The same id is the registry key
+  (`servers:id:{server_id}`), the join token's `sid` (section 1), the session's `server_id`,
+  the key of the gateway watcher's known-server map (`gateway/registry/watcher.go:61`, events
+  at `:159`), the target of `server_down` eviction (`gateway/server/server.go:382-397`) and
+  the kick consumer group `gs:{server_id}` (above, and below under event streams).
 - **Readers.** The gateway reads by map (`FindByMapID`,
   `shared/storage/redisstore/registry.go:145-173`, which prunes dead ids from the set at
   `:170`) and by id (`GetServer`, `:132-143`). `infoFromFields` turns an absent field into
@@ -4478,17 +4502,38 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
     - The gateway publishes `session_superseded` on a duplicate login
       (`shared/constants/keys.go:18`, `gateway/server/kick.go:42-44`), with payload
       `{user_id, server_id, jti, old_gateway, new_gateway}` (`gateway/server/kick.go:13-19`).
+    - The publish is skipped when the old session has no `server_id` or no `jti`
+      (`gateway/server/kick.go:24-26`), i.e. when it never entered a world.
+    - The C# mirror of the payload is `SessionSupersededPayload`, which must stay
+      field-for-field identical to the Go struct; the normative description is
+      `gameserver-dotnet/docs/API.md` (`gameserver-dotnet/GameServer/Events/KickEvents.cs:6-25`,
+      `docs/API.md:93-109`). Its parser refuses a payload without `user_id`, `server_id` or
+      `jti` (`KickEvents.cs:61-62`).
     - Each game server reads it in its own consumer group `gs:{server_id}`
       (`gameserver-dotnet/GameServer/Events/RedisKickConsumer.cs:54-57`, `:119`) and drops
-      entries for other server ids (`:224`).
+      entries for other server ids (`:224`). It then kicks only the connection whose stored
+      join-token `jti` equals the event's (`gameserver-dotnet/GameServer/Server/GameServer.cs:2380-2389`,
+      wired at `gameserver-dotnet/GameServer/Program.cs:1242`), so a late event is a no-op.
   - **`events:gateway_kick`** (`shared/constants/keys.go:22-25`).
-    - The gateway publishes the same payload, gateway to gateway
-      (`gateway/server/kick.go:63-65`).
+    - The gateway publishes the same payload, gateway to gateway, only when the old session
+      belongs to another gateway (`gateway/server/kick.go:52-54`, `:63-65`).
     - Each gateway instance reads it in its own group `gw:{gateway_id}`
-      (`gateway/server/kick_consumer.go:19-20`, `:77`).
+      (`gateway/server/kick_consumer.go:19-20`, `:77`) and keeps only events whose
+      `old_gateway` names it (`:129-131`).
+    - It then closes the local connection **by user id alone** (`:139`). There is no `jti`
+      check, although the type's comment claims "the same idempotency through the jti guard"
+      as the C# consumer (`:25-27`). The callback type takes only a user id (`:45`).
+  - **Local connection tracking on the gateway.** The gateway keeps one map from user id to
+    connection, `userConns` (`gateway/server/server.go:103`), maintained by `trackUser`,
+    `untrackUser` and `findUserConn` (`:567-590`). Every eviction path looks a connection up
+    by user id only:
+    - the cross-gateway kick, `FindAndCloseConnection(userID)` (`:596-603`);
+    - the same-gateway duplicate-login kick in `handleAuth` (`:877`, `:884-885`) through
+      `kickLocalUser(userID)` (`:979-987`);
+    - session cleanup on disconnect (`:656`).
 
   No stream key, group or payload has a game field. Kick events are partitioned by server
-  id or gateway id. `events:game` is not partitioned at all.
+  id or gateway id, and inside a gateway by user id. `events:game` is not partitioned at all.
 
 ### 3. Metrics
 
@@ -4505,12 +4550,32 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
   (`gameserver-dotnet/GameServer/Observability/GameMetrics.cs:66`), publishes 60 distinct
   instrument names in that file. The exporter turns them into Prometheus names
   (`GameMetrics.cs:6-30`). The constructor takes one `mapId` (`GameMetrics.cs:163`, called
-  from `gameserver-dotnet/GameServer/Program.cs:857`) and builds every tag list from it
-  (`GameMetrics.cs:168-190`). Most instruments carry `map_id` plus at most one small
-  enumerated label (`group`, `reason`, `outcome`, `generation`). Two carry no `map_id`:
-  player saves, labelled only `status` (`GameMetrics.cs:171-172`), and published events,
-  labelled only `type` (`GameMetrics.cs:1060`). A search of `GameMetrics.cs` for
-  `server_id` finds no server or pod label.
+  from `gameserver-dotnet/GameServer/Program.cs:857`). Most instruments carry `map_id` plus
+  at most one small enumerated label (`group`, `reason`, `outcome`, `generation`,
+  `transport`/`cipher`). The tags do **not** all come from one place:
+  - **Built in the constructor:** the `TagList` fields (`GameMetrics.cs:168-190`), the
+    per-reason input-rejection lists (`:400-409`), and `_mapTagArray`, a separate one-element
+    array that the GC, process and players-online observables pass (`:168`, `:612-637`,
+    `:1445`).
+  - **Built outside the constructor:**
+    - the GC collection counts compose a new tag pair on every observation, copying
+      `_mapTagArray[0]` and adding `generation` (`:640-646`);
+    - the transport-posture gauges use `_transportTags`, set in `SetTransportPosture`
+      (`:882-889`) and empty until that call (`:869`);
+    - the KCP reason-labelled observables call `KcpTags(reason)`, which builds a fresh list
+      from `_mapId` on each observation (`:913`, used at `:932-962`);
+    - rejected commands build their list lazily per reason, through `GetOrAdd` from `_mapId`
+      (`:1415-1416`).
+  - **Recorded with no `map_id`:**
+    - `gameserver.player.saves`, labelled only `status` (`:171-172`);
+    - `gameserver.events.published`, labelled only `type` (`:1060`);
+    - `gameserver.events.dropped` (`:1063`) and `gameserver.events.publish_failures`
+      (`:1066`), which carry no tag at all;
+    - the `gameserver.entities` gauge (registered at `:536-538`), whose observation passes no tag
+      (`:1447-1451`).
+
+  So adding a label means touching each of these paths, not only the constructor. A search
+  of `GameMetrics.cs` for `server_id` finds no server or pod label.
 - **Scrape and use.**
   - `deploy/monitoring/prometheus.yaml` scrapes static targets that each get one label,
     `service` (`:57-117`), plus one external label, `env: dev` (`:44-45`).
@@ -4642,10 +4707,25 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
   has one Nakama and one meta database (section 4).
 - **Secrets.** Each is a single value in one Secret per stack
   (`deploy/k8s/app/30-secret-template.yaml:42-71`):
-  - `JWT_SECRET`: Nakama signs with it and the gateway verifies with it. It is also
-    injected into game servers (`deploy/agones/fleet-map-dotnet-dev.yaml:277-282`), which
-    read it (`gameserver-dotnet/GameServer/Program.cs:151`) and use it only for startup
-    warnings (`:826-829`, `:846-850`).
+  - `JWT_SECRET`: Nakama signs gateway tokens with it and the gateway verifies them with it
+    (`gateway/server/server.go:855`).
+    - It is also Nakama's session encryption key and, with a suffix, its refresh key
+      (`deploy/k8s/data/nakama.yaml:165-166`, `deploy/docker-compose.yml:154-155`). The k8s
+      bring-up requires Nakama's value and the app tier's to be equal
+      (`deploy/k8s/data/README.md:296-300`, `:316-317`).
+    - It is injected into every game-server pod: `deploy/agones/fleet-map-dotnet-dev.yaml:277-281`,
+      `deploy/k8s/app/50-fleet-map.yaml:193-197`, `deploy/k8s/app/60-fleet-dungeon.yaml:240-244`
+      and `deploy/docker-compose.yml:380`.
+    - The game server reads it (`gameserver-dotnet/GameServer/Program.cs:151`) and uses it
+      only for two startup warnings: unset (`:826-829`) and equal to `JOIN_TOKEN_SECRET`
+      (`:846-850`). It also copies it into `GameServerOptions.JwtSecret` (`Program.cs:1117`,
+      declared at `gameserver-dotnet/GameServer/Server/GameServer.cs:248`), which a search
+      of `GameServer/` finds no reader of.
+    - So a compromised game-server pod can already forge a gateway token for any user id,
+      which the gateway accepts. The fleet comment that keeps `JOIN_TOKEN_SECRET` distinct
+      gives the opposite reason, "a compromised pod must not be able to forge client auth
+      tokens" (`deploy/agones/fleet-map-dotnet-dev.yaml:282-286`), while the pod holds the
+      secret those tokens are signed with.
   - `JOIN_TOKEN_SECRET`: the gateway signs with it and every game server verifies with it
     (`Program.cs:156`, `:833-844`). Because the game server checks only signature, `sid`
     and `jti` (section 1), whoever holds this secret can mint a join token for any server on
@@ -4757,15 +4837,51 @@ every RPC can read.
      as today's.
    - Nakama checks `cid` ownership against the game's own roster (D4). A `cid` is
      therefore only ever valid together with its own `gid`.
-2. **Gateway session.** `handleAuth` latches `gid` together with `cid`
-   (`gateway/server/server.go:866`, `:920`).
-   - The session key becomes `session:{game}:{user_id}` for a non-default game. It stays
-     `session:{user_id}` for the default game (`shared/constants/keys.go:5`).
-   - This is a decision, not a detail. With accounts shared across games (D4) and today's
-     single key, a login to game B would supersede the same account's session in game A
-     and kick it (ADR-20).
-   - Recommended: an account may be logged into two games at once, with one session per
-     game (open question 4).
+2. **Gateway session, local connections and kick targeting.** `handleAuth` latches `gid`
+   together with `cid` (`gateway/server/server.go:866`, `:920`).
+   - **The decision.** With accounts shared across games (D4), today's code lets a login to
+     game B supersede and kick the same account in game A (ADR-20). Recommended: an account
+     may be logged into two games at once, one session per game (open question 4). A new
+     session key alone does not deliver that, because three things are keyed by user id
+     today (current state §2): the Redis session, the gateway's local connection map, and
+     the target of a cross-gateway kick. All three move to `(game, user)`.
+   - **Session key.** `session:{game}:{user_id}` for a non-default game, unchanged
+     `session:{user_id}` for the default game (`shared/constants/keys.go:5`). Duplicate-login
+     detection (`gateway/server/server.go:871`) then reads only the same game's session.
+   - **Local connection map.** `userConns` (`gateway/server/server.go:103`) and its three
+     helpers (`:567-590`) are keyed by `(game, user)`. So are the same-gateway kick in
+     `handleAuth` (`:877`, `:884-885`) and `kickLocalUser` (`:979-987`), and the cleanup on
+     disconnect (`:656`). Without this, a login to game B on the same gateway finds the
+     account's game-A socket by user id and closes it.
+   - **Cross-gateway kick.** `SessionSupersededEvent` (`gateway/server/kick.go:13-19`) gains
+     `game_id`. The gateway always writes it, the default game included. A reader treats an
+     absent `game_id` as the default game. The `events:gateway_kick` consumer
+     (`gateway/server/kick_consumer.go:139`) closes the connection found under
+     `(game_id, user_id)`, not under the user id. Its callback type (`:45`) takes the game
+     and the `jti` as well as the user.
+   - **`jti` guard on the gateway, as hardening.** The consumer also skips the close unless
+     the connection's last minted join-token `jti` equals the event's. That is the guard the
+     C# consumer already applies (`gameserver-dotnet/GameServer/Server/GameServer.cs:2380-2389`)
+     and the one the Go type's comment already claims (`kick_consumer.go:25-27`). It makes a
+     late event a no-op on this hop too. Cost: the connection records the `jti` it was
+     handed at `EnterWorld` (`gateway/server/server.go:1166-1180`).
+   - **Why `(game, user)` rather than `jti` alone as the key.** The `jti` only exists once a
+     connection has entered a world, and a supersede is published only in that case
+     (`gateway/server/kick.go:24-26`). The same-gateway kick in `handleAuth` runs for any
+     authenticated connection, including one that has not entered a world, so it needs a key
+     that exists from authentication on. `(game, user)` is that key; the `jti` is the extra
+     check.
+   - **The game-server side** (`events:kick`) already targets one connection by `server_id`
+     and `jti` (current state §2). Under D2's server-id invariant a server id belongs to one
+     game, so the C# consumer needs no new matching rule. It must tolerate the new field (the
+     source-generated `KickJsonContext`, `gameserver-dotnet/GameServer/Events/KickEvents.cs:28-29`,
+     sets no unmapped-member option, so an unknown property is skipped) and should log a
+     `game_id` that differs from its own `GAMESERVER_GAME_ID`.
+   - **Contract impact: the `session_superseded` payload.** It is a Go/C# contract that must
+     stay field-for-field identical (`gameserver-dotnet/GameServer/Events/KickEvents.cs:6-11`,
+     normative in `gameserver-dotnet/docs/API.md:93-109`). `game_id` is added to the Go struct,
+     the C# record and API.md in one commit. It is additive, it is not a wire message, and it
+     does not bump the protocol version.
 3. **Map ids stay game-local; the request does not name the game.** Three options:
    - **(A)** Namespace the map id string as `<game>/<map>`, sent by the client in
      `EnterWorldRequest.map_id`.
@@ -4805,6 +4921,9 @@ every RPC can read.
 - **JoinToken and gateway JWT claims: additive.** The shared claim struct (Go
   `shared/jwt`, C# `JwtValidator`) gains one optional claim, `gid`. Readers must tolerate
   its absence, exactly as they do for `cid` (`shared/jwt/jwt.go:30-35`).
+- **Kick event payload: additive.** `session_superseded` on `events:kick` and
+  `events:gateway_kick` gains `game_id`, absent meaning the default game (item 2). Consumers:
+  the Go gateway's `KickConsumer` and the C# `RedisKickConsumer`.
 - **Protocol version: not bumped.**
   - The bump rule covers messages and fields a peer must act on
     (`shared/proto/wire.proto:115-140`), and nothing on the wire changes.
@@ -4821,11 +4940,61 @@ every RPC can read.
 **The constraint.** Two games may both have a map called `map_01`, and a lookup by map must
 find only that game's servers.
 
-- Server ids are pod names (or `GAMESERVER_ID`). They are already unique on a stack, so the
-  id key does not need a game in it.
-- The map index does need one.
+- The map index needs a game.
+- Server ids need a rule too. They are **not** guaranteed unique across games today
+  (current state §2): nothing checks uniqueness, the compose default
+  `gs-dotnet-${GAMESERVER_MAP_ID}` (`deploy/docker-compose.yml:416`) gives two games' `map_01`
+  servers the same id, and per-game namespaces (D7) allow equal GameServer names in two
+  namespaces. A server id is the registry key, the join token's `sid`, the session's
+  `server_id`, the watcher's key and the kick consumer group, so two games sharing one id
+  would overwrite each other's registry entry and receive each other's kicks.
 
-**Options.**
+**Server-id uniqueness.**
+
+- **Option S1: a stack-wide, game-qualified server-id invariant.** A server id is unique on
+  the stack. For a non-default game it must start with `<game>-`. The default game's ids
+  stay as they are. Enforcement, at every place an id is produced or consumed:
+  - **at startup:** a server whose `GAMESERVER_GAME_ID` is a non-default game refuses to
+    start unless its id starts with `<game>-` (next to the id resolution at
+    `gameserver-dotnet/GameServer/Program.cs:31`);
+  - **at registration:** the registration write becomes a check-and-set. It refuses to
+    write `servers:id:{id}` when the existing hash names another `game_id`. This changes
+    the registration in both languages in one commit
+    (`gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:116-150`,
+    `shared/storage/redisstore/registry.go:75-96`);
+  - **at allocation:** the gateway refuses an Agones allocation whose GameServer name lacks
+    the requested game's prefix, before it uses the name as the id
+    (`gateway/registry/agones_allocator.go:215-218`), and the existing per-entry check in
+    `findServer` refuses an entry whose `game_id` differs (Option B below);
+  - **downstream, nothing changes:** the `sid` claim, the session's `server_id`, the
+    watcher's map (`gateway/registry/watcher.go:61`) and the kick group `gs:{server_id}`
+    (`gameserver-dotnet/GameServer/Events/RedisKickConsumer.cs:54-57`) stay keyed by the
+    id, because the id is now unique.
+  - Costs: one prefix check at startup, one check-and-set script in each language, one
+    check in the allocator, and an ops obligation: each non-default game's fleets are named
+    `<game>-…` so that Agones-generated names carry the prefix, and a second game's compose
+    service sets `GAMESERVER_ID` explicitly. A default-game id that happens to start with a
+    game's prefix is caught by the registration check, not by construction.
+- **Option S2: game-namespaced id keys.** The id stays game-local and the game joins every
+  key and comparison: `servers:id:{game}:{id}`, a `(gid, sid)` pair on the join check, the
+  watcher keyed by `(game, id)`, the kick group `gs:{game}:{id}`, and `game_id` added to
+  `server_down` as a key rather than a label.
+  - Costs: every reader and writer of a server id changes, in both languages. The hub's
+    `servers:id:*` scan has to parse the game out of the key. Each place that compares a
+    bare id is a place that can forget the game.
+
+**Recommendation: S1.** It is one invariant, enforced where ids are made, and everything
+downstream keeps keying by the id. S2 spreads the same guarantee over every consumer.
+
+- **Registry contract impact.** The registration write changes semantics, from an
+  unconditional HSET to a check-and-set on `game_id`, in Go and C# together, under the same
+  one-commit rule as the fields.
+- **Rollout obligation.** Leg 1 fixes the id format and its validator. Leg 2 adds the
+  startup check and the guarded registration. Leg 3 adds the allocator check. Leg 5 names
+  non-default fleets with the prefix. No second game is onboarded before all four are done
+  (D8).
+
+**Options for the keys.**
 
 - **Option A: a game prefix on every key**, as `servers:{game}:id:{id}` and
   `servers:{game}:map:{map}`.
@@ -4857,12 +5026,15 @@ find only that game's servers.
 **Recommendation: B.** The hub lists servers by scanning `servers:id:*` and filtering on
 `game_id`: one scan covers every game.
 
-**Registry-hash contract impact.** There are two changes, both additive:
+**Registry-hash contract impact.** There are three changes:
 
-- one new field, `game_id`;
-- a new map-index key derivation for non-default games.
+- one new field, `game_id` (additive);
+- a new map-index key derivation for non-default games (additive);
+- the registration write becomes a check-and-set on `game_id`, and non-default server ids
+  carry the game prefix (S1 above). An existing default-game entry passes both checks
+  unchanged.
 
-Both land in Go and C# in one commit, as the contract comments already require
+All three land in Go and C# in one commit, as the contract comments already require
 (`shared/storage/redisstore/registry.go:20-24`,
 `gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:18-21`).
 
@@ -4901,23 +5073,60 @@ Both land in Go and C# in one commit, as the contract comments already require
     Revisit when a per-game consumer exists.
   - The cost of one stream: a game that floods it pushes the other games' unread entries
     out at `MAXLEN ~ 30000` (`shared/storage/redisstore/stream.go:68`). D7 lists this risk.
-- **`events:kick` and `events:gateway_kick`: no change in shape.**
-  - They are partitioned by server id and gateway id.
-  - A kick is matched by `jti` (`gameserver-dotnet/GameServer/Events/RedisKickConsumer.cs:224`),
-    which is already unique per join.
-  - With per-game sessions (D1), a duplicate login supersedes a session only within the
-    same game.
-  - Adding `game_id` to `SessionSupersededEvent` (`gateway/server/kick.go:13-19`) would help
-    the logs. It is optional and additive.
+- **`events:kick` and `events:gateway_kick`: same streams and groups, one new payload
+  field, and a new targeting key on the gateway.**
+  - The streams stay shared, partitioned by server id (`gs:{server_id}`) and gateway id
+    (`gw:{gateway_id}`). Under S1 a server id belongs to one game, so a server's group
+    cannot receive another game's kicks.
+  - `SessionSupersededEvent` (`gateway/server/kick.go:13-19`) and its C# mirror
+    (`gameserver-dotnet/GameServer/Events/KickEvents.cs:20-25`) gain `game_id`. It is
+    **required in what the gateway writes**, and a reader treats an absent `game_id` as the
+    default game. It is not optional and not logging-only, because the gateway consumer
+    targets by it.
+  - **Gateway consumer.** It closes the connection found under `(game_id, user_id)`, not
+    the one under the user id (`gateway/server/kick_consumer.go:139`, today), and skips the
+    close unless that connection's join-token `jti` equals the event's (D1 item 2). Without
+    this, a supersede in game A, published to the gateway that holds the account's game-B
+    socket, would close the game-B socket.
+  - **Game-server consumer.** It already kicks only the connection whose `jti` matches
+    (`gameserver-dotnet/GameServer/Server/GameServer.cs:2380-2389`), after its `server_id`
+    filter (`gameserver-dotnet/GameServer/Events/RedisKickConsumer.cs:224`). It only has to
+    tolerate the new field.
+  - **Contract impact:** the `session_superseded` payload, a Go/C# event contract
+    (`KickEvents.cs:6-11`, `gameserver-dotnet/docs/API.md:93-109`). It is additive and lands
+    in Go, C# and API.md in one commit (D8 leg 1). It is not on the wire and needs no
+    protocol bump.
+  - **Skew.** A gateway built before leg 3 ignores `game_id` and closes by user id. Until
+    every gateway replica runs leg 3, an account in two games can still be kicked across
+    games. ADR-17 runs one gateway replica, and no second game is onboarded before leg 5,
+    so no such state is reachable in the recommended order.
 
 ### D3 — Metrics
 
 - **Game server.**
-  - A pod serves one game. Add `game` as a constant tag next to `map_id` in every tag list
-    that `GameMetrics` builds (`gameserver-dotnet/GameServer/Observability/GameMetrics.cs:163-190`).
-    Also add it to the two instruments that carry no `map_id` (`:171-172`, `:1060`).
+  - A pod serves one game, so `game` is a constant tag. The requirement is that **every
+    recording and every observable path carries it**, not only the lists the constructor
+    builds. Current state §3 lists the paths; in `GameMetrics.cs`
+    (`gameserver-dotnet/GameServer/Observability/GameMetrics.cs`) they are:
+    - the constructor's `TagList` fields and per-reason lists (`:168-190`, `:400-409`);
+    - `_mapTagArray` (`:168`) and the GC collection pair that copies only its first element
+      (`:640-646`). Copying `_mapTagArray[0]` would silently drop a second tag, so this
+      path has to copy the whole base set;
+    - `_transportTags` (`:882-889`), `KcpTags(reason)` (`:913`) and the lazy command-reject
+      lists (`:1415-1416`), all built outside the constructor;
+    - the five paths with no `map_id` today: `gameserver.player.saves` (`:171-172`),
+      `gameserver.events.published` (`:1060`), `gameserver.events.dropped` (`:1063`),
+      `gameserver.events.publish_failures` (`:1066`) and the `gameserver.entities`
+      observation (`:1447-1451`). Each gains `game`. They also gain `map_id`, so that the
+      `by (game, map_id)` dashboards cover them.
+  - **How to keep it true.** Build one base tag set, `{map_id, game}`, once, and derive
+    every other list from it, including the ones built later. Add a test that collects
+    every instrument from the meter through a `MeterListener` and fails when any
+    measurement lacks `game`. A new instrument added later without the tag then fails the
+    test instead of producing an unfiltered series.
   - A constant label adds **no series**. The series count stays what it is today: live map
-    servers × existing label sets (current state §3).
+    servers × existing label sets (current state §3). Adding `map_id` to the five paths
+    above does not add series either, for the same reason.
   - The alternative is a Prometheus target label set at scrape time, from the pod or from a
     static `labels:` entry. It costs no code. But the compose stack scrapes static targets
     (`deploy/monitoring/prometheus.yaml:57-117`) where nothing would set the label, and the
@@ -4947,7 +5156,8 @@ Both land in Go and C# in one commit, as the contract comments already require
 
 **Recommendation:**
 
-- game server: the constant tag;
+- game server: the constant tag on every recording and observable path, enforced by the
+  meter-wide test;
 - gateway: the `game` label on the four families;
 - Nakama: no label yet.
 
@@ -5046,6 +5256,8 @@ Every name listed in current state §4 goes through the resolver:
 - A game that needs its own tables gets its own migration set, in its own image (D6).
 - Set a connection limit on each database (`ALTER DATABASE … CONNECTION LIMIT`), so one
   game cannot take every connection (D7).
+- Give each database its own login role, named in that game's `game-db-url`, so one game's
+  credentials cannot open another game's database (D7, residual risk).
 
 ### D6 — Content and Shared.GameLogic
 
@@ -5107,9 +5319,11 @@ What one game can do to the others:
 | Game Postgres | Exhausting connections, or one heavy query, slows every game's saves | A database per game (D5) with a connection limit on each. CPU stays shared |
 | Nakama | An RPC storm or a panic in one game's code affects every game's logins and RPCs. A plugin deploy restarts Nakama for all games. All games share one Nakama version | None inside one Nakama. This is the strongest argument for giving a game its own stack |
 | Gateway | A login storm, a bad config or a bad deploy is a join outage for every game (ADR-17: one replica). The supported protocol window belongs to the gateway, so every game shares it | Rate limits apply per IP and per connection, not per game |
-| `JOIN_TOKEN_SECRET` | A compromised game server pod can mint join tokens for **any** server on the stack. A `gid` check does not stop it, because the pod can mint any `gid` | **One join-token secret per game.** The gateway signs with the game's keyring, and each game's fleet holds only its own secret. Costs: a keyring map in the gateway and one Secret per game. Recommended for every non-default game (open question 5) |
+| `JOIN_TOKEN_SECRET` | A compromised game server pod can mint join tokens for **any** server on the stack. A `gid` check does not stop it, because the pod can mint any `gid` | **One join-token secret per game.** The gateway signs with the game's keyring, and each game's fleet holds only its own secret. Costs: a keyring map in the gateway and one Secret per game. Recommended for every non-default game (open question 5). This closes the join-token path only; see the `JWT_SECRET` row |
+| `JWT_SECRET` on game-server pods | Every game-server pod holds it (current state §7), and the gateway verifies gateway tokens with it (`gateway/server/server.go:855`). A compromised pod of game A can therefore sign a gateway token with any `sub` and `gid: B`, authenticate to the gateway as that user in game B, and receive a **legitimate** game-B join token, signed by the gateway with B's own join secret. The per-game join secret does not stop this. The same value is Nakama's session encryption key (`deploy/k8s/data/nakama.yaml:165-166`), so the pod can also sign a Nakama session token for any user, with any `game` session var, under D1 Option B | **Remove `JWT_SECRET` from game-server pods** (ops leg): the env entries in `deploy/agones/fleet-map-dotnet-dev.yaml:277-281`, `deploy/k8s/app/50-fleet-map.yaml:193-197`, `deploy/k8s/app/60-fleet-dungeon.yaml:240-244` and `deploy/docker-compose.yml:380`, and in the server leg the read at `gameserver-dotnet/GameServer/Program.cs:151` and the unused `GameServerOptions.JwtSecret` (`Program.cs:1117`, `GameServer.cs:248`). Cost: the two startup warnings that read it go (`Program.cs:826-829`, `:846-850`); the "join secret equals JWT secret" check moves to the deploy-time secret check that already compares Nakama's and the app tier's values (`deploy/k8s/data/README.md:296-300`). The test harnesses that set `JwtSecret` on the options change with it. Recommended for every stack, the single-game one included, because the gap exists today (open question 5) |
 | `NAKAMA_HTTP_KEY` | Any game's server can credit any game's wallet (D4) | None inside one Nakama, which has a single HTTP key |
-| `JWT_SECRET`, `TRANSPORT_KEY` | One value per stack. `TRANSPORT_KEY` is a shared PSK by design (ADR-21) | Accepted |
+| Redis credentials | Every game-server pod holds the stack's Redis password (`deploy/agones/fleet-map-dotnet-dev.yaml:420-424`). A compromised pod can write another game's registry entries and map index (and so steer that game's joiners to an address it controls, with an identity key it publishes itself), publish `server_down` or kick events for its servers, or fill Redis | Accepted on a shared stack. Per-game Redis ACL users are possible only for keys that carry the game, and the default game's keys do not (D2). A stack per game removes it |
+| `TRANSPORT_KEY` | One value per stack, a shared PSK by design (ADR-21) | Accepted |
 | Nodes and Agones | One game's fleet grows and starves another game's allocations | Put each game's fleets in its own namespace with a `ResourceQuota`. The allocator's namespace then becomes per game, like its fleet (D2) |
 | A bad game server image | Breaks only that game's fleet, under D6 Option B | — |
 
@@ -5134,6 +5348,21 @@ these holds:**
 If none of these holds, the game shares the stack. Recommended: adopt these four criteria
 as the rule (open question 8).
 
+**Residual risk on a shared stack**, after both secret measures (a join-token secret per
+game, and no `JWT_SECRET` on game-server pods): a compromised game-server pod can no longer
+mint a gateway token, a Nakama session or a join token for another game. It can still:
+
+- credit any game's wallet through `NAKAMA_HTTP_KEY`;
+- write any game's registry entries, map index and stream events through the shared Redis
+  password, which can steer another game's joiners to an address it controls;
+- connect to another game's database if the per-game databases (D5) share one role. D5's
+  recommendation therefore needs **one role per game database**, not only one database;
+- use the shared `TRANSPORT_KEY`, which gives no per-game separation on the datagram layer
+  (ADR-21).
+
+These are accepted for games the studio itself builds and operates. Criterion 3 above moves
+a game to its own stack when that trust does not hold.
+
 ### D8 — Rollout
 
 **Rules that hold for every leg:**
@@ -5146,11 +5375,11 @@ as the rule (open question 8).
 | Leg | Module(s) / skill | Contracts touched | What the hub can rely on afterwards |
 |---|---|---|---|
 | 0 | This ADR | — | Accepted answers to the open questions. Nothing else changes, and the hub stays at one game per cluster |
-| 1 | wire-contract: `shared/jwt` and C# `JwtValidator`; the `shared/storage` and C# `RedisServerRegistry` constants; `DefaultGameID` in Go and C#, with a parity test; validators for the game id and map id formats | JoinToken / JWT claims (`gid`, additive). Registry hash (the `game_id` field and the per-game map index key, both additive). **wire.proto: no change. Protocol version: no bump** | The names and the "absent = default" rule are fixed. Behaviour does not change |
-| 2 | server-realtime: `GAMESERVER_GAME_ID`; `game_id` written into every registry entry, and the per-game index key; the `gid` check on join; the `game` tag on every metric; `game_id` in `entity_killed`; the content manifest check; `game_id` on reward RPC calls | Registry hash (writer side). Join token (reader side). Content manifest (new, server only) | Every registry entry names its game, and every game server series carries `game`. Both read `DefaultGameID` for now |
-| 3 | server-services, gateway: latch `gid`; the per-game session key; map id validation; lookup by `(game, map)` with the per-entry check; fleets and mismatch memory per `(game, kind)`; a join-token keyring per game; the `game` label on the four families; `game_id` in `server_down` | JoinToken claims (writer side). Registry hash (reader side). The gateway's `session:` Redis keys (gateway only) | Gateway series carry `game`, and events carry `game_id`. Once a second game's configuration exists, the gateway can route it |
+| 1 | wire-contract: `shared/jwt` and C# `JwtValidator`; the `shared/storage` and C# `RedisServerRegistry` constants; `game_id` in `SessionSupersededEvent` (Go), `SessionSupersededPayload` (C#) and `docs/API.md`; `DefaultGameID` in Go and C#, with a parity test; validators for the game id, map id and game-qualified server id formats | JoinToken / JWT claims (`gid`, additive). Registry hash (the `game_id` field and the per-game map index key, both additive; the server-id format of D2 S1). Kick event payload (`game_id`, additive). **wire.proto: no change. Protocol version: no bump** | The names and the "absent = default" rule are fixed. Behaviour does not change |
+| 2 | server-realtime: `GAMESERVER_GAME_ID`; the server-id prefix check at startup; `game_id` written into every registry entry through the guarded (check-and-set) registration, and the per-game index key; the `gid` check on join; the `game` tag on every recording and observable path, with the meter-wide test (D3); `game_id` in `entity_killed`; tolerating and logging `game_id` on `events:kick`; the content manifest check; `game_id` on reward RPC calls; dropping the `JWT_SECRET` read and the unused option | Registry hash (writer side, including the check-and-set). Join token (reader side). Kick event payload (C# reader side). Content manifest (new, server only) | Every registry entry names its game, and every game server series carries `game`. Both read `DefaultGameID` for now |
+| 3 | server-services, gateway: latch `gid`; the per-game session key; the local connection map and every eviction path keyed by `(game, user)`; the `events:gateway_kick` consumer targeting `(game_id, user_id)` with the `jti` guard; `game_id` written into every `SessionSupersededEvent`; map id validation; lookup by `(game, map)` with the per-entry check; the allocator's server-id prefix check; fleets and mismatch memory per `(game, kind)`; a join-token keyring per game; the `game` label on the four families; `game_id` in `server_down` | JoinToken claims (writer side). Registry hash (reader side). Kick event payload (writer side and Go reader side). The gateway's `session:` Redis keys (gateway only) | Gateway series carry `game`, and events carry `game_id`. A supersede can no longer close another game's connection. Once a second game's configuration exists, the gateway can route it |
 | 4 | server-services, Nakama: before-authenticate hooks; the `GAMES` allow-list; `gameFromContext`; `gid` in `gateway_token`; `scoped()` on every collection, leaderboard and wallet key; `game_id` on the reward RPCs | Gateway JWT claims (minting side). Nakama RPC payloads (additive) | Nakama data is per game. The hub's players page can filter on the per-game profile object. The default game's data is untouched |
-| 5 | server-ops: a game-state database and Secrets per game (game DB URL, join-token secret); fleets and a namespace per game; the image-per-game build in CI; the gateway's per-game allocator env; dashboards and alerts `by (game, map_id)` | None across languages. Deploy manifests and monitoring only | A cluster can carry a second game end to end, and the hub's per-game filters are complete |
+| 5 | server-ops: a game-state database, a login role and Secrets per game (game DB URL, join-token secret); **`JWT_SECRET` removed from every game-server fleet and the compose game server**; the "join secret differs from JWT secret" check moved to the deploy-time secret check; fleets named `<game>-…` and a namespace per game; the image-per-game build in CI; the gateway's per-game allocator env; dashboards and alerts `by (game, map_id)` | None across languages. Deploy manifests and monitoring only | A cluster can carry a second game end to end, and the hub's per-game filters are complete. No game-server pod can sign a gateway token |
 | 6 | Client of the new game: pass `vars: {game: <id>}` when authenticating with Nakama. **Netcode: no change. Existing client: no change** | None | — |
 
 Legs 2 and 3 can ship in either order for the default game, because each reads a missing
@@ -5173,11 +5402,16 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
 - **ADR-2 and ADR-18 change scope.** ADR-2's one live server per `map_id` becomes one live
   server per `(game, map_id)`. ADR-18's one-replica map fleets become one fleet per game
   and kind.
-- **Some failure domains stay shared.** On a shared stack, Nakama, the gateway, Redis, the
-  join-token secret and the HTTP key are shared (D7).
-  - The per-game join-token secret closes the one gap that a single compromised pod could
-    use against another game.
-  - The HTTP-key gap stays open by design.
+- **Some failure domains stay shared.** On a shared stack, Nakama, the gateway, Redis and
+  the HTTP key are shared (D7).
+  - The per-game join-token secret alone does **not** close cross-game impersonation. While
+    game-server pods hold `JWT_SECRET`, a compromised pod of one game can sign a gateway
+    token for another game and get a legitimate join token from the gateway. Both measures
+    are needed: a join-token secret per game, and no `JWT_SECRET` on game-server pods (leg 5;
+    the second also closes a gap the single game has today).
+  - With both in place, the residual risk is the shared HTTP key, the shared Redis
+    credentials, a shared database role if D5's per-game roles are skipped, and the shared
+    `TRANSPORT_KEY` (D7). It is accepted for studio-operated games.
 - **The hub's filter needs legs 2 to 4.** Until leg 5 is done, every filter shows a single
   value: the default game.
 
@@ -5199,10 +5433,26 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
    - Map ids stay game-local. No `wire.proto` change, no protocol bump.
 4. **May one account be logged into two games at the same time?**
    - Recommended: yes, with one session per game (`session:{game}:{user_id}`).
-   - A login then supersedes a session only within its own game.
-5. **Should each game have its own join-token secret?**
-   - Recommended: yes, for every non-default game from its first deploy.
-   - The default game keeps `JOIN_TOKEN_SECRET`.
+   - A login then supersedes a session only within its own game. That needs more than the
+     session key: the gateway's local connection map and every eviction path are keyed by
+     `(game, user)`, and the `events:gateway_kick` consumer targets `(game_id, user_id)`
+     with a `jti` guard (D1 item 2).
+   - `SessionSupersededEvent` gains a `game_id` that the gateway always writes, absent
+     meaning the default game. This changes the Go/C# kick payload contract (additive, not
+     on the wire, no protocol bump).
+   - If the answer is no, the session key and the kick path stay keyed by user id, and a
+     login to one game ends the account's session in every other game.
+5. **Should each game have its own join-token secret, and should game-server pods stop
+   receiving `JWT_SECRET`?**
+   - Recommended: yes to both. A join-token secret per non-default game from its first
+     deploy; the default game keeps `JOIN_TOKEN_SECRET`.
+   - `JWT_SECRET` comes off every game-server pod, on every stack, the single-game one
+     included. The pods use it only for two startup warnings, and holding it lets a
+     compromised pod sign gateway tokens (and, because it is also Nakama's session key,
+     Nakama sessions) for any user and, after this ADR, any game.
+   - Cost: the two warnings go, and the equality check between the two secrets moves to
+     deploy time (D7).
+   - Without the second measure, the first does not close cross-game impersonation.
 6. **Where do a future game's content and Shared.GameLogic live, and does each game get its
    own image?**
    - Recommended: one image per game (D6 Option B), with a `game.json` manifest check at
@@ -5217,21 +5467,32 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
    - Recommended: yes.
    - Criterion 1 (production is not shared with development) applies without exception.
 9. **Game state: a database per game, or shared tables with a `game_id` column?**
-   - Recommended: a database per game on the shared instance (D5 Option A).
+   - Recommended: a database per game on the shared instance (D5 Option A), each with its
+     own login role.
+10. **How are server ids kept unique across games?**
+    - Recommended: a stack-wide invariant, with non-default ids prefixed `<game>-` and
+      checked at startup, at registration and at allocation (D2 Option S1).
+    - The alternative, a game in every id key (S2), touches every reader and writer of a
+      server id in both languages.
 
 **Follow-up work.**
 
 - **S**: Leg 1. In Go and C#, with parity tests: the `gid` claim, the `game_id` registry
-  field and key helper, `DefaultGameID`, and the format validators.
-- **M**: Leg 2, the game server side: `GAMESERVER_GAME_ID`, the registry, the join check,
-  the metrics tag, the event payload, the content manifest and the reward payload.
-- **M**: Leg 3, the gateway: the session key, the lookup, the per-game allocator and
-  join-token keyring, the metrics, and map id validation.
+  field and key helper, `game_id` in the kick payload (and `docs/API.md`), `DefaultGameID`,
+  and the format validators (game id, map id, game-qualified server id).
+- **M**: Leg 2, the game server side: `GAMESERVER_GAME_ID`, the server-id check, the guarded
+  registration, the join check, the metrics tag on every path with its meter-wide test, the
+  event payloads, the content manifest, the reward payload, and removing the `JWT_SECRET`
+  read.
+- **M**: Leg 3, the gateway: the session key, the `(game, user)` connection map and kick
+  targeting with the `jti` guard, the lookup, the per-game allocator with its server-id
+  check, the join-token keyring, the metrics, and map id validation.
 - **M**: Leg 4, the Nakama plugin: the hooks, the allow-list, the resolver over every name,
   per-game leaderboards and `gid` minting. Include a test that a session refresh keeps the
   `game` var.
-- **M**: Leg 5, ops: a database per game, the Secrets, fleets and a namespace per game with
-  a quota, the image-per-game CI build, and dashboards and alerts by game.
+- **M**: Leg 5, ops: a database and a login role per game, the Secrets, `JWT_SECRET` removed
+  from game-server pods, `<game>-`-prefixed fleets and a namespace per game with a quota, the
+  image-per-game CI build, and dashboards and alerts by game.
 - **S**: Once leg 1 lands, update the root `CLAUDE.md` connection flow and the
   `backend/TEAM.md` contracts for `gid` and `game_id`. At the same time, add a
   "(per game, ADR-33)" note to the statements in ADR-2 and ADR-18.
