@@ -72,7 +72,7 @@ go run ./cmd/gateway/ --backend=redis --instance-id=gw-1
 | `--allocation-poll-interval` | `ALLOCATION_POLL_INTERVAL` (`250ms`) | Registry re-check interval during that wait |
 | `--allocator-kubeconfig` | in-cluster → `$KUBECONFIG` → `~/.kube/config` | Credential source for the allocation API |
 | `--tls-cert` / `--tls-key` | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` (empty) | PEM paths making the gateway **terminate TLS itself** (ADR-23). Both empty = plaintext, the default. **Exactly one set is a startup error**, never a fall back to plaintext |
-| `--join-token-secret` | `JOIN_TOKEN_SECRET` → `JWT_SECRET` | HS256 secret for gateway→gameserver join tokens. Comma-separated to rotate |
+| `--join-token-secret` | `JOIN_TOKEN_SECRET` (**required**, no fallback) | HS256 secret for gateway→gameserver join tokens (default game). Comma-separated to rotate. Unset is **fatal** at startup |
 | `--conn-rate-per-min` | `GATEWAY_CONN_RATE_PER_MIN` (`10`) | Accepted connections per minute per source IP. `0` disables |
 | `--msg-rate-per-sec` | `GATEWAY_MSG_RATE_PER_SEC` (`60`) | Inbound frames per second per connection. `0` disables |
 
@@ -214,7 +214,7 @@ All three Redis stores share one client/pool.
 |-----|---------|----------|
 | `GATEWAY_ADDR` | `:8000` | Listen address |
 | `JWT_SECRET` | `dev-secret-change-me` | Client auth-token verification (shared with Nakama). Comma-separated list to rotate: `new,old` — first signs, all verify |
-| `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | Join-token signing (shared with gameserver-dotnet). Also rotatable. Unset logs a warning |
+| `JOIN_TOKEN_SECRET` | *(none; **required**)* | Join-token signing for the default game (shared with gameserver-dotnet). Also rotatable. There is no fallback to `JWT_SECRET`: unset (and no `--join-token-secret`) is **fatal** at startup. Equal to `JWT_SECRET` logs a warning |
 | `GAMES` | *(empty → `cuvara` only)* | Games this gateway admits (ADR-33), comma-separated, mirroring Nakama's `GAMES`. Each entry must be a valid game id (`gameid.ValidGameID`); an invalid or empty entry is **fatal** at startup. A client token whose `gid` (absent = `cuvara`) is not listed is refused at auth with `game not configured`. EnterWorld is routed per (game, map); a listed non-default game also needs `JOIN_TOKEN_SECRET_<GAME>` below, or its EnterWorld is refused with `game not routable` |
 | `JOIN_TOKEN_SECRET_<GAME>` | *(none)* | Join-token signing for non-default game `<game>` (`<GAME>` = id upper-cased), comma-separated to rotate. No fallback to `JOIN_TOKEN_SECRET` or `JWT_SECRET`; unset = that game is not routable (startup warning naming the setting). Give the same value to that game's servers. Startup also **warns** when it equals `JWT_SECRET`, or when any of its rotation keys is also a key of another game's join secret (`cuvara`'s included): a server holding a shared key could forge the other game's join tokens |
 | `ALLOCATOR_FLEET_MAP_<GAME>` / `ALLOCATOR_FLEET_DUNGEON_<GAME>` | *(none)* | Agones fleets for non-default game `<game>` (ADR-33 D7); `cuvara` keeps `ALLOCATOR_FLEET_MAP` / `ALLOCATOR_FLEET_DUNGEON`. Unset = that kind fails with `ErrKindNotConfigured` naming the game and setting. Only with `--allocator=agones` |

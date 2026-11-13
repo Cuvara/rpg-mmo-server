@@ -5,6 +5,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Docs only: `docs/API.md` and `docs/DESIGN.md` no longer say the game server ignores the join
+  token's `gid`; it refuses a mismatch (`Token is for a different game`, ADR-33 leg 2) and the
+  per-game join secret is defence in depth. `docs/README.md` now says `JOIN_TOKEN_SECRET` is
+  required with no `JWT_SECRET` fallback, as `cmd/gateway/main.go` enforces. A stale
+  "until l3-routing" comment in `server/server.go` is removed (comment only).
+
 ### Added
 - **Game-scoped routing, ADR-33 leg 3 (routing).** EnterWorld is routed per (game, map).
   The game is always the connection's verified `gid` (absent = `cuvara`); the client

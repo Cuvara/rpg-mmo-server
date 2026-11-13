@@ -333,7 +333,9 @@ close Redis stream + client.
   **rotation keyrings**: first key signs, every key verifies.
 - `JOIN_TOKEN_SECRET` is **required on both sides** — gateway exits 1
   (`main.go:99-104`), game server exits 2 (`Program.cs:249-255`). Reusing
-  `JWT_SECRET` warns on both.
+  `JWT_SECRET` warns on both. *(Superseded since this audit: under ADR-33 the game
+  server no longer reads `JWT_SECRET` at all, so only the gateway warns; give a game
+  server `JOIN_TOKEN_SECRET` only.)*
 - Join tokens: 30s TTL, `sid`-pinned, **single-use via JTI**.
 - Rate limits: per-IP accepts, per-connection frames (gateway), per-user
   `gateway_token` (Nakama).

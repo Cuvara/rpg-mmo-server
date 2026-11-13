@@ -5,6 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Comments only: `k8s/data/secrets.example.yaml` no longer names the game server as a reader of
+  `JWT_SECRET` (only the gateway and Nakama read it), and `k8s/app/40-gateway.yaml` no longer
+  refers to a literal `GAMES` entry in the `render.py` gateway-env snippet, which it does not emit.
+
 ### ADR-33 leg 5: per-game ops — template, gateway and Nakama games env, image per game, per-game monitoring (D2 S1, D3, D6, D7)
 
 Nothing here is instantiated for a real second game, applied to a cluster, or run in CI:

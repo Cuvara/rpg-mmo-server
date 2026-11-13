@@ -5,6 +5,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Docs only: `docs/API.md` lists `FindByGameAndMapID` on the `storage.ServerRegistry`
+  interface (ADR-33 leg 3 widened it) and drops the notes saying it was a concrete method only.
+
 ### Added
 - **`constants.SessionKey(gameID, userID)` (ADR-33 leg 3).** The session store key:
   `session:{user_id}` for the default game (empty or `cuvara`, unchanged from today) and

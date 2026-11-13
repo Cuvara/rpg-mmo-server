@@ -69,9 +69,9 @@ Map ids are chosen per game, so collisions are expected, not exotic.
 - Adding a game to `GAMES` is not enough to route it: it also needs
   `JOIN_TOKEN_SECRET_<GAME>` on the gateway (and the same value on that game's
   servers), plus `ALLOCATOR_FLEET_MAP_<GAME>` when allocation is on.
-- The game server does not yet compare `gid` with its own game (ADR-33 leg 2). Until
-  it does, the per-game join secret is the separation between games' servers, which
-  is why a shared key is warned about.
+- The game server compares `gid` with its own game and refuses a mismatch with
+  `Token is for a different game` (ADR-33 leg 2). The per-game join secret is defence
+  in depth on top of that check, which is why a shared key is warned about.
 - Fixed in passing: an expired session cleared the connection identity but left its
   `(game, user)` entry in `userConns`; `checkSession` now untracks it like teardown.
 

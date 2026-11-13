@@ -103,9 +103,11 @@ allow-list. Absent `gid` means the default game, `DefaultGameID = "cuvara"` (Go
 `constants.DefaultGameID`, C# `GameServer.Games.GameId.DefaultGameId`). The gateway
 copies `gid` into the join token as it does `cid`, and the game server compares it
 with its own `GAMESERVER_GAME_ID` after the `sid` check and refuses a mismatch
-(ADR-33 D1 item 4). Neither is implemented yet: the gateway copy is leg 3 and the
-server check is leg 2. The client never names the game: `MsgEnterWorld { MapID }`
-is unchanged and the gateway composes `(game, map_id)` from the authenticated `gid`
+(ADR-33 D1 item 4). Both are implemented: the gateway mints the join token with
+`jwt.Keyring.SignWithGame` and that game's join keyring
+(`transfer.JoinKeyrings.For`), omitting `gid` for the default game, and the game
+server refuses a mismatch with "Token is for a different game". The client never
+names the game: `MsgEnterWorld { MapID }` is unchanged and the gateway composes `(game, map_id)` from the authenticated `gid`
 (ADR-33 D1 item 3, option C). `wire.proto` does not change and the protocol version
 is not bumped.
 

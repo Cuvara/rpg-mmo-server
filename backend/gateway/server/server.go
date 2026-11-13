@@ -909,7 +909,6 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		g.sendAuthError(cc, "game not configured")
 		return
 	}
-	// Configured non-default games still route by map only until l3-routing.
 	userID := claims.UserID
 	// The character this login plays (ADR-31). Nakama checked ownership when it
 	// minted the token; the gateway only carries the claim forward into the join

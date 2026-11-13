@@ -263,11 +263,11 @@ Each game signs with **its own keyring** (`transfer.JoinKeyrings`): `cuvara` wit
 comma-separated rotation format). There is no fallback to `JOIN_TOKEN_SECRET` or
 `JWT_SECRET`; a game in `GAMES` without its secret is refused at EnterWorld with
 `game not routable`. The secret must also be given to that game's servers. The game
-server reads `gid` but does not yet compare it with its own game (ADR-33 leg 2), so
-until then the distinct secret is what stops one game's servers accepting another's
-tokens. At startup the gateway warns when a game's secret is missing, equals
-`JWT_SECRET`, or shares any rotation key with another game's join secret (`cuvara`'s
-included).
+server compares `gid` (absent meaning `cuvara`) with its own `GAMESERVER_GAME_ID`
+after the `sid` check and refuses a mismatch with `Token is for a different game`
+(ADR-33 leg 2); the distinct secret is defence in depth on top of that check. At
+startup the gateway warns when a game's secret is missing, equals `JWT_SECRET`, or
+shares any rotation key with another game's join secret (`cuvara`'s included).
 
 ### Character (`cid`, ADR-31)
 

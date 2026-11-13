@@ -757,9 +757,12 @@ export JOIN_TOKEN_SECRET=$(grep '^JOIN_TOKEN_SECRET=' ../deploy/.env | cut -d= -
 ./loadtest -players 10 -duration 60s -baseline-entities 6 -movement still
 
 # The capacity sweep as run here: dedicated server, direct join, no spawner.
+# The recorded runs also passed -e JWT_SECRET to this container. The game server
+# no longer reads it (ADR-33) and must not hold the client-auth secret, so the
+# command leaves it out; the measurements above are unaffected.
 docker run -d --name rpg-gs-bench --network rpg-mmo-meta_default \
   -p 9300:9000 -p 9301:9101 \
-  -e JWT_SECRET="$JWT_SECRET" -e JOIN_TOKEN_SECRET="$JOIN_TOKEN_SECRET" \
+  -e JOIN_TOKEN_SECRET="$JOIN_TOKEN_SECRET" \
   -e GAMESERVER_ADDR=:9000 \
   -e GAMESERVER_MAP_ID=map_bench -e GAMESERVER_ID=gs-bench \
   -e GAMESERVER_CAPACITY=2000 -e METRICS_ADDR=:9101 \

@@ -5050,9 +5050,11 @@ find only that game's servers.
     suffixes, and the pod is named after the GameServer. Those names must stay within 63
     characters, the RFC 1123 label limit that applies to a pod's hostname and to label
     values. This ADR
-    budgets 12 characters for the suffixes (two `-` plus 5 random characters, the Kubernetes
-    `generateName` pattern), which leg 5 must confirm against the deployed Agones version,
-    so a fleet name may be at most 51 characters. The longest fleet today is
+    budgets 12 characters for the suffixes: two `-`, each followed by 5 random characters
+    (fleet → GameServerSet → GameServer, each step a Kubernetes `generateName` of
+    `<parent>-`). Leg 5 confirmed this for Agones 1.59.0, the pinned version
+    (`deploy/k8s/games/README.md`, "Name budget"), so a fleet name may be at most 51
+    characters. The longest fleet today is
     `dungeon-servers-dotnet-k8s`, 26 characters (`deploy/k8s/app/60-fleet-dungeon.yaml:29`).
     `<game>-` adds at most 25, so `<game>-dungeon-servers-dotnet-k8s` is at most 51. That
     is what caps the game id at 24 characters. A longer fleet base name needs a shorter

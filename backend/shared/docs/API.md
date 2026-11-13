@@ -147,7 +147,8 @@ type SessionStore interface {
 type ServerRegistry interface {
     Register(ctx context.Context, info ServerInfo) error
     Deregister(ctx context.Context, serverID string) error
-    FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error)
+    FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error)                   // default game only
+    FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]ServerInfo, error)   // ADR-33; "" = default game
     UpdatePlayerCount(ctx context.Context, serverID string, count int) error
     Heartbeat(ctx context.Context, serverID string) error               // NEW
     GetServer(ctx context.Context, serverID string) (ServerInfo, error) // NEW
@@ -174,7 +175,7 @@ func NewMemoryEventStream() *MemoryEventStream
 ```
 
 ```go
-// Concrete methods, not on storage.ServerRegistry (the interface is unchanged; ADR-33 leg 3 widens it).
+// storage.ServerRegistry, ADR-33. FindByMapID delegates to it with the default game.
 func (r *MemoryServerRegistry) FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]ServerInfo, error)
 ```
 
@@ -218,7 +219,7 @@ func (r *ServerRegistry) FindByMapID(ctx context.Context, mapID string) ([]stora
 func (r *ServerRegistry) UpdatePlayerCount(ctx context.Context, serverID string, count int) error
 func (r *ServerRegistry) Heartbeat(ctx context.Context, serverID string) error
 func (r *ServerRegistry) GetServer(ctx context.Context, serverID string) (storage.ServerInfo, error)
-func (r *ServerRegistry) FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]storage.ServerInfo, error) // ADR-33, not on the interface
+func (r *ServerRegistry) FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]storage.ServerInfo, error) // ADR-33
 func (r *ServerRegistry) Close() error
 func MapIndexKey(gameID, mapID string) string // ADR-33: servers:map:{map_id} or servers:map:{game}:{map_id}
 
