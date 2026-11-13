@@ -5,6 +5,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### ADR-33 leg 5: secrets and game-state databases (D5, D7, owner decision 5)
+
+#### Removed
+- `JWT_SECRET` from every game-server pod and the compose game server: `agones/fleet-map-dotnet-dev.yaml`, `k8s/app/50-fleet-map.yaml`, `k8s/app/60-fleet-dungeon.yaml`, and the game-server services in `docker-compose.yml` and `docker-compose.override.yml`. A compromised game-server pod holding it could sign a gateway token for any user and any `gid`, authenticate to the gateway, and receive a legitimate join token for another game; a per-game join secret does not stop that (ADR-33 D7, owner decision 5, decided for every stack including the single-game one). The gateway and Nakama still receive `JWT_SECRET`. The game server holds only `JOIN_TOKEN_SECRET`, still mandatory.
+
+#### Added
+- Deploy-time check that the join secret differs from `JWT_SECRET`, which the game server can no longer make at startup. `k8s/dev-up.sh` refuses an empty `rpg-app-secrets` `join-token-secret` or one equal to its `jwt-secret`, next to the existing Nakama/gateway `JWT_SECRET` comparison. `./stack.sh check-secrets` makes the compose check offline (no docker, compose or network) against the loaded `.env` with compose's `:-` defaults: every comma-separated rotation key of `JOIN_TOKEN_SECRET`, whitespace-trimmed, must differ from `JWT_SECRET`, and any set `JOIN_TOKEN_SECRET_<GAME>` must be a non-empty keyring with no `JWT_SECRET` entry (the gateway does not read the per-game variables yet). `./stack.sh up` runs the same check before building or starting anything. Diagnostics name variables and keys, never values. Offline test: `k8s/verify/tests/secret_check_test.sh` (compose half); the k8s half is a documented fake-`kubectl` dry run in `k8s/data/README.md`, because `dev-up.sh` applies resources before reaching its checks.
+- `db/provision-gamestate.sh <game>`: human-run, db-schema-write-gated provisioning of one non-default game's database and login role `gamestate_<game>` on the shared game PostgreSQL instance (ADR-33 D5). It validates the game id (`^[a-z][a-z0-9]{1,23}$`, reserved ids refused, `cuvara` refused because it keeps the existing `gamestate` database), makes the role the database owner with restricted attributes, sets `CONNECTION LIMIT` on both role and database (default 20, `--connection-limit N`) so one game cannot take the shared instance's connections (D7), revokes PUBLIC CONNECT/TEMPORARY on the new database, and fails if the role can still connect to any other database (`--revoke-public-connect` hardens those). The role password is read by psql with `\getenv` from `GAMESTATE_ROLE_PASSWORD` and never appears in argv, SQL text, output or the `--dry-run` preview. Never part of deploy or boot automation, and not run against any database in this change. Offline test with a fake psql: `db/tests/provision_test.sh`. Documented in `docs/DATABASE.md`.
+
+#### Changed
+- Fleet, compose, `.env.example`, `agones/secret-example.yaml` and `k8s/app/30-secret-template.yaml` comments now say the game server holds only `JOIN_TOKEN_SECRET`; the old fleet comment that justified a non-optional `jwt-secret` is gone. The `jwt-secret` key stays in `rpg-realtime-secrets` only because `k3s/setup-dev.sh` still writes it; no fleet mounts it.
+- `docs/README.md`, `docs/RUNBOOK-local-dev.md`, `docs/K3S.md`, `docs/CICD.md`, `docs/VPS-SETUP.md` and `docs/REALTIME-FLOW.md` no longer say the game server receives `JWT_SECRET`, and point at `./stack.sh check-secrets`.
+
+#### Security
+- Rollout order does not matter. A game server image older than l2-core read `JWT_SECRET` only for two startup warnings ("`JWT_SECRET` not set" and "`JOIN_TOKEN_SECRET` and `JWT_SECRET` are the same value") and an option nothing read (`gameserver-dotnet/CHANGELOG.md`, Removed), and verified join tokens with `JOIN_TOKEN_SECRET`. Such an image started without `JWT_SECRET` logs the "not set ... will reject all tokens" warning, which is misleading but harmless: joins still succeed. An l2-core image ignores `JWT_SECRET` if it is still set.
+
 ### Fixed
 
 - Route the scratch stack's Nakama plugin stop through `dc()` so it uses the same explicit compose file set as every other operation and never auto-loads the default override.

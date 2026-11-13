@@ -332,7 +332,8 @@ exists is the GameServer's status: `status.address` and `status.ports[].port`.
   │   │ Agones maps it to host 192.168.65.3:<random>      │            │
   │   │                                                   │            │
   │   │ env passed by the fleet (:82-112):                │            │
-  │   │   POD_NAME  JWT_SECRET  JOIN_TOKEN_SECRET         │            │
+  │   │   POD_NAME  JOIN_TOKEN_SECRET (no JWT_SECRET,     │            │
+  │   │     ADR-33 D7)                                    │            │
   │   │   SIM_*_HZ  REDIS_ADDR  LOG_LEVEL                 │            │
   │   │   ✗ no GAMESERVER_PUBLIC_ADDR                     │            │
   │   │                                                   │            │

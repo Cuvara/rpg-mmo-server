@@ -102,8 +102,9 @@ The client needs **one address and one secret**, and nothing else:
   authenticates here (device auth) and calls the `gateway_token` RPC to get the
   JWT it then sends in `MsgAuth`.
 - **Secrets** — read them out of `backend/deploy/.env`. `JWT_SECRET` is shared
-  by Nakama, the gateway and the game server; `JOIN_TOKEN_SECRET` is shared by
-  the gateway and the game server only. A client never sees either: it receives
+  by Nakama and the gateway only; the game server does not receive it (ADR-33
+  D7). `JOIN_TOKEN_SECRET` is shared by the gateway and the game server only,
+  and must differ from `JWT_SECRET`. A client never sees either: it receives
   a signed JWT from Nakama and an opaque join token from the gateway.
 
 `GAMESERVER_PUBLIC_ADDR` is handed to clients **verbatim** in
@@ -190,6 +191,14 @@ they only diverge if something overrides one of them.
 **Either binary exits immediately with a non-zero status** — `JOIN_TOKEN_SECRET`
 is mandatory on both the gateway and the game server, they must match, and both
 refuse to start without it. `.env.example` sets a dev default.
+
+**`./stack.sh up` stops with `ERROR: JOIN_TOKEN_SECRET must not contain
+JWT_SECRET as a join-token key`** — the join secret, one of its comma-separated
+rotation keys, or a set `JOIN_TOKEN_SECRET_<GAME>` equals `JWT_SECRET`. The game
+server holds the join secret, so reusing the JWT secret would let a compromised
+server sign gateway tokens (ADR-33 D7). Generate a separate value. `./stack.sh
+check-secrets` runs the same check on its own, offline, before you start
+anything; it names variables, never values.
 
 **Exported environment variables seem to be ignored by compose** — on this
 project's dev box `docker` is a shell shim to the Windows `docker.exe`
@@ -418,7 +427,7 @@ Common failures:
 | `plugin was built with a different version of package` | pluginbuilder tag ≠ nakama tag | Align versions, rebuild plugin |
 | Console lists no runtime modules | `modules/nakama.so` missing | `make plugin` then `make up` |
 | `dial tcp: connect: connection refused` on migrate | postgres not ready | Healthcheck should prevent this; check `docker compose logs postgres` |
-| Gateway rejects Nakama-issued tokens | secret mismatch | `JWT_SECRET` in `.env` must equal `JWT_SECRET` exported for gateway/gameserver |
+| Gateway rejects Nakama-issued tokens | secret mismatch | `JWT_SECRET` in `.env` must equal `JWT_SECRET` exported for the gateway (the game server does not read it) |
 | Port already allocated | host process on 5432/6379/7350 | Change `POSTGRES_PORT` / `REDIS_PORT` in `.env` or stop the host service |
 | `NOAUTH Authentication required` from gateway/gameserver | `REDIS_PASSWORD` set in `.env` but not exported to the host process | Export the same `REDIS_PASSWORD` before `go run` |
 | `dial tcp [::1]:6379: connect: connection refused` | Redis not up, or `REDIS_PORT` remapped | `make ps`; set `REDIS_ADDR=localhost:$REDIS_PORT` |
@@ -464,7 +473,7 @@ streams — `go-redis` v9) via `REDIS_ADDR` / `REDIS_PASSWORD` from
 publishes Redis on the host, so the defaults work as-is.
 
 ```bash
-export JWT_SECRET=dev-secret-change-me      # must equal .env JWT_SECRET
+export JWT_SECRET=dev-secret-change-me      # gateway only; must equal .env JWT_SECRET
 export JOIN_TOKEN_SECRET=dev-join-secret-change-me   # must equal .env; NOT JWT_SECRET
 export REDIS_ADDR=localhost:6379            # match REDIS_PORT if you changed it
 export REDIS_PASSWORD=                      # must equal .env REDIS_PASSWORD

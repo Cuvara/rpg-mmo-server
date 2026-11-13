@@ -23,9 +23,10 @@ Docs:
 - `RUNBOOK-local-dev.md` — start/stop/debug/reset the local stack, verification steps, REDIS_ADDR wiring.
 - `CICD.md` — `build-all.sh` / `deploy-local.sh` usage, `cd.yml` job matrix, self-hosted
   runner registration + labels, Environment secrets, branch strategy, rollback.
-- `DATABASE.md` — numbered game-state migrations (how to add one, the
-  backward-compatibility rule), `db/backup.sh` / `db/restore.sh`, and the disaster
-  recovery runbook.
+- `DATABASE.md` — per-game game-state database provisioning
+  (`db/provision-gamestate.sh`, ADR-33 D5), numbered game-state migrations (how
+  to add one, the backward-compatibility rule), `db/backup.sh` / `db/restore.sh`,
+  and the disaster recovery runbook.
 - `DISASTER-RECOVERY.md` — what breaks when each dependency dies (Redis, both
   PostgreSQL instances, Nakama, gateway, game server, lgtm), what players
   experience, recovery commands, RTO/RPO, `db/redis-backup.sh` / `db/redis-restore.sh`,
@@ -59,10 +60,12 @@ Docs:
 The realtime services (gateway, gameserver) do have container images (see
 "Gateway & gameserver container images" below), but the default local-dev flow
 still runs them on the host (`go run` for gateway, `dotnet run` for
-gameserver-dotnet), sharing `JWT_SECRET` and `REDIS_ADDR` with the stack:
+gameserver-dotnet), sharing secrets and `REDIS_ADDR` with the stack. The
+gateway reads `JWT_SECRET`; the game server does not, and holds only
+`JOIN_TOKEN_SECRET` (ADR-33 D7):
 
 ```bash
-export JWT_SECRET=dev-secret-change-me
+export JWT_SECRET=dev-secret-change-me   # gateway only; never the game server
 export JOIN_TOKEN_SECRET=dev-join-secret-change-me   # must match .env; NOT JWT_SECRET
 export REDIS_ADDR=localhost:6379   # container-to-container it would be redis:6379
 export REDIS_PASSWORD=             # must match .env
@@ -107,15 +110,21 @@ ABI-locked. See RUNBOOK-local-dev.md § "Version pinning rule".
 `.env` values are local-dev defaults only (`localdev`, `admin/password`,
 `dev-secret-change-me`, `defaultkey`; Redis runs with no auth by default).
 `JWT_SECRET` must match the value used by
-gateway and gameserver (`backend/shared/config`, env `JWT_SECRET`) — Nakama signs
-session tokens with it and the gateway verifies them locally. From Beta tier
+the gateway (`backend/shared/config`, env `JWT_SECRET`) — Nakama signs
+session tokens with it and the gateway verifies them locally. The game server
+does not receive `JWT_SECRET` (ADR-33 D7, owner decision 5): it holds only
+`JOIN_TOKEN_SECRET`, which must differ from `JWT_SECRET`. `./stack.sh
+check-secrets` checks that offline (no docker, compose or network) against the
+loaded `.env`, including every comma-separated rotation key and any set
+`JOIN_TOKEN_SECRET_<GAME>`, and names variables, never values; `./stack.sh up`
+runs the same check before building or starting anything. From Beta tier
 onward these move to k8s Secrets.
 
 Nakama refuses to start when `session.encryption_key` and
 `session.refresh_encryption_key` are identical, so compose passes
 `--session.refresh_encryption_key "$${JWT_SECRET}-refresh"` while
-`--session.encryption_key` keeps the raw `JWT_SECRET` that gateway/gameserver
-verify against. Do not collapse the two into one value.
+`--session.encryption_key` keeps the raw `JWT_SECRET` that the gateway
+verifies against. Do not collapse the two into one value.
 
 For deployed environments (dev/staging/production) these values come from GitHub
 Environment secrets and are written to `.env` by the CD workflow — see

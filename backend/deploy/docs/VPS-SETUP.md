@@ -185,8 +185,8 @@ grep -oE 'secrets\.[A-Z_]+' .github/workflows/cd.yml | sort -u
 
 | Secret | Required | Example | Meaning |
 |--------|----------|---------|---------|
-| `JWT_SECRET` | **yes** — deploy fails if empty | 48 random chars | HS256 secret shared by Nakama, gateway and game server. Nakama signs client session tokens with it, so the gateway verifies them locally with no roundtrip. Changing it invalidates every live session. |
-| `JOIN_TOKEN_SECRET` | **yes** — deploy fails if empty, or if it equals `JWT_SECRET` | 48 random chars | HS256 secret the gateway signs gateway→gameserver join tokens with and every game server verifies them with. Separate from `JWT_SECRET` on purpose: a compromised game-server pod must not be able to forge client auth tokens. Rotate with a comma-separated `new,old` list. |
+| `JWT_SECRET` | **yes** — deploy fails if empty | 48 random chars | HS256 secret shared by Nakama and the gateway. Nakama signs client session tokens with it, so the gateway verifies them locally with no roundtrip. The game server deliberately does not receive it (ADR-33 D7). Changing it invalidates every live session. |
+| `JOIN_TOKEN_SECRET` | **yes** — deploy fails if empty, or if it equals `JWT_SECRET` (`./stack.sh check-secrets` runs the same check locally) | 48 random chars | HS256 secret the gateway signs gateway→gameserver join tokens with and every game server verifies them with. Separate from `JWT_SECRET` on purpose: a compromised game-server pod must not be able to forge client auth tokens. Rotate with a comma-separated `new,old` list. |
 | `POSTGRES_PASSWORD` | **yes** | 48 random chars | Nakama meta DB password. Changing it on an existing volume does **not** re-key Postgres — the old password keeps working. |
 | `NAKAMA_CONSOLE_PASSWORD` | **yes** | 48 random chars | Login for the Nakama admin console (port 7351). |
 | `GRAFANA_ADMIN_PASSWORD` | **yes when `MONITORING_ENABLED != false`** | 48 random chars | Grafana admin password. Only applied when Grafana *creates* its admin user, i.e. on an empty `grafana.db` — see `MONITORING.md` for the rotation procedure. |
