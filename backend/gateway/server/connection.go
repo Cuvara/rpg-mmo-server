@@ -251,6 +251,14 @@ func (c *ClientConn) Identity() (string, ConnState) {
 	return c.userID, c.state
 }
 
+// IdentityGame returns the user, lifecycle state and verified game under one
+// lock, so routing cannot pair an identity with another transition's game.
+func (c *ClientConn) IdentityGame() (string, ConnState, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.userID, c.state, constants.GameOrDefault(c.game)
+}
+
 // SetAuthenticated binds a verified user to the connection, playing the
 // account's default character.
 func (c *ClientConn) SetAuthenticated(userID string) {

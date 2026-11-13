@@ -105,7 +105,7 @@ func TestGatewayGameSessionKeys(t *testing.T) {
 		{"configured gid", "foo", "session:foo:u1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")))
+			r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")), withTestFooRouting(t))
 			loginGame(t, r.gw, tc.claim, "u1", false)
 			if _, err := r.store.Get(context.Background(), tc.key); err != nil {
 				t.Fatalf("missing %s: %v", tc.key, err)
@@ -119,7 +119,7 @@ func TestGatewayGameSessionKeys(t *testing.T) {
 }
 
 func TestGatewaySameInstanceGamesStayIndependent(t *testing.T) {
-	r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")))
+	r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")), withTestFooRouting(t))
 	ctx := context.Background()
 	defaultConn := loginGame(t, r.gw, constants.DefaultGameID, "u1", true)
 	before, err := r.store.Get(ctx, "session:u1")
@@ -158,7 +158,7 @@ func TestGatewaySameInstanceGamesStayIndependent(t *testing.T) {
 }
 
 func TestGatewayReauthAnotherGameRetiresPreviousTracking(t *testing.T) {
-	r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")))
+	r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")), withTestFooRouting(t))
 	conn := loginGame(t, r.gw, constants.DefaultGameID, "u1", true)
 	cc := r.gw.findUserConn(constants.DefaultGameID, "u1")
 	if resp := authenticateGame(t, conn, "foo", "u1"); !resp.OK {
@@ -176,14 +176,14 @@ func TestGatewayReauthAnotherGameRetiresPreviousTracking(t *testing.T) {
 
 func TestGatewayAcrossInstancesGamesStayIndependent(t *testing.T) {
 	games := configuredTestGames(t, "cuvara,foo")
-	r := startKickTestGateway(t, WithGames(games))
+	r := startKickTestGateway(t, WithGames(games), withTestFooRouting(t))
 	consumer := NewKickConsumer(r.stream, r.sessions.GatewayID(), r.gw.FindAndCloseConnection, logger.New("error"))
 	if err := consumer.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = consumer.Stop() })
 	gwB := New(session.NewSessionManager(r.store, "gw-b"), r.gw.registry, testSecret, logger.New("error"),
-		WithGames(games), WithKickStream(r.stream))
+		WithGames(games), withTestFooRouting(t), WithKickStream(r.stream))
 	t.Cleanup(gwB.Shutdown)
 	go func() { _ = gwB.Run("127.0.0.1:0") }()
 	for i := 0; i < 100 && gwB.Addr() == ""; i++ {
@@ -229,7 +229,7 @@ func TestGatewayUnconfiguredGameRefusedBeforeSessionAccess(t *testing.T) {
 			// Observe every session operation so rejection cannot quietly read
 			// another game's session, even if it never writes one.
 			store := &gameSessionAuditStore{SessionStore: storage.NewMemorySessionStore()}
-			gw, met := startGatewayWithOptions(t, WithGames(games), func(g *Gateway) {
+			gw, met := startGatewayWithOptions(t, WithGames(games), withTestFooRouting(t), func(g *Gateway) {
 				g.sessions = session.NewSessionManager(store)
 			})
 			met.SetGames(games.IDs())
@@ -316,7 +316,7 @@ func TestGatewayKickGameAndJTIGuards(t *testing.T) {
 }
 
 func TestGatewayKickUsesLastAssignmentJTI(t *testing.T) {
-	r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")))
+	r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")), withTestFooRouting(t))
 	defaultConn := loginGame(t, r.gw, constants.DefaultGameID, "u1", true)
 	fooConn := loginGame(t, r.gw, "foo", "u1", true)
 	cc := r.gw.findUserConn("foo", "u1")
@@ -390,7 +390,7 @@ func TestClientConnGameIdentityLifecycle(t *testing.T) {
 }
 
 func TestGatewayGameDisconnectOnlyCleansItsSession(t *testing.T) {
-	r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")))
+	r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")), withTestFooRouting(t))
 	defaultConn := loginGame(t, r.gw, constants.DefaultGameID, "u1", false)
 	fooConn := loginGame(t, r.gw, "foo", "u1", false)
 	disc, err := messages.NewEnvelope(messages.MsgDisconnect, messages.DisconnectMessage{})
@@ -471,7 +471,7 @@ func TestGatewayVerifiedGameMetrics(t *testing.T) {
 	for _, game := range []string{constants.DefaultGameID, "foo"} {
 		t.Run(game, func(t *testing.T) {
 			games := configuredTestGames(t, "cuvara,foo")
-			gw, met := startGatewayWithOptions(t, WithGames(games))
+			gw, met := startGatewayWithOptions(t, WithGames(games), withTestFooRouting(t))
 			met.SetGames(games.IDs())
 			conn := loginGame(t, gw, game, "u1", true)
 			cc := gw.findUserConn(game, "u1")
@@ -515,7 +515,7 @@ func TestGatewayVerifiedGameMetrics(t *testing.T) {
 func TestSupersedeAlwaysWritesExplicitGame(t *testing.T) {
 	for _, game := range []string{constants.DefaultGameID, "foo"} {
 		t.Run(game, func(t *testing.T) {
-			r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")))
+			r := startKickTestGateway(t, WithGames(configuredTestGames(t, "cuvara,foo")), withTestFooRouting(t))
 			loginGame(t, r.gw, game, "u1", true)
 			loginGame(t, r.gw, game, "u1", false)
 			select {

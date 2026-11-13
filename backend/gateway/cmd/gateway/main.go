@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
 	"github.com/duycuong/rpg-mmo/shared/config"
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/storage"
@@ -121,6 +123,24 @@ func main() {
 	}
 	if joinSecret == cfg.JWTSecret {
 		log.Warn("JOIN_TOKEN_SECRET and JWT_SECRET are the same value -- a leak of either secret compromises both the Nakama auth hop and the game-server hop. Use distinct secrets before launch.")
+	}
+	var gameJoinOptions []server.Option
+	for _, game := range games.IDs() {
+		if game == constants.DefaultGameID {
+			continue
+		}
+		envName := "JOIN_TOKEN_SECRET_" + strings.ToUpper(game)
+		secret := os.Getenv(envName)
+		if strings.TrimSpace(secret) == "" {
+			log.Warn("game join-token secret is missing; EnterWorld for this game is refused",
+				"game", game, "setting", envName)
+			continue
+		}
+		if secret == cfg.JWTSecret {
+			log.Warn("game join-token secret and JWT_SECRET are the same value -- use distinct secrets before launch",
+				"game", game, "setting", envName)
+		}
+		gameJoinOptions = append(gameJoinOptions, server.WithGameJoinTokenSecret(game, secret))
 	}
 	if cfg.JWTSecret == "dev-secret-change-me" {
 		log.Warn("JWT_SECRET is the built-in development default -- anyone can forge auth tokens. Set JWT_SECRET before exposing this gateway.")
@@ -260,6 +280,17 @@ func main() {
 			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON")),
 			Kubeconfig:   firstNonEmpty(*allocKubeconfig, os.Getenv("ALLOCATOR_KUBECONFIG")),
 		}
+		agonesCfg.Games = make(map[string]registry.GameFleets)
+		for _, game := range games.IDs() {
+			if game == constants.DefaultGameID {
+				continue
+			}
+			agonesCfg.Games[game] = registry.GameFleets{
+				Map:       os.Getenv(registry.FleetEnvName(registry.KindMap, game)),
+				Dungeon:   os.Getenv(registry.FleetEnvName(registry.KindDungeon, game)),
+				Namespace: os.Getenv("ALLOCATOR_NAMESPACE_" + strings.ToUpper(game)),
+			}
+		}
 		// An allocated pod is not dialable the moment the allocation API
 		// answers: it still has to boot, bind, report Ready and self-register.
 		// The registry waits for its own entry before a join token is minted,
@@ -374,7 +405,7 @@ func main() {
 		}
 	}
 
-	gw = server.New(sessions, reg, cfg.JWTSecret, log,
+	gwOptions := []server.Option{
 		server.WithEventRelay(relay),
 		server.WithMetrics(met),
 		server.WithGames(games),
@@ -397,7 +428,8 @@ func main() {
 		server.WithConnRateLimit(connRatePerMin/60, connBurst),
 		server.WithMsgRateLimit(msgRatePerSec, msgBurst),
 		server.WithMinProtocolVersion(uint32(*minProtoVersion)),
-	)
+	}
+	gw = server.New(sessions, reg, cfg.JWTSecret, log, append(gwOptions, gameJoinOptions...)...)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
