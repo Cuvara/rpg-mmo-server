@@ -119,7 +119,14 @@ Redis-backed counter keyed identically.
 
 ```go
 var ErrNotFound = errors.New("not found")   // wrapped by Redis impls; test with errors.Is
+var ErrGameMismatch = errors.New("server id registered to another game") // ADR-33; test with errors.Is
 ```
+
+`ServerInfo.GameID` (`json:"game_id"`, ADR-33) names the game that owns the entry. Empty
+means `constants.DefaultGameID`; both registries normalise it on write and return it filled
+in from `GetServer` and the lookups. `Register` returns an error wrapping `ErrGameMismatch`
+when a **live** entry with the same server id belongs to another game, and changes nothing;
+re-registering the same game is accepted, and an expired id is free.
 
 ### Interfaces
 
@@ -166,6 +173,11 @@ func NewMemoryServerRegistryWithTTL(ttl time.Duration) *MemoryServerRegistry    
 func NewMemoryEventStream() *MemoryEventStream
 ```
 
+```go
+// Concrete methods, not on storage.ServerRegistry (the interface is unchanged; ADR-33 leg 3 widens it).
+func (r *MemoryServerRegistry) FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]ServerInfo, error)
+```
+
 `NewMemoryServerRegistry()` keeps entries forever (ttl 0) — existing behaviour is
 unchanged. `NewMemoryServerRegistryWithTTL(constants.ServerHeartbeatTTL)` mirrors the
 Redis liveness semantics without a Redis dependency.
@@ -206,7 +218,9 @@ func (r *ServerRegistry) FindByMapID(ctx context.Context, mapID string) ([]stora
 func (r *ServerRegistry) UpdatePlayerCount(ctx context.Context, serverID string, count int) error
 func (r *ServerRegistry) Heartbeat(ctx context.Context, serverID string) error
 func (r *ServerRegistry) GetServer(ctx context.Context, serverID string) (storage.ServerInfo, error)
+func (r *ServerRegistry) FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]storage.ServerInfo, error) // ADR-33, not on the interface
 func (r *ServerRegistry) Close() error
+func MapIndexKey(gameID, mapID string) string // ADR-33: servers:map:{map_id} or servers:map:{game}:{map_id}
 
 // EventStream — Redis Streams consumer group
 func NewEventStream(addr, password, group, consumer string) *EventStream
@@ -231,9 +245,26 @@ func (s *EventStream) Close() error
 | Purpose | Key | Type | TTL |
 |---------|-----|------|-----|
 | Session | `session:{user_id}` (caller-built, `constants.SessionKeyPrefix`) | string | `constants.SessionTTL` (1h) |
-| Server record | `servers:id:{server_id}` | hash (`server_id`, `map_id`, `addr`, `capacity`, `player_count`) | `constants.ServerHeartbeatTTL` (15s) |
-| Map index | `servers:map:{map_id}` | set of server ids | none (pruned lazily) |
+| Server record | `servers:id:{server_id}` | hash, eight fields: `server_id`, `map_id`, `addr`, `transport`, `capacity`, `player_count`, `identity_key`, `game_id` | `constants.ServerHeartbeatTTL` (15s) |
+| Map index, default game | `servers:map:{map_id}` | set of server ids | none (pruned lazily) |
+| Map index, other game | `servers:map:{game}:{map_id}` | set of server ids | none (pruned lazily) |
 | Event stream | `events:{stream}` | stream | none |
+
+The registry hash is a cross-language contract: the C# game server
+(`GameServer/Registry/RedisServerRegistry.cs`) writes the same names and encodings, and
+`testdata/multigame/registry.json` pins the field order and the expected index keys for
+both languages. An absent or empty `game_id` reads as `constants.DefaultGameID`; writers
+always write it (explicit `cuvara` for the default game). `MapIndexKey` keeps the original
+`servers:map:{map_id}` for the default game (`""` or `cuvara`), so default-game keys are
+unchanged. `Deregister` removes the id from the index named by the stored `game_id`.
+
+`Register` is a single Lua check-and-set (`testdata/multigame/register.lua`, byte-identical
+to the Go and C# copies): if `servers:id:{id}` exists and its `game_id` (absent = default)
+differs from the caller's, it returns 0 and writes nothing, surfaced as `ErrGameMismatch`;
+otherwise it does `HSET` of the eight fields, `PEXPIRE` and `SADD` to the game's map index.
+`FindByMapID` reads `servers:map:{map_id}` as before; `FindByGameAndMapID` reads the game's
+index, skips entries whose `game_id` names another game and prunes expired ids the same way.
+`UpdatePlayerCount` and its script are unchanged.
 
 ### Usage
 

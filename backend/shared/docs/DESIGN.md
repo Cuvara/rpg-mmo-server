@@ -812,3 +812,41 @@ nothing reads it yet. Full rationale and the later legs: `backend/docs/ARCHITECT
   trailing newline) or on Unicode letter and digit classes.
 - **One fixture, not two tables.** `testdata/multigame/identity.json` is the only place the
   expected verdicts live for the parity tests; both languages fail if they disagree with it.
+
+## Registry: per-game map index and check-and-set registration (2026-11-13, ADR-33 leg 1 part 2)
+
+**Decision**: the registry hash gains an eighth field, `game_id`, and the map index key
+depends on the game:
+
+```
+servers:id:{server_id}        HASH  server_id, map_id, addr, transport, capacity,
+                                    player_count, identity_key, game_id (+ TTL)
+servers:map:{map_id}          SET   default-game server ids on that map (unchanged key)
+servers:map:{game}:{map_id}   SET   server ids of another game on that map
+```
+
+`Register` becomes one Lua script, the same text in Go, in C# and in
+`testdata/multigame/register.lua`: if `servers:id:{id}` exists and names another game, it
+returns 0 without touching any key (`storage.ErrGameMismatch` in Go,
+`RegistryGameMismatchException` in C#); otherwise `HSET`, `PEXPIRE`, `SADD` as before.
+
+**Why**:
+
+- **Absent means the default game** (same rule as the `gid` claim): every hash written
+  before ADR-33 has no `game_id` and must still read as `cuvara`, and the default game keeps
+  `servers:map:{map_id}`, so a mixed fleet of old and new writers and readers agrees on the
+  default game without a migration. New writers still write `cuvara` explicitly so a hash
+  says which game it belongs to.
+- **A separate index key per game** rather than filtering one shared set: a map id is only
+  unique within a game, and in Redis a non-default game's servers never appear in the
+  default game's `FindByMapID`. (`MemoryServerRegistry.FindByMapID` still matches on
+  `map_id` alone, across games; use `FindByGameAndMapID` when the game matters.) Map ids exclude `:` (`gameid.ValidMapID`) and game ids are lowercase
+  alphanumerics, so `servers:map:{game}:{map_id}` cannot collide with a default-game key.
+- **Check-and-set, not a pipeline**: server ids are only game-qualified for new games, so two
+  games could otherwise overwrite each other's live entry by reusing an id, silently moving a
+  server between games. The check and the write must be one atomic step; a Lua script is the
+  only way to do that in a single round trip. An expired id is free to take, matching the
+  hash-is-truth liveness rule above.
+- **The interface does not change yet.** `FindByGameAndMapID` is a concrete method on the
+  Redis and memory registries; widening `storage.ServerRegistry` would break every gateway
+  test fake, so it waits for leg 3, where the gateway starts calling it.

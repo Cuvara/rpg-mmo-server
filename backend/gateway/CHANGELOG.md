@@ -5,6 +5,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`SessionSupersededEvent.GameID` (ADR-33 leg 1 part 2).** Optional `game_id` field
+  (`omitempty`) on the `session_superseded` kick payload, plus `Game()` (absent =
+  `constants.DefaultGameID`). Struct only: `publishSupersede` does not fill it yet (ADR-33
+  leg 3), so the published bytes are unchanged. The C# `SessionSupersededPayload` and
+  `gameserver-dotnet/docs/API.md` carry the field in the same commit. Tests:
+  `TestSessionSupersededEventJSON`, `TestSessionSupersededEventUnmarshalWithoutGame`.
+
 ### Changed
 - **The gateway hop is always TCP (optionally TLS); gameplay is always KCP/UDP.** The gateway
   listens on TCP unconditionally. `GATEWAY_TRANSPORT=kcp` (or any non-`tcp` value) is now a

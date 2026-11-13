@@ -29,6 +29,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     non-empty game is refused. `SignWithCharacter` delegates with an empty game, so every
     existing signing call is unchanged; `Claims.IsZero` accounts for the field. Nothing
     mints a non-empty `gid` yet. Tests in `jwt/gid_test.go`.
+- **Game-aware server registry, ADR-33 leg 1 part 2.** Default-game behaviour is unchanged,
+  and there is no wire or protocol change (`proto/`, generated code and the protocol version
+  constants are untouched). The C# game server changes in the same commit.
+  - `storage.ServerInfo.GameID` (`json:"game_id"`) and the eighth registry hash field
+    `game_id`. `infoFromFields` reads an absent or empty `game_id` as
+    `constants.DefaultGameID`, so a pre-ADR-33 entry belongs to the default game; `GetServer`
+    and the lookups return `GameID` filled in. The writer always writes it (explicit
+    `cuvara` for the default game).
+  - `redisstore.MapIndexKey(gameID, mapID)`: `servers:map:{map_id}` for the default game
+    (`""` or `cuvara`, the existing key), `servers:map:{game}:{map_id}` for any other game.
+    `Deregister` removes the id from the index named by the stored `game_id`.
+  - `storage.ErrGameMismatch`. `Register` (Redis) is now one check-and-set Lua script: when
+    `servers:id:{id}` exists and names another game (absent = default), it writes nothing and
+    returns an error wrapping `ErrGameMismatch`; otherwise it does `HSET` (eight fields),
+    `PEXPIRE` and `SADD` as before. Re-registering the same game, or a default-game server
+    over an entry without `game_id`, is accepted. An expired id is free. `MemoryServerRegistry`
+    applies the same rule to live entries.
+  - `FindByGameAndMapID(ctx, gameID, mapID)` on the Redis and memory registries (empty
+    `gameID` = default): reads the game's index, skips entries owned by another game and
+    prunes expired ids like `FindByMapID`. A concrete method only: the
+    `storage.ServerRegistry` interface method set is unchanged (leg 3 widens it).
+  - Fixtures `testdata/multigame/registry.json` (the ordered eight hash fields and the
+    expected map-index keys) and `testdata/multigame/register.lua` (the registration script,
+    byte for byte), pinned by `TestRegistryHashFieldsFixture`, `TestMapIndexKeyFixture`,
+    `TestRegisterScriptFixture` and the C# `RegistryContractTests`. Ownership tests against
+    miniredis in `redisstore/registry_game_test.go`, memory parity in `memory_test.go`.
 
 ### Changed
 - `EntitySnapshot.speed` is now proto3 `optional` without changing its field number or
