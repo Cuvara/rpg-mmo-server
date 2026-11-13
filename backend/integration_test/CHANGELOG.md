@@ -27,6 +27,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refusal tests assert that no further frame arrives within the window instead of a socket EOF.
 
 ### Added
+- **ADR-33 multi-game e2e (legs 2-3)**: client and join tokens are minted directly with
+  `shared/jwt` (`jwt.SignWithGame`), with no Nakama in the loop.
+  - **`multigame_harness_test.go`**: shared harness. It runs an in-process gateway with
+    `GAMES=cuvara,arena` and a per-game join secret for `arena`
+    (`WithGameJoinTokenSecret`, deliberately different from the default keyring). It also
+    starts a C# `arena` server with game id `arena` (`--game-id`, i.e. `GAMESERVER_GAME_ID`)
+    and server id `arena-gs-1` on the same `map_01` as the default server, using the content
+    tree `testdata/multigame/arena/` (with the `game.json` a non-default game needs to boot).
+  - **`TestMultiGame_DefaultGameFlowUnchanged`**: neither the client token nor the join
+    token carries a `gid`, and `map_01` joins the `cuvara` server.
+  - **`TestMultiGame_SecondGameRoutedToItsOwnServer`**: for the same map id, each game is
+    routed only to its own server.
+  - **`TestMultiGame_CrossGameJoinTokenRefused`**: the cuvara server refuses the
+    gateway-issued `arena` join token. It also refuses a `gid=arena` token with the right
+    secret and the right `sid`, with `"Token is for a different game"`. A `gid` outside
+    `GAMES` is refused at gateway auth with `game not configured`.
+  - **`TestMultiGame_SameUserTwoGamesSupersedesNeither`** (`multigame_session_e2e_test.go`):
+    when the same user logs in to two games, neither session is kicked and both are served.
+    A second login in the same game still supersedes the first.
 - **`core_v3_e2e_test.go`** — wire protocol 3 against the real C# game server, both encodings:
   `TestCoreV3_CommandInventory` (a protocol 3 client's InventoryRequest gets exactly one
   CommandResult; unknown opcode and a pick-up of nothing are named refusals; a protocol 2
