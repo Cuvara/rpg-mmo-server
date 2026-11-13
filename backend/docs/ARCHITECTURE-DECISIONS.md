@@ -4294,7 +4294,8 @@ to be flipped together — that no test could see.
 
 ## ADR-33 — One backend stack serves many games: a game id travels with the session, the registry, the metrics and the Nakama data
 
-**Status:** proposed 2026-11-13, not accepted; draft for the owner (owner decision of 2026-11-13: several future games run on shared stacks). Extends ADR-31 (a claim
+**Status:** accepted 2026-11-13 (owner decisions: several future games run on shared stacks;
+every recommended answer below is accepted, and the existing game's id is `cuvara`). Extends ADR-31 (a claim
 that Nakama mints after an ownership check and the gateway copies into the join token is
 exactly the shape a game id would take) and ADR-19 (content is data on disk). Touches ADR-1
 (one writer per datum), ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a
@@ -4306,8 +4307,8 @@ hash) and ADR-26 (dungeon instances and the registration scope).
 **Context.** The Studio OS hub binds each game and each environment to a cluster. To show
 one game's servers, metrics and players on a cluster that carries several games, it needs a
 game identity to filter by in three places: the Redis server registry, the Prometheus
-metrics and the Nakama data. None of the three carries one today (see below). Until this ADR
-is decided and its legs ship, the hub runs one game per cluster.
+metrics and the Nakama data. None of the three carries one today (see below). Until its legs
+ship, the hub runs one game per cluster.
 
 **Current state.** This is what the code at this branch's HEAD (develop @ `633a792`) does.
 Paths are relative to `backend/`. Every `path:line` below was opened at that revision. Where
@@ -4798,8 +4799,9 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
 - **Not verified here.** Which map id strings shipped Unity clients send is client-side
   code in other repositories.
 
-**Decision.** Proposed. Nothing below is accepted until the owner answers the open questions
-at the end of this ADR.
+**Decision.** Accepted 2026-11-13. Every `Recommendation` and `Recommended` choice in D1 to
+D8 is the accepted one, and the owner's answers are recorded under **Owner decisions** at
+the end of this ADR.
 
 Terms used below:
 
@@ -4837,10 +4839,11 @@ Terms used below:
   | Game-state database and role | database `gamestate_<game>`, login role `gamestate_<game>` | D5 |
   | Content and image | `content/<game>/`, image tag `gameserver-dotnet:<game>-<version>` | D6 |
 - The **default game** is the single game that exists today. Its id is one compile-time
-  constant, `DefaultGameID`, declared once in Go (`shared/constants`) and once in C#, with a
-  parity test that pins the two equal. It is not a configuration value. Three components
-  (Nakama, gateway, game server) must agree on it, and a per-process setting that can differ
-  between them would split the world. Which slug it is: open question 2.
+  constant, `DefaultGameID = "cuvara"` (it matches `^[a-z][a-z0-9]{1,23}$`), declared once
+  in Go (`shared/constants`) and once in C#, with a parity test that pins the two equal. It
+  is not a configuration value. Three components (Nakama, gateway, game server) must agree
+  on it, and a per-process setting that can differ between them would split the world.
+  Owner decision 2.
 - **Absent means the default game.** Everywhere below, a missing claim, hash field, payload
   field or session var reads as `DefaultGameID`.
 
@@ -4904,8 +4907,8 @@ every RPC can read.
 2. **Gateway session, local connections and kick targeting.** `handleAuth` latches `gid`
    together with `cid` (`gateway/server/server.go:866`, `:920`).
    - **The decision.** With accounts shared across games (D4), today's code lets a login to
-     game B supersede and kick the same account in game A (ADR-20). Recommended: an account
-     may be logged into two games at once, one session per game (open question 4). A new
+     game B supersede and kick the same account in game A (ADR-20). Decided: an account
+     may be logged into two games at once, one session per game (owner decision 4). A new
      session key alone does not deliver that, because three things are keyed by user id
      today (current state §2): the Redis session, the gateway's local connection map, and
      the target of a cross-gateway kick. All three move to `(game, user)`.
@@ -5260,7 +5263,7 @@ All three land in Go and C# in one commit, as the contract comments already requ
   game. It has B's coupling without B's shared login. Rejected.
 
 **Recommendation: B.** D7's criteria decide when a game gets its own stack. That stack has
-its own Nakama, which amounts to Option A for that game. Open question 1.
+its own Nakama, which amounts to Option A for that game. Owner decision 1.
 
 **Data under B.** One resolver, `scoped(game, name)`, returns `name` unchanged for the
 default game and `<game>.<name>` for any other game. The default game's existing objects,
@@ -5281,7 +5284,7 @@ Every name listed in current state §4 goes through the resolver:
   - A Nakama wallet is one object per user, so each game gets its own currency key:
     `gold` for the default game and `<game>.gold` for any other
     (`nakama/economy/reward.go:57`, `nakama/economy/reward_batch.go:202`).
-  - No currency is shared between games (open question 7).
+  - No currency is shared between games (owner decision 7).
   - Ledger metadata gains `game_id` (`nakama/economy/reward.go:58-62`,
     `nakama/economy/reward_batch.go:203-208`).
 - **Reward and kill RPCs (server to server).**
@@ -5398,8 +5401,9 @@ Its client pins that build too.
   major version differs. This is the same way it already refuses invalid content
   (`gameserver-dotnet/GameServer/Program.cs:891-916`).
 - The default game's content stays at `backend/content/`, with a manifest added.
-- Whether a future game's content and `Shared.GameLogic` live in this repository (under
-  `content/<game>/`) or in their own repository is open question 6.
+- A future game's content lives in this repository, under `content/<game>/`, while the game
+  shares `Shared.GameLogic` with the default game. It moves to its own repository when the
+  game needs its own `Shared.GameLogic` (owner decision 6).
 
 By design, no single image serves every game. What every game shares is one Dockerfile and
 one server source tree, for as long as the games share a `Shared.GameLogic` major version.
@@ -5417,8 +5421,8 @@ What one game can do to the others:
 | Game Postgres | Exhausting connections, or one heavy query, slows every game's saves | A database per game (D5) with a connection limit on each. CPU stays shared |
 | Nakama | An RPC storm or a panic in one game's code affects every game's logins and RPCs. A plugin deploy restarts Nakama for all games. All games share one Nakama version | None inside one Nakama. This is the strongest argument for giving a game its own stack |
 | Gateway | A login storm, a bad config or a bad deploy is a join outage for every game (ADR-17: one replica). The supported protocol window belongs to the gateway, so every game shares it | Rate limits apply per IP and per connection, not per game |
-| `JOIN_TOKEN_SECRET` | A compromised game server pod can mint join tokens for **any** server on the stack. A `gid` check does not stop it, because the pod can mint any `gid` | **One join-token secret per game.** The gateway signs with the game's keyring, and each game's fleet holds only its own secret. Costs: a keyring map in the gateway and one Secret per game. Recommended for every non-default game (open question 5). This closes the join-token path only; see the `JWT_SECRET` row |
-| `JWT_SECRET` on game-server pods | Every game-server pod holds it (current state §7), and the gateway verifies gateway tokens with it (`gateway/server/server.go:855`). A compromised pod of game A can therefore sign a gateway token with any `sub` and `gid: B`, authenticate to the gateway as that user in game B, and receive a **legitimate** game-B join token, signed by the gateway with B's own join secret. The per-game join secret does not stop this. The same value is Nakama's session encryption key (`deploy/k8s/data/nakama.yaml:165-166`), so the pod can also sign a Nakama session token for any user, with any `game` session var, under D1 Option B | **Remove `JWT_SECRET` from game-server pods** (ops leg): the env entries in `deploy/agones/fleet-map-dotnet-dev.yaml:277-281`, `deploy/k8s/app/50-fleet-map.yaml:193-197`, `deploy/k8s/app/60-fleet-dungeon.yaml:240-244` and `deploy/docker-compose.yml:380`, and in the server leg the read at `gameserver-dotnet/GameServer/Program.cs:151` and the unused `GameServerOptions.JwtSecret` (`Program.cs:1117`, `GameServer.cs:248`). Cost: the two startup warnings that read it go (`Program.cs:826-829`, `:846-850`); the "join secret equals JWT secret" check moves to the deploy-time secret check that already compares Nakama's and the app tier's values (`deploy/k8s/data/README.md:296-300`). The test harnesses that set `JwtSecret` on the options change with it. Recommended for every stack, the single-game one included, because the gap exists today (open question 5) |
+| `JOIN_TOKEN_SECRET` | A compromised game server pod can mint join tokens for **any** server on the stack. A `gid` check does not stop it, because the pod can mint any `gid` | **One join-token secret per game.** The gateway signs with the game's keyring, and each game's fleet holds only its own secret. Costs: a keyring map in the gateway and one Secret per game. Decided for every non-default game (owner decision 5). This closes the join-token path only; see the `JWT_SECRET` row |
+| `JWT_SECRET` on game-server pods | Every game-server pod holds it (current state §7), and the gateway verifies gateway tokens with it (`gateway/server/server.go:855`). A compromised pod of game A can therefore sign a gateway token with any `sub` and `gid: B`, authenticate to the gateway as that user in game B, and receive a **legitimate** game-B join token, signed by the gateway with B's own join secret. The per-game join secret does not stop this. The same value is Nakama's session encryption key (`deploy/k8s/data/nakama.yaml:165-166`), so the pod can also sign a Nakama session token for any user, with any `game` session var, under D1 Option B | **Remove `JWT_SECRET` from game-server pods** (ops leg): the env entries in `deploy/agones/fleet-map-dotnet-dev.yaml:277-281`, `deploy/k8s/app/50-fleet-map.yaml:193-197`, `deploy/k8s/app/60-fleet-dungeon.yaml:240-244` and `deploy/docker-compose.yml:380`, and in the server leg the read at `gameserver-dotnet/GameServer/Program.cs:151` and the unused `GameServerOptions.JwtSecret` (`Program.cs:1117`, `GameServer.cs:248`). Cost: the two startup warnings that read it go (`Program.cs:826-829`, `:846-850`); the "join secret equals JWT secret" check moves to the deploy-time secret check that already compares Nakama's and the app tier's values (`deploy/k8s/data/README.md:296-300`). The test harnesses that set `JwtSecret` on the options change with it. Decided for every stack, the single-game one included, because the gap exists today (owner decision 5) |
 | `NAKAMA_HTTP_KEY` | Any game's server can credit any game's wallet (D4) | None inside one Nakama, which has a single HTTP key |
 | Redis credentials | Every game-server pod holds the stack's Redis password (`deploy/agones/fleet-map-dotnet-dev.yaml:420-424`). A compromised pod can write another game's registry entries and map index (and so steer that game's joiners to an address it controls, with an identity key it publishes itself), publish `server_down` or kick events for its servers, or fill Redis | Accepted on a shared stack. Per-game Redis ACL users are possible only for keys that carry the game, and the default game's keys do not (D2). A stack per game removes it |
 | `TRANSPORT_KEY` | One value per stack, a shared PSK by design (ADR-21) | Accepted |
@@ -5443,8 +5447,8 @@ these holds:**
    - Per-server capacity has not been measured (ADR-7), so for now this is judged by
      player counts, not against a measured ceiling.
 
-If none of these holds, the game shares the stack. Recommended: adopt these four criteria
-as the rule (open question 8).
+If none of these holds, the game shares the stack. These four criteria are adopted as the
+rule (owner decision 8).
 
 **Residual risk on a shared stack**, after both secret measures (a join-token secret per
 game, and no `JWT_SECRET` on game-server pods): a compromised game-server pod can no longer
@@ -5472,9 +5476,9 @@ a game to its own stack when that trust does not hold.
 
 | Leg | Module(s) / skill | Contracts touched | What the hub can rely on afterwards |
 |---|---|---|---|
-| 0 | This ADR | — | Accepted answers to the open questions. Nothing else changes, and the hub stays at one game per cluster |
-| 1 | wire-contract: `shared/jwt` and C# `JwtValidator`; the `shared/storage` and C# `RedisServerRegistry` constants; `game_id` in `SessionSupersededEvent` (Go), `SessionSupersededPayload` (C#) and `docs/API.md`; `DefaultGameID` in Go and C#, with a parity test; validators for the game id, map id and game-qualified server id formats | JoinToken / JWT claims (`gid`, additive). Registry hash (the `game_id` field and the per-game map index key, both additive; the server-id format of D2 S1). Kick event payload (`game_id`, additive). **wire.proto: no change. Protocol version: no bump** | The names and the "absent = default" rule are fixed. Behaviour does not change |
-| 2 | server-realtime: `GAMESERVER_GAME_ID`; the server-id prefix check at startup; `game_id` written into every registry entry through the guarded (check-and-set) registration, and the per-game index key; the `gid` check on join; the `game` tag on every recording and observable path, with the meter-wide test (D3); `game_id` in `entity_killed`; tolerating and logging `game_id` on `events:kick`; the content manifest check; `game_id` on every Nakama RPC the server calls (`reward_kills`, `reward_kill`, `submit_kill`: `NakamaClient` and its DTOs, D4); dropping the `JWT_SECRET` read and the unused option | Registry hash (writer side, including the check-and-set). Join token (reader side). Kick event payload (C# reader side). Nakama server-to-server RPC payloads (caller side, additive `game_id`; old Nakama ignores it). Content manifest (new, server only) | Every registry entry names its game, and every game server series carries `game`. Both read `DefaultGameID` for now |
+| 0 | This ADR | — | The owner's answers, accepted 2026-11-13 (recorded under Owner decisions), with `DefaultGameID` = `cuvara`. Nothing else changes, and the hub stays at one game per cluster |
+| 1 | wire-contract: `shared/jwt` and C# `JwtValidator`; the `shared/storage` and C# `RedisServerRegistry` constants; `game_id` in `SessionSupersededEvent` (Go), `SessionSupersededPayload` (C#) and `docs/API.md`; `DefaultGameID` (`cuvara`) in Go and C#, with a parity test; validators for the game id, map id and game-qualified server id formats | JoinToken / JWT claims (`gid`, additive). Registry hash (the `game_id` field and the per-game map index key, both additive; the server-id format of D2 S1). Kick event payload (`game_id`, additive). **wire.proto: no change. Protocol version: no bump** | The names and the "absent = default" rule are fixed. Behaviour does not change |
+| 2 | server-realtime: `GAMESERVER_GAME_ID`; the server-id prefix check at startup; `game_id` written into every registry entry through the guarded (check-and-set) registration, and the per-game index key; the `gid` check on join; the `game` tag on every recording and observable path, with the meter-wide test (D3); `game_id` in `entity_killed`; tolerating and logging `game_id` on `events:kick`; the content manifest check; `game_id` on every Nakama RPC the server calls (`reward_kills`, `reward_kill`, `submit_kill`: `NakamaClient` and its DTOs, D4); dropping the `JWT_SECRET` read and the unused option | Registry hash (writer side, including the check-and-set). Join token (reader side). Kick event payload (C# reader side). Nakama server-to-server RPC payloads (caller side, additive `game_id`; old Nakama ignores it). Content manifest (new, server only) | Every registry entry names its game, and every game server series carries `game`. Both read `DefaultGameID` (`cuvara`) for now |
 | 3 | server-services, gateway: latch `gid`; the per-game session key; the local connection map and every eviction path keyed by `(game, user)`; the `events:gateway_kick` consumer targeting `(game_id, user_id)` with the `jti` guard; `game_id` written into every `SessionSupersededEvent`; map id validation; lookup by `(game, map)` with the per-entry check; the allocator's server-id prefix check; fleets and mismatch memory per `(game, kind)`; a join-token keyring per game; the `game` label on the four families; `game_id` in `server_down`; `game_id` in the `party_get` payload from the session's `gid` (D4) | JoinToken claims (writer side). Registry hash (reader side). Kick event payload (writer side and Go reader side). `party_get` payload (caller side, additive). The gateway's `session:` Redis keys (gateway only) | Gateway series carry `game`, and events carry `game_id`. A supersede can no longer close another game's connection. Once a second game's configuration exists, the gateway can route it |
 | 4 | server-services, Nakama: before-authenticate hooks; the `GAMES` allow-list; `gameFromContext`; `gid` in `gateway_token`; `scoped()` on every collection, leaderboard and wallet key; the optional payload `game_id` read by `reward_kill`, `reward_kills`, `submit_kill` and `party_get` when the call has no session, each selecting its scoped names (D1, D4) | Gateway JWT claims (minting side). Nakama RPC payloads (additive) | Nakama data is per game. The hub's players page can filter on the per-game profile object. The default game's data is untouched |
 | 5 | server-ops: a game-state database, a login role and Secrets per game (game DB URL, join-token secret); **`JWT_SECRET` removed from every game-server fleet and the compose game server**; the "join secret differs from JWT secret" check moved to the deploy-time secret check; fleets named `<game>-…` and a namespace per game; the image-per-game build in CI; the gateway's per-game allocator env; dashboards and alerts `by (game, map_id)` | None across languages. Deploy manifests and monitoring only | A cluster can carry a second game end to end, and the hub's per-game filters are complete. No game-server pod can sign a gateway token |
@@ -5496,7 +5500,8 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
   - Removing it later takes a one-time data rename. That is cheap while the project is
     pre-release (ADR-32), and expensive after release.
 - **`DefaultGameID` cannot change after leg 2** without rewriting registry entries, metric
-  history and hub bindings. That is why open question 2 asks for the real slug now.
+  history and hub bindings. That is why it was fixed before leg 2: `cuvara` (owner
+  decision 2).
 - **ADR-2 and ADR-18 change scope.** ADR-2's one live server per `map_id` becomes one live
   server per `(game, map_id)`. ADR-18's one-replica map fleets become one fleet per game
   and kind.
@@ -5511,26 +5516,27 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
     credentials, a shared database role if D5's per-game roles are skipped, and the shared
     `TRANSPORT_KEY` (D7). It is accepted for studio-operated games.
 - **The hub's filter needs legs 2 to 4.** Until leg 5 is done, every filter shows a single
-  value: the default game.
+  value: the default game, `cuvara`.
 
-**Open questions for the owner.** Each has a recommended answer.
+**Owner decisions (2026-11-13).** Each answer below is the one the owner accepted.
 
 1. **Accounts: one Nakama with accounts shared across games, or one Nakama per game?**
-   - Recommended: shared (D4 Option B).
+   - Answer (2026-11-13): shared (D4 Option B).
    - It gives one studio login and one Nakama to run. D7's criteria move a game to its own
      stack when sharing stops being safe.
 2. **What is the existing game's id?**
-   - Recommended: its permanent short slug, chosen now (`^[a-z][a-z0-9]{1,23}$`, Terms), not the
-     literal `default`.
-   - The id ends up in metric labels, hub bindings and registry entries, and renaming it
-     there means a migration.
+   - Answer (2026-11-13): `cuvara`, i.e. `DefaultGameID = "cuvara"`, the existing game's
+     permanent short slug (`^[a-z][a-z0-9]{1,23}$`, Terms), not the literal `default`.
+   - It is fixed now because the id ends up in metric labels, hub bindings and registry
+     entries, and renaming it there means a migration.
 3. **Where does a session's game come from?**
-   - Recommended: a Nakama session var, `game` (D1 Option B), copied into a `gid` claim.
+   - Answer (2026-11-13): a Nakama session var, `game` (D1 Option B), copied into a `gid`
+     claim.
    - It is checked against a `GAMES` allow-list twice: by the before-authenticate hooks,
      and again by the RPC helper.
    - Map ids stay game-local. No `wire.proto` change, no protocol bump.
 4. **May one account be logged into two games at the same time?**
-   - Recommended: yes, with one session per game (`session:{game}:{user_id}`).
+   - Answer (2026-11-13): yes, with one session per game (`session:{game}:{user_id}`).
    - A login then supersedes a session only within its own game. That needs more than the
      session key: the gateway's local connection map and every eviction path are keyed by
      `(game, user)`, and the `events:gateway_kick` consumer targets `(game_id, user_id)`
@@ -5538,12 +5544,12 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
    - `SessionSupersededEvent` gains a `game_id` that the gateway always writes, absent
      meaning the default game. This changes the Go/C# kick payload contract (additive, not
      on the wire, no protocol bump).
-   - If the answer is no, the session key and the kick path stay keyed by user id, and a
-     login to one game ends the account's session in every other game.
+   - Not taken: the session key and the kick path stay keyed by user id, and a login to one
+     game ends the account's session in every other game.
 5. **Should each game have its own join-token secret, and should game-server pods stop
    receiving `JWT_SECRET`?**
-   - Recommended: yes to both. A join-token secret per non-default game from its first
-     deploy; the default game keeps `JOIN_TOKEN_SECRET`.
+   - Answer (2026-11-13): yes to both. A join-token secret per non-default game from its
+     first deploy; the default game keeps `JOIN_TOKEN_SECRET`.
    - `JWT_SECRET` comes off every game-server pod, on every stack, the single-game one
      included. The pods use it only for two startup warnings, and holding it lets a
      compromised pod sign gateway tokens (and, because it is also Nakama's session key,
@@ -5553,31 +5559,32 @@ value as the default game. Writer before reader (2, then 3) is recommended, so t
    - Without the second measure, the first does not close cross-game impersonation.
 6. **Where do a future game's content and Shared.GameLogic live, and does each game get its
    own image?**
-   - Recommended: one image per game (D6 Option B), with a `game.json` manifest check at
-     boot.
+   - Answer (2026-11-13): one image per game (D6 Option B), with a `game.json` manifest
+     check at boot.
    - The content lives in this repository, under `content/<game>/`, while the game shares
      `Shared.GameLogic` with the default game. It moves to its own repository when the game
      needs its own `Shared.GameLogic`.
 7. **Is any currency, item or progression shared between games?**
-   - Recommended: no. Wallet keys, rosters, leaderboards and parties are all per game.
+   - Answer (2026-11-13): no. Wallet keys, rosters, leaderboards and parties are all per
+     game.
    - If cross-game rewards are wanted later, they get their own decision.
 8. **Do the four criteria in D7 decide when a game gets its own stack?**
-   - Recommended: yes.
+   - Answer (2026-11-13): yes.
    - Criterion 1 (production is not shared with development) applies without exception.
 9. **Game state: a database per game, or shared tables with a `game_id` column?**
-   - Recommended: a database per game on the shared instance (D5 Option A), each with its
-     own login role.
+   - Answer (2026-11-13): a database per game on the shared instance (D5 Option A), each
+     with its own login role.
 10. **How are server ids kept unique across games?**
-    - Recommended: a stack-wide invariant, with non-default ids prefixed `<game>-` and
-      checked at startup, at registration and at allocation (D2 Option S1).
-    - The alternative, a game in every id key (S2), touches every reader and writer of a
+    - Answer (2026-11-13): a stack-wide invariant, with non-default ids prefixed `<game>-`
+      and checked at startup, at registration and at allocation (D2 Option S1).
+    - Not taken: a game in every id key (S2), which touches every reader and writer of a
       server id in both languages.
 
 **Follow-up work.**
 
 - **S**: Leg 1. In Go and C#, with parity tests: the `gid` claim, the `game_id` registry
-  field and key helper, `game_id` in the kick payload (and `docs/API.md`), `DefaultGameID`,
-  and the format validators (game id, map id, game-qualified server id).
+  field and key helper, `game_id` in the kick payload (and `docs/API.md`), `DefaultGameID`
+  (`cuvara`), and the format validators (game id, map id, game-qualified server id).
 - **M**: Leg 2, the game server side: `GAMESERVER_GAME_ID`, the server-id check, the guarded
   registration, the join check, the metrics tag on every path with its meter-wide test, the
   event payloads, the content manifest, `game_id` on the `reward_kills`, `reward_kill` and
