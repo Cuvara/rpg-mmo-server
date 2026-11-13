@@ -72,7 +72,20 @@ COPY --from=build /app .
 # Copied in the runtime stage rather than the build stage on purpose. Content changes far
 # more often than code, and putting it here means a content-only change rebuilds one small
 # layer instead of invalidating the NativeAOT compile above it.
-COPY content/ ./content/
+#
+# One image per game (ADR-33 leg 5). CONTENT_DIR names the game's content directory
+# relative to the build context (backend/): `content` for the default game, cuvara (the
+# default, so a build without the arg is today's image), `content/<game>` for any other.
+# Whatever it names lands at /app/content, so the server's content resolution is the same
+# for every game and the game is told apart only by GAMESERVER_GAME_ID, not by a path:
+#   docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+#     --build-arg CONTENT_DIR=content/ember --build-arg GIT_REVISION="$(git rev-parse HEAD)" \
+#     -t rpg-mmo/gameserver-dotnet:ember-dev .
+# The arg is declared here, not at the top, so it cannot reach (or invalidate) the build
+# stage, and an ARG adds no layer: the default build has the same layers as before it
+# existed. CI builds one image per game in its games list (docs/CICD.md).
+ARG CONTENT_DIR=content
+COPY ${CONTENT_DIR}/ ./content/
 
 # Provenance. Declared AFTER the copy so a rebuild at a new revision does not
 # invalidate the expensive AOT layers above it.

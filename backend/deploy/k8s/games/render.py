@@ -27,9 +27,13 @@ and, as separate outputs that are never part of the manifests stream:
   * a Secret TEMPLATE `rpg-app-secrets` for the game namespace (placeholders
     only, after k8s/app/30-secret-template.yaml, WITHOUT jwt-secret: the client
     auth secret never reaches a game-server pod, ADR-8);
-  * the gateway env snippet (GAMES, ALLOCATOR_FLEET_MAP_<GAME>,
+  * the gateway env snippet (ALLOCATOR_FLEET_MAP_<GAME>,
     ALLOCATOR_FLEET_DUNGEON_<GAME>, ALLOCATOR_NAMESPACE_<GAME>,
-    JOIN_TOKEN_SECRET_<GAME>) for k8s/app/40-gateway.yaml.
+    JOIN_TOKEN_SECRET_<GAME>) for k8s/app/40-gateway.yaml. GAMES is NOT an
+    entry in it: 40-gateway.yaml already reads GAMES from ConfigMap
+    gateway-config key `games`, so the snippet's header carries the
+    `kubectl patch configmap` that sets that key instead (a second GAMES env
+    entry would shadow or duplicate the ConfigMap one).
 
 The k8s/app files are the source of truth: this script loads them and renames,
 re-namespaces and re-images what it finds, so a game cannot drift from cuvara's
@@ -221,7 +225,8 @@ def render(
     stack_namespace: str = DEFAULT_STACK_NAMESPACE,
     image: str | None = None,
 ) -> dict[str, list[dict]]:
-    """Return {"manifests": [...], "secret-template": [...], "gateway-env": [...]}.
+    """Return {"manifests": [...], "secret-template": [...], "gateway-env": [...],
+    "gateway-games": "cuvara,<game>"}.
 
     Raises RenderError on any refused input. Pure: reads k8s/app, writes nothing.
     """
@@ -389,9 +394,12 @@ def render(
     }
 
     # --- gateway env snippet ------------------------------------------------
+    # GAMES is deliberately absent: k8s/app/40-gateway.yaml reads it from
+    # ConfigMap gateway-config key `games` (optional) and says not to add a
+    # second GAMES variable. The value that key needs is returned separately
+    # as "gateway-games" and printed as a patch command in the snippet header.
     up = game.upper()
     gateway_env = [
-        {"name": "GAMES", "value": f"{DEFAULT_GAME_ID},{game}"},
         {"name": f"ALLOCATOR_FLEET_MAP_{up}", "value": map_fleet["metadata"]["name"]},
         {"name": f"ALLOCATOR_FLEET_DUNGEON_{up}", "value": dungeon_fleet["metadata"]["name"]},
         {"name": f"ALLOCATOR_NAMESPACE_{up}", "value": ns},
@@ -401,7 +409,12 @@ def render(
         },
     ]
 
-    return {"manifests": manifests, "secret-template": [secret], "gateway-env": gateway_env}
+    return {
+        "manifests": manifests,
+        "secret-template": [secret],
+        "gateway-env": gateway_env,
+        "gateway-games": f"{DEFAULT_GAME_ID},{game}",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -436,8 +449,13 @@ def _header(game: str, part: str, args: argparse.Namespace) -> str:
     else:
         lines += [
             "# Gateway env for this game: merge into the gateway container's env in",
-            "# k8s/app/40-gateway.yaml. GAMES lists EVERY served game, comma-separated;",
-            "# append this game to the existing list rather than replacing it.",
+            "# k8s/app/40-gateway.yaml. GAMES is NOT an env entry here: the gateway",
+            "# reads it from ConfigMap gateway-config key `games`. Set that key (it lists",
+            "# EVERY served game, comma-separated; if it already lists other games,",
+            "# append this one rather than replacing the list):",
+            f"#   kubectl -n {args.stack_namespace} patch configmap gateway-config \\",
+            f"#     --type=merge -p '{{\"data\":{{\"games\":\"{DEFAULT_GAME_ID},{game}\"}}}}'",
+            "# Nakama's GAMES (k8s/data/nakama.yaml, nakama-config key `games`) must agree.",
         ]
     return "\n".join(lines) + "\n"
 

@@ -33,7 +33,7 @@ python render.py --game ember --out /tmp/ember         # all three as files (kee
 | Fleet | `ember-dungeon-servers-dotnet-k8s` = `<game>-dungeon-servers-dotnet-<env>` | `app/60-fleet-dungeon.yaml` |
 | FleetAutoscaler | `ember-dungeon-servers-dotnet-k8s-buffer` | `app/70-fleetautoscaler-dungeon.yaml` |
 | Secret **template** (separate output) | `rpg-app-secrets` in the game namespace, placeholders only | `app/30-secret-template.yaml` minus `jwt-secret` |
-| Gateway env (separate output) | `GAMES`, `ALLOCATOR_FLEET_MAP_EMBER`, `ALLOCATOR_FLEET_DUNGEON_EMBER`, `ALLOCATOR_NAMESPACE_EMBER`, `JOIN_TOKEN_SECRET_EMBER` | gateway `cmd/gateway/main.go`, `registry.FleetEnvName` |
+| Gateway env (separate output) | `ALLOCATOR_FLEET_MAP_EMBER`, `ALLOCATOR_FLEET_DUNGEON_EMBER`, `ALLOCATOR_NAMESPACE_EMBER`, `JOIN_TOKEN_SECRET_EMBER`; its header carries the `gateway-config` patch that sets `games` (no `GAMES` env entry, see below) | gateway `cmd/gateway/main.go`, `registry.FleetEnvName` |
 
 **The `k8s/app/` files are the source of truth.** The renderer loads them and
 only renames, re-namespaces, re-labels (`rpg-mmo/game: <game>`) and re-images,
@@ -104,11 +104,24 @@ would be an OOM kill waiting to happen.
 ## Gateway side (another file, same names)
 
 The gateway allocates in the game's namespace with the env the render prints
-(merge it into `k8s/app/40-gateway.yaml`):
+(merge it into `k8s/app/40-gateway.yaml`).
+
+`GAMES` is **not** in that snippet. `40-gateway.yaml` already declares `GAMES`
+once, read from ConfigMap `gateway-config` key `games` (`optional: true`, so
+absent means cuvara only), and a second `GAMES` variable in the same container
+would duplicate it. The snippet's header prints the patch that sets the key
+instead, every served game comma-separated:
+
+```bash
+kubectl -n rpg-k8s-realtime patch configmap gateway-config   --type=merge -p '{"data":{"games":"cuvara,ember"}}'
+```
+
+Once set, cuvara is served only if listed, so the value is `cuvara,<game>`
+(plus any game already served), never `<game>` alone. Nakama's own list
+(`k8s/data/nakama.yaml`, ConfigMap `nakama-config` key `games`) must agree.
 
 | Env | Value |
 |---|---|
-| `GAMES` | every served game, comma-separated, e.g. `cuvara,ember` |
 | `ALLOCATOR_FLEET_MAP_<GAME>` | `<game>-map-servers-dotnet-<env>` |
 | `ALLOCATOR_FLEET_DUNGEON_<GAME>` | `<game>-dungeon-servers-dotnet-<env>` |
 | `ALLOCATOR_NAMESPACE_<GAME>` | `<stack namespace>-<game>` (also the gateway's default when unset) |
@@ -126,15 +139,23 @@ unchanged; the game namespace's Role/RoleBinding is the only new grant.
 1. Provision its database: `db/provision-gamestate.sh <game>` creates database
    and role `gamestate_<game>` (human-run, db-schema-write gate).
 2. Build its image `rpg-mmo/gameserver-dotnet:<game>-<version>` from its content
-   directory (ADR-33 leg 5 image work; CI builds one image per listed game).
+   directory `backend/content/<game>` (`--build-arg CONTENT_DIR=content/<game>`
+   on `docker/Dockerfile.gameserver-dotnet`). CI builds one image per game in
+   its games list and tags it `<game>-<short sha>` and `<game>-<extra tag>`
+   (`<game>-develop` from develop, which is render.py's default `--image`);
+   add the game to that list in both `publish-images.yml` and `cd.yml`
+   (`docs/CICD.md`, "Images per game").
 3. Render with `--out` to a directory **outside** the repo.
 4. Fill the Secret template there (or `kubectl create secret generic`), with
    `game-db-url` for `gamestate_<game>`, `join-token-secret`, `nakama-http-key`
    (same value as cuvara's) and the optional keys. Create `registry-creds` in
    the game namespace if the image is pulled from the registry
    (`k8s/registry/README.md`).
-5. Add `join-token-secret-<game>` to the stack namespace's `rpg-app-secrets`
-   and merge the gateway env snippet, then roll the gateway.
+5. Add `join-token-secret-<game>` to the stack namespace's `rpg-app-secrets`,
+   merge the gateway env snippet, set `games` in `gateway-config` (the patch
+   in the snippet header) and in `rpg-k8s-data`'s `nakama-config` (the recipe
+   in `k8s/data/nakama.yaml`) to the same list, then roll the gateway and
+   Nakama.
 6. Apply the manifests; apply the FleetAutoscaler only after the dungeon
    fleet's image is pinned, for the reason in `app/70-fleetautoscaler-dungeon.yaml`.
 

@@ -200,7 +200,7 @@ production / `build_images=true`; it is **not** on the deploy path.
 | `build-gateway` / `build-gameserver` / `build-smoketest` | `ubuntu-latest` | `_go-module.yml` with `run_tests: false`; each needs only *its own* module test, so it starts before integration finishes. Uploads `bin-<name>-<sha>`. |
 | `build-verify-probe` | `ubuntu-latest` | `_go-module.yml` on `backend/deploy/k8s/verify/probe` with `run_tests: false`. Uploads `bin-verify-probe-<sha>`. Exists because the k8s post-deploy verification must not compile anything on the deploy runner — see §4 below. |
 | `build-plugin` | `ubuntu-latest` | `_go-module.yml` with `needs_docker: true` → `docker build -f nakama-plugin.Dockerfile --target export` → uploads `nakama-plugin-<sha>`. Parallel with the binary builds. |
-| `build-images` | `ubuntu-latest` | Gateway + gameserver container images → GHCR. Conditional (see below). |
+| `build-images` | `ubuntu-latest` | Gateway + gameserver container images → GHCR, a matrix with one leg per game (the gateway is built in the `cuvara` leg only). Conditional (see below). |
 | `bundle` | `ubuntu-latest` | Downloads `bin-*-<sha>` (`merge-multiple`) + `nakama-plugin-<sha>`, adds `docker-compose.yml`, `Makefile`, `.env.example`, `deploy-local.sh`, `COMMIT`, asserts every expected file is present, uploads `deploy-bundle-<sha>` (14 days, `include-hidden-files` for `.env.example`). Compiles nothing. |
 | `deploy` | `${{ fromJSON(resolve.runner_labels) }}` | Checkout → download bundle → `install` into `$RPG_DEPLOY_DIR` (keeping `.prev` binaries) → write `.env` from Environment secrets → **bring up the data tier** (postgres, redis, nakama; no `realtime` profile) → **apply pending migrations** → `docker compose up -d` with the remaining profiles → then **either** `deploy-local.sh restart` (host mode) **or** build images + bring up the `realtime` profile + register the game server (containers mode). Outputs `deploy_dir`, `deploy_mode`. See §3b. |
 
@@ -420,8 +420,11 @@ Two workflows push `ghcr.io/cuvara/rpg-mmo-gateway` and
 
 | Workflow | When | Tags |
 |---|---|---|
-| `publish-images.yml` | every develop push touching the images, every `core-baseline-*` tag, `workflow_dispatch` (`ref`, optional `tag`) | `<short-sha>` + `develop` / the tag name |
-| `cd.yml` `build-images` | production deploy (`release-*`) or `build_images=true` | `<short-sha>` + **`latest`** |
+| `publish-images.yml` | every develop push touching the images or `backend/content/`, every `core-baseline-*` tag, `workflow_dispatch` (`ref`, optional `tag`) | `<short-sha>` + `develop` / the tag name; gameserver also `<game>-<short-sha>` + `<game>-develop` / `<game>-<tag>` per game |
+| `cd.yml` `build-images` | production deploy (`release-*`) or `build_images=true` | `<short-sha>` + **`latest`**; gameserver also `<game>-<short-sha>` + `<game>-latest` per game |
+
+The unprefixed gameserver tags (`<short-sha>`, `develop`, `latest`, a `core-baseline-*`
+tag) are **cuvara's**, exactly as before games existed; see "Images per game" below.
 
 `latest` therefore means "what production runs"; `develop` is the newest develop build.
 `publish-images.yml` exists because `cd.yml` alone left the registry exactly as old as the
@@ -446,6 +449,73 @@ only fleet, `agones/fleet-map-dotnet-dev.yaml`, uses the local tag
 > arg the label reads `unknown` and `validate-manifests.py --check-image` fails,
 > which is the intended behaviour, not a bug. The workflow lives outside
 > `deploy/` and has not been changed here.
+
+### Images per game (ADR-33 leg 5)
+
+There is **one gameserver image per game**: the server code is the same, the baked-in
+content differs, and the game is told apart at run time only by `GAMESERVER_GAME_ID`
+(ADR-33 D3/D6). The gateway serves every game and stays one image.
+
+**Dockerfile.** `docker/Dockerfile.gameserver-dotnet` takes `--build-arg CONTENT_DIR`,
+the game's content directory relative to the `backend/` build context, and copies it to
+`/app/content`. The default is `content`, i.e. `backend/content`, which is cuvara's, so a
+build without the arg is today's image (an `ARG` adds no layer, and it is declared in
+the runtime stage only, so the NativeAOT build stage and its cache are untouched). A
+non-default game's content lives in `backend/content/<game>`:
+
+```bash
+cd backend
+docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+  --build-arg CONTENT_DIR=content/ember --build-arg GIT_REVISION="$(git rev-parse HEAD)" \
+  -t rpg-mmo/gameserver-dotnet:ember-dev .
+```
+
+**The games list.** CI builds one image per entry of a games list that today holds only
+`cuvara` (`content_dir: content`). It appears three times and the three must agree:
+
+| Where | Shape |
+|---|---|
+| `publish-images.yml`, job `gameserver` | `strategy.matrix.include`: `{game, content_dir}` |
+| `cd.yml`, job `build-images` | `strategy.matrix.include`: `{game, content_dir}` |
+| `cd.yml`, step "Build realtime images on the runner" | shell loop over `<game>:<content_dir>` |
+
+Adding a game is one entry in each, e.g. `game: ember, content_dir: content/ember` and
+`ember:content/ember`. Each leg refuses a game id that fails `^[a-z][a-z0-9]{1,23}$`
+(same rule as `shared/gameid` and `k8s/games/render.py`) and a content directory without
+`items.json`, so a typo fails the build instead of shipping a server that cannot boot.
+
+**Tags.** Every game's image gets `<game>-`prefixed tags; cuvara additionally keeps every
+unprefixed tag it had, so nothing that pulls cuvara's image today changes:
+
+| Build | Every game | cuvara also |
+|---|---|---|
+| `publish-images.yml` (GHCR) | `<game>-<short-sha>`, `<game>-<extra>` (`<game>-develop`, `<game>-core-baseline-…`) | `<short-sha>`, `<extra>` |
+| `cd.yml` `build-images` (GHCR) | `<game>-<short-sha>`, `<game>-latest` | `<short-sha>`, `latest` |
+| `cd.yml` runner build (local, containers/k8s mode) | `rpg-mmo/gameserver-dotnet:<game>-<sha>`, `:<game>-dev` | `:<sha>`, `:dev` (what `GAMESERVER_IMAGE` and the manifests use) |
+
+`<game>-develop` is the default `--image` `k8s/games/render.py` renders for a game, so a
+game's fleets point at an image this workflow publishes. Because the prefix takes up to
+25 characters of Docker's 128-character tag limit, `publish-images.yml` now refuses an
+extra tag longer than 103 characters (it used to allow 128). The default game is never
+prefixed-only: its unprefixed tags are what `k8s/app/`, compose and `GAMESERVER_IMAGE`
+pull, and a non-default game can never write one of them.
+
+**Cache.** One `type=gha` scope per game: cuvara keeps `gameserver-dotnet`, so its cache
+stays warm across this change; any other game uses `gameserver-dotnet-<game>`, so two
+games' content layers never evict each other's entries.
+
+**Jobs.** `publish-images.yml` is now three jobs: `meta` resolves the revision and the
+extra tag once, then `gateway` and the `gameserver` matrix build from that same commit.
+Both matrices run with `fail-fast: false`, so one game's failed build does not cancel
+another game's push. A branch-protection rule or a script that named the old single job
+(`Build & push gateway + gameserver-dotnet`) or the unsuffixed `Build & push container
+images` must be updated to the new job names.
+
+Limitation: `backend/content` is cuvara's directory **and** the parent of every other
+game's `content/<game>`, so once a second game's content exists, cuvara's image also
+carries it under `/app/content/<game>`. The server's content loader opens named files and
+enumerates no directory, so this costs image size, not behaviour; moving cuvara to `content/cuvara` would remove
+it at the price of changing the default build, which this change deliberately does not.
 
 ### Concurrency
 

@@ -495,8 +495,13 @@ def check_game_render(rendered: dict, game: str, stack_ns: str, renderer) -> lis
         problems.append(f"gateway env ALLOCATOR_NAMESPACE_{up} is not {ns!r}")
     if dig(gw.get(f"JOIN_TOKEN_SECRET_{up}") or {}, "valueFrom.secretKeyRef.key") != f"join-token-secret-{game}":
         problems.append(f"gateway env JOIN_TOKEN_SECRET_{up} must read key join-token-secret-{game}")
-    if game not in str((gw.get("GAMES") or {}).get("value", "")).split(","):
-        problems.append(f"gateway env GAMES does not list {game!r}")
+    # GAMES comes from ConfigMap gateway-config key `games` (k8s/app/40-gateway.yaml),
+    # so the snippet must not carry its own GAMES entry; the list it prints for that
+    # key is "gateway-games".
+    if "GAMES" in gw:
+        problems.append("gateway env snippet carries a GAMES entry; GAMES is read from gateway-config key 'games'")
+    if game not in str(rendered.get("gateway-games", "")).split(","):
+        problems.append(f"gateway-games does not list {game!r}")
     return problems
 
 

@@ -12,6 +12,15 @@
 #                               (use it to publish a ref whose tree predates this file,
 #                               e.g. ref=core-baseline-v1.1 tag=core-baseline-v1.1)
 #
+# One gameserver image per game (ADR-33 leg 5). The `gameserver` job is a matrix over
+# the games list in it, and every game's image gets `<game>-`prefixed tags:
+#   rpg-mmo-gameserver-dotnet:<game>-<short-sha>, :<game>-<extra>   (every game)
+#   rpg-mmo-gameserver-dotnet:<short-sha>, :<extra>                  (cuvara ONLY)
+# so cuvara keeps every tag it had before games existed, and no other game can
+# overwrite them. The gateway serves every game from one image and is built once.
+# `<game>-develop` is the default image deploy/k8s/games/render.py renders for a game.
+# The same games list lives in cd.yml's build-images job; keep the two in step.
+#
 # `:latest` is deliberately NOT written here. It stays what cd.yml's production deploy
 # pushed, so `latest` keeps meaning "what production runs".
 #
@@ -28,6 +37,7 @@ on:
       - 'backend/gateway/**'
       - 'backend/shared/**'
       - 'backend/gameserver-dotnet/**'
+      - 'backend/content/**'
       - 'backend/deploy/docker/**'
       - '.github/workflows/publish-images.yml'
   workflow_dispatch:
@@ -46,12 +56,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  publish:
-    name: Build & push gateway + gameserver-dotnet
+  # Tags are resolved once, so the gateway image and every game's gameserver image are
+  # built from the same commit and carry the same short sha and extra tag.
+  meta:
+    name: Resolve revision and tags
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      short: ${{ steps.meta.outputs.short }}
+      extra: ${{ steps.meta.outputs.extra }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,22 +93,45 @@ jobs:
             extra="develop"
           fi
           # A docker tag allows [A-Za-z0-9_.-], max 128; refuse rather than mangle.
-          if [ -n "$extra" ] && ! printf '%s' "$extra" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
-            echo "::error::'$extra' is not a valid image tag"; exit 1
+          # The per-game tags prepend "<game>-" (at most 25 chars: game ids are
+          # ^[a-z][a-z0-9]{1,23}$), so the extra tag must leave room for it: max 103.
+          if [ -n "$extra" ] && ! printf '%s' "$extra" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,102}$'; then
+            echo "::error::'$extra' is not a valid image tag (max 103 chars, leaving room for '<game>-')"; exit 1
           fi
           if [ "$extra" = "latest" ]; then
             echo "::error:::latest belongs to the production deploy in cd.yml"; exit 1
           fi
-          list() {
-            echo "ghcr.io/cuvara/$1:$short"
-            [ -n "$extra" ] && echo "ghcr.io/cuvara/$1:$extra"
-            return 0
-          }
           {
             echo "sha=$sha"
             echo "short=$short"
-            echo "gateway<<EOF"; list rpg-mmo-gateway; echo "EOF"
-            echo "gameserver<<EOF"; list rpg-mmo-gameserver-dotnet; echo "EOF"
+            echo "extra=$extra"
+          } >> "$GITHUB_OUTPUT"
+
+  gateway:
+    name: Build & push gateway
+    needs: meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+
+      - name: Image tags
+        id: tags
+        env:
+          SHORT: ${{ needs.meta.outputs.short }}
+          EXTRA: ${{ needs.meta.outputs.extra }}
+        run: |
+          set -euo pipefail
+          {
+            echo "list<<EOF"
+            echo "ghcr.io/cuvara/rpg-mmo-gateway:$SHORT"
+            if [ -n "$EXTRA" ]; then echo "ghcr.io/cuvara/rpg-mmo-gateway:$EXTRA"; fi
+            echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
@@ -113,29 +151,115 @@ jobs:
           context: backend
           file: backend/deploy/docker/Dockerfile.gateway
           push: true
-          build-args: GIT_REVISION=${{ steps.meta.outputs.sha }}
-          tags: ${{ steps.meta.outputs.gateway }}
+          build-args: GIT_REVISION=${{ needs.meta.outputs.sha }}
+          tags: ${{ steps.tags.outputs.list }}
           cache-from: type=gha,scope=gateway
           cache-to: type=gha,scope=gateway,mode=max
 
+      - name: Image summary
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          LIST: ${{ steps.tags.outputs.list }}
+        run: |
+          {
+            echo "### Gateway image pushed (revision \`$SHA\`)"
+            echo ""
+            echo '```'
+            echo "$LIST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  gameserver:
+    name: Build & push gameserver-dotnet (${{ matrix.game }})
+    needs: meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # One game's failed build must not cancel another game's push.
+      fail-fast: false
+      matrix:
+        # THE GAMES LIST (ADR-33 leg 5): one entry per served game. content_dir is
+        # relative to backend/ (the build context): `content` for the default game,
+        # cuvara; `content/<game>` for any other. Mirrored in cd.yml build-images.
+        include:
+          - game: cuvara
+            content_dir: content
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+
+      - name: Image tags
+        id: tags
+        env:
+          GAME: ${{ matrix.game }}
+          CONTENT_DIR: ${{ matrix.content_dir }}
+          SHORT: ${{ needs.meta.outputs.short }}
+          EXTRA: ${{ needs.meta.outputs.extra }}
+        run: |
+          set -euo pipefail
+          # Same rule as shared/gameid.ValidGameID and deploy/k8s/games/render.py.
+          if ! printf '%s' "$GAME" | grep -Eq '^[a-z][a-z0-9]{1,23}$'; then
+            echo "::error::games list entry '$GAME' is not a valid game id"; exit 1
+          fi
+          # The server refuses to boot without content; fail here instead of shipping
+          # an image that cannot start.
+          if [ ! -f "backend/$CONTENT_DIR/items.json" ]; then
+            echo "::error::backend/$CONTENT_DIR/items.json missing: game '$GAME' has no content"; exit 1
+          fi
+          repo=ghcr.io/cuvara/rpg-mmo-gameserver-dotnet
+          {
+            echo "list<<EOF"
+            echo "$repo:$GAME-$SHORT"
+            if [ -n "$EXTRA" ]; then echo "$repo:$GAME-$EXTRA"; fi
+            # The default game keeps the unprefixed tags it has always had.
+            if [ "$GAME" = "cuvara" ]; then
+              echo "$repo:$SHORT"
+              if [ -n "$EXTRA" ]; then echo "$repo:$EXTRA"; fi
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Cache scope per game. cuvara keeps the scope it always had
+      # (`gameserver-dotnet`), so its cache stays warm; any other game gets
+      # `gameserver-dotnet-<game>`, so two games' content layers never evict each
+      # other's entries.
       - name: Build & push gameserver-dotnet image
         uses: docker/build-push-action@v6
         with:
           context: backend
           file: backend/deploy/docker/Dockerfile.gameserver-dotnet
           push: true
-          build-args: GIT_REVISION=${{ steps.meta.outputs.sha }}
-          tags: ${{ steps.meta.outputs.gameserver }}
-          cache-from: type=gha,scope=gameserver-dotnet
-          cache-to: type=gha,scope=gameserver-dotnet,mode=max
+          build-args: |
+            GIT_REVISION=${{ needs.meta.outputs.sha }}
+            CONTENT_DIR=${{ matrix.content_dir }}
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha,scope=${{ matrix.game == 'cuvara' && 'gameserver-dotnet' || format('gameserver-dotnet-{0}', matrix.game) }}
+          cache-to: type=gha,scope=${{ matrix.game == 'cuvara' && 'gameserver-dotnet' || format('gameserver-dotnet-{0}', matrix.game) }},mode=max
 
       - name: Image summary
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          GAME: ${{ matrix.game }}
+          LIST: ${{ steps.tags.outputs.list }}
         run: |
           {
-            echo "### Container images pushed (revision \`${{ steps.meta.outputs.sha }}\`)"
+            echo "### gameserver-dotnet image for \`$GAME\` pushed (revision \`$SHA\`)"
             echo ""
             echo '```'
-            echo "${{ steps.meta.outputs.gateway }}"
-            echo "${{ steps.meta.outputs.gameserver }}"
+            echo "$LIST"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
