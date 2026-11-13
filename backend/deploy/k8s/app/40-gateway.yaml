@@ -259,6 +259,50 @@ spec:
             # dungeon entry without touching map play.
             - name: ALLOCATOR_FLEET_DUNGEON
               value: "dungeon-servers-dotnet-k8s"
+            # --- Games served (ADR-33 D1, leg 3) --------------------------
+            # GAMES is the comma-separated allow-list of game ids this gateway
+            # serves (session.EnvGames). Absent or empty = cuvara only, which
+            # is today's shape: the `games` key is NOT in gateway-config, and
+            # `optional: true` leaves the variable unset rather than failing
+            # container creation. Once set, cuvara is served ONLY if listed,
+            # so a second game is `cuvara,<game>`, never `<game>` alone.
+            #
+            # Per-cluster, like the TLS opt-in above: this file is applied
+            # unchanged to dev and staging, so the list lives in the ConfigMap.
+            #   kubectl -n rpg-k8s-realtime patch configmap gateway-config \
+            #     --type=merge -p '{"data":{"games":"cuvara,<game>"}}'
+            # The Nakama Deployment reads its own GAMES (k8s/data/nakama.yaml,
+            # ConfigMap nakama-config key `games`); the two lists must agree.
+            - name: GAMES
+              valueFrom:
+                configMapKeyRef:
+                  name: gateway-config
+                  key: games
+                  optional: true
+            # PER NON-DEFAULT GAME, none today. `<GAME>` is the game id
+            # uppercased, `<game>` as-is. The exact block for a game is printed by
+            #   python deploy/k8s/games/render.py --game <game> --print gateway-env
+            # and its names are these; take GAMES from the ConfigMap key above
+            # rather than adding the snippet's literal GAMES entry as a second
+            # variable of the same name.
+            #
+            #   - name: ALLOCATOR_FLEET_MAP_<GAME>
+            #     value: "<game>-map-servers-dotnet-k8s"
+            #   - name: ALLOCATOR_FLEET_DUNGEON_<GAME>
+            #     value: "<game>-dungeon-servers-dotnet-k8s"
+            #   # Optional: unset defaults to "<ALLOCATOR_NAMESPACE>-<game>",
+            #   # i.e. rpg-k8s-realtime-<game>, the namespace render.py creates.
+            #   - name: ALLOCATOR_NAMESPACE_<GAME>
+            #     value: "rpg-k8s-realtime-<game>"
+            #   # Same value as `join-token-secret` in the game's namespace and
+            #   # distinct from JWT_SECRET and from every other game's join key
+            #   # (ADR-33 D7). Missing or unparseable: the gateway starts and
+            #   # refuses EnterWorld for that game only, with a WARN naming it.
+            #   - name: JOIN_TOKEN_SECRET_<GAME>
+            #     valueFrom:
+            #       secretKeyRef:
+            #         name: rpg-app-secrets
+            #         key: join-token-secret-<game>
             # NAKAMA — party membership, and ONLY party membership.
             #
             # The gateway verifies auth tokens locally and never calls Nakama on

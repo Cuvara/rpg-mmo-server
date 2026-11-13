@@ -16,6 +16,7 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Gateway / gameserver images | `docker/Dockerfile.gateway`, `docker/Dockerfile.gameserver-dotnet` | ✅ Built + smoke-tested |
 | k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |
 | Full k8s dev stack (Nakama, gateway, Redis, both PostgreSQL, Agones fleet) | `k8s/data/`, `k8s/app/`, `k8s/dev-up.sh`, `k8s/rollback-to-compose.sh`, `k8s/verify/` | ✅ Dev runs on it. **One replica of everything and `Recreate` on the two `hostPort` workloads — see `k8s/README.md` §Availability posture and ADR-17** |
+| Per-game app tier for a non-default game (ADR-33 leg 5) | `k8s/games/render.py`, `k8s/games/README.md` | Authored + rendered in memory by `k3s/validate-manifests.py`. **No second game is instantiated**; nothing applies it |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
 | Dev observability (Grafana + Prometheus + Loki + Tempo) | `docker-compose.yml` profile `monitoring`, `monitoring/` | ✅ Usable (`make monitoring-up`) |
 
@@ -46,6 +47,9 @@ Docs:
   and `rpg-k8s-realtime`): bring-up, ports, verification, rollback, and the
   **availability posture** — one replica everywhere, why `Recreate` is required on the
   `hostPort` workloads, and what a gateway rollout costs (ADR-17).
+- `../k8s/games/README.md` — a non-default game's namespace, quota, `<game>-` fleets,
+  Secret template and gateway env, rendered from `k8s/app/` by `render.py`
+  (ADR-33 leg 5).
 
 ## Local dev backing stack
 
@@ -199,10 +203,13 @@ artifact bundle.
 | Image | Tags |
 |-------|------|
 | `ghcr.io/cuvara/rpg-mmo-gateway` | `<short-sha>`, `develop`, `core-baseline-*`, `latest` (production) |
-| `ghcr.io/cuvara/rpg-mmo-gameserver-dotnet` | `<short-sha>`, `develop`, `core-baseline-*`, `latest` (production) |
+| `ghcr.io/cuvara/rpg-mmo-gameserver-dotnet` | cuvara: `<short-sha>`, `develop`, `core-baseline-*`, `latest` (production). Every game in the CI games list (today only cuvara) also: `<game>-<short-sha>`, `<game>-develop`, `<game>-core-baseline-*`, `<game>-latest` |
 
 `develop` and `core-baseline-*` come from `.github/workflows/publish-images.yml`, which
 publishes without deploying; `latest` only from a production deploy in `cd.yml`.
+There is one gameserver image per game (ADR-33 leg 5): the Dockerfile's `CONTENT_DIR`
+build arg (default `content`, cuvara) picks the content baked in; see `CICD.md`,
+"Images per game".
 
 No Agones manifest references a GHCR image any more: the prod fleets were
 deleted with the Go game server, and `agones/fleet-map-dotnet-dev.yaml` uses the

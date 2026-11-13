@@ -21,7 +21,12 @@ Usage:
     python3 validate-manifests.py --check-image rpg-mmo/gameserver-dotnet:dev \
                                   --expect-revision "$(git rev-parse HEAD)"
 
-With no files it validates deploy/agones/*.yaml and deploy/k3s/*.yaml.
+With no files it validates deploy/agones/*.yaml and deploy/k3s/*.yaml, then
+renders the per-game template (deploy/k8s/games/render.py, ADR-33 leg 5) in
+memory for a sample game id and for the longest legal id, validates the
+rendered documents (Agones schemas, the check_fleet contract in the game's own
+namespace, the game invariants in check_game_render) and asserts that invalid,
+reserved, default and too-long ids are refused. Nothing is written or applied.
 The Agones install.yaml is cached in ~/.cache/rpg-mmo/agones-<version>.yaml.
 
 This does NOT replace `kubectl apply --dry-run=server -f <file>`, which
@@ -151,16 +156,27 @@ def _containers(fleet: dict) -> list:
     )
 
 
-def check_fleet(doc: dict, label: str) -> list[str]:
-    """Project invariants for an Agones Fleet. Returns a list of problems."""
+def check_fleet(doc: dict, label: str, expected_namespace: str = GATEWAY_NAMESPACE) -> list[str]:
+    """Project invariants for an Agones Fleet. Returns a list of problems.
+
+    expected_namespace is the namespace the gateway allocates this fleet in:
+    DefaultNamespace for the dev fleet, `<stack namespace>-<game>` for a
+    rendered non-default game (ADR-33 D7, ALLOCATOR_NAMESPACE_<GAME>).
+    """
     problems: list[str] = []
     name = dig(doc, "metadata.name") or "?"
 
-    if dig(doc, "metadata.namespace") != GATEWAY_NAMESPACE:
-        problems.append(
-            f"namespace is {dig(doc, 'metadata.namespace')!r}, but the gateway "
-            f"allocator defaults to {GATEWAY_NAMESPACE!r} (DefaultNamespace)"
-        )
+    if dig(doc, "metadata.namespace") != expected_namespace:
+        if expected_namespace == GATEWAY_NAMESPACE:
+            problems.append(
+                f"namespace is {dig(doc, 'metadata.namespace')!r}, but the gateway "
+                f"allocator defaults to {GATEWAY_NAMESPACE!r} (DefaultNamespace)"
+            )
+        else:
+            problems.append(
+                f"namespace is {dig(doc, 'metadata.namespace')!r}, but the gateway "
+                f"allocates this game's fleets in {expected_namespace!r}"
+            )
 
     ports = dig(doc, "spec.template.spec.ports") or []
     named = [p.get("name") for p in ports]
@@ -345,6 +361,223 @@ def check_image_revision(image: str, expected: str) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# Per-game template (ADR-33 leg 5, deploy/k8s/games/render.py)
+# --------------------------------------------------------------------------
+
+GAME_RENDERER = "k8s/games/render.py"
+# Any valid non-default id. `ember` is the one the gateway tests use.
+SAMPLE_GAME_ID = "ember"
+# The longest legal id: with --env k8s its dungeon fleet is exactly 51 chars,
+# so this is the boundary the 12-char Agones suffix budget was sized for.
+SAMPLE_MAX_GAME_ID = "g" * 24
+# (game, env) pairs the renderer MUST refuse, and why.
+GAME_REFUSALS = [
+    ("cuvara", "k8s", "default game keeps k8s/app"),
+    ("gs", "k8s", "reserved"),
+    ("map", "k8s", "reserved"),
+    ("dungeon", "k8s", "reserved"),
+    ("other", "k8s", "reserved"),
+    ("Ember", "k8s", "uppercase"),
+    ("1ember", "k8s", "leading digit"),
+    ("e", "k8s", "too short"),
+    ("em_ber", "k8s", "underscore"),
+    ("ember\n", "k8s", "trailing newline"),
+    ("g" * 25, "k8s", "id over 24 chars"),
+    ("g" * 24, "staging", "fleet name over 51 chars"),
+]
+ALLOCATE_RULES = [
+    {"apiGroups": ["allocation.agones.dev"], "resources": ["gameserverallocations"], "verbs": ["create"]}
+]
+
+
+def load_game_renderer():
+    import importlib.util
+
+    path = DEPLOY_DIR / GAME_RENDERER
+    spec = importlib.util.spec_from_file_location("rpg_mmo_games_render", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+def check_game_render(rendered: dict, game: str, stack_ns: str, renderer) -> list[str]:
+    """ADR-33 leg 5 invariants of one rendered game. Returns a list of problems."""
+    problems: list[str] = []
+    ns = renderer.game_namespace(stack_ns, game)
+    docs = rendered["manifests"]
+    secrets = rendered["secret-template"]
+
+    def of_kind(kind: str, pool=None) -> list[dict]:
+        return [d for d in (pool if pool is not None else docs) if d.get("kind") == kind]
+
+    namespaces = of_kind("Namespace")
+    if [dig(d, "metadata.name") for d in namespaces] != [ns]:
+        problems.append(f"expected exactly one Namespace {ns!r}, got {[dig(d, 'metadata.name') for d in namespaces]}")
+    for d in docs + secrets:
+        name = dig(d, "metadata.name") or ""
+        if len(name) > renderer.NAME_LIMIT:
+            problems.append(f"{d.get('kind')}/{name} is over {renderer.NAME_LIMIT} chars")
+        if d.get("kind") != "Namespace" and dig(d, "metadata.namespace") != ns:
+            problems.append(f"{d.get('kind')}/{name} is in {dig(d, 'metadata.namespace')!r}, not {ns!r}")
+
+    quotas = of_kind("ResourceQuota")
+    if len(quotas) != 1:
+        problems.append(f"expected one ResourceQuota (ADR-33 D7), got {len(quotas)}")
+    else:
+        hard = dig(quotas[0], "spec.hard") or {}
+        for key in ("pods", "requests.cpu", "requests.memory"):
+            if key not in hard:
+                problems.append(f"ResourceQuota has no {key!r}")
+
+    fleets = of_kind("Fleet")
+    fleet_names = {dig(f, "metadata.name") for f in fleets}
+    if len(fleets) != 2:
+        problems.append(f"expected a map and a dungeon Fleet, got {sorted(fleet_names)}")
+    for f in fleets:
+        name = dig(f, "metadata.name") or ""
+        if not name.startswith(f"{game}-"):
+            problems.append(f"Fleet {name!r} lacks the '{game}-' prefix ADR-33 D2 S1 needs for server ids")
+        if len(name) > renderer.FLEET_NAME_LIMIT:
+            problems.append(
+                f"Fleet {name!r} is {len(name)} chars; GameServer/pod = fleet + "
+                f"{renderer.AGONES_SUFFIX_BUDGET} must stay within {renderer.NAME_LIMIT}"
+            )
+        for c in _containers(f):
+            env = {e.get("name"): e for e in c.get("env") or []}
+            if "JWT_SECRET" in env:
+                problems.append(f"Fleet {name!r} mounts JWT_SECRET on a game-server pod (ADR-8)")
+            gid = env.get("GAMESERVER_GAME_ID")
+            ref = dig(gid or {}, "valueFrom.configMapKeyRef") or {}
+            if ref.get("name") != "gameserver-config" or ref.get("key") != "game-id" or ref.get("optional"):
+                problems.append(
+                    f"Fleet {name!r} must read GAMESERVER_GAME_ID from the REQUIRED "
+                    f"gameserver-config key game-id, got {gid!r}"
+                )
+            for e in env.values():
+                if dig(e, "valueFrom.secretKeyRef.key") == "jwt-secret":
+                    problems.append(f"Fleet {name!r} reads jwt-secret into {e.get('name')}")
+
+    cms = [d for d in of_kind("ConfigMap") if dig(d, "metadata.name") == "gameserver-config"]
+    if len(cms) != 1 or (dig(cms[0], "data") or {}).get("game-id") != game:
+        problems.append(f"gameserver-config must set game-id: {game!r}")
+
+    roles = of_kind("Role")
+    if len(roles) != 1 or roles[0].get("rules") != ALLOCATE_RULES:
+        problems.append(f"expected one Role granting exactly {ALLOCATE_RULES}, got {[r.get('rules') for r in roles]}")
+    gw_bindings = [b for b in of_kind("RoleBinding") if dig(b, "roleRef.kind") == "Role"]
+    want_subject = [{"kind": "ServiceAccount", "name": "rpg-gateway", "namespace": stack_ns}]
+    if len(gw_bindings) != 1 or gw_bindings[0].get("subjects") != want_subject or (
+        roles and dig(gw_bindings[0], "roleRef.name") != dig(roles[0], "metadata.name")
+    ):
+        problems.append(f"expected one RoleBinding of the allocate Role to {want_subject}")
+
+    for s in of_kind("Secret", secrets):
+        data = s.get("stringData") or {}
+        if "jwt-secret" in data:
+            problems.append("Secret template carries jwt-secret; game-server pods never hold it (ADR-8)")
+        for key in ("game-db-url", "join-token-secret"):
+            if key not in data:
+                problems.append(f"Secret template has no {key!r}")
+        for key, value in data.items():
+            if value and not str(value).startswith("REPLACE_ME"):
+                problems.append(f"Secret template key {key!r} holds a non-placeholder value")
+    if of_kind("Secret"):
+        problems.append("a Secret is in the manifests stream; it belongs in the template only")
+
+    gw = {e["name"]: e for e in rendered["gateway-env"]}
+    up = game.upper()
+    for kind in ("map", "dungeon"):
+        val = (gw.get(f"ALLOCATOR_FLEET_{kind.upper()}_{up}") or {}).get("value")
+        if val not in fleet_names or not val.startswith(f"{game}-{kind}-"):
+            problems.append(f"gateway env ALLOCATOR_FLEET_{kind.upper()}_{up}={val!r} names no rendered {kind} fleet")
+    if (gw.get(f"ALLOCATOR_NAMESPACE_{up}") or {}).get("value") != ns:
+        problems.append(f"gateway env ALLOCATOR_NAMESPACE_{up} is not {ns!r}")
+    if dig(gw.get(f"JOIN_TOKEN_SECRET_{up}") or {}, "valueFrom.secretKeyRef.key") != f"join-token-secret-{game}":
+        problems.append(f"gateway env JOIN_TOKEN_SECRET_{up} must read key join-token-secret-{game}")
+    # GAMES comes from ConfigMap gateway-config key `games` (k8s/app/40-gateway.yaml),
+    # so the snippet must not carry its own GAMES entry; the list it prints for that
+    # key is "gateway-games".
+    if "GAMES" in gw:
+        problems.append("gateway env snippet carries a GAMES entry; GAMES is read from gateway-config key 'games'")
+    if game not in str(rendered.get("gateway-games", "")).split(","):
+        problems.append(f"gateway-games does not list {game!r}")
+    return problems
+
+
+def validate_game_template(schemas: dict) -> tuple[int, int]:
+    """Render the per-game template in memory and validate it. (checked, failures)."""
+    checked = failures = 0
+    print(f"\n==> per-game template ({GAME_RENDERER})")
+    try:
+        renderer = load_game_renderer()
+    except Exception as exc:  # noqa: BLE001 - any import failure is a FAIL
+        print(f"[FAIL] cannot load {GAME_RENDERER}: {exc}")
+        return 0, 1
+
+    stack_ns = renderer.DEFAULT_STACK_NAMESPACE
+    for game in (SAMPLE_GAME_ID, SAMPLE_MAX_GAME_ID):
+        try:
+            rendered = renderer.render(game)
+        except renderer.RenderError as exc:
+            print(f"[FAIL] render --game {game}: refused: {exc}")
+            failures += 1
+            continue
+        ns = renderer.game_namespace(stack_ns, game)
+        docs = rendered["manifests"] + rendered["secret-template"]
+        fleet_names = {dig(d, "metadata.name") for d in docs if d.get("kind") == "Fleet"}
+        for doc in docs:
+            key = (doc.get("apiVersion"), doc.get("kind"))
+            label = f"render[{game}]:{doc.get('kind')}/{dig(doc, 'metadata.name') or '?'}"
+            if key in schemas:
+                try:
+                    jsonschema.validate(doc, sanitize(schemas[key]))
+                except jsonschema.ValidationError as exc:
+                    loc = "/".join(str(p) for p in exc.absolute_path) or "<root>"
+                    print(f"[FAIL] {label}: {loc}: {exc.message}")
+                    failures += 1
+                    continue
+                contract: list[str] = []
+                if doc.get("kind") == "Fleet":
+                    contract = check_fleet(doc, label, expected_namespace=ns)
+                elif doc.get("kind") == "FleetAutoscaler":
+                    contract = check_autoscaler(doc, fleet_names)
+                for problem in contract:
+                    print(f"[FAIL] {label}: {problem}")
+                failures += len(contract)
+                if not contract:
+                    print(f"[ ok ] {label} (Agones CRD schema + contract)")
+                    checked += 1
+            else:
+                need = ["metadata.name"] + ([] if doc.get("kind") == "Namespace" else ["metadata.namespace"])
+                missing = [f for f in need if dig(doc, f) is None]
+                if missing:
+                    print(f"[FAIL] {label}: missing {', '.join(missing)}")
+                    failures += 1
+                    continue
+                print(f"[ ok ] {label} (structural check)")
+                checked += 1
+        problems = check_game_render(rendered, game, stack_ns, renderer)
+        for problem in problems:
+            print(f"[FAIL] render[{game}]: {problem}")
+        failures += len(problems)
+        if not problems:
+            print(f"[ ok ] render[{game}]: ADR-33 leg 5 invariants (namespace, quota, '<game>-' fleets "
+                  f"<= {renderer.FLEET_NAME_LIMIT} chars, game id, no JWT_SECRET, allocate RBAC, gateway env)")
+            checked += 1
+
+    for game, env, why in GAME_REFUSALS:
+        try:
+            renderer.render(game, env=env)
+        except renderer.RenderError as exc:
+            print(f"[ ok ] render --game {game!r} --env {env} refused ({why}): {exc}")
+            checked += 1
+        else:
+            print(f"[FAIL] render --game {game!r} --env {env} was NOT refused ({why})")
+            failures += 1
+    return checked, failures
+
+
 def dig(doc: dict, dotted: str):
     node = doc
     for part in dotted.split("."):
@@ -455,6 +688,11 @@ def main() -> int:
 
     for warning in check_gateway_constants(fleet_names):
         print(f"[warn] {warning}")
+
+    if not args.files:
+        game_checked, game_failures = validate_game_template(schemas)
+        checked += game_checked
+        failures += game_failures
 
     print(f"\n{checked} document(s) validated, {failures} failure(s)")
 

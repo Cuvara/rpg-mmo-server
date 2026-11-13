@@ -102,14 +102,24 @@ Exposed on a **separate listener** from the realtime port — `--metrics-addr`
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
 | `gateway_connections_active` | gauge | — | client sockets currently held |
-| `gateway_auth_total` | counter | `result=ok\|fail` | MsgAuth outcomes |
-| `gateway_enter_world_total` | counter | `result=ok\|fail` | MsgEnterWorld / map assignment outcomes |
-| `gateway_allocations_total` | counter | `result=ok\|fail` | allocator (Agones) requests |
+| `gateway_auth_total` | counter | `game`, `result=ok\|fail` | MsgAuth outcomes |
+| `gateway_enter_world_total` | counter | `game`, `result=ok\|fail` | MsgEnterWorld / map assignment outcomes |
+| `gateway_allocations_total` | counter | `game`, `result=ok\|fail` | allocator (Agones) requests |
+| `gateway_session_checks_total` | counter | `game`, `result=ok\|expired\|store_error` | session validations; `store_error` is Redis failing, not a session ending |
 | `gateway_relay_events_total` | counter | — | cross-server events delivered by the relay |
 
-Plus the standard `go_*` and `process_*` collectors. Both `result` label values
-are pre-created at startup so `rate()` has a zero baseline instead of a series
-that pops into existence on the first failure.
+Plus further unlabelled or non-game series (`gateway_rate_limited_total{reason}`,
+`gateway_kick_publish_total{result}`, `gateway_redis_up`, `gateway_relay_up`,
+`gateway_transport_*`, ...; `backend/gateway/metrics/metrics.go` is the list)
+and the standard `go_*` and `process_*` collectors.
+
+**`game` (ADR-33 D3)** is a game id from the gateway's `GAMES` list (`cuvara`
+when `GAMES` is unset) taken from a **verified** token claim only. Anything
+else, including a failed auth whose claim could not be verified, is counted
+under `game="other"`, so a forged `gid` cannot mint series. Every
+`(game, result)` pair of a configured game is pre-created at startup so
+`rate()` has a zero baseline instead of a series that pops into existence on
+the first failure; `other` is not pre-created.
 
 ### The C# metrics endpoint binds a wildcard (fixed 2026-08-06)
 
@@ -156,10 +166,18 @@ curl -s http://127.0.0.1:9090/api/v1/label/__name__/values | grep -o 'gameserver
 
 ### Game server (C#, `:9101`)
 
-Owned by the game server module. The dashboard consumes
+Owned by the game server module (`GameServer/Observability/GameMetrics.cs`
+lists every instrument). The dashboard consumes
 `gameserver_tick_duration_seconds` (histogram), `gameserver_players_online`
-(gauge) and `gameserver_player_saves_total{status="error"}` (counter). Panels
-stay empty until that exporter is live.
+(gauge) and `gameserver_player_saves_total{status="error"}` (counter); the
+alerts consume `gameserver_nakama_reward_outcomes_total{outcome}` and
+`gameserver_players_online`. Panels stay empty until that exporter is live.
+
+**Every `gameserver_*` series carries `map_id` and `game`** (ADR-33 D3), from
+one base tag set, so no instrument can drop either. `game` is the process's
+`GAMESERVER_GAME_ID` (`cuvara` when unset). One process serves one game, so
+the label adds no series; it exists because a `map_id` is only unique within a
+game (two games may both have a `map_01`).
 
 > Until 2026-09-13 this said `gameserver_save_errors_total`, which **has never
 > existed** — the instrument is `gameserver.player.saves`, exported as
@@ -180,12 +198,24 @@ tell you whether the game is healthy:
 
 | Panel | Query | Read it as |
 |-------|-------|-----------|
-| Tick duration p99 | `histogram_quantile(0.99, sum by (le, map_id) (rate(gameserver_tick_duration_seconds_bucket[5m])))` | Must stay far below the tick budget (66ms at 15Hz). Crossing it = the sim is late, clients rubber-band. |
-| Players online | `sum by (map_id) (gameserver_players_online)` | Load per map + total CCU. |
+| Tick duration p99 | `histogram_quantile(0.99, sum by (le, game, map_id) (rate(gameserver_tick_duration_seconds_bucket[5m])))` | Must stay far below the tick budget (66ms at 15Hz). Crossing it = the sim is late, clients rubber-band. |
+| Players online | `sum by (game, map_id) (gameserver_players_online)` | Load per map of each game + total CCU across games. |
 | Gateway connections active | `sum by (instance) (gateway_connections_active)` | Should track players online; a growing gap means sockets leak or clients stall before EnterWorld. |
 | Auth / EnterWorld failure ratio | `rate(gateway_auth_total{result="fail"}[5m]) / rate(gateway_auth_total[5m])` | Sustained >10% = JWT secret mismatch with Nakama, expired tokens, or (EnterWorld) no server has capacity. |
 | Save errors + allocation failures | `rate(gameserver_player_saves_total{status="error"}[5m])`, `rate(gateway_allocations_total{result="fail"}[5m])` | Anything non-zero is player progress at risk / Agones unable to give us pods. |
 | Scrape targets up | `max by (job) (up)` | Which exporters are alive. |
+
+**Per-map means per `(game, map_id)`** (ADR-33 D3). A map id is only unique
+within a game, so every panel and alert rule that splits by map groups by
+`(game, map_id)`, never by `map_id` alone: `by (le, game, map_id)` for the tick
+histogram, `by (game, map_id)` elsewhere, `on (game, map_id)` for the join in
+`NakamaRewardPathSilent`, and legends and alert annotations print
+`<game>/<map_id>`. Grouping by `map_id` alone would sum two games' `map_01`
+into one line, and the reward alerts would compare one game's failures with
+another game's traffic. With only cuvara deployed every series reads
+`cuvara/<map_id>`. The gateway panels are whole-gateway ratios and do not split
+by map; split them by `game` ad hoc (`sum by (game) (...)`) when needed.
+Follow the same rule for any new panel or rule.
 
 Editing: change it in Grafana, then **Export → Save to file** back into
 `monitoring/dashboards/rpg-gameplay.json` (provisioned dashboards are read-only
@@ -344,7 +374,8 @@ Free tier covers ~10k series / 50GB logs — enough through soft launch.
 + Grafana + Alertmanager) and add a `PodMonitor` per workload:
 
 - gateway pods → port `9102`
-- game server pods → port `9101` (Agones fleets; keep `map_id`/`server_id` as labels)
+- game server pods → port `9101` (Agones fleets, one namespace per non-default
+  game: `rpg-k8s-realtime-<game>`; keep `game`/`map_id`/`server_id` as labels)
 - Agones ships its own controller metrics + a published Grafana dashboard set
 
 Alerting starts there too: tick p99 over budget, allocation failure rate,
