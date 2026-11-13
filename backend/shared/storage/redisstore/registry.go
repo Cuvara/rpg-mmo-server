@@ -184,10 +184,10 @@ func (r *ServerRegistry) GetServer(ctx context.Context, serverID string) (storag
 	return infoFromFields(fields), nil
 }
 
-// FindByMapID returns all live servers on the map, pruning index entries whose
-// hash has expired.
+// FindByMapID returns live servers on the map for the default game only,
+// pruning index entries whose hash has expired.
 func (r *ServerRegistry) FindByMapID(ctx context.Context, mapID string) ([]storage.ServerInfo, error) {
-	return r.findByMapIndex(ctx, mapKey(mapID), mapID, "")
+	return r.FindByGameAndMapID(ctx, constants.DefaultGameID, mapID)
 }
 
 // FindByGameAndMapID returns live servers owned by gameID on mapID, pruning

@@ -838,15 +838,17 @@ returns 0 without touching any key (`storage.ErrGameMismatch` in Go,
   default game without a migration. New writers still write `cuvara` explicitly so a hash
   says which game it belongs to.
 - **A separate index key per game** rather than filtering one shared set: a map id is only
-  unique within a game, and in Redis a non-default game's servers never appear in the
-  default game's `FindByMapID`. (`MemoryServerRegistry.FindByMapID` still matches on
-  `map_id` alone, across games; use `FindByGameAndMapID` when the game matters.) Map ids exclude `:` (`gameid.ValidMapID`) and game ids are lowercase
-  alphanumerics, so `servers:map:{game}:{map_id}` cannot collide with a default-game key.
+  unique within a game. Both Redis and memory registries expose `FindByGameAndMapID`
+  through `storage.ServerRegistry` (empty game = default); `FindByMapID` returns only
+  default-game servers. At EnterWorld, the gateway refuses map ids outside
+  `^[A-Za-z0-9_-]{1,64}$` using `gameid.ValidMapID`, so map ids cannot contain `:` and
+  `servers:map:{game}:{map_id}` cannot collide with a default-game key. The store itself
+  does not validate map ids; this guarantee depends on the gateway's validation.
 - **Check-and-set, not a pipeline**: server ids are only game-qualified for new games, so two
   games could otherwise overwrite each other's live entry by reusing an id, silently moving a
   server between games. The check and the write must be one atomic step; a Lua script is the
   only way to do that in a single round trip. An expired id is free to take, matching the
   hash-is-truth liveness rule above.
-- **The interface does not change yet.** `FindByGameAndMapID` is a concrete method on the
-  Redis and memory registries; widening `storage.ServerRegistry` would break every gateway
-  test fake, so it waits for leg 3, where the gateway starts calling it.
+- **Leg 3 widens the interface.** `storage.ServerRegistry.FindByGameAndMapID` makes the
+  game-scoped lookup available to the gateway and its test fakes; `FindByMapID` keeps its
+  existing signature for default-game callers.

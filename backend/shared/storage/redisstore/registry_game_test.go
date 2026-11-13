@@ -268,8 +268,8 @@ func TestRedisServerRegistry_GameLookupFiltersAndPrunes(t *testing.T) {
 			}
 			if constants.GameOrDefault(gameID) == constants.DefaultGameID {
 				all, err := reg.FindByMapID(ctx, "map_01")
-				if err != nil || len(all) != 2 {
-					t.Errorf("FindByMapID() = %+v, %v, want both live index members", all, err)
+				if err != nil || len(all) != 1 || all[0].ServerID != "own" {
+					t.Errorf("FindByMapID() = %+v, %v, want own default-game server only", all, err)
 				}
 			}
 		})

@@ -193,18 +193,9 @@ func (r *MemoryServerRegistry) Deregister(_ context.Context, serverID string) er
 	return nil
 }
 
-func (r *MemoryServerRegistry) FindByMapID(_ context.Context, mapID string) ([]ServerInfo, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	var result []ServerInfo
-	for _, e := range r.servers {
-		if e.info.MapID == mapID && r.alive(e) {
-			info := e.info
-			info.GameID = constants.GameOrDefault(info.GameID)
-			result = append(result, info)
-		}
-	}
-	return result, nil
+// FindByMapID returns live servers on mapID for the default game only.
+func (r *MemoryServerRegistry) FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error) {
+	return r.FindByGameAndMapID(ctx, constants.DefaultGameID, mapID)
 }
 
 // FindByGameAndMapID returns live servers owned by gameID on mapID.

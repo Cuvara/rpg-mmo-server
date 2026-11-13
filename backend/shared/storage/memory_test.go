@@ -367,12 +367,12 @@ func TestMemoryServerRegistry_GameLookups(t *testing.T) {
 		})
 	}
 	all, err := reg.FindByMapID(ctx, "map_01")
-	if err != nil || len(all) != 4 {
-		t.Fatalf("FindByMapID() = %+v, %v, want all four live servers on map_01", all, err)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("FindByMapID() = %+v, %v, want two default-game servers on map_01", all, err)
 	}
 	for _, info := range all {
-		if info.GameID == "" {
-			t.Errorf("FindByMapID() returned unnormalized GameID for %+v", info)
+		if (info.ServerID != "default" && info.ServerID != "legacy") || info.GameID != constants.DefaultGameID {
+			t.Errorf("FindByMapID() returned unexpected default-game server %+v", info)
 		}
 	}
 	legacy, err := reg.GetServer(ctx, "legacy")
