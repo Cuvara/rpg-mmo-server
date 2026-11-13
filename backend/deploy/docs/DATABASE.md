@@ -11,6 +11,122 @@ instances.
 Everything below is about the game-state instance. The meta instance is only
 ever backed up and restored, never migrated by us.
 
+## Per-game game-state database (ADR-33 D5)
+
+`db/provision-gamestate.sh` provisions one non-default game's database on the
+shared game Postgres instance (`postgres:16.4-alpine` in compose and Kubernetes).
+It creates database **and login role** `gamestate_<game>`, makes that role the
+database owner, and reapplies restricted role attributes and connection limits
+on every run. The role has LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE,
+NOREPLICATION and NOINHERIT. Database creation is conditional and runs outside
+a transaction. This creates no tables: the game's existing `Migrator` creates
+them on first server start, using this role as their owner.
+
+Game ids must match exactly `^[a-z][a-z0-9]{1,23}$`. The ids `gs`, `map` and
+`dungeon` are reserved. The default game, `cuvara`, is refused because it keeps
+the existing `gamestate` database and its existing user (`game` by default).
+Invalid input exits 2 before invoking psql.
+
+Both the role and database default to **20 connections**; override with
+`--connection-limit N` (positive integer, at most PostgreSQL's 2147483647).
+This is a starting budget, not a capacity guarantee: it limits one game's share
+of the shared instance's connections (ADR-33 D7), leaving room for other games
+and operations. Size fleet pools and the combined game budgets against the
+instance's `max_connections`; CPU and query load remain shared.
+
+The script revokes PUBLIC's CONNECT and TEMPORARY privileges on the new game's
+database, then grants CONNECT to its owner role. PostgreSQL normally grants
+PUBLIC CONNECT to other databases, so this alone does not isolate the login.
+The final check uses `has_database_privilege` for **every other non-template
+database**, including `postgres`, `gamestate` and other `gamestate_*` databases.
+It fails nonzero and names accessible databases if any remain. An unsuccessful
+run may already have created the role and database; fix the grants and rerun
+to converge.
+
+`--revoke-public-connect` explicitly hardens those accessible databases by
+revoking CONNECT from PUBLIC before the check, quoting identifiers with
+`format('%I')`. **Other roles that depended on PUBLIC lose the ability to open
+new connections there.** Owners and superusers keep access; the default game's
+user owns `gamestate`. Existing connections are not terminated. Review other
+service accounts before choosing this flag. The script grants nothing on the
+default game's database. Explicit grants and role memberships can still allow
+access after PUBLIC is revoked; the check catches effective CONNECT privileges
+and requires the operator to resolve them.
+
+This is **human-run operations work subject to the db-schema-write gate**;
+review the dry run and obtain that gate before executing against a database.
+It is not part of deployment or boot automation. These examples are operator
+instructions, not commands run as part of implementing this feature:
+
+```bash
+# Offline SQL preview: no psql, docker, cluster or password required.
+bash backend/deploy/db/provision-gamestate.sh foo --dry-run
+bash backend/deploy/db/provision-gamestate.sh foo --connection-limit 20 \
+  --revoke-public-connect --dry-run
+
+# After the gate: enter the new role password privately, without shell tracing.
+set +x
+read -r -s -p 'New game role password: ' GAMESTATE_ROLE_PASSWORD; printf '\n'
+export GAMESTATE_ROLE_PASSWORD
+
+# Compose: local administrative connection inside the game Postgres container.
+# -e passes the exported environment variable by name, never its value in argv.
+PSQL_CMD='docker exec -i -e GAMESTATE_ROLE_PASSWORD rpg-postgres-game psql -U game -d postgres' \
+  bash backend/deploy/db/provision-gamestate.sh foo --revoke-public-connect
+
+# Kubernetes: kubectl exec has no environment-forwarding flag. Use a local
+# wrapper which sends a shell-quoted export and then SQL over exec's stdin.
+# Install this wrapper locally outside the repo; it stores no password value.
+cat > /tmp/game-psql <<'WRAPPER'
+#!/usr/bin/env bash
+set +x
+set -euo pipefail
+{
+  printf 'export GAMESTATE_ROLE_PASSWORD=%q\n' "$GAMESTATE_ROLE_PASSWORD"
+  printf 'exec psql -U game -d postgres'
+  printf ' %q' "$@"
+  printf '\n'
+  cat
+} | kubectl --context k3d-rpg-dev -n rpg-k8s-data exec -i postgres-game-0 -- bash -s
+WRAPPER
+chmod 700 /tmp/game-psql
+PSQL_CMD=/tmp/game-psql bash backend/deploy/db/provision-gamestate.sh foo \
+  --revoke-public-connect
+unset GAMESTATE_ROLE_PASSWORD
+```
+
+Adjust container, Kubernetes context/namespace, and administrative user for the
+target instance. The Kubernetes wrapper requires Bash in the stock PostgreSQL
+image and sends the export and SQL only over stdin; do not use a command
+argument such as `env GAMESTATE_ROLE_PASSWORD=value` with `kubectl exec`.
+`PSQL_CMD` defaults to `psql`; it is split on whitespace without shell evaluation.
+Use a wrapper for arguments or paths needing quoting, and never include a
+password or password-bearing connection string in it. Administrative
+authentication should use the existing local connection or standard PostgreSQL
+environment/passfile facilities, not a constructed password-bearing DSN.
+
+The role password is required as exported `GAMESTATE_ROLE_PASSWORD` except in
+dry-run mode. psql 15+ reads it with `\getenv`; the script never substitutes its
+value into SQL text, argv, output, or the dry-run preview. It disables psql
+startup files and SQL echo, and uses superuser-only session settings to turn
+off stock PostgreSQL statement, error-statement and duration logging before
+reading the password. Use the stock instance logging configuration; any added
+SQL auditing must likewise exclude password statements. psql stderr is
+suppressed because error diagnostics can contain interpolated SQL; failures
+give a generic message plus any non-secret isolation diagnostics on stdout.
+
+After success, the script prints this **shape**, with placeholders only:
+
+```text
+postgres://gamestate_foo:<password>@<host>:5432/gamestate_foo?sslmode=...
+```
+
+Complete the DSN privately (URL-encode password characters as needed), choose
+the target host and TLS policy, and store it in **that game's fleet Secret,
+key `game-db-url`**. Never commit the completed DSN or password. No database
+provisioning, Secret creation, Docker startup, or cluster operation is performed
+by the offline test `db/tests/provision_test.sh`, which uses a fake psql only.
+
 ## 0. Pull request restore rehearsal
 
 `.github/workflows/restore-drill.yml` runs on pull requests using disposable
