@@ -5,6 +5,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Game identity, ADR-33 leg 1 (Terms).** No behaviour change, no wire or protocol change
+  (`proto/`, generated code and the protocol version constants are untouched).
+  - `constants.DefaultGameID = "cuvara"` and `constants.GameOrDefault(id)` (empty ->
+    `DefaultGameID`, anything else unchanged): absent means the default game. Mirrored once
+    in C# as `GameServer.Games.GameId.DefaultGameId`. Test: `TestGameOrDefault`.
+  - New package `gameid`: `ValidGameID` (`^[a-z][a-z0-9]{1,23}$`), `ValidMapID`
+    (`^[A-Za-z0-9_-]{1,64}$`, so no `:` or `/`), `IsDefaultGame` (`""` or `DefaultGameID`)
+    and `ValidServerID(game, id)` (default game: any non-empty id, preserving every id
+    accepted today; another game: a valid game id and `<game>-` followed by a non-empty
+    suffix, so `foobar-1` is not a `foo` server id). Byte-wise ASCII checks, no trailing
+    newline or non-ASCII accepted. Table-driven tests cover `-`, `_`, `:`, `/`, lengths
+    1/2/24/25 (64/65 for maps) and the shared-prefix case.
+  - `testdata/multigame/identity.json`: the single fixture of the default game id and every
+    game id, map id and server id verdict. Read by `gameid.TestIdentityFixtureParity` (Go)
+    and `GameIdTests.SharedFixture_MatchesConstantsAndValidators` (C#), so the constants and
+    the validators of the two languages cannot drift.
+  - **Optional `gid` JWT claim**: `jwt.Claims.GameID` (`json:"gid,omitempty"`, next to
+    `cid`), `Claims.Game()` (defaults an absent claim), `jwt.SignWithGame` and
+    `Keyring.SignWithGame`. An empty or default game omits the claim, so a default-game
+    token keeps today's claim set byte for byte (`TestLegacyClaimBytes`); an invalid
+    non-empty game is refused. `SignWithCharacter` delegates with an empty game, so every
+    existing signing call is unchanged; `Claims.IsZero` accounts for the field. Nothing
+    mints a non-empty `gid` yet. Tests in `jwt/gid_test.go`.
+
 ### Changed
 - `EntitySnapshot.speed` is now proto3 `optional` without changing its field number or
   type: absent means unknown, and present zero means immobile. Go protobuf conversion

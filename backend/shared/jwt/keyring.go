@@ -101,6 +101,14 @@ func (k Keyring) SignWithCharacter(userID, serverID, characterID string, expiry 
 	return SignWithCharacter(userID, serverID, characterID, k.Signing(), expiry)
 }
 
+// SignWithGame issues a token with an optional game ID using the signing secret.
+func (k Keyring) SignWithGame(userID, serverID, characterID, gameID string, expiry time.Duration) (string, error) {
+	if !k.Valid() {
+		return "", fmt.Errorf("sign: empty keyring")
+	}
+	return SignWithGame(userID, serverID, characterID, gameID, k.Signing(), expiry)
+}
+
 // Verify validates a token against every secret in the keyring, in order, and
 // returns the claims of the first secret that accepts it.
 //
@@ -130,5 +138,5 @@ func (k Keyring) Verify(token string) (Claims, error) {
 // IsZero reports whether the claims are empty, i.e. Verify failed before it
 // could decode a payload.
 func (c Claims) IsZero() bool {
-	return c.UserID == "" && c.ServerID == "" && c.CharacterID == "" && c.IssuedAt == 0 && c.ExpireAt == 0
+	return c.UserID == "" && c.ServerID == "" && c.CharacterID == "" && c.GameID == "" && c.IssuedAt == 0 && c.ExpireAt == 0
 }

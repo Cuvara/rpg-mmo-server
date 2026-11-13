@@ -791,3 +791,24 @@ either side and no test of the keyframe path able to see it. The `Speed` field
 already carries a comment saying exactly this. Both new fields are therefore in
 `SentView`'s field list, its constructor, its `Equals` and its `GetHashCode`, and
 in `Rent()`'s reset.
+
+## Game identity: absent means the default game (2026-11-13, ADR-33 leg 1)
+
+ADR-33 makes the backend host more than one game. This step only declares the identity;
+nothing reads it yet. Full rationale and the later legs: `backend/docs/ARCHITECTURE-DECISIONS.md`
+(ADR-33, Terms).
+
+- **Absent means `DefaultGameID` (`"cuvara"`).** Every id, token and record written before
+  ADR-33 has no game, so the default game must be representable by absence. That is why
+  `gid` is `omitempty` and `SignWithGame` drops it for the default game: a default-game
+  token stays byte-identical to one minted before the claim existed, and an old reader that
+  ignores `gid` stays correct.
+- **The default game's server ids are not restricted.** `ValidServerID("", id)` accepts any
+  non-empty id, because today's ids (`gs-...`, pod names) carry no prefix and renaming them
+  is not part of this step. Only a new game must prefix its server ids with `<game>-`.
+- **Game ids exclude `-`**, so `<game>-` is an unambiguous prefix; map ids exclude `:` and
+  `/` so they can be embedded in keys and paths.
+- **Byte-wise checks, not regexes,** so Go and C# cannot disagree on anchors (`$` before a
+  trailing newline) or on Unicode letter and digit classes.
+- **One fixture, not two tables.** `testdata/multigame/identity.json` is the only place the
+  expected verdicts live for the parity tests; both languages fail if they disagree with it.

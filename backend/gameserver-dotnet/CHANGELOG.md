@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Game identity, ADR-33 leg 1 (Terms); no behaviour, wire or protocol change. `GameServer.Games.GameId`: `DefaultGameId = "cuvara"` (the C# twin of Go `constants.DefaultGameID`), `GameOrDefault` (null or empty -> default), `IsDefaultGame`, `IsValidGameId` (`^[a-z][a-z0-9]{1,23}$`), `IsValidMapId` (`^[A-Za-z0-9_-]{1,64}$`) and `IsValidServerId(game, id)` (default game: any non-empty id; another game: a valid game id and a `<game>-` prefix with a non-empty suffix). `GameIdTests` covers the edge cases, and `SharedFixture_MatchesConstantsAndValidators` reads `backend/shared/testdata/multigame/identity.json`, the same fixture as the Go parity test, so the two sides cannot drift.
+- `JwtValidator.JwtClaims.GameId`: the optional `gid` claim, a trailing record member defaulting to empty (like `CharacterId`), so positional construction is source-compatible. Empty when absent means the default game; nothing mints a non-empty `gid` yet and nothing acts on it. Tests in `JwtCharacterClaimTests`: `gid` present, absent and empty, through keyring rotation, and the positional default.
+
 ### Fixed
 
 - Local full-suite instability on a loaded host (#515, partial); test-only except one internal seam. Each fixed family is a wall-clock budget the test did not need, or a read deadline that also covered the work it was waiting for:
