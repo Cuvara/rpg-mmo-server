@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	gameerrors "github.com/duycuong/rpg-mmo/shared/errors"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
@@ -97,7 +98,7 @@ type RegistryService struct {
 	// allocMu guards allocInFlight only. It is never taken on the
 	// existing-server path.
 	allocMu       sync.Mutex
-	allocInFlight map[string]*allocationCall
+	allocInFlight map[gameMapKey]*allocationCall
 
 	// mismatchTTL is how long a proven fleet/map mismatch is remembered. Zero
 	// means the default; a negative value disables the memory entirely.
@@ -107,10 +108,16 @@ type RegistryService struct {
 	// existing-server path: the memory is only consulted immediately before an
 	// allocation, which by definition means the registry had nothing.
 	mismatchMu    sync.Mutex
-	mismatchUntil map[string]time.Time
+	mismatchUntil map[gameMapKey]time.Time
 }
 
-// allocationCall is one in-flight allocate-and-wait for a single map_id. Every
+// gameMapKey keeps map names independent across games.
+type gameMapKey struct {
+	game  string
+	mapID string
+}
+
+// allocationCall is one in-flight allocate-and-wait for a single (game, map). Every
 // caller that joins it blocks on done and then reads info/err, which are
 // written exactly once by the leader before done is closed.
 type allocationCall struct {
@@ -206,8 +213,8 @@ var ErrNoServerAvailable = errors.New("no available server for map")
 var ErrServerStarting = errors.New("allocated server has not registered yet")
 
 // ErrFleetMapMismatch means a game server exists and is healthy, but it serves a
-// DIFFERENT map than the one that was asked for. It is a configuration fault,
-// not a capacity one, which is why it is deliberately NOT a flavour of
+// DIFFERENT game or map than the one that was asked for. It is a configuration
+// fault, not a capacity one, which is why it is deliberately NOT a flavour of
 // ErrNoServerAvailable: "we are out of capacity for map X" and "the fleet you
 // configured hosts map Y, not X" call for opposite operator responses (grow the
 // fleet vs. fix GAMESERVER_MAP_ID / point the map at a fleet that serves it).
@@ -221,8 +228,8 @@ var ErrServerStarting = errors.New("allocated server has not registered yet")
 //     awaitRegistration (which polls by ServerID) finds that pod's pre-existing
 //     entry instantly. Before this check the client was handed a server for the
 //     wrong world and every layer reported success.
-//   - on the registry path, when FindByMapID returns an entry whose MapID is not
-//     the key it was asked for, which means the store is lying.
+//   - on the registry path, when FindByGameAndMapID returns an entry whose game
+//     or map differs from the key it was asked for, which means the store is lying.
 //
 // Must be matchable with errors.Is; the gateway maps it to a distinct,
 // non-retryable client message.
@@ -241,9 +248,9 @@ func isRetriable(err error) bool {
 	return true
 }
 
-// findByMapIDWithRetry wraps FindByMapID with exponential backoff. Only
-// transient errors are retried; capacity / not-found errors return immediately.
-func (s *RegistryService) findByMapIDWithRetry(ctx context.Context, mapID string) ([]storage.ServerInfo, error) {
+// findByGameAndMapIDWithRetry wraps FindByGameAndMapID with exponential backoff.
+// Only transient errors are retried; capacity / not-found errors return immediately.
+func (s *RegistryService) findByGameAndMapIDWithRetry(ctx context.Context, gameID, mapID string) ([]storage.ServerInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, RetryTotalTimeout)
 	defer cancel()
 
@@ -251,7 +258,7 @@ func (s *RegistryService) findByMapIDWithRetry(ctx context.Context, mapID string
 	delay := retryInitialDelay
 
 	for attempt := 0; attempt <= retryMaxAttempts; attempt++ {
-		servers, err := s.reg.FindByMapID(ctx, mapID)
+		servers, err := s.reg.FindByGameAndMapID(ctx, gameID, mapID)
 		if err == nil {
 			return servers, nil
 		}
@@ -267,6 +274,7 @@ func (s *RegistryService) findByMapIDWithRetry(ctx context.Context, mapID string
 
 		if s.log != nil {
 			s.log.Warn("registry lookup failed, retrying",
+				"game_id", gameID,
 				"map_id", mapID,
 				"attempt", attempt+1,
 				"delay", delay,
@@ -364,8 +372,8 @@ func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID strin
 // actually listening on. If it never appears, ErrServerStarting is returned and
 // no address is announced.
 //
-// Allocation is single-flight per map_id (see allocateOnce): concurrent callers
-// for one unserved map produce one allocation, not one each.
+// Allocation is single-flight per (game, map_id) (see allocateOnce): concurrent
+// callers for one unserved map produce one allocation, not one each.
 //
 // Whatever path produced the entry, the entry must serve the map that was asked
 // for. Allocation targets a *fleet*, not a map, so nothing upstream guarantees
@@ -373,7 +381,14 @@ func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID strin
 // retrying client from burning one GameServer per attempt on a map the fleet
 // cannot serve.
 func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
-	info, err := s.findServer(ctx, mapID)
+	return s.FindServerGame(ctx, constants.DefaultGameID, mapID)
+}
+
+// FindServerGame locates a live server with capacity for the requested game and
+// map. An absent game identifies the default game.
+func (s *RegistryService) FindServerGame(ctx context.Context, gameID, mapID string) (storage.ServerInfo, error) {
+	gameID = constants.GameOrDefault(gameID)
+	info, err := s.findServer(ctx, gameID, mapID)
 	if err != nil {
 		return storage.ServerInfo{}, err
 	}
@@ -386,14 +401,14 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 	return info, nil
 }
 
-func (s *RegistryService) findServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
-	servers, err := s.findByMapIDWithRetry(ctx, mapID)
+func (s *RegistryService) findServer(ctx context.Context, gameID, mapID string) (storage.ServerInfo, error) {
+	servers, err := s.findByGameAndMapIDWithRetry(ctx, gameID, mapID)
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("find servers: %w", err)
 	}
 
-	// Defence in depth on the registry path. FindByMapID is keyed by map_id, so
-	// every entry it returns should already serve mapID; an entry that does not
+	// Defence in depth on the registry path. FindByGameAndMapID is keyed by
+	// (game, map_id), so every entry should already serve that game and map; one that does not
 	// means the store is lying (a key written under the wrong map, a stale index,
 	// a buggy implementation). That is exactly the failure the allocation path
 	// used to ship to clients silently, so it is refused here too rather than
@@ -403,10 +418,21 @@ func (s *RegistryService) findServer(ctx context.Context, mapID string) (storage
 	if wrong := wrongMapServers(servers, mapID); len(wrong) > 0 {
 		if s.log != nil {
 			s.log.Warn("registry returned servers for a different map than the one queried; the store index is inconsistent",
-				"map_id", mapID, "server_ids", wrong)
+				"game_id", gameID, "map_id", mapID, "server_ids", wrong)
 		}
 		return storage.ServerInfo{}, fmt.Errorf("%w: registry index for map %s returned servers %v serving another map",
 			ErrFleetMapMismatch, mapID, wrong)
+	}
+	for _, srv := range servers {
+		if serverGame := constants.GameOrDefault(srv.GameID); serverGame != gameID {
+			if s.log != nil {
+				s.log.Warn("registry returned a server for a different game; the store index is inconsistent",
+					"requested_game_id", gameID, "server_game_id", serverGame,
+					"map_id", mapID, "server_id", srv.ServerID)
+			}
+			return storage.ServerInfo{}, fmt.Errorf("%w: registry index for game %q map %q returned server %q belonging to game %q",
+				ErrFleetMapMismatch, gameID, mapID, srv.ServerID, serverGame)
+		}
 	}
 
 	if len(servers) > 1 && s.log != nil {
@@ -416,7 +442,7 @@ func (s *RegistryService) findServer(ctx context.Context, mapID string) (storage
 		}
 		sort.Strings(ids)
 		s.log.Warn("map served by multiple game servers; the world is split and players on different instances cannot interact",
-			"map_id", mapID, "server_count", len(servers), "server_ids", ids)
+			"game_id", gameID, "map_id", mapID, "server_count", len(servers), "server_ids", ids)
 	}
 
 	// A map served by more than one live server is a violated invariant, not a
@@ -475,12 +501,12 @@ func (s *RegistryService) findServer(ctx context.Context, mapID string) (storage
 	if s.allocator != nil {
 		// A map already proven unservable by the configured fleet is refused
 		// before the allocation API is called at all — see rememberMismatch.
-		if until, ok := s.mismatchRemembered(mapID); ok {
+		if until, ok := s.mismatchRemembered(gameID, mapID); ok {
 			return storage.ServerInfo{}, fmt.Errorf(
-				"%w: map %s was allocated a server for another map; not allocating again for %s",
-				ErrFleetMapMismatch, mapID, time.Until(until).Round(time.Second))
+				"%w: game %q map %q was allocated a server for another game or map; not allocating again for %s",
+				ErrFleetMapMismatch, gameID, mapID, time.Until(until).Round(time.Second))
 		}
-		return s.allocateOnce(ctx, mapID)
+		return s.allocateOnce(ctx, gameID, mapID)
 	}
 
 	return storage.ServerInfo{}, fmt.Errorf("%w %s", ErrNoServerAvailable, mapID)
@@ -507,27 +533,27 @@ func (s *RegistryService) effectiveMismatchTTL() time.Duration {
 	return s.mismatchTTL
 }
 
-// mismatchRemembered reports whether mapID is inside a live "the fleet does not
-// serve this map" window, and when that window ends.
-func (s *RegistryService) mismatchRemembered(mapID string) (time.Time, bool) {
+// mismatchRemembered reports whether (gameID, mapID) is inside a live "the fleet
+// does not serve this game and map" window, and when that window ends.
+func (s *RegistryService) mismatchRemembered(gameID, mapID string) (time.Time, bool) {
 	if s.mismatchTTL < 0 {
 		return time.Time{}, false
 	}
 	s.mismatchMu.Lock()
 	defer s.mismatchMu.Unlock()
-	until, ok := s.mismatchUntil[mapID]
+	until, ok := s.mismatchUntil[gameMapKey{gameID, mapID}]
 	if !ok {
 		return time.Time{}, false
 	}
 	if !time.Now().Before(until) {
-		delete(s.mismatchUntil, mapID)
+		delete(s.mismatchUntil, gameMapKey{gameID, mapID})
 		return time.Time{}, false
 	}
 	return until, true
 }
 
-// rememberMismatch records that allocating for mapID produced a server for a
-// different map, so the next request refuses before calling the allocation API.
+// rememberMismatch records that allocating for (gameID, mapID) produced a server
+// for a different game or map, so the next request refuses before calling the API.
 //
 // This is the one failure that IS cached, and the exception is deliberate.
 // allocateOnce never caches a failure because the failures it sees are
@@ -540,8 +566,8 @@ func (s *RegistryService) mismatchRemembered(mapID string) (time.Time, bool) {
 // Deallocate, so an Allocated pod never returns to the pool. Caching a
 // self-correcting failure is a bug; caching a fact of the deployment, with a TTL
 // short enough that a corrected deployment is picked up without a restart, is
-// what bounds the leak to one pod per map per TTL.
-func (s *RegistryService) rememberMismatch(mapID string) {
+// what bounds the leak to one pod per (game, map) per TTL.
+func (s *RegistryService) rememberMismatch(gameID, mapID string) {
 	ttl := s.effectiveMismatchTTL()
 	if ttl < 0 {
 		return
@@ -549,14 +575,14 @@ func (s *RegistryService) rememberMismatch(mapID string) {
 	s.mismatchMu.Lock()
 	defer s.mismatchMu.Unlock()
 	if s.mismatchUntil == nil {
-		s.mismatchUntil = make(map[string]time.Time)
+		s.mismatchUntil = make(map[gameMapKey]time.Time)
 	}
-	s.mismatchUntil[mapID] = time.Now().Add(ttl)
+	s.mismatchUntil[gameMapKey{gameID, mapID}] = time.Now().Add(ttl)
 }
 
-// allocateOnce runs allocateAndWait for mapID under single-flight: the first
-// caller for a map does the work, every caller that arrives while it is running
-// waits for it and shares its outcome.
+// allocateOnce runs allocateAndWait for (gameID, mapID) under single-flight: the
+// first caller does the work, every caller for that game and map that arrives
+// while it is running waits for it and shares its outcome.
 //
 // Without this, the retry we ask clients to perform is an amplifier. A client
 // told "server is starting, retry shortly" retries, the retry finds the map
@@ -575,13 +601,13 @@ func (s *RegistryService) rememberMismatch(mapID string) {
 // this map for DefaultMapMismatchTTL (see rememberMismatch): it is a fact of the
 // deployment rather than a transient fault, and each retry of it costs a
 // GameServer that is never reclaimed.
-func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (storage.ServerInfo, error) {
+func (s *RegistryService) allocateOnce(ctx context.Context, gameID, mapID string) (storage.ServerInfo, error) {
 	s.allocMu.Lock()
-	if call, ok := s.allocInFlight[mapID]; ok {
+	if call, ok := s.allocInFlight[gameMapKey{gameID, mapID}]; ok {
 		s.allocMu.Unlock()
 		if s.log != nil {
 			s.log.Warn("joining an allocation already in flight for this map",
-				"map_id", mapID)
+				"game_id", gameID, "map_id", mapID)
 		}
 		select {
 		case <-call.done:
@@ -596,10 +622,10 @@ func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (stora
 		}
 	}
 	if s.allocInFlight == nil {
-		s.allocInFlight = make(map[string]*allocationCall)
+		s.allocInFlight = make(map[gameMapKey]*allocationCall)
 	}
 	call := &allocationCall{done: make(chan struct{})}
-	s.allocInFlight[mapID] = call
+	s.allocInFlight[gameMapKey{gameID, mapID}] = call
 	s.allocMu.Unlock()
 
 	// The leader's WORK is detached from its own caller's cancellation and
@@ -617,9 +643,9 @@ func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (stora
 	// reach the one caller that stacks every timeout (issue #235).
 	detached := context.WithoutCancel(ctx)
 	go func() {
-		call.info, call.err = s.allocateAndWait(detached, mapID)
+		call.info, call.err = s.allocateAndWait(detached, gameID, mapID)
 		s.allocMu.Lock()
-		delete(s.allocInFlight, mapID)
+		delete(s.allocInFlight, gameMapKey{gameID, mapID})
 		s.allocMu.Unlock()
 		close(call.done)
 	}()
@@ -638,16 +664,27 @@ func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (stora
 
 // allocateAndWait requests one new instance for mapID and blocks until that
 // instance has registered itself, or the wait window expires.
-func (s *RegistryService) allocateAndWait(ctx context.Context, mapID string) (storage.ServerInfo, error) {
-	allocated, aerr := s.allocator.AllocateServer(ctx, mapID)
+func (s *RegistryService) allocateAndWait(ctx context.Context, gameID, mapID string) (storage.ServerInfo, error) {
+	allocated, aerr := s.allocator.AllocateServer(ctx, gameID, mapID)
 	if aerr != nil {
-		s.metrics.AllocationResult(false)
+		s.metrics.AllocationResultGame(gameID, false)
 		return storage.ServerInfo{}, fmt.Errorf("%w %s: allocate: %w", ErrNoServerAvailable, mapID, aerr)
 	}
 	ready, werr := s.awaitRegistration(ctx, allocated.ServerID)
 	if werr != nil {
-		s.metrics.AllocationResult(false)
+		s.metrics.AllocationResultGame(gameID, false)
 		return storage.ServerInfo{}, fmt.Errorf("allocated server for map %s: %w", mapID, werr)
+	}
+	if serverGame := constants.GameOrDefault(ready.GameID); serverGame != gameID {
+		s.metrics.AllocationResultGame(gameID, false)
+		s.rememberMismatch(gameID, mapID)
+		if s.log != nil {
+			s.log.Warn("allocated game server belongs to a different game; refusing the assignment",
+				"requested_game_id", gameID, "server_game_id", serverGame,
+				"map_id", mapID, "server_id", ready.ServerID)
+		}
+		return storage.ServerInfo{}, fmt.Errorf("%w: allocated server %q for game %q belongs to game %q",
+			ErrFleetMapMismatch, ready.ServerID, gameID, serverGame)
 	}
 	// awaitRegistration polls by ServerID, not by map, so what it returns is
 	// "the entry this pod published", not "an entry for this map". Those differ
@@ -657,10 +694,11 @@ func (s *RegistryService) allocateAndWait(ctx context.Context, mapID string) (st
 	// server for a completely different world is handed to the client with a
 	// valid join token and no error anywhere.
 	if ready.MapID != mapID {
-		s.metrics.AllocationResult(false)
-		s.rememberMismatch(mapID)
+		s.metrics.AllocationResultGame(gameID, false)
+		s.rememberMismatch(gameID, mapID)
 		if s.log != nil {
 			s.log.Warn("allocated game server serves a different map than the one requested; refusing the assignment and suppressing further allocations for this map",
+				"game_id", gameID,
 				"requested_map_id", mapID, "server_map_id", ready.MapID,
 				"server_id", ready.ServerID, "suppress_for", s.effectiveMismatchTTL())
 		}
@@ -668,7 +706,7 @@ func (s *RegistryService) allocateAndWait(ctx context.Context, mapID string) (st
 			"%w: allocated %s for map %s but it serves map %q (check the fleet's GAMESERVER_MAP_ID)",
 			ErrFleetMapMismatch, ready.ServerID, mapID, ready.MapID)
 	}
-	s.metrics.AllocationResult(true)
+	s.metrics.AllocationResultGame(gameID, true)
 	return ready, nil
 }
 
@@ -772,7 +810,7 @@ func (s *RegistryService) Evict(ctx context.Context, serverID string) error {
 // trackServer adds a live server to the watcher's set, if one is attached.
 func (s *RegistryService) trackServer(info storage.ServerInfo) {
 	if s.watcher != nil && info.ServerID != "" {
-		s.watcher.TrackServer(info.ServerID, info.MapID)
+		s.watcher.TrackServerInfo(info)
 	}
 }
 
@@ -795,14 +833,17 @@ func (s *RegistryService) trackServer(info storage.ServerInfo) {
 // servers:map: (ADR-26 decision 8). The wait is also not optional: the
 // allocation response carries the node address, which ADR-16 measured as not
 // dialable, while the pod's own entry carries the composed address that is.
-func (s *RegistryService) AllocateDungeon(ctx context.Context, contentID string) (storage.ServerInfo, error) {
+func (s *RegistryService) AllocateDungeon(ctx context.Context, gameID, contentID string) (storage.ServerInfo, error) {
+	gameID = constants.GameOrDefault(gameID)
+	okResult := false
+	defer func() { s.metrics.AllocationResultGame(gameID, okResult) }()
 	ka, ok := s.allocator.(KindAllocator)
 	if !ok {
 		return storage.ServerInfo{}, fmt.Errorf("allocate dungeon: allocator does not support kinds: %w",
 			gameerrors.New(gameerrors.ErrNotImplemented, "kind allocation not implemented"))
 	}
 
-	allocated, err := ka.Allocate(ctx, AllocationRequest{Kind: KindDungeon, MapID: contentID})
+	allocated, err := ka.Allocate(ctx, AllocationRequest{Game: gameID, Kind: KindDungeon, MapID: contentID})
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("allocate dungeon %q: %w", contentID, err)
 	}
@@ -811,5 +852,16 @@ func (s *RegistryService) AllocateDungeon(ctx context.Context, contentID string)
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("allocate dungeon %q: server %s: %w", contentID, allocated.ServerID, err)
 	}
+	if serverGame := constants.GameOrDefault(info.GameID); serverGame != gameID {
+		if s.log != nil {
+			s.log.Warn("allocated dungeon server belongs to a different game; refusing the assignment",
+				"requested_game_id", gameID, "server_game_id", serverGame,
+				"content_id", contentID, "server_id", info.ServerID)
+		}
+		return storage.ServerInfo{}, fmt.Errorf("%w: allocated dungeon server %q for game %q belongs to game %q",
+			ErrFleetMapMismatch, info.ServerID, gameID, serverGame)
+	}
+	okResult = true
+	s.trackServer(info)
 	return info, nil
 }

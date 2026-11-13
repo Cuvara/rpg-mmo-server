@@ -16,6 +16,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
+	"github.com/duycuong/rpg-mmo/shared/gameid"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
@@ -71,11 +73,31 @@ var ErrKindNotConfigured = errors.New("no fleet configured for allocation kind")
 
 // AllocationRequest describes what the gateway wants allocated.
 type AllocationRequest struct {
+	// Game identifies the owning game. Empty means constants.DefaultGameID.
+	Game string
 	// Kind selects the fleet: KindMap or KindDungeon. Empty means KindMap.
 	Kind string
 	// MapID (or dungeon id) that the allocated server will host. It is only
-	// used to fill the resulting ServerInfo — fleet selection is by Kind.
+	// used to fill the resulting ServerInfo — fleet selection is by (Game, Kind).
 	MapID string
+}
+
+// FleetEnvName returns the fleet setting for a game and kind. The default game
+// retains its original environment variable names.
+func FleetEnvName(kind, game string) string {
+	name := "ALLOCATOR_FLEET_" + strings.ToUpper(kind)
+	if !gameid.IsDefaultGame(game) {
+		name += "_" + strings.ToUpper(game)
+	}
+	return name
+}
+
+// GameFleets configures a non-default game's fleets and namespace (ADR-33 D7).
+type GameFleets struct {
+	Map     string
+	Dungeon string
+	// Namespace defaults to <default-game namespace>-<game>.
+	Namespace string
 }
 
 // KindAllocator allocates a game server for a specific fleet kind. It is the
@@ -91,6 +113,9 @@ type AgonesConfig struct {
 	// FleetMap / FleetDungeon are the Fleet names selected per kind.
 	FleetMap     string
 	FleetDungeon string
+	// Games contains non-default games only. The default game always uses the
+	// Namespace, FleetMap and FleetDungeon fields above for compatibility.
+	Games map[string]GameFleets
 	// Kubeconfig is an explicit kubeconfig path. Empty falls back to the
 	// in-cluster service account, then $KUBECONFIG, then ~/.kube/config.
 	Kubeconfig string
@@ -127,6 +152,7 @@ type AgonesAllocator struct {
 	baseURL   string
 	namespace string
 	fleets    map[string]string
+	games     map[string]GameFleets
 	capacity  int
 	timeout   time.Duration
 }
@@ -156,10 +182,21 @@ func NewAgonesAllocator(cfg AgonesConfig) (*AgonesAllocator, error) {
 // base URL. Tests use it against an httptest server.
 func newAgonesAllocator(httpClient *http.Client, baseURL string, cfg AgonesConfig) *AgonesAllocator {
 	cfg.applyDefaults()
+	games := make(map[string]GameFleets, len(cfg.Games))
+	for game, fleets := range cfg.Games {
+		if gameid.IsDefaultGame(game) {
+			continue
+		}
+		if fleets.Namespace == "" {
+			fleets.Namespace = cfg.Namespace + "-" + game
+		}
+		games[game] = fleets
+	}
 	return &AgonesAllocator{
 		http:      httpClient,
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		namespace: cfg.Namespace,
+		games:     games,
 		// Only kinds with a configured fleet are registered; the rest fail with
 		// ErrKindNotConfigured instead of posting an allocation for "".
 		fleets: nonEmptyFleets(map[string]string{
@@ -208,8 +245,8 @@ func resolveRESTConfig(kubeconfig string) (*rest.Config, error) {
 }
 
 // AllocateServer allocates a map server for mapID (Allocator interface).
-func (a *AgonesAllocator) AllocateServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
-	return a.Allocate(ctx, AllocationRequest{Kind: KindMap, MapID: mapID})
+func (a *AgonesAllocator) AllocateServer(ctx context.Context, gameID, mapID string) (storage.ServerInfo, error) {
+	return a.Allocate(ctx, AllocationRequest{Game: gameID, Kind: KindMap, MapID: mapID})
 }
 
 // Allocate posts a GameServerAllocation and turns the response into a
@@ -221,21 +258,26 @@ func (a *AgonesAllocator) Allocate(ctx context.Context, req AllocationRequest) (
 	if kind == "" {
 		kind = KindMap
 	}
-	fleet, ok := a.fleets[kind]
-	if !ok {
-		switch kind {
-		case KindMap:
-			return storage.ServerInfo{}, fmt.Errorf("allocate: %w %q (set --allocator-fleet-map / ALLOCATOR_FLEET_MAP)",
-				ErrKindNotConfigured, kind)
-		case KindDungeon:
-			return storage.ServerInfo{}, fmt.Errorf("allocate: %w %q: no dungeon fleet is deployed (set --allocator-fleet-dungeon / ALLOCATOR_FLEET_DUNGEON once one exists)",
-				ErrKindNotConfigured, kind)
-		default:
-			return storage.ServerInfo{}, fmt.Errorf("allocate: unknown kind %q", kind)
+	game := constants.GameOrDefault(req.Game)
+	if kind != KindMap && kind != KindDungeon {
+		return storage.ServerInfo{}, fmt.Errorf("allocate: unknown kind %q for game %q", kind, game)
+	}
+	namespace, fleet := a.namespace, a.fleets[kind]
+	if !gameid.IsDefaultGame(game) {
+		fleets := a.games[game]
+		namespace = fleets.Namespace
+		if kind == KindMap {
+			fleet = fleets.Map
+		} else {
+			fleet = fleets.Dungeon
 		}
 	}
+	if fleet == "" {
+		return storage.ServerInfo{}, fmt.Errorf("allocate: %w %q for game %q (set %s)",
+			ErrKindNotConfigured, kind, game, FleetEnvName(kind, game))
+	}
 
-	body, err := json.Marshal(newAllocationBody(a.namespace, fleet))
+	body, err := json.Marshal(newAllocationBody(namespace, fleet))
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("allocate: marshal request: %w", err)
 	}
@@ -243,7 +285,7 @@ func (a *AgonesAllocator) Allocate(ctx context.Context, req AllocationRequest) (
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 
-	url := a.baseURL + fmt.Sprintf(allocationPath, a.namespace)
+	url := a.baseURL + fmt.Sprintf(allocationPath, namespace)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("allocate: build request: %w", err)
@@ -282,8 +324,13 @@ func (a *AgonesAllocator) Allocate(ctx context.Context, req AllocationRequest) (
 		return storage.ServerInfo{}, fmt.Errorf("allocate: incomplete allocation status (name=%q address=%q)",
 			out.Status.GameServerName, out.Status.Address)
 	}
+	if !gameid.ValidServerID(game, out.Status.GameServerName) {
+		return storage.ServerInfo{}, fmt.Errorf("allocate: gameserver name %q is invalid for game %q: expected prefix %q",
+			out.Status.GameServerName, game, game+"-")
+	}
 
 	return storage.ServerInfo{
+		GameID:   game,
 		ServerID: out.Status.GameServerName,
 		MapID:    req.MapID,
 		Addr:     fmt.Sprintf("%s:%d", out.Status.Address, port),
