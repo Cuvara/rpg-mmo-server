@@ -66,6 +66,13 @@ func main() {
 	cfg := config.Load()
 	log := logger.New(cfg.LogLevel)
 
+	games, gamesErr := session.ParseGames(os.Getenv(session.EnvGames))
+	if gamesErr != nil {
+		log.Error("invalid games configuration", "err", gamesErr)
+		os.Exit(1)
+	}
+	log.Info("configured games", "games", games.IDs())
+
 	listenAddr := cfg.GatewayAddr
 	if *addr != "" {
 		listenAddr = *addr
@@ -141,6 +148,7 @@ func main() {
 	// Metrics listener: separate port from the realtime listener, started before
 	// anything else so a crash-looping gateway is still scrapeable/probeable.
 	met, promReg := metrics.NewDefault()
+	met.SetGames(games.IDs())
 	// Readiness checks are registered below once the backend is known — the
 	// metrics listener starts first on purpose, so probes work even if backend
 	// wiring fails.
@@ -334,7 +342,7 @@ func main() {
 	// on the memory backend MemoryEventStream dispatches by stream name.
 	kickConsumer := server.NewKickConsumer(
 		eventStream, gatewayID,
-		func(userID string) { gw.FindAndCloseConnection(userID) },
+		func(game, userID, jti string) { gw.FindAndCloseConnection(game, userID, jti) },
 		log,
 	)
 
@@ -369,6 +377,7 @@ func main() {
 	gw = server.New(sessions, reg, cfg.JWTSecret, log,
 		server.WithEventRelay(relay),
 		server.WithMetrics(met),
+		server.WithGames(games),
 		// Duplicate-login supersede events publish into the SAME event stream
 		// backend the relay consumes from (events:kick vs events:game are
 		// different keys on the same store). On the memory backend the stream

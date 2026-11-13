@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
@@ -38,6 +39,9 @@ import (
 // gateway takes 9102 to keep a single-host dev stack collision-free.
 const DefaultAddr = ":9102"
 
+// GameOther groups unconfigured or unverified game IDs.
+const GameOther = "other"
+
 // Result label values for the *_total counters.
 const (
 	ResultOK   = "ok"
@@ -47,6 +51,9 @@ const (
 // Metrics is the gateway's metric set. Build one with New (which registers
 // every collector) and hand it to server.WithMetrics / registry.WithMetrics.
 type Metrics struct {
+	gamesMu sync.RWMutex
+	games   map[string]struct{}
+
 	// ConnectionsActive tracks client sockets the gateway currently holds.
 	ConnectionsActive prometheus.Gauge
 	// AuthTotal counts MsgAuth outcomes, labelled ok/fail.
@@ -152,15 +159,15 @@ func New(reg prometheus.Registerer) *Metrics {
 		AuthTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_auth_total",
 			Help: "Client authentication attempts by result.",
-		}, []string{"result"}),
+		}, []string{"game", "result"}),
 		EnterWorldTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_enter_world_total",
 			Help: "EnterWorld (map assignment) attempts by result.",
-		}, []string{"result"}),
+		}, []string{"game", "result"}),
 		AllocationsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_allocations_total",
 			Help: "Game server allocation requests by result.",
-		}, []string{"result"}),
+		}, []string{"game", "result"}),
 		RelayEventsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "gateway_relay_events_total",
 			Help: "Cross-server events delivered by the event relay.",
@@ -200,7 +207,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		SessionChecksTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_session_checks_total",
 			Help: "Session validations by outcome (ok, expired, store_error).",
-		}, []string{"result"}),
+		}, []string{"game", "result"}),
 		StreamGroupLossTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "gateway_stream_group_loss_total",
 			Help: "Event-stream consumer groups found missing and re-created.",
@@ -228,21 +235,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			m.StreamGroupLossTotal,
 			m.KickPublishTotal,
 		)
-		for _, v := range []string{SessionCheckOK, SessionCheckExpired, SessionCheckStoreError} {
-			m.SessionChecksTotal.WithLabelValues(v)
-		}
-		// Same zero-priming rationale as the result counters below: a limiter
-		// that has never fired should export 0, not nothing.
+		// Preserve zero baselines for the non-game counters.
 		m.RateLimitedTotal.WithLabelValues(RateLimitReasonConnection)
 		m.RateLimitedTotal.WithLabelValues(RateLimitReasonMessage)
-		// Pre-create both label values so a freshly started gateway exports
-		// `...{result="fail"} 0` instead of nothing — rate() over a series that
-		// only appears on the first failure produces misleading graphs.
-		for _, cv := range []*prometheus.CounterVec{m.AuthTotal, m.EnterWorldTotal, m.AllocationsTotal, m.KickPublishTotal} {
-			cv.WithLabelValues(ResultOK)
-			cv.WithLabelValues(ResultFail)
-		}
+		m.KickPublishTotal.WithLabelValues(ResultOK)
+		m.KickPublishTotal.WithLabelValues(ResultFail)
 	}
+	m.SetGames([]string{constants.DefaultGameID})
 	return m
 }
 
@@ -273,12 +272,63 @@ func (m *Metrics) ConnClosed() {
 	m.ConnectionsActive.Dec()
 }
 
-// AuthResult records one authentication outcome.
-func (m *Metrics) AuthResult(ok bool) {
+// SetGames replaces the configured game set and primes its result series.
+// Call it at startup before serving requests. GameOther is never primed.
+func (m *Metrics) SetGames(ids []string) {
 	if m == nil {
 		return
 	}
-	m.AuthTotal.WithLabelValues(result(ok)).Inc()
+	m.gamesMu.Lock()
+	defer m.gamesMu.Unlock()
+	next := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" && id != GameOther {
+			next[id] = struct{}{}
+		}
+	}
+	for id := range m.games {
+		if _, ok := next[id]; !ok {
+			for _, cv := range []*prometheus.CounterVec{m.AuthTotal, m.EnterWorldTotal, m.AllocationsTotal} {
+				cv.DeleteLabelValues(id, ResultOK)
+				cv.DeleteLabelValues(id, ResultFail)
+			}
+			for _, result := range []string{SessionCheckOK, SessionCheckExpired, SessionCheckStoreError} {
+				m.SessionChecksTotal.DeleteLabelValues(id, result)
+			}
+		}
+	}
+	m.games = next
+	for id := range next {
+		for _, cv := range []*prometheus.CounterVec{m.AuthTotal, m.EnterWorldTotal, m.AllocationsTotal} {
+			cv.WithLabelValues(id, ResultOK)
+			cv.WithLabelValues(id, ResultFail)
+		}
+		for _, result := range []string{SessionCheckOK, SessionCheckExpired, SessionCheckStoreError} {
+			m.SessionChecksTotal.WithLabelValues(id, result)
+		}
+	}
+}
+
+// GameLabel returns a configured game or GameOther. game must come from a
+// verified claim only; pass an empty string when no claim was verified.
+func (m *Metrics) GameLabel(game string) string {
+	if m == nil {
+		return GameOther
+	}
+	m.gamesMu.RLock()
+	defer m.gamesMu.RUnlock()
+	if _, ok := m.games[game]; ok {
+		return game
+	}
+	return GameOther
+}
+
+// AuthResult records one authentication outcome. game must come from a verified claim only.
+func (m *Metrics) AuthResult(game string, ok bool) {
+	if m == nil {
+		return
+	}
+	m.AuthTotal.WithLabelValues(m.GameLabel(game), result(ok)).Inc()
 }
 
 // KickPublishResult records one duplicate-login supersede publish outcome.
@@ -289,29 +339,35 @@ func (m *Metrics) KickPublishResult(ok bool) {
 	m.KickPublishTotal.WithLabelValues(result(ok)).Inc()
 }
 
-// EnterWorldResult records one map-assignment outcome.
-func (m *Metrics) EnterWorldResult(ok bool) {
+// EnterWorldResult records one map-assignment outcome. game must come from a verified claim only.
+func (m *Metrics) EnterWorldResult(game string, ok bool) {
 	if m == nil {
 		return
 	}
-	m.EnterWorldTotal.WithLabelValues(result(ok)).Inc()
+	m.EnterWorldTotal.WithLabelValues(m.GameLabel(game), result(ok)).Inc()
 }
 
-// AllocationResult records one allocator request outcome.
+// AllocationResult records an allocator outcome for the default game. Registry
+// call sites move to AllocationResultGame in l3-routing.
 func (m *Metrics) AllocationResult(ok bool) {
-	if m == nil {
-		return
-	}
-	m.AllocationsTotal.WithLabelValues(result(ok)).Inc()
+	m.AllocationResultGame(constants.DefaultGameID, ok)
 }
 
-// SessionCheckResult records one session validation outcome. result must be one
-// of the SessionCheck* constants.
-func (m *Metrics) SessionCheckResult(result string) {
+// AllocationResultGame records an allocator outcome. game must come from a verified claim only.
+func (m *Metrics) AllocationResultGame(game string, ok bool) {
 	if m == nil {
 		return
 	}
-	m.SessionChecksTotal.WithLabelValues(result).Inc()
+	m.AllocationsTotal.WithLabelValues(m.GameLabel(game), result(ok)).Inc()
+}
+
+// SessionCheckResult records a session validation outcome. game must come from
+// a verified claim only; result must be one of the SessionCheck* constants.
+func (m *Metrics) SessionCheckResult(game, result string) {
+	if m == nil {
+		return
+	}
+	m.SessionChecksTotal.WithLabelValues(m.GameLabel(game), result).Inc()
 }
 
 // SetRedisUp records the outcome of a Redis dependency probe.

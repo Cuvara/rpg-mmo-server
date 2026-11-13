@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -171,7 +173,7 @@ func TestNewMetricsExportsDependencyGauges(t *testing.T) {
 	m := New(reg)
 	m.SetRedisUp(true)
 	m.SetRelayUp(false)
-	m.SessionCheckResult(SessionCheckStoreError)
+	m.SessionCheckResult(constants.DefaultGameID, SessionCheckStoreError)
 	m.StreamGroupLost(2)
 
 	h := HandlerWithChecks(reg, nil)
@@ -180,9 +182,9 @@ func TestNewMetricsExportsDependencyGauges(t *testing.T) {
 	for _, want := range []string{
 		"gateway_redis_up 1",
 		"gateway_relay_up 0",
-		`gateway_session_checks_total{result="store_error"} 1`,
-		`gateway_session_checks_total{result="expired"} 0`,
-		`gateway_session_checks_total{result="ok"} 0`,
+		`gateway_session_checks_total{game="` + constants.DefaultGameID + `",result="store_error"} 1`,
+		`gateway_session_checks_total{game="` + constants.DefaultGameID + `",result="expired"} 0`,
+		`gateway_session_checks_total{game="` + constants.DefaultGameID + `",result="ok"} 0`,
 		"gateway_stream_group_loss_total 2",
 	} {
 		if !strings.Contains(body, want) {
@@ -196,6 +198,6 @@ func TestNilMetricsHelpersAreSafe(t *testing.T) {
 	var m *Metrics
 	m.SetRedisUp(true)
 	m.SetRelayUp(true)
-	m.SessionCheckResult(SessionCheckOK)
+	m.SessionCheckResult(constants.DefaultGameID, SessionCheckOK)
 	m.StreamGroupLost(1)
 }

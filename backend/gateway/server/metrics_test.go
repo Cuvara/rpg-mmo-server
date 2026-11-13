@@ -7,6 +7,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/gateway/session"
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/messages"
@@ -92,10 +93,10 @@ func TestGatewayMetrics_AuthEnterWorldAndConnections(t *testing.T) {
 		counter prometheus.Counter
 		want    float64
 	}{
-		{"auth ok", m.AuthTotal.WithLabelValues(metrics.ResultOK), 1},
-		{"auth fail", m.AuthTotal.WithLabelValues(metrics.ResultFail), 1},
-		{"enter_world ok", m.EnterWorldTotal.WithLabelValues(metrics.ResultOK), 1},
-		{"enter_world fail", m.EnterWorldTotal.WithLabelValues(metrics.ResultFail), 1},
+		{"auth ok", m.AuthTotal.WithLabelValues(constants.DefaultGameID, metrics.ResultOK), 1},
+		{"auth fail", m.AuthTotal.WithLabelValues(metrics.GameOther, metrics.ResultFail), 1},
+		{"enter_world ok", m.EnterWorldTotal.WithLabelValues(constants.DefaultGameID, metrics.ResultOK), 1},
+		{"enter_world fail", m.EnterWorldTotal.WithLabelValues(constants.DefaultGameID, metrics.ResultFail), 1},
 	}
 	for _, c := range checks {
 		if got := testutil.ToFloat64(c.counter); got != c.want {

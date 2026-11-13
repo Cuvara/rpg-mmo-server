@@ -42,7 +42,7 @@ type KickConsumer struct {
 
 // ConnectionCloser is the callback the KickConsumer uses to close a user's
 // local gateway connection. The Gateway implements it via FindAndCloseConnection.
-type ConnectionCloser func(userID string)
+type ConnectionCloser func(game, userID, jti string)
 
 // NewKickConsumer builds a consumer but does not start it. Call Start to begin
 // consuming.
@@ -133,10 +133,10 @@ func (kc *KickConsumer) dispatch(ev storage.Event) {
 	kc.handled.Add(1)
 	if kc.logger != nil {
 		kc.logger.Info("kick consumer: closing superseded connection",
-			"user", payload.UserID, "old_gateway", payload.OldGateway,
+			"game", payload.Game(), "user", payload.UserID, "old_gateway", payload.OldGateway,
 			"new_gateway", payload.NewGateway)
 	}
-	kc.closer(payload.UserID)
+	kc.closer(payload.Game(), payload.UserID, payload.JTI)
 }
 
 // Consumed returns the total number of events received from the stream.
