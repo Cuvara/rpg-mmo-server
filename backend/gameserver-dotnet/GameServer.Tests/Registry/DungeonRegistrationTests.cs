@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using GameServer.Games;
 using GameServer.Registry;
 using StackExchange.Redis;
 
@@ -56,12 +57,13 @@ public class DungeonRegistrationTests
         Assert.Equal(serverId, hash["server_id"]);
         Assert.Equal("10.0.0.9:9200", hash["addr"]);
         Assert.Equal(mapId, hash["map_id"]);
-        // Seven since ADR-25: a dungeon instance publishes its identity key like any other
+        // Eight since ADR-33: a dungeon instance publishes its identity and game like any other
         // server. Scope changes only whether the MAP INDEX is joined, never what the hash
         // carries -- a dungeon pod a client cannot authenticate would be a worse instance,
         // not a more private one.
-        Assert.Equal(7, hash.Count);
+        Assert.Equal(8, hash.Count);
         Assert.True(hash.ContainsKey("identity_key"));
+        Assert.Equal(GameId.DefaultGameId, hash["game_id"]);
 
         // ...with its heartbeat TTL armed, so a dead instance still disappears by itself.
         var ttl = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");

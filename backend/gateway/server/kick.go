@@ -16,7 +16,12 @@ type SessionSupersededEvent struct {
 	JTI        string `json:"jti"`
 	OldGateway string `json:"old_gateway,omitempty"`
 	NewGateway string `json:"new_gateway,omitempty"`
+	// GameID is the ADR-33 game identity; absent means constants.DefaultGameID.
+	// The gateway fills it starting in leg 3.
+	GameID string `json:"game_id,omitempty"`
 }
+
+func (e SessionSupersededEvent) Game() string { return constants.GameOrDefault(e.GameID) }
 
 const kickPublishTimeout = 2 * time.Second
 

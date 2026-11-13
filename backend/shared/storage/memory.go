@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/duycuong/rpg-mmo/shared/constants"
 )
 
 // --- MemoryPlayerStore ---
@@ -146,9 +148,15 @@ func (r *MemoryServerRegistry) alive(e *registryEntry) bool {
 	return time.Since(e.lastSeen) < r.ttl
 }
 
+// Register stores a server and renews its liveness window. Returns ErrGameMismatch
+// if a live entry with the same server id belongs to another game.
 func (r *MemoryServerRegistry) Register(_ context.Context, info ServerInfo) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	info.GameID = constants.GameOrDefault(info.GameID)
+	if existing, ok := r.servers[info.ServerID]; ok && r.alive(existing) && constants.GameOrDefault(existing.info.GameID) != info.GameID {
+		return fmt.Errorf("register server %s for game %s: %w", info.ServerID, info.GameID, ErrGameMismatch)
+	}
 	r.servers[info.ServerID] = &registryEntry{info: info, lastSeen: time.Now()}
 	return nil
 }
@@ -173,7 +181,9 @@ func (r *MemoryServerRegistry) GetServer(_ context.Context, serverID string) (Se
 	if !ok || !r.alive(e) {
 		return ServerInfo{}, fmt.Errorf("server %s: %w", serverID, ErrNotFound)
 	}
-	return e.info, nil
+	info := e.info
+	info.GameID = constants.GameOrDefault(info.GameID)
+	return info, nil
 }
 
 func (r *MemoryServerRegistry) Deregister(_ context.Context, serverID string) error {
@@ -189,7 +199,26 @@ func (r *MemoryServerRegistry) FindByMapID(_ context.Context, mapID string) ([]S
 	var result []ServerInfo
 	for _, e := range r.servers {
 		if e.info.MapID == mapID && r.alive(e) {
-			result = append(result, e.info)
+			info := e.info
+			info.GameID = constants.GameOrDefault(info.GameID)
+			result = append(result, info)
+		}
+	}
+	return result, nil
+}
+
+// FindByGameAndMapID returns live servers owned by gameID on mapID.
+// An empty gameID means constants.DefaultGameID.
+func (r *MemoryServerRegistry) FindByGameAndMapID(_ context.Context, gameID, mapID string) ([]ServerInfo, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	gameID = constants.GameOrDefault(gameID)
+	var result []ServerInfo
+	for _, e := range r.servers {
+		if e.info.MapID == mapID && constants.GameOrDefault(e.info.GameID) == gameID && r.alive(e) {
+			info := e.info
+			info.GameID = constants.GameOrDefault(info.GameID)
+			result = append(result, info)
 		}
 	}
 	return result, nil

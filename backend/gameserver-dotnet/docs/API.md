@@ -106,7 +106,9 @@ Entry fields on the Redis Stream `events:kick` are the standard event pair
 
 `user_id`, `server_id` and `jti` are mandatory (a consumer MUST treat a payload
 missing any of them as malformed: count it, ACK it, act on nothing);
-`old_gateway`/`new_gateway` are diagnostic. `jti` is the join-token jti of the
+`old_gateway`/`new_gateway` are diagnostic. `game_id` is an optional string;
+absent or empty means the default game `cuvara`. Starting in ADR-33 leg 3, the
+gateway writes it and consumers compare it with their own game. `jti` is the join-token jti of the
 superseded session's map assignment — the consumer kicks only the connection
 that authenticated with exactly that jti, which is what makes late delivery and
 at-least-once redelivery safe (newest login wins). Consumer groups are
