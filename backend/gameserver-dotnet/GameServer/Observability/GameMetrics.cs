@@ -92,7 +92,6 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _snapshotsSent;
     private readonly Counter<long> _snapshotsCoalesced;
     private readonly Counter<long> _snapshotFramesWritten;
-    private readonly string _mapId;
     private readonly Counter<long> _snapshotBytes;
     private readonly Counter<long> _snapshotEntitiesShed;
     private readonly Counter<long> _snapshotAnchorMissing;
@@ -186,7 +185,6 @@ public sealed class GameMetrics : IDisposable
         _meter = new Meter(MeterName);
 
         GameId = global::GameServer.Games.GameId.GameOrDefault(gameId);
-        _mapId = mapId;
         _baseTags =
         [
             new KeyValuePair<string, object?>("map_id", mapId),

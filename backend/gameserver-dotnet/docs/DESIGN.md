@@ -1521,9 +1521,11 @@ for an annotated type, and only the **reflection-based resolver** consults
    `AgonesSdk` (`AgonesJsonContext`), `ContentLoader` (`ContentJsonContext`),
    `GameManifest` (`ManifestJsonContext`), `EventPublisher` (`EventJsonContext`),
    `KickEvents` (`KickJsonContext`), `MapLoader` (`MapJsonContext`), `NakamaClient`
-   (`NakamaJsonContext`, nine calls), `MetricsEndpoint` (`ServerStatusContext`) and two in
-   `JwtValidator` (`JwtJsonContext`): 18 calls in 9 files, counted 2026-11-13 with
-   `grep -rn "JsonSerializer\." GameServer/`. No call passes a `JsonSerializerOptions` or
+   (`NakamaJsonContext`, eight calls), `MetricsEndpoint` (`ServerStatusContext`) and two in
+   `JwtValidator` (`JwtJsonContext`): 17 calls in 9 files, counted 2026-11-13 with
+   `grep -rn --include='*.cs' "JsonSerializer\." GameServer/ | grep -v '///'`, which drops
+   doc-comment lines (one, in `Content/ContentJson.cs`, names `JsonSerializer.Deserialize`
+   without calling it). No call passes a `JsonSerializerOptions` or
    names a type without its `JsonTypeInfo`. Some serialised types do hold ordinary
    collections (`ServerStatus.InputsRejectedByReason` is a `Dictionary<string, long>`),
    and the source generator emits code for those itself; none is a Pooled type (fact 4).

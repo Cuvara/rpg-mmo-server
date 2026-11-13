@@ -268,8 +268,9 @@ on top of these two.
 Both come from one base tag set `{map_id, game}` that `GameMetrics` builds once in its
 constructor. Every other tag set (the per-reason, per-outcome and per-group lists, the GC
 generation pair, the transport pair, the KCP reasons, the lazily built command-reject lists,
-the per-type event list) is that base set plus its own labels, so an instrument cannot drop
-either base label by re-listing literals.
+and the event-type set that `RecordEventPublished` builds per call as an inline `TagList`)
+is that base set plus its own labels, so an instrument cannot drop either base label by
+re-listing literals.
 
 **One process serves one game, so `game` adds no series**: the series count per process is
 the same as before ADR-33. No metric was added, renamed or removed.
