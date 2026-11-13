@@ -6,6 +6,59 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Game-scoped sessions and kicks, ADR-33 leg 3 (session and kicks).** The default game
+  (`cuvara`) behaves as before, apart from the explicit `game_id` and the metric label below.
+  - **`GAMES` env** (`session.ParseGames`, `session.EnvGames`, `server.WithGames`): the games
+    this gateway admits, comma-separated, mirroring Nakama's `GAMES`. Absent or blank = the
+    default game only. Each entry must pass `gameid.ValidGameID`; an invalid or empty entry
+    makes the gateway **refuse to start** (exit 1, `invalid games configuration`). Duplicates
+    are dropped. The configured set is logged at startup (`configured games`).
+  - **A token whose `gid` is not in `GAMES` is refused at auth**: `MsgAuthResp{OK:false,
+    Error:"game not configured"}`, log reason `game_not_configured`, before any session
+    read or write. Routing is not game-aware yet (leg 3 routing), so the gateway admits only
+    the games it was told about. JWT verification still reads `gid` (absent = default game).
+  - **Session key** `session:{game}:{user_id}` for a non-default game; the default game keeps
+    `session:{user_id}` (`constants.SessionKey`, `session.GameSessionKey`, plus
+    `CreateGameSession` / `GetGameSession` / `UpdateGameSession`; the old user-only methods
+    delegate with the default game). Pong refresh, `checkSession`, the EnterWorld update and
+    teardown all use the connection's game.
+  - **Duplicate-login detection, the same-gateway kick, `userConns` and disconnect cleanup are
+    keyed by (game, user).** Logging into game B reads only the game-B session, so it never
+    supersedes or kicks the account's game-A session, on the same gateway or across two.
+    The connection latches `gid` with `cid` at auth (`ClientConn.SetAuthenticatedGame`,
+    `Game`); a socket that re-authenticates into another game or account retires its previous
+    tracking key first.
+  - **`game_id` is always written** in `session_superseded` (`events:kick`) and therefore in
+    `gateway_superseded` (`events:gateway_kick`, same payload), the default game included as
+    an explicit `cuvara`. This completes the leg 1 part 2 field below, which was struct-only.
+  - **The `events:gateway_kick` consumer closes only the (`game_id`, `user_id`) connection whose
+    last join-token jti equals the event's.** The connection records the jti it was handed at
+    EnterWorld (`ClientConn.SetJoinTokenJTI` / `JoinTokenJTI`, cleared with the identity and on
+    re-auth). A different, empty or missing jti is a no-op (debug `stale kick`), so a late kick
+    cannot close a newer login on this gateway that has already entered a world, and a game-A
+    event never closes a game-B socket. `ConnectionCloser` and
+    `Gateway.FindAndCloseConnection` now take `(game, userID, jti)`.
+  - Tests: `server/multi_game_test.go`, `session/games_test.go`,
+    `session/game_session_test.go`, `metrics/metrics_test.go` (`TestGameLabelsAndPriming`,
+    `TestUnconfiguredGameRecordsAsOther`, `TestUnchangedFamilyLabels`), `kick_publish_test.go`.
+  - **Limitation until l3-routing:** a configured non-default game is routed by map id only.
+    l3-routing must route EnterWorld per game, or refuse it for a game it cannot route.
+
+### Changed
+- **`game` label on `gateway_auth_total`, `gateway_enter_world_total`,
+  `gateway_allocations_total` and `gateway_session_checks_total`** (ADR-33 leg 3). The value
+  comes from the verified `gid` claim only, mapped through `GAMES`: an unconfigured game, or a
+  failure before a token verified (malformed request, protocol refusal, invalid token,
+  `game_not_configured`, EnterWorld before auth), reports `other`. Configured games are
+  zero-primed for every result; `other` is not primed. `gateway_allocations_total` still
+  records the default game (`AllocationResult`) until l3-routing threads the game through
+  (`AllocationResultGame` is ready). Dashboards and alerts that select these families on
+  `result` alone still match, and `sum by (result)` is unaffected; a query or recording rule
+  that matches the exact label set needs the new `game` label. The transport gauges,
+  `gateway_rate_limited_total`, `gateway_kick_publish_total` and the runtime collectors are
+  unchanged.
+
+### Added
 - **`SessionSupersededEvent.GameID` (ADR-33 leg 1 part 2).** Optional `game_id` field
   (`omitempty`) on the `session_superseded` kick payload, plus `Game()` (absent =
   `constants.DefaultGameID`). Struct only: `publishSupersede` does not fill it yet (ADR-33

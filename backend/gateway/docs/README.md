@@ -210,6 +210,7 @@ All three Redis stores share one client/pool.
 | `GATEWAY_ADDR` | `:8000` | Listen address |
 | `JWT_SECRET` | `dev-secret-change-me` | Client auth-token verification (shared with Nakama). Comma-separated list to rotate: `new,old` — first signs, all verify |
 | `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | Join-token signing (shared with gameserver-dotnet). Also rotatable. Unset logs a warning |
+| `GAMES` | *(empty → `cuvara` only)* | Games this gateway admits (ADR-33), comma-separated, mirroring Nakama's `GAMES`. Each entry must be a valid game id (`gameid.ValidGameID`); an invalid or empty entry is **fatal** at startup. A client token whose `gid` (absent = `cuvara`) is not listed is refused at auth with `game not configured`. A configured non-default game is routed by map id only until l3-routing routes or refuses it per game |
 | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` | *(empty)* | TLS on the gateway listener (ADR-23). Both empty = plaintext. Setting one is fatal |
 | `GATEWAY_CONN_RATE_PER_MIN` | `10` | Per-IP connection rate limit (`0` disables) |
 | `GATEWAY_CONN_BURST` | `10` | Per-IP burst |
@@ -296,18 +297,28 @@ curl localhost:9102/readyz      # 200 "ready", or 503 "not ready: redis"
 | Metric | Type | Labels |
 |--------|------|--------|
 | `gateway_connections_active` | gauge | — |
-| `gateway_auth_total` | counter | `result=ok\|fail` |
-| `gateway_enter_world_total` | counter | `result=ok\|fail` |
-| `gateway_allocations_total` | counter | `result=ok\|fail` |
+| `gateway_auth_total` | counter | `game`, `result=ok\|fail` |
+| `gateway_enter_world_total` | counter | `game`, `result=ok\|fail` |
+| `gateway_allocations_total` | counter | `game`, `result=ok\|fail` |
 | `gateway_relay_events_total` | counter | — |
 | `gateway_rate_limited_total` | counter | `reason=connection\|message` |
 | `gateway_transport_encrypted` | gauge | `transport`, `cipher` | 1 when packets leave the gateway as ciphertext, 0 when cleartext. **0 is the default** (the listener is `tcp`, which has no packet encryption; only TLS sets it to 1). A gauge, not a counter, so it is present when it reads 0 — a security question must never be answered by a missing field |
 | `gateway_transport_authenticated` | gauge | `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. 1 only with gateway TLS (`cipher="tls"`); plaintext TCP is 0. Separate from `transport_encrypted` so encryption cannot be read as integrity |
 | `gateway_redis_up` | gauge | — |
 | `gateway_relay_up` | gauge | — |
-| `gateway_session_checks_total` | counter | `result=ok\|expired\|store_error` |
+| `gateway_session_checks_total` | counter | `game`, `result=ok\|expired\|store_error` |
 | `gateway_stream_group_loss_total` | counter | — |
 | `gateway_kick_publish_total` | counter | `result=ok\|fail` |
+
+**The `game` label (ADR-33)** is set from the verified `gid` claim only, mapped
+through `GAMES`: a configured game reports its id, anything else reports `other`.
+`other` therefore covers both an unconfigured game and every failure that happens
+before a token verified (malformed request, protocol refusal, invalid token,
+`game_not_configured`, EnterWorld before auth); a client cannot mint label values.
+Each configured game is zero-primed for every result, `other` is not.
+`gateway_allocations_total` records the default game for every allocation until
+l3-routing threads the game through. Queries that select on `result` alone, and
+`sum by (result)`, keep working; only an exact-label-set match needs `game`.
 
 `gateway_kick_publish_total` counts duplicate-login supersede events published to
 the `events:kick` stream (ADR-20). A `fail` is a duplicate login whose old

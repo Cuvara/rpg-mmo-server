@@ -6,6 +6,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`constants.SessionKey(gameID, userID)` (ADR-33 leg 3).** The session store key:
+  `session:{user_id}` for the default game (empty or `cuvara`, unchanged from today) and
+  `session:{game}:{user_id}` for any other game. The gateway's session manager uses it.
+  Test: `TestSessionKey`.
 - Game IDs `gs`, `map` and `dungeon` are reserved to avoid default-game server ID collisions.
 - **Game identity, ADR-33 leg 1 (Terms).** No behaviour change, no wire or protocol change
   (`proto/`, generated code and the protocol version constants are untouched).
