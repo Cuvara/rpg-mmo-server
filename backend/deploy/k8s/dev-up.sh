@@ -502,6 +502,46 @@ if [ -z "$nk_jwt" ] || [ "$nk_jwt" != "$gw_jwt" ]; then
 fi
 echo "checked: nakama's JWT_SECRET matches the gateway's jwt-secret"
 
+# Game-server pods hold only the join secret (ADR-33), so this comparison must
+# happen at deploy time, where both keys are available. Both are comma-separated
+# rotation keyrings at the gateway (shared/jwt ParseKeyring: split on ',', trim
+# whitespace, drop empty entries), so compare them key by key: a join key equal
+# to ANY jwt key lets a game-server pod forge gateway tokens. Never log a value,
+# its length or its position in the list.
+keyring_keys() { # spec -> KEYRING_KEYS (trimmed, non-empty entries)
+  local remaining="$1" key
+  KEYRING_KEYS=()
+  while :; do
+    key=${remaining%%,*}
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [ -z "$key" ] || KEYRING_KEYS+=("$key")
+    case "$remaining" in
+      *,*) remaining=${remaining#*,} ;;
+      *) break ;;
+    esac
+  done
+}
+join_secret=$($K get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath='{.data.join-token-secret}' 2>/dev/null | base64 -d 2>/dev/null || true)
+keyring_keys "$gw_jwt"
+jwt_keys=(${KEYRING_KEYS[@]+"${KEYRING_KEYS[@]}"})
+keyring_keys "$join_secret"
+if [ "${#KEYRING_KEYS[@]}" -eq 0 ]; then
+  echo "ERROR: rpg-app-secrets' join-token-secret has no non-empty key." >&2
+  exit 1
+fi
+for join_key in "${KEYRING_KEYS[@]}"; do
+  for jwt_key in ${jwt_keys[@]+"${jwt_keys[@]}"}; do
+    if [ "$join_key" = "$jwt_key" ]; then
+      echo "ERROR: rpg-app-secrets' join-token-secret must not share a key with its jwt-secret." >&2
+      echo "  A game-server pod holding the join secret could forge gateway tokens if they were equal." >&2
+      exit 1
+    fi
+  done
+done
+unset join_secret join_key jwt_key jwt_keys KEYRING_KEYS
+echo "checked: rpg-app-secrets' join-token-secret has a key and shares none with its jwt-secret"
+
 # The two STATIC Nakama keys, asserted for the same reason as the JWT above: this
 # Secret is applied out-of-band, so nothing else looks at it, and a value left at
 # Nakama's published default authenticates anyone who can reach the service.

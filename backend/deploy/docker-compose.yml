@@ -84,7 +84,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # Shared HS256 secret. MUST match JWT_SECRET used by gateway/gameserver
+      # Shared HS256 secret. MUST match JWT_SECRET used by the gateway
       # (backend/shared/config: env JWT_SECRET, default "dev-secret-change-me").
       # Nakama signs client session tokens with session.encryption_key, so the
       # gateway can verify them locally with no roundtrip.
@@ -377,9 +377,11 @@ services:
     # because one configuration channel is easier to read than two, and because
     # agones/fleet-map-dotnet-dev.yaml uses the same one.)
     environment:
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
-      # Verifies join tokens signed by the gateway. Same value as the gateway
-      # service above, and NOT JWT_SECRET (see the comment there).
+      # The game server holds only JOIN_TOKEN_SECRET. It must match the gateway's
+      # value or every join fails, and must differ from JWT_SECRET; stack.sh
+      # enforces the difference at deploy time. JWT_SECRET is deliberately absent:
+      # a compromised server holding it could sign gateway tokens for any user
+      # and gid (ADR-33 D7). The binary exits 2 if JOIN_TOKEN_SECRET is missing.
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
       # PINNED OFF ON PURPOSE — this is a decision, not an oversight.

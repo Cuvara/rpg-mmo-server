@@ -300,6 +300,93 @@ there is somewhere to put them, then fails with a named list if any of
 `postgres-meta`, `postgres-game`, `nakama` is absent — and fails again if
 `nakama`'s `JWT_SECRET` does not equal `rpg-app-secrets`' `jwt-secret`.
 
+The `join-token-secret`/`jwt-secret` comparison now lives in `dev-up.sh` too.
+Both are comma-separated rotation keyrings at the gateway (split on `,`,
+whitespace trimmed, empty entries dropped), so they are compared key by key:
+`rpg-app-secrets`' `join-token-secret` must hold at least one non-empty key and
+share no key with its `jwt-secret`. A game-server pod holds the join secret;
+reusing any JWT key would let that pod forge gateway tokens. The checks name
+keys, never values, lengths or list positions.
+
+For compose, `../stack.sh check-secrets` checks the loaded env file and exits
+without docker, compose or network access; `stack.sh up` runs the same check
+before building or starting containers. Unset or empty `JWT_SECRET` and
+`JOIN_TOKEN_SECRET` use compose's respective `dev-secret-change-me` and
+`dev-join-secret-change-me` defaults. Both are read as keyrings: every
+comma-separated join rotation key (with surrounding whitespace trimmed) must
+differ from every key of the effective `JWT_SECRET` keyring. Any set `JOIN_TOKEN_SECRET_<GAME>` must contain a non-empty keyring with
+no JWT-secret entry, even though the gateway does not read those per-game
+variables yet; cuvara continues to use `JOIN_TOKEN_SECRET`.
+
+An offline compose dry run uses only fake values and a temporary deploy copy,
+so it cannot read or create the real deploy `.env`. From `backend/deploy`:
+
+```bash
+(
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+  cp stack.sh .env.example "$work/"
+  printf '%s\n' 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' > "$work/.env"
+  env -i PATH="$PATH" bash "$work/stack.sh" check-secrets  # checked:, exit 0
+  printf '%s\n' 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a,test-jwt-a' > "$work/.env"
+  if env -i PATH="$PATH" bash "$work/stack.sh" check-secrets; then
+    echo 'FAIL: equal rotation key accepted'; exit 1
+  fi
+) # expected: refusal naming JOIN_TOKEN_SECRET and JWT_SECRET, with no values
+```
+
+For the k8s half, **do not run the whole `dev-up.sh` as a dry run**: it applies
+resources before reaching these checks. This isolated dry run extracts only its
+read-only JWT/join checks and puts a fake `kubectl` first on PATH. The fake only
+accepts the throwaway, nonexistent context `k3d-rpg-secret-check-does-not-exist`;
+it never calls a cluster or reads a real Secret. `k8s/verify/tests/secret_check_test.sh`
+automates these cases (and more) with the same awk markers; the block below is the
+manual equivalent. From `backend/deploy`:
+
+```bash
+(
+  set -euo pipefail
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+  mkdir "$work/bin"
+  awk '/^nk_jwt=/ { copy=1 } copy { print }
+       /^echo "checked: rpg-app-secrets.*join-token-secret/ { exit }' \
+    k8s/dev-up.sh > "$work/check.sh"
+  grep -q '^echo "checked: rpg-app-secrets.*join-token-secret' "$work/check.sh"
+  cat > "$work/bin/kubectl" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  '--context k3d-rpg-secret-check-does-not-exist get secret nakama -n rpg-k8s-data -o jsonpath={.data.JWT_SECRET}'|\
+  '--context k3d-rpg-secret-check-does-not-exist get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath={.data.jwt-secret}')
+    printf '%s' "$FAKE_JWT" | base64 ;;
+  '--context k3d-rpg-secret-check-does-not-exist get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath={.data.join-token-secret}')
+    printf '%s' "$FAKE_JOIN" | base64 ;;
+  *) exit 99 ;;
+esac
+FAKE
+  chmod +x "$work/bin/kubectl"
+  for kind in distinct equal empty rotation jwt-keyring; do
+    jwt=test-jwt-a
+    case "$kind" in
+      distinct) join=test-join-a; want=0 ;;
+      equal) join=test-jwt-a; want=1 ;;
+      empty) join=; want=1 ;;
+      rotation) join=test-join-a,test-jwt-a; want=1 ;;
+      jwt-keyring) jwt=test-jwt-new,test-jwt-old; join=test-jwt-old; want=1 ;;
+    esac
+    rc=0
+    env -i PATH="$work/bin:$PATH" FAKE_JWT="$jwt" FAKE_JOIN="$join" \
+      K='kubectl --context k3d-rpg-secret-check-does-not-exist' \
+      bash -euo pipefail "$work/check.sh" > "$work/output" 2>&1 || rc=$?
+    [ "$rc" -eq "$want" ] || { echo "FAIL: $kind status"; exit 1; }
+    if grep -Fq -e test-jwt-a -e test-join-a -e test-jwt-new -e test-jwt-old "$work/output"; then
+      echo 'FAIL: a fake secret appeared in output'; exit 1
+    fi
+    echo "checked: offline k8s $kind case, no secret values in output"
+  done
+)
+```
+
 A laptop bring-up is therefore one extra command, e.g.:
 
 ```bash

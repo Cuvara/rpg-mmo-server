@@ -281,23 +281,13 @@ spec:
                       name: gameserver-config
                       key: advertise-host
                       optional: true
-                - name: JWT_SECRET
-                  valueFrom:
-                    secretKeyRef:
-                      name: rpg-realtime-secrets
-                      key: jwt-secret
-                # Verifies the gateway->gameserver join token. MUST hold the same
-                # value as the gateway's JOIN_TOKEN_SECRET or every join fails
-                # signature verification, and must NOT equal JWT_SECRET: this
-                # value is on every game-server pod, so a compromised pod must
-                # not be able to forge client auth tokens.
-                #
-                # Neither key is `optional: true`. A missing key fails container
-                # creation with a visible CreateContainerConfigError, which is
-                # what you want: `optional` on jwt-secret would start a server
-                # that silently rejects every token, and the binary exits 2 on a
-                # missing JOIN_TOKEN_SECRET anyway, i.e. a crash loop instead of
-                # a clear config error.
+                # The game server holds only JOIN_TOKEN_SECRET. It must match the
+                # gateway's value or every join fails, and must differ from the
+                # gateway-token signing secret; deploy-time checks enforce that.
+                # The gateway-token signing secret is deliberately absent here: a
+                # compromised pod holding it could sign gateway tokens for any
+                # user and gid (ADR-33 D7, owner decision 5).
+                # This key is not optional: the binary exits 2 when it is missing.
                 - name: JOIN_TOKEN_SECRET
                   valueFrom:
                     secretKeyRef:

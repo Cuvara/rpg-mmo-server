@@ -715,7 +715,10 @@ Put protection rules (required reviewers, branch restriction to `release-*`) on
 `false`, because a Grafana published with a default password is an open door.
 It also fails when `JOIN_TOKEN_SECRET` equals `JWT_SECRET`: the split exists so a
 compromised game server cannot mint client auth tokens, and one shared value
-silently gives that up.
+silently gives that up. The game server no longer reads `JWT_SECRET` at all
+(ADR-33 D7), so it cannot detect the reuse itself; this CD check, the
+`k8s/dev-up.sh` check on `rpg-app-secrets` and `./stack.sh check-secrets` (also
+run by `./stack.sh up`) are where it is caught.
 
 **Handling.** Secrets are passed to the step as environment variables, checked
 for emptiness *by name only*, and written to `$RPG_DEPLOY_DIR/deploy/.env` under
@@ -731,8 +734,8 @@ the same name does not satisfy `secrets.X` inside a job with
 > `session.refresh_encryption_key` must differ — Nakama refuses to start when they
 > are identical. `docker-compose.yml` therefore passes
 > `--session.refresh_encryption_key "$${JWT_SECRET}-refresh"` while
-> `--session.encryption_key` stays the raw `JWT_SECRET` (the value the gateway and
-> gameserver verify against). Do not "simplify" these to the same value.
+> `--session.encryption_key` stays the raw `JWT_SECRET` (the value the gateway
+> verifies against; the game server does not receive it). Do not "simplify" these to the same value.
 
 ---
 
