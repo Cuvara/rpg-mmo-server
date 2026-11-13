@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Offline compose secret-check regression cases: only temporary deploy copies
-# are used, so the real deploy/.env is never read or created. All values are fake.
-# dev-up.sh applies resources before reaching its secret checks; do not execute
-# it here. The k8s half is covered by the documented isolated, fake-kubectl dry
-# run under Secrets in k8s/data/README.md, which runs only the read-only checks.
+# Offline secret-check regression cases for both deploy paths. All values are fake.
+# Compose: only temporary deploy copies are used, so the real deploy/.env is
+# never read or created. k8s: dev-up.sh applies resources before reaching its
+# secret checks, so it is never executed whole; only its read-only JWT/join
+# check block is extracted (the same awk markers as the dry run under Secrets in
+# k8s/data/README.md) and run against a fake kubectl that answers only the
+# nonexistent context k3d-rpg-secret-check-does-not-exist and exits 99 otherwise.
 # Run: bash backend/deploy/k8s/verify/tests/secret_check_test.sh
 set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +40,7 @@ run_case() { # name expected-status env-file-lines...
 		SECRET_CHECK_GUARD_LOG="$WORK/guard.log" \
 		bash "$WORK/deploy/stack.sh" check-secrets > "$WORK/output" 2>&1 || rc=$?
 	if [ "$rc" -eq "$want" ]; then ok "$name: status"; else bad "$name: status"; fi
-	if grep -Fq -e test-jwt-a -e test-join-a -e test-join-b \
+	if grep -Fq -e test-jwt-a -e test-join-a -e test-join-b -e test-jwt-new -e test-jwt-old \
 		-e dev-secret-change-me -e dev-join-secret-change-me "$WORK/output"; then
 		bad "$name: secret appeared in stdout/stderr"
 	else
@@ -65,6 +67,69 @@ run_case per-game-empty 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a
 run_case per-game-rotation 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b,test-jwt-a'
 run_case per-game-distinct 0 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b'
 run_case unusable-keyring 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=" , "'
+# JWT_SECRET is a keyring at the gateway too: every join key is compared with
+# every JWT key, not with the whole JWT_SECRET string.
+run_case jwt-keyring-shared 1 'JWT_SECRET=test-jwt-new,test-jwt-old' 'JOIN_TOKEN_SECRET=test-jwt-old'
+run_case jwt-keyring-distinct 0 'JWT_SECRET=test-jwt-new,test-jwt-old' 'JOIN_TOKEN_SECRET=test-join-a'
+run_case jwt-keyring-trimmed 1 'JWT_SECRET=" test-jwt-new , test-jwt-old"' 'JOIN_TOKEN_SECRET=test-join-a,test-jwt-new'
+run_case jwt-keyring-per-game 1 'JWT_SECRET=test-jwt-new,test-jwt-old' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b,test-jwt-old'
+
+# ------------------------------------------------------------------ k8s path
+mkdir -p "$WORK/k8s-bin"
+awk '/^nk_jwt=/ { copy=1 } copy { print }
+     /^echo "checked: rpg-app-secrets.*join-token-secret/ { exit }' \
+	"$DEPLOY/k8s/dev-up.sh" > "$WORK/check.sh"
+if grep -q '^echo "checked: rpg-app-secrets.*join-token-secret' "$WORK/check.sh" \
+	&& grep -q '^join_secret=' "$WORK/check.sh"; then
+	ok "k8s: check block extracted from dev-up.sh"
+else
+	bad "k8s: check block extracted from dev-up.sh"
+fi
+# Answers only the three read-only Secret reads on the throwaway context and
+# logs (exit 99) anything else, so no cluster can be reached.
+cat > "$WORK/k8s-bin/kubectl" <<'FAKE'
+#!/usr/bin/env bash
+ctx='--context k3d-rpg-secret-check-does-not-exist'
+case "$*" in
+"$ctx get secret nakama -n rpg-k8s-data -o jsonpath={.data.JWT_SECRET}" | \
+"$ctx get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath={.data.jwt-secret}")
+	printf '%s' "$FAKE_JWT" | base64 ;;
+"$ctx get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath={.data.join-token-secret}")
+	printf '%s' "$FAKE_JOIN" | base64 ;;
+*)
+	printf 'unexpected kubectl command\n' >> "$SECRET_CHECK_GUARD_LOG"
+	exit 99 ;;
+esac
+FAKE
+chmod +x "$WORK/k8s-bin/kubectl"
+
+run_k8s_case() { # name expected-status jwt-secret join-token-secret
+	local name="k8s $1" want="$2" rc=0
+	: > "$WORK/guard.log"
+	env -i PATH="$WORK/k8s-bin:$WORK/bin:$PATH" \
+		FAKE_JWT="$3" FAKE_JOIN="$4" \
+		SECRET_CHECK_GUARD_LOG="$WORK/guard.log" \
+		K='kubectl --context k3d-rpg-secret-check-does-not-exist' \
+		bash -euo pipefail "$WORK/check.sh" > "$WORK/output" 2>&1 || rc=$?
+	if [ "$rc" -eq "$want" ]; then ok "$name: status"; else bad "$name: status (rc=$rc want=$want)"; fi
+	if grep -Fq -e test-jwt-a -e test-join-a -e test-join-b -e test-jwt-new -e test-jwt-old \
+		"$WORK/output"; then
+		bad "$name: secret appeared in stdout/stderr"
+	else
+		ok "$name: no secret in stdout/stderr"
+	fi
+	if [ ! -s "$WORK/guard.log" ]; then ok "$name: no unexpected command"; else bad "$name: unexpected command"; fi
+}
+
+run_k8s_case distinct 0 'test-jwt-a' 'test-join-a'
+run_k8s_case equal 1 'test-jwt-a' 'test-jwt-a'
+run_k8s_case empty 1 'test-jwt-a' ''
+run_k8s_case unusable-keyring 1 'test-jwt-a' ' , '
+run_k8s_case rotation 1 'test-jwt-a' 'test-join-a,test-jwt-a'
+run_k8s_case rotation-trimmed 1 'test-jwt-a' 'test-join-a, test-jwt-a '
+run_k8s_case rotation-distinct 0 'test-jwt-a' 'test-join-a,test-join-b'
+run_k8s_case jwt-keyring-shared 1 'test-jwt-new,test-jwt-old' 'test-jwt-old'
+run_k8s_case jwt-keyring-distinct 0 'test-jwt-new,test-jwt-old' 'test-join-a'
 
 echo
 echo "passed: $PASS failed: $FAIL"

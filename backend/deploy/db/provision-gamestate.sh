@@ -12,6 +12,9 @@
 # database currently accessible to this role. Roles relying on PUBLIC lose new
 # connections there; owners and superusers retain access. The default game's
 # existing user owns gamestate. No privileges are granted on that database.
+# The flag is normally required: on stock PostgreSQL, PUBLIC holds CONNECT on
+# postgres and gamestate, so a run without it creates the role and database and
+# then fails the isolation check (exit 1). Rerunning with the flag converges.
 # Default 20 connections per role AND database bounds each game's consumption
 # of the shared instance's connection budget (ADR-33 D7); CPU remains shared.
 # Exit codes: 0 success/dry run, 1 provisioning/isolation failure, 2 bad input.

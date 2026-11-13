@@ -41,7 +41,10 @@ The final check uses `has_database_privilege` for **every other non-template
 database**, including `postgres`, `gamestate` and other `gamestate_*` databases.
 It fails nonzero and names accessible databases if any remain. An unsuccessful
 run may already have created the role and database; fix the grants and rerun
-to converge.
+to converge. **On stock PostgreSQL the flag below is normally required:** PUBLIC
+holds CONNECT on `postgres` and `gamestate`, so a run without
+`--revoke-public-connect` creates the role and database and then fails this
+check.
 
 `--revoke-public-connect` explicitly hardens those accessible databases by
 revoking CONNECT from PUBLIC before the check, quoting identifiers with

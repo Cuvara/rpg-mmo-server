@@ -212,42 +212,57 @@ for _n in $_stack_saved; do
 	eval "export $_n=\$_stack_save_$_n"
 done
 
-# Match compose's :- defaults, then check every key in a rotation list. Never
-# include values (or their lengths) in diagnostics: these logs are deploy output.
-check_join_keyring() { # variable-name value effective-jwt
-	local name="$1" remaining="$2" jwt="$3" key usable=0
+# Match compose's :- defaults, then compare the two keyrings key by key: the
+# gateway reads JWT_SECRET and JOIN_TOKEN_SECRET as comma-separated rotation
+# lists (shared/jwt ParseKeyring), so a join key equal to ANY JWT key lets a
+# game-server pod forge gateway tokens. Never include values, their lengths or
+# their positions in diagnostics: these logs are deploy output.
+keyring_keys() { # spec -> KEYRING_KEYS (trimmed, non-empty entries)
+	local remaining="$1" key
+	KEYRING_KEYS=()
 	while :; do
 		key=${remaining%%,*}
-		# The gateway and game server trim whitespace around rotation entries.
+		# Same rule as ParseKeyring: trim surrounding whitespace, drop empties.
 		key="${key#"${key%%[![:space:]]*}"}"
 		key="${key%"${key##*[![:space:]]}"}"
-		if [ -n "$key" ]; then usable=1; fi
-		if [ "$key" = "$jwt" ]; then
-			echo "ERROR: $name must not contain JWT_SECRET as a join-token key." >&2
-			echo "  A game-server pod holding the join secret could forge gateway tokens if they were equal." >&2
-			return 1
-		fi
+		[ -z "$key" ] || KEYRING_KEYS+=("$key")
 		case "$remaining" in
 		*,*) remaining=${remaining#*,} ;;
 		*) break ;;
 		esac
 	done
-	if [ "$usable" -eq 0 ]; then
+}
+
+check_join_keyring() { # variable-name value (compares against JWT_KEYS)
+	local name="$1" join jwt
+	keyring_keys "$2"
+	if [ "${#KEYRING_KEYS[@]}" -eq 0 ]; then
 		echo "ERROR: $name must contain a non-empty join-token key, distinct from JWT_SECRET." >&2
 		return 1
 	fi
+	for join in "${KEYRING_KEYS[@]}"; do
+		for jwt in ${JWT_KEYS[@]+"${JWT_KEYS[@]}"}; do
+			if [ "$join" = "$jwt" ]; then
+				echo "ERROR: $name must not share a key with JWT_SECRET." >&2
+				echo "  A game-server pod holding the join secret could forge gateway tokens if they were equal." >&2
+				return 1
+			fi
+		done
+	done
 }
 
 check_secrets() {
-	local jwt="${JWT_SECRET:-dev-secret-change-me}" name
-	check_join_keyring JOIN_TOKEN_SECRET "${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}" "$jwt" || return 1
+	local name
+	keyring_keys "${JWT_SECRET:-dev-secret-change-me}"
+	JWT_KEYS=(${KEYRING_KEYS[@]+"${KEYRING_KEYS[@]}"})
+	check_join_keyring JOIN_TOKEN_SECRET "${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}" || return 1
 	# Include set-but-empty per-game variables; they have no compose fallback.
 	# compgen also sees assignments loaded from the env file, without eval.
 	while IFS= read -r name; do
 		[ "$name" != JOIN_TOKEN_SECRET_ ] || continue
-		check_join_keyring "$name" "${!name}" "$jwt" || return 1
+		check_join_keyring "$name" "${!name}" || return 1
 	done < <(compgen -A variable JOIN_TOKEN_SECRET_ || true)
-	echo "checked: JOIN_TOKEN_SECRET and set per-game join secrets are non-empty and distinct from JWT_SECRET"
+	echo "checked: JOIN_TOKEN_SECRET and set per-game join secrets are non-empty and share no key with JWT_SECRET"
 }
 
 # This subcommand stops before host probes, docker, compose or network access.
