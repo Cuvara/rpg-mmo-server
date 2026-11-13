@@ -4513,7 +4513,7 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
   `server_id` finds no server or pod label.
 - **Scrape and use.**
   - `deploy/monitoring/prometheus.yaml` scrapes static targets that each get one label,
-    `service` (`:57-117`), plus one external label, `env: dev` (`:43-44`).
+    `service` (`:57-117`), plus one external label, `env: dev` (`:44-45`).
   - The dashboard and the alert rules group by `map_id`
     (`deploy/monitoring/dashboards/rpg-gameplay.json:35`, `:54`;
     `deploy/monitoring/alerts.yaml:38-78`).
@@ -4692,4 +4692,548 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
 - **Not verified here.** Which map id strings shipped Unity clients send is client-side
   code in other repositories.
 
-<!-- ADR-33 decisions: next subtask -->
+**Decision.** Proposed. Nothing below is accepted until the owner answers the open questions
+at the end of this ADR.
+
+Terms used below:
+
+- A **game id** is a short, stable slug: `^[a-z][a-z0-9_]{1,23}$`. It contains no `:`, `/`
+  or `.`, so it can be joined into Redis keys, Nakama collection names and Prometheus label
+  values without escaping.
+- The **default game** is the single game that exists today. Its id is one compile-time
+  constant, `DefaultGameID`, declared once in Go (`shared/constants`) and once in C#, with a
+  parity test that pins the two equal. It is not a configuration value. Three components
+  (Nakama, gateway, game server) must agree on it, and a per-process setting that can differ
+  between them would split the world. Which slug it is: open question 2.
+- **Absent means the default game.** Everywhere below, a missing claim, hash field, payload
+  field or session var reads as `DefaultGameID`.
+
+### D1 — Game identity: where it comes from and how a session carries it
+
+**Where the id comes from.** `gateway_token` is not the only Nakama RPC that needs the game.
+Every game-scoped RPC does: `character_list`, `character_create`, `character_delete`, the
+party RPCs and the leaderboard reads (current state §4). So the source must be something
+every RPC can read.
+
+- **Option A: a `game_id` field in each RPC payload.**
+  - Every client RPC call and every handler changes (about ten handlers in `auth`,
+    `character`, `economy` and `social`).
+  - A handler that forgets the field silently serves the default game, and nothing shows
+    that failure.
+  - Nothing binds a session to a game, so one session can act in two games, call by call.
+- **Option B: a Nakama session variable `game`.** The client sets it when it
+  authenticates, a before-authenticate hook validates it, and every RPC reads it through
+  one helper.
+  - **Mechanism.** Session variables are a documented Nakama feature: vars sent with the
+    authenticate request are carried in the session token and handed to runtime code in
+    the request context. This tree does not use them yet: a search of `nakama/` for
+    `RUNTIME_CTX_VARS` finds nothing.
+  - **Validation at authenticate.** The plugin already registers a before-authenticate
+    hook for email (`nakama/main.go:38`). Matching hooks for device, and for every auth
+    method the client adds later, refuse a `game` var that is not in the stack's
+    allow-list. The allow-list is Nakama runtime env `GAMES`, comma-separated. When it is
+    absent, only the default game is allowed.
+  - **Validation in the helper.** `gameFromContext(ctx)` returns the var, returns the
+    default game when the var is absent, and returns an error for a value outside the
+    allow-list. This second check means an auth method added later without a hook cannot
+    bring in an unknown game.
+  - **Costs.** Two hooks and one helper in `nakama/auth`, plus a call to the helper in
+    every handler. The client of a non-default game passes `vars: {game: <id>}` when it
+    authenticates. The existing client changes nothing.
+  - **Unverified.** This ADR does not assume that a Nakama session refresh keeps the vars.
+    The leg's test must cover refresh.
+- **Option C: the game is the Nakama instance.** One Nakama per game, with `GAME_ID` in
+  that Nakama's runtime env and no client input. Its costs are those of D4 Option A. It is
+  listed here because choosing it makes this question disappear.
+
+**Recommendation: B.** Take C only if D4 picks a Nakama per game.
+
+**How the session carries the game id.**
+
+1. **Gateway token.** `gateway_token` puts the helper's value in a new claim, `gid`, next
+   to `cid` in `shared/jwt.Claims` (`shared/jwt/jwt.go:26-38`). The claim is `omitempty`,
+   and an absent `gid` means the default game.
+   - For the default game the claim is omitted, so a default-game token has the same shape
+     as today's.
+   - Nakama checks `cid` ownership against the game's own roster (D4). A `cid` is
+     therefore only ever valid together with its own `gid`.
+2. **Gateway session.** `handleAuth` latches `gid` together with `cid`
+   (`gateway/server/server.go:866`, `:920`).
+   - The session key becomes `session:{game}:{user_id}` for a non-default game. It stays
+     `session:{user_id}` for the default game (`shared/constants/keys.go:5`).
+   - This is a decision, not a detail. With accounts shared across games (D4) and today's
+     single key, a login to game B would supersede the same account's session in game A
+     and kick it (ADR-20).
+   - Recommended: an account may be logged into two games at once, with one session per
+     game (open question 4).
+3. **Map ids stay game-local; the request does not name the game.** Three options:
+   - **(A)** Namespace the map id string as `<game>/<map>`, sent by the client in
+     `EnterWorldRequest.map_id`.
+   - **(B)** Add a `game_id` field to `EnterWorldRequest`.
+   - **(C)** Take the game only from the authenticated `gid`, and compose `(game, map_id)`
+     inside the gateway.
+
+   A and B let the client name a game that differs from the one Nakama authenticated, so
+   the gateway would have to check the request against the claim anyway. A also puts a `/`
+   into content file paths (`content/maps/<map_id>.json`,
+   `gameserver-dotnet/GameServer/Program.cs:918-933`) and into every existing `map_id`
+   metric value.
+
+   **Recommendation: C.** In the same change, the gateway starts validating the map id
+   format, which it does not do today (current state §1). The pattern is
+   `^[A-Za-z0-9_-]{1,64}$`, with no `:` or `/`, because the map id becomes part of a
+   composed Redis key (D2). Dungeon content ids arrive in the same field, and the leg must
+   check that they match the pattern.
+4. **Join token.** `GenerateJoinTokenCharacter` (`gateway/transfer/join_token.go:36-45`)
+   copies `gid` into the join token, as it does `cid`.
+   - The game server compares the token's `gid` with its own `GAMESERVER_GAME_ID`, where
+     absent means the default game on both sides. It does this after the `sid` check
+     (`gameserver-dotnet/GameServer/Server/GameServer.cs:1651`) and refuses a mismatch.
+   - Why check it at all: the `sid` pin already ties a token to one server, and so to one
+     game. The `gid` check makes that binding explicit and testable on the server, rather
+     than a side effect of the gateway's lookup. The server also writes character rows
+     (D5) and must not write them for a game it does not serve.
+   - Costs: one claim in `JwtValidator`
+     (`gameserver-dotnet/GameServer/Server/JwtValidator.cs:25`, `:33-45`), one comparison
+     and one new refusal reason.
+
+**Contract impact.**
+
+- **wire.proto: none.** Under the recommended options no message gains a field. The game
+  travels in a JWT claim and in a Nakama session var, and neither is a wire message. The
+  legacy JSON structs (`shared/messages/messages.go`) do not change either.
+- **JoinToken and gateway JWT claims: additive.** The shared claim struct (Go
+  `shared/jwt`, C# `JwtValidator`) gains one optional claim, `gid`. Readers must tolerate
+  its absence, exactly as they do for `cid` (`shared/jwt/jwt.go:30-35`).
+- **Protocol version: not bumped.**
+  - The bump rule covers messages and fields a peer must act on
+    (`shared/proto/wire.proto:115-140`), and nothing on the wire changes.
+  - A client of the existing game sends no var. It gets a token with no `gid`, a
+    default-game session, a default-game server and a join token with no `gid`. These are
+    the same bytes as today.
+  - A client of a new game is a new client build, and it speaks the current protocol.
+  - For contrast: map-id option A would change what `map_id` means, and option B would add
+    a field the gateway must act on, so B would need a bump under the rule above. That is
+    another reason to choose C.
+
+### D2 — The Redis registry and the event streams
+
+**The constraint.** Two games may both have a map called `map_01`, and a lookup by map must
+find only that game's servers.
+
+- Server ids are pod names (or `GAMESERVER_ID`). They are already unique on a stack, so the
+  id key does not need a game in it.
+- The map index does need one.
+
+**Options.**
+
+- **Option A: a game prefix on every key**, as `servers:{game}:id:{id}` and
+  `servers:{game}:map:{map}`.
+  - Readers and writers change their key functions for every key.
+  - Listing a stack's servers becomes one scan per game.
+  - The hash itself still does not say which game it belongs to.
+- **Option B: a `game_id` hash field, plus a per-game map index key.**
+  - The hash `servers:id:{server_id}` gains an eighth field, `game_id`.
+  - The index key is `servers:map:{game}:{map_id}` for a non-default game. It stays
+    `servers:map:{map_id}` for the default game.
+  - A default-game map id cannot collide with a composed key, because neither a game id
+    nor a map id may contain `:` (D1).
+  - `findServer` refuses an entry whose own `game_id` differs from the query. This sits
+    next to its existing refusal of an entry whose `map_id` differs
+    (`gateway/registry/registry.go:403-410`), so a corrupted index cannot route a player
+    into another game.
+  - Costs:
+    - one field constant and one key function on each side
+      (`shared/storage/redisstore/registry.go:15-31`, `:71`;
+      `gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:26-39`, `:110-111`);
+    - one `GameID` field in `storage.ServerInfo` (`shared/storage/interfaces.go:40-67`);
+    - in `infoFromFields`, an empty `game_id` reads as the default game
+      (`shared/storage/redisstore/registry.go:198-212`).
+- **Option C: a Redis per game.**
+  - This is the strongest separation, and no key changes at all.
+  - It is most of the way to a stack per game (D7), and the gateway needs one Redis client
+    per game.
+
+**Recommendation: B.** The hub lists servers by scanning `servers:id:*` and filtering on
+`game_id`: one scan covers every game.
+
+**Registry-hash contract impact.** There are two changes, both additive:
+
+- one new field, `game_id`;
+- a new map-index key derivation for non-default games.
+
+Both land in Go and C# in one commit, as the contract comments already require
+(`shared/storage/redisstore/registry.go:20-24`,
+`gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:18-21`).
+
+- The C# server always writes `game_id`, including an explicit value for the default
+  game. So the hub never has to interpret a missing field on an entry written after the
+  leg.
+- The `player_count` script does not change. It touches only `player_count`
+  (`shared/storage/redisstore/registry.go:33-41`).
+
+**Other gateway keys.**
+
+- **`session:`** is covered by D1 item 2.
+- **`dungeon:alloc:{party_id}` and `dungeon:party:{party_id}`**
+  (`shared/storage/redisstore/dungeon.go:13-24`) need no game in the key. Party ids are
+  random 128-bit values (`nakama/social/party.go:138-149`), and a party belongs to exactly
+  one game (D4).
+- **The allocator** does need the game. Today it picks a fleet by kind
+  (`gateway/registry/agones_allocator.go:25-26`, `:362`). It becomes one fleet per
+  `(game, kind)`:
+  - the default game keeps `ALLOCATOR_FLEET_MAP` and `ALLOCATOR_FLEET_DUNGEON`;
+  - a non-default game adds `ALLOCATOR_FLEET_MAP_<GAME>` and
+    `ALLOCATOR_FLEET_DUNGEON_<GAME>`;
+  - a game with no fleet pair configured fails with the existing `ErrKindNotConfigured`,
+    which then names the game.
+- **The mismatch memory** (`gateway/registry/registry.go:659-670`) is keyed by
+  `(game, map)`.
+
+**Event streams.**
+
+- **`events:game`: one stream, with `game_id` added to each payload.**
+  - The payloads are `entity_killed`
+    (`gameserver-dotnet/GameServer/Events/EventPublisher.cs:9-14`) and
+    `gateway:server_down` (`gateway/registry/watcher.go:35-38`).
+  - The alternative is a stream per game (`events:{game}:game`). It buys nothing while the
+    only consumer is the shared gateway relay, which would then read one stream per game.
+    Revisit when a per-game consumer exists.
+  - The cost of one stream: a game that floods it pushes the other games' unread entries
+    out at `MAXLEN ~ 30000` (`shared/storage/redisstore/stream.go:68`). D7 lists this risk.
+- **`events:kick` and `events:gateway_kick`: no change in shape.**
+  - They are partitioned by server id and gateway id.
+  - A kick is matched by `jti` (`gameserver-dotnet/GameServer/Events/RedisKickConsumer.cs:224`),
+    which is already unique per join.
+  - With per-game sessions (D1), a duplicate login supersedes a session only within the
+    same game.
+  - Adding `game_id` to `SessionSupersededEvent` (`gateway/server/kick.go:13-19`) would help
+    the logs. It is optional and additive.
+
+### D3 — Metrics
+
+- **Game server.**
+  - A pod serves one game. Add `game` as a constant tag next to `map_id` in every tag list
+    that `GameMetrics` builds (`gameserver-dotnet/GameServer/Observability/GameMetrics.cs:163-190`).
+    Also add it to the two instruments that carry no `map_id` (`:171-172`, `:1060`).
+  - A constant label adds **no series**. The series count stays what it is today: live map
+    servers × existing label sets (current state §3).
+  - The alternative is a Prometheus target label set at scrape time, from the pod or from a
+    static `labels:` entry. It costs no code. But the compose stack scrapes static targets
+    (`deploy/monitoring/prometheus.yaml:57-117`) where nothing would set the label, and the
+    label is missing from any series read outside that scrape (an OTLP export, `/status`).
+  - Recommended: the constant tag.
+- **Gateway.**
+  - The gateway serves every game, so `game` is a real dimension there.
+  - Add it only where the result is per game: `gateway_auth_total`,
+    `gateway_enter_world_total`, `gateway_allocations_total` and
+    `gateway_session_checks_total`, which are the `result`-labelled families in
+    `gateway/metrics/metrics.go:146-212`.
+  - Leave these unchanged: the transport gauges; `gateway_rate_limited_total`, which is
+    keyed by IP and counted before a game is known; and the Go runtime collectors.
+  - The label value comes only from the verified `gid` claim, never from client input. It
+    is mapped through the gateway's configured game set: an id with no configuration (D2)
+    is reported as `other`.
+  - **Cardinality bound: (configured games + 1) × today's series of those four families.**
+    With today's `result` values, that is a few series per game.
+- **Nakama.**
+  - Nakama's own metrics carry no game.
+  - The plugin's game-scoped RPCs may add counters with a `game` tag through Nakama's
+    runtime metrics API. This is optional, and the hub does not need it first.
+- **Dashboards and alerts.** They group by `map_id`
+  (`deploy/monitoring/dashboards/rpg-gameplay.json:35`, `:54`;
+  `deploy/monitoring/alerts.yaml:38-78`). In the ops leg they become `by (game, map_id)`,
+  because two games can share a map id.
+
+**Recommendation:**
+
+- game server: the constant tag;
+- gateway: the `game` label on the four families;
+- Nakama: no label yet.
+
+### D4 — Nakama data per game
+
+**Accounts.**
+
+- **Option A: a Nakama, and a meta database, per game.** Accounts are separate.
+  - The plugin needs no scoping code: each instance serves one game, and `GAME_ID` sits in
+    its runtime env.
+  - The hub filters by which Nakama it talks to.
+  - Costs:
+    - one more Nakama process and one more meta database per game (the database can live
+      on the shared meta Postgres instance);
+    - a client per game, pointed at its own Nakama URL;
+    - no shared studio login;
+    - one plugin build per game, against that game's Nakama version.
+- **Option B: one Nakama, accounts shared across games, data scoped per game.**
+  - One login covers every studio game, and there is one Nakama to operate.
+  - Costs:
+    - every game-scoped name in the plugin goes through one resolver, described below;
+    - one plugin binary and one Nakama version serve every game on the stack, so a plugin
+      deploy for one game restarts Nakama for all of them (D7).
+- **Option C: one Nakama, separate accounts per game**, using custom ids prefixed with the
+  game. It has B's coupling without B's shared login. Rejected.
+
+**Recommendation: B.** D7's criteria decide when a game gets its own stack. That stack has
+its own Nakama, which amounts to Option A for that game. Open question 1.
+
+**Data under B.** One resolver, `scoped(game, name)`, returns `name` unchanged for the
+default game and `<game>.<name>` for any other game. The default game's existing objects,
+leaderboard and wallet key therefore keep their names, and no data migration is needed.
+Every name listed in current state §4 goes through the resolver:
+
+- **Profile: collection `player`** (`nakama/auth/profile.go:15-20`).
+  - It is created per game on the first game-scoped login, not only in the
+    after-authenticate hook.
+  - A per-game profile object is also the hub's marker for "this account plays this game".
+- **Roster (ADR-31): collection `characters`** (`nakama/character/character.go:49-54`).
+  - `gateway_token`'s ownership check (`nakama/auth/token.go:117`) reads the caller's
+    game's roster, so a character belongs to exactly one game.
+  - The default character id is the user id
+    (`gameserver-dotnet/GameServer/Persistence/CharacterStore.cs:126-130`), so it is the
+    same string in every game. It cannot collide, because game-state data is per game (D5).
+- **Wallet.**
+  - A Nakama wallet is one object per user, so each game gets its own currency key:
+    `gold` for the default game and `<game>.gold` for any other
+    (`nakama/economy/reward.go:57`, `nakama/economy/reward_batch.go:202`).
+  - No currency is shared between games (open question 7).
+  - Ledger metadata gains `game_id` (`nakama/economy/reward.go:58-62`,
+    `nakama/economy/reward_batch.go:203-208`).
+- **Reward RPCs.**
+  - `reward_kill` and `reward_kills` take an optional `game_id`, absent meaning the default
+    game. The game server sets it from its own `GAMESERVER_GAME_ID`.
+  - The receipt collection `reward_receipts` is scoped like the rest
+    (`nakama/economy/reward_batch.go:46`).
+  - The caller is trusted on `game_id` only because it holds `NAKAMA_HTTP_KEY`
+    (`nakama/economy/caller.go:30-41`). Nakama has one such key, so on a shared stack any
+    game's server can credit any game's wallet. D7 records this risk. It is accepted for
+    games the studio itself operates.
+- **Leaderboards.** `InitModule` creates `<game>.kills_alltime` for each game in `GAMES`.
+  `kills_alltime` stays the default game's leaderboard (`nakama/economy/leaderboard.go:16`,
+  `:94-102`).
+- **Party.**
+  - The collections `party` and `party_member` are scoped (`nakama/social/party.go:77-84`),
+    so a party cannot span games.
+  - The gateway's `party_get` call (`nakama/main.go:56-58`) passes the session's game.
+- **Not built yet:** friends, chat, groups and matchmaking (current state §4). Each feature
+  decides when it is built whether it is studio-wide (friends, plausibly) or per game
+  (guilds, matchmaking). This ADR does not decide them.
+
+### D5 — Game-state database and migrations
+
+- **Option A: a database per game on the shared game Postgres instance.** The default game
+  keeps `gamestate`; any other game gets `gamestate_<game>`.
+  - Each fleet's `game-db-url` Secret names its game's database
+    (`deploy/agones/fleet-map-dotnet-dev.yaml:463-467`).
+  - The `Migrator` runs unchanged against each database. Its advisory lock and its
+    `schema_migrations` table are already per database
+    (`gameserver-dotnet/GameServer/Persistence/Migrator.cs:68`, `:102-108`).
+  - Costs: one `CREATE DATABASE` and one Secret per game (ops work), and hub queries open
+    one connection per game. No schema change.
+- **Option B: a schema per game in one database**, selected by `search_path` in the DSN.
+  It behaves like A but separates less: `max_connections` is shared, and so are roles by
+  default. It is also easier to get wrong in a DSN.
+- **Option C: shared tables with a `game_id` column.**
+  - A migration 003 adds the column to all four tables (current state §5) and makes it
+    part of each primary key, because the default character id is the user id in every
+    game (D4).
+  - It forces every game onto one schema and one migration sequence, which couples their
+    releases. Different games will want different tables.
+
+**Recommendation: A.**
+
+- Migrations stay one embedded set while the games share a server build.
+- A game that needs its own tables gets its own migration set, in its own image (D6).
+- Set a connection limit on each database (`ALTER DATABASE … CONNECTION LIMIT`), so one
+  game cannot take every connection (D7).
+
+### D6 — Content and Shared.GameLogic
+
+What varies per game falls into two layers:
+
+- **Content** is data loaded from disk (ADR-19): abilities, items, loot, stats, statuses
+  and map geometry (current state §6).
+- **Compiled rules** are code:
+  - `GameConstants` (`gameserver-dotnet/Shared.GameLogic/Components/GameConstants.cs:93-142`);
+  - the command opcodes and `gameplay.proto` (`Gameplay/GameplayOpcodes.cs:15-36`);
+  - the systems.
+
+Games that differ only in content can run the same binary. A game whose compiled rules
+differ needs a different `Shared.GameLogic` build, and therefore a different server binary.
+Its client pins that build too.
+
+- **Option A: one image with every game's content baked in**, under `content/<game>/`,
+  selected by `GAMESERVER_GAME_ID`. Costs:
+  - a content change in one game produces a new image for every game;
+  - the image grows with every game;
+  - it stops working the day two games need different `Shared.GameLogic` builds.
+- **Option B: one image per game**, from the same Dockerfile. A build argument names the
+  game's content directory, and the tag is `gameserver-dotnet:<game>-<version>`.
+  - Costs: one CI image build per game and one image reference per fleet. Fleets are
+    already per game (D2).
+  - A game that later needs its own `Shared.GameLogic` changes only what its own build
+    compiles against.
+- **Option C: content mounted at run time**, from a volume or an init container, with one
+  shared image.
+  - Content releases are no longer tied to image releases.
+  - Costs: a second artifact to version and roll back, and a pod whose content and image
+    can disagree. ADR-19 keeps content beside the binary.
+
+**Recommendation: B**, plus a guard that applies whichever option is taken:
+
+- Each game's content carries a manifest, `game.json`, that records its `game_id` and the
+  `Shared.GameLogic` version the content was authored against.
+- The server refuses to start when the manifest's `game_id` differs from
+  `GAMESERVER_GAME_ID` (absent meaning the default game), or when its `Shared.GameLogic`
+  major version differs. This is the same way it already refuses invalid content
+  (`gameserver-dotnet/GameServer/Program.cs:891-916`).
+- The default game's content stays at `backend/content/`, with a manifest added.
+- Whether a future game's content and `Shared.GameLogic` live in this repository (under
+  `content/<game>/`) or in their own repository is open question 6.
+
+By design, no single image serves every game. What every game shares is one Dockerfile and
+one server source tree, for as long as the games share a `Shared.GameLogic` major version.
+
+### D7 — Isolation and blast radius
+
+On a shared stack, every game shares Redis, the game Postgres instance, Nakama and its meta
+database, the gateway, the cluster's nodes, and the per-stack secrets (current state §7).
+What one game can do to the others:
+
+| Shared | What one game can do to the others | Mitigation on a shared stack |
+|---|---|---|
+| Redis (`noeviction`, ADR-4) | A memory leak or a stream backlog fills Redis. Writes then fail for every game: no new sessions, no heartbeats (servers expire from the registry), no joins | `MAXLEN` already bounds the streams. Alert on Redis memory. One Redis has no per-game quota |
+| `events:game` | A flood trims the other games' unread entries | Streams per game (D2), if this starts to matter |
+| Game Postgres | Exhausting connections, or one heavy query, slows every game's saves | A database per game (D5) with a connection limit on each. CPU stays shared |
+| Nakama | An RPC storm or a panic in one game's code affects every game's logins and RPCs. A plugin deploy restarts Nakama for all games. All games share one Nakama version | None inside one Nakama. This is the strongest argument for giving a game its own stack |
+| Gateway | A login storm, a bad config or a bad deploy is a join outage for every game (ADR-17: one replica). The supported protocol window belongs to the gateway, so every game shares it | Rate limits apply per IP and per connection, not per game |
+| `JOIN_TOKEN_SECRET` | A compromised game server pod can mint join tokens for **any** server on the stack. A `gid` check does not stop it, because the pod can mint any `gid` | **One join-token secret per game.** The gateway signs with the game's keyring, and each game's fleet holds only its own secret. Costs: a keyring map in the gateway and one Secret per game. Recommended for every non-default game (open question 5) |
+| `NAKAMA_HTTP_KEY` | Any game's server can credit any game's wallet (D4) | None inside one Nakama, which has a single HTTP key |
+| `JWT_SECRET`, `TRANSPORT_KEY` | One value per stack. `TRANSPORT_KEY` is a shared PSK by design (ADR-21) | Accepted |
+| Nodes and Agones | One game's fleet grows and starves another game's allocations | Put each game's fleets in its own namespace with a `ResourceQuota`. The allocator's namespace then becomes per game, like its fleet (D2) |
+| A bad game server image | Breaks only that game's fleet, under D6 Option B | — |
+
+**A game gets its own stack (its own Redis, Postgres, Nakama and gateway) when any one of
+these holds:**
+
+1. **It is in production, and another game on the stack is still in development.**
+   - It has paying players, while the other game still deploys at development cadence.
+   - Environments already run on separate stacks (`deploy/environments.tsv:25-28`). This
+     criterion applies the same rule between games.
+2. **It needs something the shared stack cannot give every game at once:** a different
+   Nakama version, a different plugin release cadence, or a different wire protocol window
+   from the games already on the stack.
+3. **Another team builds or operates it, or its data falls under different legal or
+   residency terms.** A shared HTTP key and a shared Nakama give no isolation between
+   operators.
+4. **It is big enough to need its own hardware.**
+   - Its expected load would dominate a shared Redis, Postgres or Nakama.
+   - Per-server capacity has not been measured (ADR-7), so for now this is judged by
+     player counts, not against a measured ceiling.
+
+If none of these holds, the game shares the stack. Recommended: adopt these four criteria
+as the rule (open question 8).
+
+### D8 — Rollout
+
+**Rules that hold for every leg:**
+
+- The default game keeps working, and its client needs no change.
+- An absent claim, field, var or label value means `DefaultGameID`.
+- No second game is onboarded until leg 5 is done. Until then nothing mints a `gid`, so
+  every half-deployed state is a default-game state.
+
+| Leg | Module(s) / skill | Contracts touched | What the hub can rely on afterwards |
+|---|---|---|---|
+| 0 | This ADR | — | Accepted answers to the open questions. Nothing else changes, and the hub stays at one game per cluster |
+| 1 | wire-contract: `shared/jwt` and C# `JwtValidator`; the `shared/storage` and C# `RedisServerRegistry` constants; `DefaultGameID` in Go and C#, with a parity test; validators for the game id and map id formats | JoinToken / JWT claims (`gid`, additive). Registry hash (the `game_id` field and the per-game map index key, both additive). **wire.proto: no change. Protocol version: no bump** | The names and the "absent = default" rule are fixed. Behaviour does not change |
+| 2 | server-realtime: `GAMESERVER_GAME_ID`; `game_id` written into every registry entry, and the per-game index key; the `gid` check on join; the `game` tag on every metric; `game_id` in `entity_killed`; the content manifest check; `game_id` on reward RPC calls | Registry hash (writer side). Join token (reader side). Content manifest (new, server only) | Every registry entry names its game, and every game server series carries `game`. Both read `DefaultGameID` for now |
+| 3 | server-services, gateway: latch `gid`; the per-game session key; map id validation; lookup by `(game, map)` with the per-entry check; fleets and mismatch memory per `(game, kind)`; a join-token keyring per game; the `game` label on the four families; `game_id` in `server_down` | JoinToken claims (writer side). Registry hash (reader side). The gateway's `session:` Redis keys (gateway only) | Gateway series carry `game`, and events carry `game_id`. Once a second game's configuration exists, the gateway can route it |
+| 4 | server-services, Nakama: before-authenticate hooks; the `GAMES` allow-list; `gameFromContext`; `gid` in `gateway_token`; `scoped()` on every collection, leaderboard and wallet key; `game_id` on the reward RPCs | Gateway JWT claims (minting side). Nakama RPC payloads (additive) | Nakama data is per game. The hub's players page can filter on the per-game profile object. The default game's data is untouched |
+| 5 | server-ops: a game-state database and Secrets per game (game DB URL, join-token secret); fleets and a namespace per game; the image-per-game build in CI; the gateway's per-game allocator env; dashboards and alerts `by (game, map_id)` | None across languages. Deploy manifests and monitoring only | A cluster can carry a second game end to end, and the hub's per-game filters are complete |
+| 6 | Client of the new game: pass `vars: {game: <id>}` when authenticating with Nakama. **Netcode: no change. Existing client: no change** | None | — |
+
+Legs 2 and 3 can ship in either order for the default game, because each reads a missing
+value as the default game. Writer before reader (2, then 3) is recommended, so the hub sees
+`game_id` on registry entries as early as possible.
+
+**Consequences.**
+
+- **The wire protocol and the Netcode package do not change.** The existing client keeps
+  working with no new release. The cost: the game is invisible on the realtime wire. A game
+  server learns its game from its own configuration and from the join token, never from a
+  message.
+- **The default game becomes a permanent special case.** Its Nakama names, Redis keys and
+  database keep today's layout; every other game is prefixed.
+  - One resolver in each language keeps the special case in one place.
+  - Removing it later takes a one-time data rename. That is cheap while the project is
+    pre-release (ADR-32), and expensive after release.
+- **`DefaultGameID` cannot change after leg 2** without rewriting registry entries, metric
+  history and hub bindings. That is why open question 2 asks for the real slug now.
+- **ADR-2 and ADR-18 change scope.** ADR-2's one live server per `map_id` becomes one live
+  server per `(game, map_id)`. ADR-18's one-replica map fleets become one fleet per game
+  and kind.
+- **Some failure domains stay shared.** On a shared stack, Nakama, the gateway, Redis, the
+  join-token secret and the HTTP key are shared (D7).
+  - The per-game join-token secret closes the one gap that a single compromised pod could
+    use against another game.
+  - The HTTP-key gap stays open by design.
+- **The hub's filter needs legs 2 to 4.** Until leg 5 is done, every filter shows a single
+  value: the default game.
+
+**Open questions for the owner.** Each has a recommended answer.
+
+1. **Accounts: one Nakama with accounts shared across games, or one Nakama per game?**
+   - Recommended: shared (D4 Option B).
+   - It gives one studio login and one Nakama to run. D7's criteria move a game to its own
+     stack when sharing stops being safe.
+2. **What is the existing game's id?**
+   - Recommended: its permanent short slug, chosen now (`^[a-z][a-z0-9_]{1,23}$`), not the
+     literal `default`.
+   - The id ends up in metric labels, hub bindings and registry entries, and renaming it
+     there means a migration.
+3. **Where does a session's game come from?**
+   - Recommended: a Nakama session var, `game` (D1 Option B), copied into a `gid` claim.
+   - It is checked against a `GAMES` allow-list twice: by the before-authenticate hooks,
+     and again by the RPC helper.
+   - Map ids stay game-local. No `wire.proto` change, no protocol bump.
+4. **May one account be logged into two games at the same time?**
+   - Recommended: yes, with one session per game (`session:{game}:{user_id}`).
+   - A login then supersedes a session only within its own game.
+5. **Should each game have its own join-token secret?**
+   - Recommended: yes, for every non-default game from its first deploy.
+   - The default game keeps `JOIN_TOKEN_SECRET`.
+6. **Where do a future game's content and Shared.GameLogic live, and does each game get its
+   own image?**
+   - Recommended: one image per game (D6 Option B), with a `game.json` manifest check at
+     boot.
+   - The content lives in this repository, under `content/<game>/`, while the game shares
+     `Shared.GameLogic` with the default game. It moves to its own repository when the game
+     needs its own `Shared.GameLogic`.
+7. **Is any currency, item or progression shared between games?**
+   - Recommended: no. Wallet keys, rosters, leaderboards and parties are all per game.
+   - If cross-game rewards are wanted later, they get their own decision.
+8. **Do the four criteria in D7 decide when a game gets its own stack?**
+   - Recommended: yes.
+   - Criterion 1 (production is not shared with development) applies without exception.
+9. **Game state: a database per game, or shared tables with a `game_id` column?**
+   - Recommended: a database per game on the shared instance (D5 Option A).
+
+**Follow-up work.**
+
+- **S**: Leg 1. In Go and C#, with parity tests: the `gid` claim, the `game_id` registry
+  field and key helper, `DefaultGameID`, and the format validators.
+- **M**: Leg 2, the game server side: `GAMESERVER_GAME_ID`, the registry, the join check,
+  the metrics tag, the event payload, the content manifest and the reward payload.
+- **M**: Leg 3, the gateway: the session key, the lookup, the per-game allocator and
+  join-token keyring, the metrics, and map id validation.
+- **M**: Leg 4, the Nakama plugin: the hooks, the allow-list, the resolver over every name,
+  per-game leaderboards and `gid` minting. Include a test that a session refresh keeps the
+  `game` var.
+- **M**: Leg 5, ops: a database per game, the Secrets, fleets and a namespace per game with
+  a quota, the image-per-game CI build, and dashboards and alerts by game.
+- **S**: Once leg 1 lands, update the root `CLAUDE.md` connection flow and the
+  `backend/TEAM.md` contracts for `gid` and `game_id`. At the same time, add a
+  "(per game, ADR-33)" note to the statements in ADR-2 and ADR-18.
+- **S**: When leg 3 touches `gateway/registry/watcher.go`, fix the stale "Pub/Sub channel"
+  comment at line 30.
