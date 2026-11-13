@@ -6,6 +6,46 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Multi-game auth, ADR-33 leg 4 (D1 Option B).** One Nakama serves several games; the
+  game travels as the Nakama session variable `game`. Default-game (`cuvara`) behaviour is
+  unchanged.
+  - **Package `gamectx`** (`gamectx/`), importable by the data packages (task l4-data).
+    `VarGame` = `"game"`. `EnvGames` = `GAMES`, the allow-list read from the Nakama runtime
+    env (process env fallback only when the runtime env has no `GAMES` key): absent or blank
+    = `cuvara` only; set = exactly the listed games, comma-separated, trimmed, de-duplicated,
+    with **no implicit `cuvara`**; any entry failing `^[a-z][a-z0-9]{1,23}$` makes
+    `InitModule` fail (`configure allowed games: …`). `GameFromVars(ctx, vars)` validates a
+    `vars` map (absent `game` = `cuvara`). `GameFromContext(ctx, payloadGameID)`: with a
+    session, the session var wins (absent = `cuvara`) and a non-empty payload `game_id`
+    that differs is refused (`ErrGameMismatch`, code 7); without a session (`http_key`
+    caller) the payload selects the game and context vars are ignored; the result must be in
+    `GAMES` (`ErrGameNotAllowed`, code 3). `Scoped(game, name)` returns `name` for `cuvara`
+    and `<game>.<name>` otherwise.
+  - **Before hooks on every auth method and on session refresh.** New
+    `BeforeAuthenticateApple`, `Custom`, `Device`, `Facebook`, `FacebookInstantGame`,
+    `GameCenter`, `Google`, `Steam` and `BeforeSessionRefresh` refuse a `vars.game` outside
+    `GAMES` with code 3. A refresh with no `vars` passes through, so Nakama keeps the
+    refresh token's vars; a refresh that replaces `vars` is validated like a login.
+  - **`gid` in `gateway_token`.** The RPC resolves the caller's game through
+    `GameFromContext`, mints it as the `gid` claim through `shared/jwt`'s `SignWithGame`
+    (omitted for `cuvara`, so the default token shape is unchanged) and echoes it as the
+    response's `game_id` (also omitted for `cuvara`). The request may carry an optional
+    `game_id`, which must equal the session game. New `auth.IssueGatewayTokenForGame`.
+  - **Per-game roster check.** For a non-default game, `character_id` is checked against
+    that game's own roster collection `<game>.characters` with no fallback to `characters`;
+    `cuvara` still uses `character.Owns`.
+  - **Per-game profile** `<game>.player`/`profile`, created on the first game-scoped login,
+    by the after-authenticate hooks **and** by `gateway_token`, so a player whose account
+    predates the game gets one on their first token. New `auth.EnsureGameProfile`
+    (idempotent read-then-write, like `EnsureProfile`).
+  - **Tests.** `gamectx` (allow-list parsing, env precedence, resolution, mismatch,
+    `Scoped`, runtime error codes), every before hook, `gateway_token` game paths (no `GAMES`
+    = no `gid`, rejections, `<game>.characters` roster, profile created once), and
+    `TestSessionRefresh_GameVarSeenByPlugin` / `TestGameFromContext_AfterSessionRefresh`
+    for what the plugin sees across a refresh. `auth/refresh_localstack_test.go`
+    (build tag `localstack`) proves on a real Nakama that a refresh keeps `vrs.game` and
+    the refreshed session still mints `gid`; it is **HUMAN_REQUIRED** until run against a
+    local stack (see `docs/RUNBOOK.md`).
 - **Character roster RPCs (ADR-31): `character_list`, `character_create`, `character_delete`**
   (`character/`), registered in `InitModule`. One version-checked storage object per user
   (collection `characters`, key `roster`, owner-read / server-write), so concurrent creates
@@ -148,6 +188,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   board by default, and deletes+recreates only on opt-in.
 
 ### Changed
+- **`BeforeAuthenticateEmail` and the after-authenticate hooks are game-aware (ADR-33).**
+  `BeforeAuthenticateEmail` refuses a disallowed `vars.game` (code 3) before validating
+  credentials; `AfterAuthenticateDevice` / `AfterAuthenticateEmail` create the profile in
+  `Scoped(game, "player")`. For `cuvara` that is still `player`, so default-game behaviour
+  is unchanged. `docs/API.md`, `docs/DESIGN.md`, `docs/README.md` and `docs/RUNBOOK.md`
+  describe `GAMES`, the client `vars` contract, the hooks, `gid` and the local-stack test.
 - `docs/API.md`, `docs/RUNBOOK.md`, `docs/DESIGN.md`, `docs/README.md` describe the
   server-only contract, error code 7, the leaderboard migration, the exactly-once
   receipt mechanics, `status`/`replayed`, code 11, receipt retention and how to audit

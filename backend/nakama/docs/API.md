@@ -12,13 +12,20 @@ Issues a realtime session token (HS256 JWT) that the Gateway verifies locally.
 Request payload (optional, may be an empty string):
 
 ```json
-{ "server_id": "map_01-abc", "character_id": "5f0c…-uuid" }
+{ "server_id": "map_01-abc", "character_id": "5f0c…-uuid", "game_id": "foo" }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `server_id` | string | no | Pins the token to a specific game server instance. Omitted → the `sid` claim is not emitted. |
-| `character_id` | string | no | ADR-31. Roster character this realtime session plays. Must be in the caller's own roster (`character_list`); otherwise code `5` `character not found` (same answer for "not yours" and "does not exist"). Emitted as the `cid` claim, which the gateway copies into the join token. Omitted → no `cid` claim → the account's default character (protocol 2 behaviour). |
+| `character_id` | string | no | ADR-31. Roster character this realtime session plays. Must be in the caller's own roster (`character_list`) — for a non-default game, that game's roster collection `<game>.characters`, with no fallback to `characters`; otherwise code `5` `character not found` (same answer for "not yours" and "does not exist"). Emitted as the `cid` claim, which the gateway copies into the join token. Omitted → no `cid` claim → the account's default character (protocol 2 behaviour). |
+| `game_id` | string | no | ADR-33. Never selects the game: the game is the session variable `game` (absent = `cuvara`). When supplied it must equal that session game, otherwise code `7` `game_id does not match the session game`. Omitting it is the normal case. |
+
+The game is resolved by `gamectx.GameFromContext` (see *Game identity* below)
+before the roster check. For a non-default game the RPC also creates the
+caller's `<game>.player`/`profile` record if it is missing (same record and
+rules as the after-authenticate hooks), so an account that predates the game
+gets its profile on its first token.
 
 Response payload:
 
@@ -27,7 +34,8 @@ Response payload:
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
   "user_id": "3f9c…",
   "expires_in": 3600,
-  "character_id": "5f0c…-uuid"
+  "character_id": "5f0c…-uuid",
+  "game_id": "foo"
 }
 ```
 
@@ -37,6 +45,7 @@ Response payload:
 | `user_id` | string | Nakama user ID, equal to the token's `sub` claim |
 | `expires_in` | int | Token lifetime in seconds (`constants.SessionTTL`, 3600) |
 | `character_id` | string | Echo of the `cid` claim; omitted for the default character |
+| `game_id` | string | ADR-33. Echo of the `gid` claim; omitted for the default game `cuvara` |
 
 Token claims (produced by `shared/jwt`, consumed by `gateway/session`):
 
@@ -45,6 +54,7 @@ Token claims (produced by `shared/jwt`, consumed by `gateway/session`):
 | `sub` | Nakama user ID | Read by `session.VerifyClientJWT` |
 | `sid` | request `server_id` | Optional, omitted when empty |
 | `cid` | request `character_id` (ownership-checked) | Optional (ADR-31), omitted when empty = default character. The gateway copies it into the join token; the game server echoes it in `JoinTokenResponse.character_id` |
+| `gid` | session var `game` (allow-listed) | Optional (ADR-33), minted through `shared/jwt` `SignWithGame`; **omitted for `cuvara`**, so a default-game token is byte-for-byte the pre-ADR-33 shape. `Claims.Game()` reads absent as `cuvara` |
 | `iat` | now | Issued-at, Unix seconds |
 | `exp` | now + TTL | Expiry, Unix seconds; `jwt.Verify` rejects expired tokens |
 
@@ -54,8 +64,10 @@ Errors:
 |------|---------|-------|
 | 16 | `unauthenticated` | No user ID in the request context |
 | 3 | `invalid payload` | Payload is not valid JSON |
-| 5 | `character not found` | `character_id` is not in the caller's roster |
-| 13 | `internal error` | Signing, marshalling or roster-read failure |
+| 3 | `game not allowed` | The session game is not in `GAMES` (or not a valid game id) |
+| 7 | `game_id does not match the session game` | Request `game_id` differs from the session var `game` |
+| 5 | `character not found` | `character_id` is not in the caller's roster (the game's own roster for a non-default game) |
+| 13 | `internal error` | Signing, marshalling, roster-read or profile-write failure, or an invalid `GAMES` value (logged server-side) |
 
 ### `character_list`, `character_create`, `character_delete` (ADR-31)
 
@@ -332,12 +344,44 @@ let it run at the sum of the limits. Same per-process caveat as `gateway_token`.
 id to key a bucket on, and keying them all to the empty string would let one
 player's joins throttle the whole cluster's dungeon allocations.
 
+## Game identity (ADR-33)
+
+A client selects its game once, at login, through Nakama session variables:
+
+```json
+POST /v2/account/authenticate/device?create=true
+{ "id": "<device id>", "vars": { "game": "foo" } }
+```
+
+Absent `game` = `cuvara`. Nakama copies `vars` into the session token, and the
+plugin reads them back from `runtime.RUNTIME_CTX_VARS` on every later call
+(`gamectx.GameFromContext`). The game must be in the `GAMES` allow-list
+(`README.md` → *Configuration*); otherwise the login, the refresh or the RPC is
+refused with code `3` `game not allowed`.
+
+| Error | Code | Raised by |
+|-------|------|-----------|
+| `game not allowed` (`gamectx.ErrGameNotAllowed`) | 3 | Every before-auth hook, `BeforeSessionRefresh`, `gateway_token` |
+| `game_id does not match the session game` (`gamectx.ErrGameMismatch`) | 7 | `gateway_token` (any `GameFromContext` caller with a session) |
+| `internal error` | 13 | Invalid `GAMES` reached at request time (normally `InitModule` already refused to start) |
+
+Per-game data names come from `gamectx.Scoped(game, name)`: `name` for `cuvara`,
+`<game>.<name>` otherwise (profile `<game>.player`, roster `<game>.characters`).
+
 ## Hooks
+
+| Hook | Game check | Other behaviour |
+|------|------------|-----------------|
+| `BeforeAuthenticateApple`, `Custom`, `Device`, `Facebook`, `FacebookInstantGame`, `GameCenter`, `Google`, `Steam` | `account.vars.game` must be in `GAMES` (code 3) | Request passed through unchanged; a request with no `account` passes through |
+| `BeforeAuthenticateEmail` | Same, checked first | Credential validation and email normalisation (below) |
+| `BeforeSessionRefresh` | Only when the refresh carries `vars`: then `vars.game` must be in `GAMES` (code 3), absent `game` = `cuvara` | A refresh with no `vars` passes through, so Nakama keeps the refresh token's vars and the game |
+| `AfterAuthenticateDevice`, `AfterAuthenticateEmail` | Re-validates `vars.game` | Creates the profile in `Scoped(game, "player")` (below) |
 
 ### `BeforeAuthenticateEmail`
 
-Validates the email/password pair before Nakama processes the request, and
-normalises the email to lower case (trimmed).
+Refuses a `vars.game` outside `GAMES` (code 3), then validates the
+email/password pair before Nakama processes the request, and normalises the
+email to lower case (trimmed).
 
 Validation rules (`auth.ValidateEmailCredentials`):
 
@@ -349,15 +393,18 @@ Validation rules (`auth.ValidateEmailCredentials`):
 
 ### `AfterAuthenticateDevice` / `AfterAuthenticateEmail`
 
-Bootstraps the player profile on first login. Reads the profile record first;
-writes only when it does not exist, so repeat logins are a no-op. A missing user
+Bootstraps the player profile on first login for the login's game
+(`vars.game`, absent = `cuvara`). Reads the profile record first;
+writes only when it does not exist, so repeat logins are a no-op. The
+collection is `gamectx.Scoped(game, "player")`: `player` for `cuvara` (unchanged),
+`<game>.player` for any other game. A missing user
 ID in the context is logged at WARN and treated as a no-op (never blocks login).
 
 Storage record:
 
 | Property | Value |
 |----------|-------|
-| Collection | `player` |
+| Collection | `player` (`cuvara`), `<game>.player` (other games) |
 | Key | `profile` |
 | Owner | the authenticating user |
 | Permission read | `2` (public) |
@@ -383,11 +430,20 @@ to `Player-<first 8 chars of user id>`.
 | `auth.GatewayTokenRPC` | RPC handler |
 | `auth.IssueGatewayToken(userID, serverID, cfg)` | Signs a Gateway-compatible JWT |
 | `auth.IssueGatewayTokenForCharacter(userID, serverID, characterID, cfg)` | Same, with the `cid` claim; does not check ownership (the RPC does) |
+| `auth.IssueGatewayTokenForGame(userID, serverID, characterID, gameID, cfg)` | Same, with the `gid` claim (ADR-33; omitted for empty/`cuvara`); does not check the allow-list or ownership (the RPC does) |
 | `auth.GatewayTokenRequest` / `GatewayTokenResponse` | RPC payload types |
 | `auth.EnsureProfile(ctx, nk, userID, displayName)` | Idempotent profile creation; reports whether it created one |
+| `auth.EnsureGameProfile(ctx, nk, game, userID, displayName)` | Same, in `Scoped(game, "player")`; the caller must have validated `game` |
 | `auth.Profile` | Stored profile record |
 | `auth.ValidateEmailCredentials(email, password, minLen)` | Credential validation |
 | `auth.AfterAuthenticateDevice` / `AfterAuthenticateEmail` / `BeforeAuthenticateEmail` | Hook handlers |
+| `auth.BeforeAuthenticateApple` / `Custom` / `Device` / `Facebook` / `FacebookInstantGame` / `GameCenter` / `Google` / `Steam`, `auth.BeforeSessionRefresh` | ADR-33 game allow-list hooks |
+| `gamectx.VarGame`, `EnvGames` | Session var name `"game"`, allow-list env name `"GAMES"` |
+| `gamectx.ParseAllowList(raw)` / `AllowList(ctx)` / `Allowed(ctx, game)` | `GAMES` parsing (runtime env first, process env fallback) |
+| `gamectx.GameFromVars(ctx, vars)` | Validated game from a `vars` map (auth and refresh hooks) |
+| `gamectx.GameFromContext(ctx, payloadGameID)` | Validated game of a call: session var with a session (payload must match), payload without one (`http_key`) |
+| `gamectx.Scoped(game, name)` | `name` for `cuvara`, `<game>.<name>` otherwise |
+| `gamectx.ErrGameNotAllowed` (3), `ErrGameMismatch` (7), `ErrGamesConfig` (13) | Runtime errors |
 | `auth.LoadConfig(ctx)` / `auth.Config` | Env-driven configuration |
 | `auth.ErrUnauthenticated`, `ErrInvalidPayload`, `ErrInternal`, `ErrInvalidEmail`, `ErrWeakPassword`, `ErrRateLimited` | Client-facing runtime errors |
 | `auth.ProfileCollection`, `ProfileKey`, `StartingLevel`, `DefaultMinPasswordLength` | Constants |
