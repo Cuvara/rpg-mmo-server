@@ -4462,7 +4462,9 @@ anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
   not write an entry for a server it allocated; it waits for the pod's own entry
   (`gateway/registry/registry.go:358-365`).
 - **Server ids.** A game server's id is `--server-id`, else `GAMESERVER_ID`, else
-  `POD_NAME`, else a random `gs-<12 hex>` (`gameserver-dotnet/GameServer/Program.cs:31`).
+  `POD_NAME`, else a random `gs-<9 hex>`, 12 characters in all: the `[..12]` slice cuts the
+  whole `$"gs-{Guid.NewGuid():N}"` string, not the GUID
+  (`gameserver-dotnet/GameServer/Program.cs:31`).
   Under Agones the GameServer name is the id: the allocator returns it and the pod registers
   under it (`gateway/registry/agones_allocator.go:215-218`). The compose stack defaults it
   from the map id alone, `gs-dotnet-${GAMESERVER_MAP_ID}` (`deploy/docker-compose.yml:416`).
