@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -91,16 +92,21 @@ func shortID(userID string) string {
 }
 
 // AfterAuthenticateDevice bootstraps the player profile after a device login.
-func AfterAuthenticateDevice(ctx context.Context, logger runtime.Logger, _ *sql.DB, nk runtime.NakamaModule, out *api.Session, _ *api.AuthenticateDeviceRequest) error {
-	return afterAuthenticate(ctx, logger, nk, out, "device")
+func AfterAuthenticateDevice(ctx context.Context, logger runtime.Logger, _ *sql.DB, nk runtime.NakamaModule, out *api.Session, in *api.AuthenticateDeviceRequest) error {
+	return afterAuthenticate(ctx, logger, nk, out, "device", in.GetAccount().GetVars())
 }
 
 // AfterAuthenticateEmail bootstraps the player profile after an email login.
-func AfterAuthenticateEmail(ctx context.Context, logger runtime.Logger, _ *sql.DB, nk runtime.NakamaModule, out *api.Session, _ *api.AuthenticateEmailRequest) error {
-	return afterAuthenticate(ctx, logger, nk, out, "email")
+func AfterAuthenticateEmail(ctx context.Context, logger runtime.Logger, _ *sql.DB, nk runtime.NakamaModule, out *api.Session, in *api.AuthenticateEmailRequest) error {
+	return afterAuthenticate(ctx, logger, nk, out, "email", in.GetAccount().GetVars())
 }
 
-func afterAuthenticate(ctx context.Context, logger runtime.Logger, nk runtime.NakamaModule, out *api.Session, method string) error {
+func afterAuthenticate(ctx context.Context, logger runtime.Logger, nk runtime.NakamaModule, out *api.Session, method string, vars map[string]string) error {
+	game, err := gamectx.GameFromVars(ctx, vars)
+	if err != nil {
+		logger.Error("after authenticate %s: invalid game: %v", method, err)
+		return err
+	}
 	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
 	username, _ := ctx.Value(runtime.RUNTIME_CTX_USERNAME).(string)
 	if userID == "" {
@@ -108,7 +114,7 @@ func afterAuthenticate(ctx context.Context, logger runtime.Logger, nk runtime.Na
 		return nil
 	}
 
-	created, err := EnsureProfile(ctx, nk, userID, username)
+	created, err := EnsureGameProfile(ctx, nk, game, userID, username)
 	if err != nil {
 		return fmt.Errorf("after authenticate %s: %w", method, err)
 	}
