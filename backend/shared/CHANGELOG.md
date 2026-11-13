@@ -62,6 +62,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     miniredis in `redisstore/registry_game_test.go`, memory parity in `memory_test.go`.
 
 ### Changed
+- `gameid.ValidGameID` reserves `other` beside `gs`, `map` and `dungeon`, because the gateway metrics game label buckets unknown games as `other`; `testdata/multigame/identity.json` gains the cases (`other` and server id `other-1` refused, `others` and `other1` valid) that the Go and C# parity tests read.
 - **Game-scoped registry lookup (ADR-33 leg 3).** `storage.ServerRegistry` now exposes
   `FindByGameAndMapID(ctx, gameID, mapID)` (empty game = `constants.DefaultGameID`).
   `FindByMapID` keeps its signature and returns only default-game servers in both memory

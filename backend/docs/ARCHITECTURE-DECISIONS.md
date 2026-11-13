@@ -4810,7 +4810,7 @@ the end of this ADR.
 Terms used below:
 
 - A **game id** is a short, stable slug: `^[a-z][a-z0-9]{1,23}$`, lowercase letters and
-  digits only, 2 to 24 characters. The ids `gs`, `map` and `dungeon` are reserved and refused by the validators because default-game server ids and fleet-derived pod names already start with `gs-`, `map-` and `dungeon-`. The alphabet is the intersection of every place the id
+  digits only, 2 to 24 characters. The ids `gs`, `map` and `dungeon` are reserved and refused by the validators because default-game server ids and fleet-derived pod names already start with `gs-`, `map-` and `dungeon-`. The id `other` is reserved as well: the gateway metrics label `game` buckets every unknown game as `other`. The alphabet is the intersection of every place the id
   is joined into a name, so it is used as is everywhere and never needs a mapping:
   - **Kubernetes and Agones names** (fleet, GameServer, pod, namespace, Secret) must be
     RFC 1123 labels: lowercase alphanumerics and `-`, at most 63 characters. `_` is not
