@@ -200,6 +200,36 @@ since 2026-09-13 — `70-fleetautoscaler-dungeon.yaml`, the project's first
 `FleetAutoscaler`. Do not read the "no autoscaler" rule below as covering that
 file; read the section it points to.
 
+### Fleets for a non-default game, and the 63-character name budget (ADR-33 leg 5)
+
+A game other than `cuvara` runs in its own namespace, `<stack namespace>-<game>`
+(`rpg-k8s-realtime-<game>`), with a ResourceQuota and fleets
+`<game>-map-servers-dotnet-<env>` / `<game>-dungeon-servers-dotnet-<env>`,
+rendered from `deploy/k8s/app/` by `deploy/k8s/games/render.py`
+(`deploy/k8s/games/README.md`). Nothing is instantiated for a real second game,
+and neither `setup-dev.sh` nor `dev-up.sh` applies any of it.
+
+The `<game>-` prefix is load-bearing: the server id is the pod name, Agones
+names the pod after the fleet, and ADR-33 D2 S1 requires a non-default game's
+server ids to start with `<game>-`. The name budget behind the 24-character
+game-id cap, **confirmed for Agones 1.59.0** (the version this file and
+`k3s/validate-manifests.py` pin):
+
+| Step | Agones release-1.59.0 source | Name |
+|---|---|---|
+| Fleet → GameServerSet | `pkg/apis/agones/v1/fleet.go:128` | `GenerateName = fleet + "-"` |
+| GameServerSet → GameServer | `pkg/apis/agones/v1/gameserverset.go:156` | `GenerateName = gss + "-"` |
+| GameServer → Pod | `pkg/apis/agones/v1/gameserver.go:871` | pod name = GameServer name |
+| `generateName` | kube-apiserver `names.SimpleNameGenerator` | + 5 random characters, base truncated to 58 |
+
+GameServer = pod = fleet + 12 characters, so a fleet of at most **51**
+characters keeps the pod within the 63-character RFC 1123 label limit with no
+truncation. The renderer refuses a longer fleet, and an invalid, reserved
+(`gs`, `map`, `dungeon`, `other`) or default (`cuvara`) game id;
+`k3s/validate-manifests.py` with no arguments renders a sample game and the
+longest legal id in memory, validates the result and asserts those refusals.
+Re-check the four lines above when the Agones pin moves.
+
 ### Which fleet is real
 
 One fleet, one server implementation. Full rationale:

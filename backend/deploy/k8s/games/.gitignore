@@ -1,0 +1,3 @@
+# render.py --out writes these; a rendered game is never committed here, and a
+# filled Secret never anywhere.
+*.yaml
