@@ -65,6 +65,10 @@ public interface IServerRegistry : IAsyncDisposable
     /// <summary>Remove the hash and its map-index entry. Used on graceful shutdown.</summary>
     Task DeregisterAsync(string serverId, string mapId, CancellationToken ct);
 
+    /// <summary>Remove only this game's hash and clean up its own map-index entry.</summary>
+    Task DeregisterAsync(string serverId, string gameId, string mapId, CancellationToken ct) =>
+        DeregisterAsync(serverId, mapId, ct);
+
     /// <summary>
     /// Set the live player count.
     /// </summary>

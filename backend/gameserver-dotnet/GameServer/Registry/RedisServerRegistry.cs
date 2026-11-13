@@ -117,6 +117,22 @@ redis.call('HSET', KEYS[1], 'player_count', ARGV[3])
 return 1
 ";
 
+    private const string GameDeregisterLua = @"
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return nil
+end
+local current = redis.call('HGET', KEYS[1], 'game_id')
+if not current or current == '' then
+    current = ARGV[1]
+end
+if current ~= ARGV[2] then
+    return false
+end
+local map = redis.call('HGET', KEYS[1], 'map_id')
+redis.call('DEL', KEYS[1])
+return map or ARGV[3]
+";
+
     private readonly IConnectionMultiplexer _mux;
     private readonly bool _ownsMux;
     private readonly TimeSpan _ttl;
@@ -250,6 +266,29 @@ return 1
         if (srem != null) await srem;
 
         _logger.LogInformation("Deregistered {ServerId} from Redis (game={GameId}, map={MapId})", serverId, gameId, effectiveMap);
+    }
+
+    /// <inheritdoc />
+    public async Task DeregisterAsync(string serverId, string gameId, string mapId, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        string effectiveGame = GameId.GameOrDefault(gameId);
+        var db = Db;
+        string? storedMap = (string?)await db.ScriptEvaluateAsync(GameDeregisterLua,
+            [ServerKey(serverId)], [GameId.DefaultGameId, effectiveGame, mapId]);
+        // A string (including an empty one) means the hash was deleted; a null
+        // result means absent or foreign. Never remove a foreign game's index.
+        string effectiveMap = storedMap ?? mapId;
+        if (!string.IsNullOrEmpty(effectiveMap))
+            await db.SetRemoveAsync(MapIndexKey(effectiveGame, effectiveMap), serverId);
+
+        if (storedMap == null)
+            _logger.LogWarning(
+                "Skipped deregistering {ServerId} from Redis: entry is absent or belongs to another game (game={GameId}, map={MapId})",
+                serverId, effectiveGame, effectiveMap);
+        else
+            _logger.LogInformation("Deregistered {ServerId} from Redis (game={GameId}, map={MapId})",
+                serverId, effectiveGame, effectiveMap);
     }
 
     /// <summary>

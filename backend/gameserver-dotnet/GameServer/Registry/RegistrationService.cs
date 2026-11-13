@@ -317,7 +317,7 @@ public sealed class RegistrationService : IAsyncDisposable
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await _registry.DeregisterAsync(_options.ServerId, _options.MapId, cts.Token);
+            await _registry.DeregisterAsync(_options.ServerId, _options.GameId, _options.MapId, cts.Token);
         }
         catch (Exception ex)
         {

@@ -391,6 +391,79 @@ public class RedisServerRegistryTests
     }
 
     [SkippableFact]
+    public async Task GameAwareDeregister_PreservesForeignHashExpiryAndIndex()
+    {
+        _redis.SkipUnlessAvailable(nameof(GameAwareDeregister_PreservesForeignHashExpiryAndIndex));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"foo-deregister-{Guid.NewGuid():N}";
+        string mapId = $"map_foreign_{Guid.NewGuid():N}";
+        await reg.RegisterAsync(Info(serverId, mapId, players: 7) with { GameId = "bar" },
+            RegistrationScope.MapIndexed, default);
+        string key = RedisServerRegistry.ServerKey(serverId);
+        string foreignIndex = RedisServerRegistry.MapIndexKey("bar", mapId);
+        string ownIndex = RedisServerRegistry.MapIndexKey("foo", mapId);
+        await db.SetAddAsync(ownIndex, serverId); // stale membership is safe to remove
+        var beforeHash = await db.HashGetAllAsync(key);
+        long beforeExpiry = (long)await db.ExecuteAsync("PEXPIRETIME", key);
+        Assert.True(beforeExpiry > 0);
+
+        await reg.DeregisterAsync(serverId, "foo", mapId, default);
+
+        Assert.Equal(beforeHash.OrderBy(entry => entry.Name.ToString()),
+            (await db.HashGetAllAsync(key)).OrderBy(entry => entry.Name.ToString()));
+        Assert.Equal(beforeExpiry, (long)await db.ExecuteAsync("PEXPIRETIME", key));
+        Assert.True(await db.SetContainsAsync(foreignIndex, serverId));
+        Assert.False(await db.SetContainsAsync(ownIndex, serverId));
+    }
+
+    [SkippableFact]
+    public async Task GameAwareDeregister_RemovesSameGameHashAndStoredMapMembership()
+    {
+        _redis.SkipUnlessAvailable(nameof(GameAwareDeregister_RemovesSameGameHashAndStoredMapMembership));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"foo-deregister-{Guid.NewGuid():N}";
+        string storedMap = $"map_owned_{Guid.NewGuid():N}";
+        await reg.RegisterAsync(Info(serverId, storedMap) with { GameId = "foo" },
+            RegistrationScope.MapIndexed, default);
+
+        await reg.DeregisterAsync(serverId, "foo", "map_incorrect", default);
+
+        Assert.False(await db.KeyExistsAsync(RedisServerRegistry.ServerKey(serverId)));
+        Assert.False(await db.SetContainsAsync(RedisServerRegistry.MapIndexKey("foo", storedMap), serverId));
+    }
+
+    [SkippableFact]
+    public async Task GameAwareDeregister_RemovesLegacyDefaultGameHashAndIndex()
+    {
+        _redis.SkipUnlessAvailable(nameof(GameAwareDeregister_RemovesLegacyDefaultGameHashAndIndex));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        // Both pre-game_id hashes and hashes with an empty game_id belong to cuvara.
+        foreach (string? storedGame in new string?[] { null, "" })
+        {
+            string serverId = $"gs-legacy-deregister-{Guid.NewGuid():N}";
+            string mapId = $"map_legacy_deregister_{Guid.NewGuid():N}";
+            string key = RedisServerRegistry.ServerKey(serverId);
+            await reg.RegisterAsync(Info(serverId, mapId), RegistrationScope.MapIndexed, default);
+            if (storedGame == null) await db.HashDeleteAsync(key, "game_id");
+            else await db.HashSetAsync(key, "game_id", storedGame);
+
+            await reg.DeregisterAsync(serverId, GameId.DefaultGameId, mapId, default);
+
+            Assert.False(await db.KeyExistsAsync(key));
+            Assert.False(await db.SetContainsAsync(RedisServerRegistry.MapIndexKey(GameId.DefaultGameId, mapId), serverId));
+        }
+    }
+
+    [SkippableFact]
     public async Task NonDefaultService_RegistersGameAndItsMapIndex()
     {
         _redis.SkipUnlessAvailable(nameof(NonDefaultService_RegistersGameAndItsMapIndex));
@@ -442,6 +515,7 @@ public class RedisServerRegistryTests
         {
             await service.StartAsync(cts.Token);
             await service.PublishPlayerCountIfChangedAsync(default);
+            await service.DeregisterAsync();
             Assert.Equal(0, service.RegisterCount);
             Assert.Equal(1, service.RefusalCount);
             Assert.Equal(beforeHash.OrderBy(entry => entry.Name.ToString()),

@@ -356,11 +356,28 @@ public class RegistrationServiceUnitTests
         finally { cts.Cancel(); }
     }
 
+    [Theory]
+    [InlineData(null, GameId.DefaultGameId)]
+    [InlineData("", GameId.DefaultGameId)]
+    [InlineData("foo", "foo")]
+    public async Task Deregister_UsesGameAwareOverloadWithConfiguredGame(string? gameId, string expected)
+    {
+        var registry = new MemoryRegistry();
+        var options = gameId == null ? Options : Options with { GameId = gameId };
+        await using var service = new RegistrationService(registry, options, () => 0, NullLogger.Instance);
+
+        await service.DeregisterAsync();
+
+        Assert.Equal((options.ServerId, expected, options.MapId), registry.LastDeregister);
+        Assert.Equal(0, registry.LegacyCalls);
+    }
+
     private sealed class MemoryRegistry : IServerRegistry
     {
         public volatile bool Refuse;
         public ServerInfo? LastInfo;
         public int LegacyCalls;
+        public (string ServerId, string GameId, string MapId)? LastDeregister;
         private int _refusals;
         public TaskCompletionSource<(string, string)> Heartbeat { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -405,7 +422,17 @@ public class RegistrationServiceUnitTests
             return Task.FromResult(true);
         }
 
-        public Task DeregisterAsync(string serverId, string mapId, CancellationToken ct) => Task.CompletedTask;
+        public Task DeregisterAsync(string serverId, string gameId, string mapId, CancellationToken ct)
+        {
+            LastDeregister = (serverId, gameId, mapId);
+            return Task.CompletedTask;
+        }
+
+        public Task DeregisterAsync(string serverId, string mapId, CancellationToken ct)
+        {
+            Interlocked.Increment(ref LegacyCalls);
+            return Task.CompletedTask;
+        }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
