@@ -22,18 +22,21 @@ public sealed class NakamaClient : IDisposable
     /// <summary>Gold awarded per enemy kill.</summary>
     public const int GoldPerKill = 10;
 
-    public NakamaClient(string baseUrl, string httpKey, ILogger logger)
-        : this(baseUrl, httpKey, logger, handler: null) { }
+    public string GameId { get; }
+
+    public NakamaClient(string baseUrl, string httpKey, ILogger logger, string? gameId = null)
+        : this(baseUrl, httpKey, logger, handler: null, gameId: gameId) { }
 
     /// <param name="handler">
     /// Test seam: a fake <see cref="HttpMessageHandler"/> lets the batcher tests script
     /// Nakama's answers without a network. Null (production) uses the default handler.
     /// </param>
-    public NakamaClient(string baseUrl, string httpKey, ILogger logger, HttpMessageHandler? handler)
+    public NakamaClient(string baseUrl, string httpKey, ILogger logger, HttpMessageHandler? handler, string? gameId = null)
     {
         _baseUrl = baseUrl.TrimEnd('/');
         _httpKey = httpKey;
         _logger = logger;
+        GameId = global::GameServer.Games.GameId.GameOrDefault(gameId);
         _http = handler is null ? new HttpClient() : new HttpClient(handler);
         // 5s, not the 100s default. Every kill used to spawn fire-and-forget calls, so a
         // stalled Nakama accumulated ~4,000 in-flight tasks and sockets before the FIRST
@@ -50,7 +53,7 @@ public sealed class NakamaClient : IDisposable
     {
         try
         {
-            var req = new RewardKillRequest { UserId = userId, VictimId = victimId, MapId = mapId };
+            var req = new RewardKillRequest { UserId = userId, VictimId = victimId, MapId = mapId, GameId = GameId };
             string payload = JsonSerializer.Serialize(req, NakamaJsonContext.Default.RewardKillRequest);
             string response = await CallRpcAsync("reward_kill", payload);
             _logger.LogDebug("Reward kill: user={UserId} victim={VictimId} response={Response}",
@@ -69,7 +72,7 @@ public sealed class NakamaClient : IDisposable
     {
         try
         {
-            var req = new SubmitKillRequest { UserId = userId };
+            var req = new SubmitKillRequest { UserId = userId, GameId = GameId };
             string payload = JsonSerializer.Serialize(req, NakamaJsonContext.Default.SubmitKillRequest);
             string response = await CallRpcAsync("submit_kill", payload);
             _logger.LogDebug("Submit kill: user={UserId} response={Response}", userId, response);
@@ -105,7 +108,7 @@ public sealed class NakamaClient : IDisposable
     /// </returns>
     public async Task<KillRewardOutcome> RewardKillsAsync(string userId, long kills, string mapId, string batchId)
     {
-        var req = new RewardKillsRequest { UserId = userId, Kills = kills, MapId = mapId, BatchId = batchId };
+        var req = new RewardKillsRequest { UserId = userId, Kills = kills, MapId = mapId, BatchId = batchId, GameId = GameId };
         string payload = JsonSerializer.Serialize(req, NakamaJsonContext.Default.RewardKillsRequest);
         string wrappedPayload = JsonSerializer.Serialize(payload, NakamaJsonContext.Default.String);
         var content = new StringContent(wrappedPayload, Encoding.UTF8, "application/json");
@@ -258,6 +261,7 @@ internal sealed class RewardKillsResponse
 
 internal sealed class RewardKillsRequest
 {
+    [JsonPropertyName("game_id")] public string GameId { get; set; } = "";
     [JsonPropertyName("user_id")] public string UserId { get; set; } = "";
     [JsonPropertyName("kills")] public long Kills { get; set; }
     [JsonPropertyName("map_id")] public string MapId { get; set; } = "";
@@ -266,6 +270,7 @@ internal sealed class RewardKillsRequest
 
 internal sealed class RewardKillRequest
 {
+    [JsonPropertyName("game_id")] public string GameId { get; set; } = "";
     [JsonPropertyName("user_id")] public string UserId { get; set; } = "";
     [JsonPropertyName("victim_id")] public string VictimId { get; set; } = "";
     [JsonPropertyName("map_id")] public string MapId { get; set; } = "";
@@ -273,6 +278,7 @@ internal sealed class RewardKillRequest
 
 internal sealed class SubmitKillRequest
 {
+    [JsonPropertyName("game_id")] public string GameId { get; set; } = "";
     [JsonPropertyName("user_id")] public string UserId { get; set; } = "";
 }
 

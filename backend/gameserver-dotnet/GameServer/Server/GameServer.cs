@@ -912,7 +912,8 @@ public sealed class GameServerHost : IAsyncDisposable
                 options.NakamaUrl,
                 options.NakamaHttpKey,
                 _loggerFactory.CreateLogger<Nakama.NakamaClient>(),
-                options.NakamaHttpHandler);
+                options.NakamaHttpHandler,
+                options.GameId);
             // One reward_kills call per killer per flush, instead of two HTTP RPCs and
             // two meta-DB transactions per kill (#233).
             _killBatcher = new Nakama.KillRewardBatcher(
@@ -923,7 +924,7 @@ public sealed class GameServerHost : IAsyncDisposable
         }
 
         var eventStream = options.EventStream ?? new NoopEventStream();
-        _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>(), _metrics);
+        _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>(), _metrics, gameId: options.GameId);
 
         SimulationRates rates = options.SimulationRates ?? SimulationRates.Uniform(options.TickRate);
         _rates = rates;
