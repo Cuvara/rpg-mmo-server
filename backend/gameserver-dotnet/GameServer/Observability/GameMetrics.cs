@@ -59,6 +59,12 @@ namespace GameServer.Observability;
 /// All record paths are allocation-free: tag sets are pre-built once in the
 /// constructor and passed by value as <see cref="TagList"/> structs, so the
 /// tick loop never allocates on the managed heap.
+///
+/// Every series on this meter carries <c>map_id</c> and <c>game</c> (ADR-33 D3). Both
+/// come from one base tag set built once in the constructor, and every other tag set
+/// is derived from it (<see cref="With"/>), so an instrument cannot forget either label
+/// by re-listing literals. The labels shown in braces above are the ones added on top
+/// of that base set. One process serves one game, so <c>game</c> adds no series.
 /// </summary>
 public sealed class GameMetrics : IDisposable
 {
@@ -142,6 +148,10 @@ public sealed class GameMetrics : IDisposable
     private readonly TagList _saveErrorTags;
     private readonly KeyValuePair<string, object?>[] _mapTagArray;
 
+    // The one base tag set {map_id, game}. Built once in the constructor; every TagList and
+    // tag array above is derived from it, never from re-listed literals.
+    private readonly KeyValuePair<string, object?>[] _baseTags;
+
     private int _playersOnline;
     private long _unknownMessageTypeCount;
     private Func<int>? _entityCountProvider;
@@ -153,6 +163,12 @@ public sealed class GameMetrics : IDisposable
     public int PlayersOnline => Volatile.Read(ref _playersOnline);
 
     /// <summary>
+    /// Effective game id carried as the <c>game</c> label on every series:
+    /// <see cref="GameServer.Games.GameId.DefaultGameId"/> when none was configured.
+    /// </summary>
+    public string GameId { get; }
+
+    /// <summary>
     /// Create the instrument set for a given map.
     /// </summary>
     /// <param name="mapId">Map identifier used as the <c>map_id</c> label.</param>
@@ -160,34 +176,48 @@ public sealed class GameMetrics : IDisposable
     /// Meter name override. Defaults to <see cref="DefaultMeterName"/>; tests pass
     /// a unique name to isolate collection.
     /// </param>
-    public GameMetrics(string mapId, string? meterName = null)
+    /// <param name="gameId">
+    /// Server game used as the <c>game</c> label (ADR-33 D3). Null or empty means the
+    /// default game, <see cref="GameServer.Games.GameId.DefaultGameId"/>.
+    /// </param>
+    public GameMetrics(string mapId, string? meterName = null, string? gameId = null)
     {
         MeterName = meterName ?? DefaultMeterName;
         _meter = new Meter(MeterName);
 
-        _mapTagArray = [new KeyValuePair<string, object?>("map_id", mapId)];
+        GameId = global::GameServer.Games.GameId.GameOrDefault(gameId);
         _mapId = mapId;
-        _mapTags = new TagList { { "map_id", mapId } };
-        _saveOkTags = new TagList { { "status", "ok" } };
-        _saveErrorTags = new TagList { { "status", "error" } };
+        _baseTags =
+        [
+            new KeyValuePair<string, object?>("map_id", mapId),
+            new KeyValuePair<string, object?>("game", GameId),
+        ];
+        _mapTagArray = [.. _baseTags];
+        _mapTags = new TagList(_baseTags);
+        // Before ADR-33 these two carried status only; they gain the base set like every
+        // other series. The transport pair defaults to the base set until
+        // SetTransportPosture adds transport and cipher, so no scrape can see it bare.
+        _saveOkTags = With("status", "ok");
+        _saveErrorTags = With("status", "error");
+        _transportTags = _mapTags;
 
-        _criticalTags = new TagList { { "map_id", mapId }, { "group", "critical" } };
-        _worldTags = new TagList { { "map_id", mapId }, { "group", "world" } };
-        _backgroundTags = new TagList { { "map_id", mapId }, { "group", "background" } };
+        _criticalTags = With("group", "critical");
+        _worldTags = With("group", "world");
+        _backgroundTags = With("group", "background");
 
-        _handshakePoolFullTags = new TagList { { "map_id", mapId }, { "reason", "pool_full" } };
-        _handshakeTimeoutTags = new TagList { { "map_id", mapId }, { "reason", "timeout" } };
-        _handshakeMalformedTags = new TagList { { "map_id", mapId }, { "reason", "malformed" } };
-        _handshakeProtocolVersionTags = new TagList { { "map_id", mapId }, { "reason", "protocol_version" } };
-        _rewardGrantedTags = new TagList { { "map_id", mapId }, { "outcome", "granted" } };
-        _rewardPartialTags = new TagList { { "map_id", mapId }, { "outcome", "partial" } };
-        _rewardNotGrantedTags = new TagList { { "map_id", mapId }, { "outcome", "not_granted" } };
-        _rewardTooLargeTags = new TagList { { "map_id", mapId }, { "outcome", "too_large" } };
-        _rewardUnknownTags = new TagList { { "map_id", mapId }, { "outcome", "unknown" } };
+        _handshakePoolFullTags = With("reason", "pool_full");
+        _handshakeTimeoutTags = With("reason", "timeout");
+        _handshakeMalformedTags = With("reason", "malformed");
+        _handshakeProtocolVersionTags = With("reason", "protocol_version");
+        _rewardGrantedTags = With("outcome", "granted");
+        _rewardPartialTags = With("outcome", "partial");
+        _rewardNotGrantedTags = With("outcome", "not_granted");
+        _rewardTooLargeTags = With("outcome", "too_large");
+        _rewardUnknownTags = With("outcome", "unknown");
 
-        _inputBudgetTags = new TagList { { "map_id", mapId }, { "reason", "connection_budget" } };
-        _inputQueueFullTags = new TagList { { "map_id", mapId }, { "reason", "queue_full" } };
-        _unknownMessageTypeTags = new TagList { { "map_id", mapId }, { "reason", "unknown_type" } };
+        _inputBudgetTags = With("reason", "connection_budget");
+        _inputQueueFullTags = With("reason", "queue_full");
+        _unknownMessageTypeTags = With("reason", "unknown_type");
 
         _tickDuration = _meter.CreateHistogram<double>(
             TickDurationInstrument,
@@ -400,12 +430,7 @@ public sealed class GameMetrics : IDisposable
         _inputRejectionTags = new TagList[GameServer.Input.InputRejection.All.Length];
         foreach (var reason in GameServer.Input.InputRejection.All)
         {
-            var tags = new TagList
-            {
-                { "map_id", mapId },
-                { "reason", GameServer.Input.InputRejection.Label(reason) },
-            };
-            _inputRejectionTags[(int)reason] = tags;
+            _inputRejectionTags[(int)reason] = With("reason", GameServer.Input.InputRejection.Label(reason));
         }
 
         _attackRateViolations = _meter.CreateCounter<long>(
@@ -631,6 +656,18 @@ public sealed class GameMetrics : IDisposable
             description: "Physical memory mapped to the process (resident set).");
     }
 
+    /// <summary>
+    /// The base tag set {map_id, game} plus one more label. The only place a derived tag
+    /// set is built, so no instrument can drop a base label. A <see cref="TagList"/> of up
+    /// to eight tags is stored inline, so this does not touch the managed heap.
+    /// </summary>
+    private TagList With(string key, object? value)
+    {
+        var tags = new TagList(_baseTags);
+        tags.Add(key, value);
+        return tags;
+    }
+
     private Measurement<double> ObserveProcessCpuSeconds()
     {
         using var self = System.Diagnostics.Process.GetCurrentProcess();
@@ -641,9 +678,8 @@ public sealed class GameMetrics : IDisposable
     {
         for (int gen = 0; gen <= GC.MaxGeneration; gen++)
         {
-            yield return new Measurement<long>(GC.CollectionCount(gen),
-                _mapTagArray[0],
-                new KeyValuePair<string, object?>("generation", gen.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            TagList tags = With("generation", gen.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            yield return new Measurement<long>(GC.CollectionCount(gen), in tags);
         }
     }
 
@@ -881,12 +917,9 @@ public sealed class GameMetrics : IDisposable
     /// </remarks>
     public void SetTransportPosture(string transport, string cipher, bool encrypted, bool authenticated)
     {
-        _transportTags = new TagList
-        {
-            { "map_id", _mapId },
-            { "transport", transport },
-            { "cipher", cipher },
-        };
+        TagList tags = With("transport", transport);
+        tags.Add("cipher", cipher);
+        _transportTags = tags;
         _transportEncrypted = encrypted;
         _transportAuthenticated = authenticated;
     }
@@ -910,7 +943,7 @@ public sealed class GameMetrics : IDisposable
 
     private GameServer.Net.Transport.KcpListenerStats? KcpStats => _kcpStatsProvider?.Invoke();
 
-    private TagList KcpTags(string reason) => new() { { "map_id", _mapId }, { "reason", reason } };
+    private TagList KcpTags(string reason) => With("reason", reason);
 
     private Measurement<int> ObserveKcpSessionsLive() => new(KcpStats?.SessionsLive ?? 0, _mapTags);
 
@@ -1055,15 +1088,21 @@ public sealed class GameMetrics : IDisposable
         }
     }
 
-    /// <summary>Record a published game event of the given type.</summary>
+    /// <summary>
+    /// Record a published game event of the given type. The tag set is the base set plus
+    /// <c>type</c>, built as a <see cref="TagList"/> struct, so no heap allocation.
+    /// </summary>
     public void RecordEventPublished(string type)
-        => _eventsPublished.Add(1, new KeyValuePair<string, object?>("type", type));
+    {
+        TagList tags = With("type", type);
+        _eventsPublished.Add(1, tags);
+    }
 
     /// <summary>Record an event dropped by the bounded publish queue (oldest-first).</summary>
-    public void RecordEventDropped() => _eventsDropped.Add(1);
+    public void RecordEventDropped() => _eventsDropped.Add(1, _mapTags);
 
     /// <summary>Record an event dropped after exhausting the publish retry budget.</summary>
-    public void RecordEventPublishFailure() => _eventPublishFailures.Add(1);
+    public void RecordEventPublishFailure() => _eventPublishFailures.Add(1, _mapTags);
 
     // ── Pre-join admission (workspace audit F03) ─────────────────────────────
 
@@ -1413,7 +1452,7 @@ public sealed class GameMetrics : IDisposable
         Interlocked.Increment(ref _commandsRejectedCount);
         Interlocked.Increment(ref _commandRejectCounts.GetOrAdd(reason, static _ => new long[1])[0]);
         TagList tags = _commandRejectTags.GetOrAdd(reason,
-            static (r, map) => new TagList { { "map_id", map }, { "reason", r } }, _mapId);
+            static (r, self) => self.With("reason", r), this);
         _commandsRejected.Add(1, tags);
     }
 
@@ -1447,7 +1486,7 @@ public sealed class GameMetrics : IDisposable
     private Measurement<int> ObserveEntities()
     {
         var provider = _entityCountProvider;
-        return new Measurement<int>(provider?.Invoke() ?? 0);
+        return new Measurement<int>(provider?.Invoke() ?? 0, _mapTags);
     }
 
     public void Dispose() => _meter.Dispose();
