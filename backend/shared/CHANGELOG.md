@@ -6,6 +6,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Game IDs `gs`, `map` and `dungeon` are reserved to avoid default-game server ID collisions.
 - **Game identity, ADR-33 leg 1 (Terms).** No behaviour change, no wire or protocol change
   (`proto/`, generated code and the protocol version constants are untouched).
   - `constants.DefaultGameID = "cuvara"` and `constants.GameOrDefault(id)` (empty ->

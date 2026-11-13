@@ -16,6 +16,8 @@ func TestValidGameID(t *testing.T) {
 		want bool
 	}{
 		{constants.DefaultGameID, true},
+		{"gs", false}, {"map", false}, {"dungeon", false},
+		{"gsx", true}, {"maps", true}, {"dungeon1", true},
 		{"a", false},
 		{"ab", true},
 		{strings.Repeat("a", 24), true},
@@ -134,6 +136,8 @@ func TestValidServerID(t *testing.T) {
 		{"", "", false},
 		{constants.DefaultGameID, "", false},
 		{"foo", "foo-1", true},
+		{"map", "map-1", false},
+		{"gs", "gs-1", false},
 		{"foo", "foo-", false},
 		{"foo", "foo", false},
 		{"foo", "foobar-1", false},

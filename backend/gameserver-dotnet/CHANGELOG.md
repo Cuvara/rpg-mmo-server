@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Game IDs `gs`, `map` and `dungeon` are reserved to avoid default-game server ID collisions.
 - Game identity, ADR-33 leg 1 (Terms); no behaviour, wire or protocol change. `GameServer.Games.GameId`: `DefaultGameId = "cuvara"` (the C# twin of Go `constants.DefaultGameID`), `GameOrDefault` (null or empty -> default), `IsDefaultGame`, `IsValidGameId` (`^[a-z][a-z0-9]{1,23}$`), `IsValidMapId` (`^[A-Za-z0-9_-]{1,64}$`) and `IsValidServerId(game, id)` (default game: any non-empty id; another game: a valid game id and a `<game>-` prefix with a non-empty suffix). `GameIdTests` covers the edge cases, and `SharedFixture_MatchesConstantsAndValidators` reads `backend/shared/testdata/multigame/identity.json`, the same fixture as the Go parity test, so the two sides cannot drift.
 - `JwtValidator.JwtClaims.GameId`: the optional `gid` claim, a trailing record member defaulting to empty (like `CharacterId`), so positional construction is source-compatible. Empty when absent means the default game; nothing mints a non-empty `gid` yet and nothing acts on it. Tests in `JwtCharacterClaimTests`: `gid` present, absent and empty, through keyring rotation, and the positional default.
 - Game-aware Redis registry, ADR-33 leg 1 part 2, in the same commit as the Go side (`shared/storage/redisstore/registry.go`); default-game behaviour, wire and protocol version unchanged.
