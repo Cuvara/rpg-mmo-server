@@ -4993,7 +4993,7 @@ every RPC can read.
   `shared/jwt`, C# `JwtValidator`) gains one optional claim, `gid`. Readers must tolerate
   its absence, exactly as they do for `cid` (`shared/jwt/jwt.go:30-35`).
 - **Kick event payload: additive.** `session_superseded` on `events:kick` and
-  `events:gateway_kick` gains `game_id`, absent meaning the default game (item 2). Consumers:
+  `gateway_superseded` on `events:gateway_kick` share one payload (`SessionSupersededEvent`), which gains `game_id`, absent meaning the default game (item 2). Consumers:
   the Go gateway's `KickConsumer` and the C# `RedisKickConsumer`.
 - **Protocol version: not bumped.**
   - The bump rule covers messages and fields a peer must act on
