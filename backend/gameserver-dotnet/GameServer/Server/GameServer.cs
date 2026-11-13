@@ -45,6 +45,11 @@ public class ServerOptions
     /// </summary>
     public KcpListenerOptions KcpLimits { get; set; } = KcpListenerOptions.Default;
     public string ServerId { get; set; } = "";
+    /// <summary>
+    /// The game this server serves, from <c>GAMESERVER_GAME_ID</c> (ADR-33).
+    /// Join tokens for another game are refused.
+    /// </summary>
+    public string GameId { get; set; } = GameServer.Games.GameId.DefaultGameId;
     public string MapId { get; set; } = "map_01";
     public string Mode { get; set; } = "map"; // "map" or "dungeon"
     /// <summary>
@@ -510,6 +515,9 @@ public class ServerOptions
 /// </summary>
 public sealed class GameServerHost : IAsyncDisposable
 {
+    /// <summary>Join refusal when the token names another game (ADR-33).</summary>
+    public const string ReasonDifferentGame = "Token is for a different game";
+
     private readonly ServerOptions _options;
     private readonly EcsWorld _world;
 
@@ -1654,6 +1662,17 @@ public sealed class GameServerHost : IAsyncDisposable
                 return;
             }
 
+            // Step 3a: Check game ID before consuming the token or reserving capacity.
+            string tokenGame = Games.GameId.GameOrDefault(claims.GameId);
+            string serverGame = Games.GameId.GameOrDefault(_options.GameId);
+            if (!string.Equals(tokenGame, serverGame, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "Join rejected for {UserId}: token is for game {TokenGame}, this server serves {ServerGame}",
+                    claims.UserId, tokenGame, serverGame);
+                await SendError(tempConn, ReasonDifferentGame, handshakeToken);
+                return;
+            }
 
             // Step 3b: JTI replay protection
             if (string.IsNullOrEmpty(claims.Jti) || !_jtiTracker.TryConsume(claims.Jti))
