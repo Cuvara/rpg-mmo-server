@@ -16,7 +16,7 @@ func TestValidGameID(t *testing.T) {
 		want bool
 	}{
 		{constants.DefaultGameID, true},
-		{"gs", false}, {"map", false}, {"dungeon", false},
+		{"gs", false}, {"map", false}, {"dungeon", false}, {"other", false},
 		{"gsx", true}, {"maps", true}, {"dungeon1", true},
 		{"a", false},
 		{"ab", true},

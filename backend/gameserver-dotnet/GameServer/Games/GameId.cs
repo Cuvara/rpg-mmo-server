@@ -13,9 +13,11 @@ public static class GameId
     public static bool IsValidGameId(string? id)
     {
         if (id == null || id.Length < 2 || id.Length > 24 || !IsLower(id[0])) return false;
+        // "other" is the gateway metrics bucket for unknown games.
         if (string.Equals(id, "gs", StringComparison.Ordinal) ||
             string.Equals(id, "map", StringComparison.Ordinal) ||
-            string.Equals(id, "dungeon", StringComparison.Ordinal)) return false;
+            string.Equals(id, "dungeon", StringComparison.Ordinal) ||
+            string.Equals(id, "other", StringComparison.Ordinal)) return false;
         for (int i = 1; i < id.Length; i++)
             if (!IsLower(id[i]) && !IsDigit(id[i])) return false;
         return true;

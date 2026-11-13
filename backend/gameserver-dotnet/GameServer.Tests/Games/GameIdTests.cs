@@ -13,6 +13,7 @@ public class GameIdTests
     [InlineData("gs", false)]
     [InlineData("map", false)]
     [InlineData("dungeon", false)]
+    [InlineData("other", false)]
     [InlineData("gsx", true)]
     [InlineData("maps", true)]
     [InlineData("dungeon1", true)]

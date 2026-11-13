@@ -8,11 +8,13 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/constants"
 )
 
-// reservedGameIDs avoid collisions with default-game server IDs and fleet-derived pod names.
-var reservedGameIDs = map[string]struct{}{"gs": {}, "map": {}, "dungeon": {}}
+// reservedGameIDs avoid collisions with default-game server IDs, fleet-derived pod names,
+// and the gateway metrics bucket for unknown games.
+var reservedGameIDs = map[string]struct{}{"gs": {}, "map": {}, "dungeon": {}, "other": {}}
 
 // ValidGameID reports whether id matches ^[a-z][a-z0-9]{1,23}$ using ASCII bytes
-// and is not reserved for a default-game server ID or fleet-derived pod name prefix.
+// and is not reserved for a default-game server ID, fleet-derived pod name prefix,
+// or the gateway metrics bucket for unknown games.
 func ValidGameID(id string) bool {
 	if _, reserved := reservedGameIDs[id]; reserved {
 		return false

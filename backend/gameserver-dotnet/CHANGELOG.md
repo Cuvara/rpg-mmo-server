@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `IsValidGameId` and Go `ValidGameID` now reserve `other` because the gateway metrics label buckets unknown games as `other`.
+
 ### Added
 
 - Game IDs `gs`, `map` and `dungeon` are reserved to avoid default-game server ID collisions.
