@@ -8,6 +8,7 @@
 #
 #   ./stack.sh up        # build images + start everything (idempotent)
 #   ./stack.sh check     # drive the full client flow through it (smoketest)
+#   ./stack.sh check-secrets # offline check of JWT/join-secret separation
 #
 # ENCRYPTION. The gameplay hop is unencrypted here: docker-compose.yml pins
 # GAMESERVER_SEALED=off, with the reason at the line. To run the stack sealed:
@@ -211,6 +212,50 @@ for _n in $_stack_saved; do
 	eval "export $_n=\$_stack_save_$_n"
 done
 
+# Match compose's :- defaults, then check every key in a rotation list. Never
+# include values (or their lengths) in diagnostics: these logs are deploy output.
+check_join_keyring() { # variable-name value effective-jwt
+	local name="$1" remaining="$2" jwt="$3" key usable=0
+	while :; do
+		key=${remaining%%,*}
+		# The gateway and game server trim whitespace around rotation entries.
+		key="${key#"${key%%[![:space:]]*}"}"
+		key="${key%"${key##*[![:space:]]}"}"
+		if [ -n "$key" ]; then usable=1; fi
+		if [ "$key" = "$jwt" ]; then
+			echo "ERROR: $name must not contain JWT_SECRET as a join-token key." >&2
+			echo "  A game-server pod holding the join secret could forge gateway tokens if they were equal." >&2
+			return 1
+		fi
+		case "$remaining" in
+		*,*) remaining=${remaining#*,} ;;
+		*) break ;;
+		esac
+	done
+	if [ "$usable" -eq 0 ]; then
+		echo "ERROR: $name must contain a non-empty join-token key, distinct from JWT_SECRET." >&2
+		return 1
+	fi
+}
+
+check_secrets() {
+	local jwt="${JWT_SECRET:-dev-secret-change-me}" name
+	check_join_keyring JOIN_TOKEN_SECRET "${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}" "$jwt" || return 1
+	# Include set-but-empty per-game variables; they have no compose fallback.
+	# compgen also sees assignments loaded from the env file, without eval.
+	while IFS= read -r name; do
+		[ "$name" != JOIN_TOKEN_SECRET_ ] || continue
+		check_join_keyring "$name" "${!name}" "$jwt" || return 1
+	done < <(compgen -A variable JOIN_TOKEN_SECRET_ || true)
+	echo "checked: JOIN_TOKEN_SECRET and set per-game join secrets are non-empty and distinct from JWT_SECRET"
+}
+
+# This subcommand stops before host probes, docker, compose or network access.
+if [ "$CMD" = check-secrets ]; then
+	check_secrets
+	exit 0
+fi
+
 GATEWAY_PORT=${GATEWAY_CONTAINER_PORT:-8100}
 GAME_PORT=${GAMESERVER_CONTAINER_PORT:-9200}
 NAKAMA_PORT=${NAKAMA_HTTP_PORT:-7350}
@@ -280,6 +325,7 @@ redis_cli() {
 
 # ------------------------------------------------------------------ subcommands
 do_up() {
+	check_secrets
 	if [ "$NO_BUILD" -eq 0 ]; then
 		# Nakama runtime plugin (gateway_token RPC). Built into ./modules,
 		# which the nakama service bind-mounts.
@@ -468,7 +514,7 @@ logs) dc logs -f --tail=100 gateway gameserver-dotnet ;;
 health) do_health ;;
 check) do_check ;;
 *)
-	echo "unknown subcommand: $CMD (want up|down|ps|logs|health|check)" >&2
+	echo "unknown subcommand: $CMD (want up|down|ps|logs|health|check|check-secrets)" >&2
 	exit 2
 	;;
 esac

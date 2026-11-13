@@ -502,6 +502,16 @@ if [ -z "$nk_jwt" ] || [ "$nk_jwt" != "$gw_jwt" ]; then
 fi
 echo "checked: nakama's JWT_SECRET matches the gateway's jwt-secret"
 
+# Game-server pods hold only the join secret (ADR-33), so this comparison must
+# happen at deploy time, where both keys are available. Never log either value.
+join_secret=$($K get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath='{.data.join-token-secret}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$join_secret" ] || [ "$join_secret" = "$gw_jwt" ]; then
+  echo "ERROR: rpg-app-secrets' join-token-secret must be non-empty and differ from its jwt-secret." >&2
+  echo "  A game-server pod holding the join secret could forge gateway tokens if they were equal." >&2
+  exit 1
+fi
+echo "checked: rpg-app-secrets' join-token-secret is non-empty and differs from its jwt-secret"
+
 # The two STATIC Nakama keys, asserted for the same reason as the JWT above: this
 # Secret is applied out-of-band, so nothing else looks at it, and a value left at
 # Nakama's published default authenticates anyone who can reach the service.
