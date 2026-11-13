@@ -115,7 +115,7 @@ func TestPartyGetRPC_WorksServerToServer(t *testing.T) {
 		t.Fatalf("resp = %+v", resp)
 	}
 	// What the gateway actually does with it.
-	p, err := GetParty(serverCtx(), nk, "party-s2s")
+	p, err := GetParty(serverCtx(), nk, "", "party-s2s")
 	if err != nil {
 		t.Fatalf("GetParty: %v", err)
 	}

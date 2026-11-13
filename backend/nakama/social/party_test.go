@@ -18,7 +18,7 @@ func TestCreateParty(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 
-	p, err := CreateParty(ctx, store, "u1", fixedNow)
+	p, err := CreateParty(ctx, store, "", "u1", fixedNow)
 	if err != nil {
 		t.Fatalf("CreateParty: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestCreateParty_Errors(t *testing.T) {
 			if c.setup != nil {
 				c.setup(store)
 			}
-			if _, err := CreateParty(context.Background(), store, c.user, fixedNow); !errors.Is(err, c.want) {
+			if _, err := CreateParty(context.Background(), store, "", c.user, fixedNow); !errors.Is(err, c.want) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
 		})
@@ -82,7 +82,7 @@ func TestCreateParty_Errors(t *testing.T) {
 func TestCreateParty_StorageFailureIsWrapped(t *testing.T) {
 	store := newMemStore()
 	store.failMultiUpdate = errStorage
-	_, err := CreateParty(context.Background(), store, "u1", fixedNow)
+	_, err := CreateParty(context.Background(), store, "", "u1", fixedNow)
 	if !errors.Is(err, errStorage) {
 		t.Fatalf("err = %v, want it to wrap %v", err, errStorage)
 	}
@@ -101,7 +101,7 @@ func TestJoinParty(t *testing.T) {
 	store := newMemStore()
 	seeded := store.seedParty(t, "party-a", "u1")
 
-	p, err := JoinParty(ctx, store, "u2", seeded.ID, fixedNow)
+	p, err := JoinParty(ctx, store, "", "u2", seeded.ID, fixedNow)
 	if err != nil {
 		t.Fatalf("JoinParty: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestJoinParty_CapIsEnforced(t *testing.T) {
 
 	for i := 2; i <= MaxPartyMembers; i++ {
 		user := "u" + string(rune('0'+i))
-		if _, err := JoinParty(ctx, store, user, "party-a", fixedNow); err != nil {
+		if _, err := JoinParty(ctx, store, "", user, "party-a", fixedNow); err != nil {
 			t.Fatalf("join %d (%s): %v", i, user, err)
 		}
 	}
@@ -135,7 +135,7 @@ func TestJoinParty_CapIsEnforced(t *testing.T) {
 	}
 
 	// The 5th member (MaxPartyMembers is 4) must be rejected.
-	_, err := JoinParty(ctx, store, "u-overflow", "party-a", fixedNow)
+	_, err := JoinParty(ctx, store, "", "u-overflow", "party-a", fixedNow)
 	if !errors.Is(err, ErrPartyFull) {
 		t.Fatalf("overflow join err = %v, want ErrPartyFull", err)
 	}
@@ -181,7 +181,7 @@ func TestJoinParty_Errors(t *testing.T) {
 			if c.setup != nil {
 				c.setup(t, store)
 			}
-			if _, err := JoinParty(context.Background(), store, c.user, c.partyID, fixedNow); !errors.Is(err, c.want) {
+			if _, err := JoinParty(context.Background(), store, "", c.user, c.partyID, fixedNow); !errors.Is(err, c.want) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
 		})
@@ -196,7 +196,7 @@ func TestJoinParty_SamePartyIsIdempotent(t *testing.T) {
 	store := newMemStore()
 	store.seedParty(t, "party-a", "u1", "u2")
 
-	p, err := JoinParty(ctx, store, "u2", "party-a", fixedNow)
+	p, err := JoinParty(ctx, store, "", "u2", "party-a", fixedNow)
 	if err != nil {
 		t.Fatalf("re-join: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestJoinParty_ConcurrentJoins_RespectCap(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := JoinParty(ctx, store, user, "party-a", fixedNow)
+			_, err := JoinParty(ctx, store, "", user, "party-a", fixedNow)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -311,7 +311,7 @@ func TestCreateParty_ConcurrentBySameUser_OnlyOneWins(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			bar.arrive() // both past the membership read before either writes
-			p, err := CreateParty(ctx, store, "u1", fixedNow)
+			p, err := CreateParty(ctx, store, "", "u1", fixedNow)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -359,7 +359,7 @@ func TestJoinParty_ConcurrentDifferentParties_OnlyOneWins(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := JoinParty(ctx, store, "u3", target, fixedNow)
+			_, err := JoinParty(ctx, store, "", "u3", target, fixedNow)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -418,7 +418,7 @@ func TestLeaveParty(t *testing.T) {
 			store := newMemStore()
 			store.seedParty(t, "party-a", c.members...)
 
-			p, err := LeaveParty(ctx, store, c.leaver, fixedNow)
+			p, err := LeaveParty(ctx, store, "", c.leaver, fixedNow)
 			if err != nil {
 				t.Fatalf("LeaveParty: %v", err)
 			}
@@ -482,7 +482,7 @@ func TestLeaveParty_Errors(t *testing.T) {
 			if c.setup != nil {
 				c.setup(store)
 			}
-			if _, err := LeaveParty(context.Background(), store, c.user, fixedNow); !errors.Is(err, c.want) {
+			if _, err := LeaveParty(context.Background(), store, "", c.user, fixedNow); !errors.Is(err, c.want) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
 		})
@@ -495,7 +495,7 @@ func TestLeaveParty_StaleIndexIsCleared(t *testing.T) {
 	store := newMemStore()
 	store.put(MembershipCollection, MembershipKey, "u1", `{"party_id":"ghost"}`)
 
-	p, err := LeaveParty(context.Background(), store, "u1", fixedNow)
+	p, err := LeaveParty(context.Background(), store, "", "u1", fixedNow)
 	if err != nil {
 		t.Fatalf("LeaveParty: %v", err)
 	}
@@ -515,10 +515,10 @@ func TestLeaveThenJoinAnotherParty(t *testing.T) {
 	store.seedParty(t, "party-a", "u1", "u2")
 	store.seedParty(t, "party-b", "u3")
 
-	if _, err := LeaveParty(ctx, store, "u2", fixedNow); err != nil {
+	if _, err := LeaveParty(ctx, store, "", "u2", fixedNow); err != nil {
 		t.Fatalf("leave: %v", err)
 	}
-	p, err := JoinParty(ctx, store, "u2", "party-b", fixedNow)
+	p, err := JoinParty(ctx, store, "", "u2", "party-b", fixedNow)
 	if err != nil {
 		t.Fatalf("join after leave: %v", err)
 	}
@@ -534,7 +534,7 @@ func TestJoinParty_ContentionGivesUpWithErrPartyBusy(t *testing.T) {
 	store.seedParty(t, "party-a", "u1")
 	store.failMultiUpdate = errVersionConflict
 
-	_, err := JoinParty(context.Background(), store, "u2", "party-a", fixedNow)
+	_, err := JoinParty(context.Background(), store, "", "u2", "party-a", fixedNow)
 	if !errors.Is(err, ErrPartyBusy) {
 		t.Fatalf("err = %v, want ErrPartyBusy", err)
 	}
@@ -557,7 +557,7 @@ func TestGetParty(t *testing.T) {
 	store := newMemStore()
 	store.seedParty(t, "party-a", "u1", "u2")
 
-	p, err := GetParty(context.Background(), store, "party-a")
+	p, err := GetParty(context.Background(), store, "", "party-a")
 	if err != nil {
 		t.Fatalf("GetParty: %v", err)
 	}
@@ -568,10 +568,10 @@ func TestGetParty(t *testing.T) {
 		t.Error("IsMember must be false for a non-member")
 	}
 
-	if _, err := GetParty(context.Background(), store, "nope"); !errors.Is(err, ErrPartyNotFound) {
+	if _, err := GetParty(context.Background(), store, "", "nope"); !errors.Is(err, ErrPartyNotFound) {
 		t.Errorf("unknown party err = %v, want ErrPartyNotFound", err)
 	}
-	if _, err := GetParty(context.Background(), store, ""); !errors.Is(err, ErrPartyIDRequired) {
+	if _, err := GetParty(context.Background(), store, "", ""); !errors.Is(err, ErrPartyIDRequired) {
 		t.Errorf("empty id err = %v, want ErrPartyIDRequired", err)
 	}
 }
@@ -579,7 +579,7 @@ func TestGetParty(t *testing.T) {
 func TestGetParty_ReadFailureIsWrapped(t *testing.T) {
 	store := newMemStore()
 	store.failRead = errStorage
-	if _, err := GetParty(context.Background(), store, "party-a"); !errors.Is(err, errStorage) {
+	if _, err := GetParty(context.Background(), store, "", "party-a"); !errors.Is(err, errStorage) {
 		t.Fatalf("err = %v, want it to wrap %v", err, errStorage)
 	}
 }

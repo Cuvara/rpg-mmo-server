@@ -18,14 +18,17 @@
 //
 // # Storage model
 //
-//	collection "party",        key <party id>, owner SYSTEM  -> Party
-//	collection "party_member", key "current",  owner <user>  -> membership
+//	collection scoped(game, "party"),        key <party id>, owner SYSTEM -> Party
+//	collection scoped(game, "party_member"), key "current", owner <user> -> membership
+//
+// The default game keeps the bare names; other games use "<game>.<name>".
+// Parties and membership indexes never fall back to another game.
 //
 // The Party record is server-owned (empty UserID, which Nakama maps to the
 // system owner) with permissions 0/0, so no client can read or write party
 // state through Nakama's public storage API — only through these RPCs, which
 // enforce the cap and the leadership rules. The membership record is the
-// reverse index that makes "at most one party per user" enforceable with a
+// reverse index that makes "at most one party per user per game" enforceable with a
 // create-only write rather than a scan.
 //
 // # Concurrency
@@ -49,6 +52,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -75,11 +79,12 @@ const (
 	// PartyCollection holds one system-owned record per live party, keyed by
 	// party id.
 	PartyCollection = "party"
-	// MembershipCollection holds one record per user that is in a party,
+	// MembershipCollection holds one record per game and user that is in a party,
 	// keyed by MembershipKey and owned by that user.
 	MembershipCollection = "party_member"
 	// MembershipKey is the single key inside MembershipCollection. A user is
-	// in at most one party, so one key per user is all that is needed — and
+	// in at most one party per game, so one key per user in each game's
+	// collection is all that is needed — and
 	// the fixed key is what makes the create-only ("*") write enforce it.
 	MembershipKey = "current"
 )
@@ -164,9 +169,9 @@ func callerID(ctx context.Context) (string, error) {
 
 // readParty loads a party and its storage version. A missing party returns a
 // nil Party and no error: "gone" is a normal state, not a failure.
-func readParty(ctx context.Context, nk partyStore, partyID string) (*Party, string, error) {
+func readParty(ctx context.Context, nk partyStore, game, partyID string) (*Party, string, error) {
 	objs, err := nk.StorageRead(ctx, []*runtime.StorageRead{{
-		Collection: PartyCollection,
+		Collection: gamectx.Scoped(game, PartyCollection),
 		Key:        partyID,
 		UserID:     "", // system-owned
 	}})
@@ -174,7 +179,7 @@ func readParty(ctx context.Context, nk partyStore, partyID string) (*Party, stri
 		return nil, "", fmt.Errorf("read party %s: %w", partyID, err)
 	}
 	for _, o := range objs {
-		if o.GetCollection() != PartyCollection || o.GetKey() != partyID {
+		if o.GetCollection() != gamectx.Scoped(game, PartyCollection) || o.GetKey() != partyID {
 			continue
 		}
 		var p Party
@@ -187,9 +192,9 @@ func readParty(ctx context.Context, nk partyStore, partyID string) (*Party, stri
 }
 
 // readMembership loads a user's current-party index and its storage version.
-func readMembership(ctx context.Context, nk partyStore, userID string) (*membership, string, error) {
+func readMembership(ctx context.Context, nk partyStore, game, userID string) (*membership, string, error) {
 	objs, err := nk.StorageRead(ctx, []*runtime.StorageRead{{
-		Collection: MembershipCollection,
+		Collection: gamectx.Scoped(game, MembershipCollection),
 		Key:        MembershipKey,
 		UserID:     userID,
 	}})
@@ -197,7 +202,7 @@ func readMembership(ctx context.Context, nk partyStore, userID string) (*members
 		return nil, "", fmt.Errorf("read membership %s: %w", userID, err)
 	}
 	for _, o := range objs {
-		if o.GetCollection() != MembershipCollection || o.GetKey() != MembershipKey {
+		if o.GetCollection() != gamectx.Scoped(game, MembershipCollection) || o.GetKey() != MembershipKey {
 			continue
 		}
 		var m membership
@@ -212,10 +217,10 @@ func readMembership(ctx context.Context, nk partyStore, userID string) (*members
 // partyWrite builds the storage write for a party record at a known version.
 // version is "*" for a create and the version read at the start of the attempt
 // for an update; either way a concurrent writer makes this write fail.
-func partyWrite(p *Party, version string) *runtime.StorageWrite {
+func partyWrite(game string, p *Party, version string) *runtime.StorageWrite {
 	value, _ := json.Marshal(p) // Party has no unmarshalable field
 	return &runtime.StorageWrite{
-		Collection:      PartyCollection,
+		Collection:      gamectx.Scoped(game, PartyCollection),
 		Key:             p.ID,
 		UserID:          "", // system-owned: no client may read or write it directly
 		Value:           string(value),
@@ -228,10 +233,10 @@ func partyWrite(p *Party, version string) *runtime.StorageWrite {
 // membershipWrite builds the create-only write for a user's party index. The
 // "*" version is what enforces one-party-at-a-time: if the user already has an
 // index record, the whole MultiUpdate is rejected.
-func membershipWrite(userID, partyID string, now time.Time) *runtime.StorageWrite {
+func membershipWrite(game, userID, partyID string, now time.Time) *runtime.StorageWrite {
 	value, _ := json.Marshal(membership{PartyID: partyID, JoinedAt: now.Unix()})
 	return &runtime.StorageWrite{
-		Collection:      MembershipCollection,
+		Collection:      gamectx.Scoped(game, MembershipCollection),
 		Key:             MembershipKey,
 		UserID:          userID,
 		Value:           string(value),
@@ -246,11 +251,11 @@ func membershipWrite(userID, partyID string, now time.Time) *runtime.StorageWrit
 // The party record and the caller's membership index are written in one
 // MultiUpdate, both create-only, so a caller who is already in a party gets
 // ErrAlreadyInParty and no orphan party is left behind.
-func CreateParty(ctx context.Context, nk partyStore, userID string, now func() time.Time) (*Party, error) {
+func CreateParty(ctx context.Context, nk partyStore, game, userID string, now func() time.Time) (*Party, error) {
 	if userID == "" {
 		return nil, ErrUnauthenticated
 	}
-	if m, _, err := readMembership(ctx, nk, userID); err != nil {
+	if m, _, err := readMembership(ctx, nk, game, userID); err != nil {
 		return nil, fmt.Errorf("create party: %w", err)
 	} else if m != nil {
 		return nil, ErrAlreadyInParty
@@ -270,12 +275,12 @@ func CreateParty(ctx context.Context, nk partyStore, userID string, now func() t
 	}
 
 	if _, _, err := nk.MultiUpdate(ctx, nil,
-		[]*runtime.StorageWrite{partyWrite(p, "*"), membershipWrite(userID, id, ts)},
+		[]*runtime.StorageWrite{partyWrite(game, p, "*"), membershipWrite(game, userID, id, ts)},
 		nil, nil, false); err != nil {
 		// The party id is fresh and unguessable, so the only version check
 		// that can realistically fail here is the membership one: the caller
 		// joined or created a party between our read and this write.
-		if m, _, rerr := readMembership(ctx, nk, userID); rerr == nil && m != nil {
+		if m, _, rerr := readMembership(ctx, nk, game, userID); rerr == nil && m != nil {
 			return nil, ErrAlreadyInParty
 		}
 		return nil, fmt.Errorf("create party %s: %w", id, err)
@@ -285,7 +290,7 @@ func CreateParty(ctx context.Context, nk partyStore, userID string, now func() t
 
 // JoinParty adds the caller to an existing party.
 //
-// One party at a time — this FAILS, it does not silently move the caller.
+// One party at a time per game — this FAILS, it does not silently move the caller.
 // Auto-leaving the old party would make an additive-looking call destructive:
 // if the caller happened to be leading a party, a mistyped or replayed join
 // would transfer that leadership away, or delete the party outright if they
@@ -298,7 +303,7 @@ func CreateParty(ctx context.Context, nk partyStore, userID string, now func() t
 //
 // Concurrency: bounded read-modify-write. Each attempt re-reads the party, so
 // a retry always validates the cap against the state the winner just wrote.
-func JoinParty(ctx context.Context, nk partyStore, userID, partyID string, now func() time.Time) (*Party, error) {
+func JoinParty(ctx context.Context, nk partyStore, game, userID, partyID string, now func() time.Time) (*Party, error) {
 	if userID == "" {
 		return nil, ErrUnauthenticated
 	}
@@ -308,7 +313,7 @@ func JoinParty(ctx context.Context, nk partyStore, userID, partyID string, now f
 
 	var lastErr error
 	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
-		m, _, err := readMembership(ctx, nk, userID)
+		m, _, err := readMembership(ctx, nk, game, userID)
 		if err != nil {
 			return nil, fmt.Errorf("join party: %w", err)
 		}
@@ -317,7 +322,7 @@ func JoinParty(ctx context.Context, nk partyStore, userID, partyID string, now f
 				return nil, ErrAlreadyInParty
 			}
 			// Already in this exact party: idempotent success.
-			p, _, err := readParty(ctx, nk, partyID)
+			p, _, err := readParty(ctx, nk, game, partyID)
 			if err != nil {
 				return nil, fmt.Errorf("join party: %w", err)
 			}
@@ -329,7 +334,7 @@ func JoinParty(ctx context.Context, nk partyStore, userID, partyID string, now f
 			return p, nil
 		}
 
-		p, version, err := readParty(ctx, nk, partyID)
+		p, version, err := readParty(ctx, nk, game, partyID)
 		if err != nil {
 			return nil, fmt.Errorf("join party: %w", err)
 		}
@@ -352,7 +357,7 @@ func JoinParty(ctx context.Context, nk partyStore, userID, partyID string, now f
 			UpdatedAt: ts.Unix(),
 		}
 		if _, _, err := nk.MultiUpdate(ctx, nil,
-			[]*runtime.StorageWrite{partyWrite(updated, version), membershipWrite(userID, partyID, ts)},
+			[]*runtime.StorageWrite{partyWrite(game, updated, version), membershipWrite(game, userID, partyID, ts)},
 			nil, nil, false); err != nil {
 			lastErr = err
 			continue // lost a version check (or a transient failure): re-read and re-validate
@@ -374,14 +379,14 @@ func JoinParty(ctx context.Context, nk partyStore, userID, partyID string, now f
 //
 // It returns the party as it stands after the departure, or nil when the
 // party was deleted.
-func LeaveParty(ctx context.Context, nk partyStore, userID string, now func() time.Time) (*Party, error) {
+func LeaveParty(ctx context.Context, nk partyStore, game, userID string, now func() time.Time) (*Party, error) {
 	if userID == "" {
 		return nil, ErrUnauthenticated
 	}
 
 	var lastErr error
 	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
-		m, memberVersion, err := readMembership(ctx, nk, userID)
+		m, memberVersion, err := readMembership(ctx, nk, game, userID)
 		if err != nil {
 			return nil, fmt.Errorf("leave party: %w", err)
 		}
@@ -389,13 +394,13 @@ func LeaveParty(ctx context.Context, nk partyStore, userID string, now func() ti
 			return nil, ErrNotInParty
 		}
 
-		p, version, err := readParty(ctx, nk, m.PartyID)
+		p, version, err := readParty(ctx, nk, game, m.PartyID)
 		if err != nil {
 			return nil, fmt.Errorf("leave party: %w", err)
 		}
 
 		memberDelete := &runtime.StorageDelete{
-			Collection: MembershipCollection,
+			Collection: gamectx.Scoped(game, MembershipCollection),
 			Key:        MembershipKey,
 			UserID:     userID,
 			Version:    memberVersion,
@@ -432,7 +437,7 @@ func LeaveParty(ctx context.Context, nk partyStore, userID string, now func() ti
 		// Last member out: delete the party and the index in one update.
 		if len(remaining) == 0 {
 			if _, _, err := nk.MultiUpdate(ctx, nil, nil, []*runtime.StorageDelete{
-				{Collection: PartyCollection, Key: p.ID, UserID: "", Version: version},
+				{Collection: gamectx.Scoped(game, PartyCollection), Key: p.ID, UserID: "", Version: version},
 				memberDelete,
 			}, nil, false); err != nil {
 				lastErr = err
@@ -453,7 +458,7 @@ func LeaveParty(ctx context.Context, nk partyStore, userID string, now func() ti
 			UpdatedAt: now().Unix(),
 		}
 		if _, _, err := nk.MultiUpdate(ctx, nil,
-			[]*runtime.StorageWrite{partyWrite(updated, version)},
+			[]*runtime.StorageWrite{partyWrite(game, updated, version)},
 			[]*runtime.StorageDelete{memberDelete}, nil, false); err != nil {
 			lastErr = err
 			continue
@@ -466,11 +471,11 @@ func LeaveParty(ctx context.Context, nk partyStore, userID string, now func() ti
 
 // GetParty reads a party by id. No caller check: party_get is the one party
 // RPC the gateway calls server-to-server.
-func GetParty(ctx context.Context, nk partyStore, partyID string) (*Party, error) {
+func GetParty(ctx context.Context, nk partyStore, game, partyID string) (*Party, error) {
 	if partyID == "" {
 		return nil, ErrPartyIDRequired
 	}
-	p, _, err := readParty(ctx, nk, partyID)
+	p, _, err := readParty(ctx, nk, game, partyID)
 	if err != nil {
 		return nil, fmt.Errorf("get party: %w", err)
 	}
@@ -488,6 +493,8 @@ func GetParty(ctx context.Context, nk partyStore, partyID string) (*Party, error
 // party_leave take no payload: their subject is the caller.
 type PartyRequest struct {
 	PartyID string `json:"party_id"`
+	// GameID selects the game without a session; a client session must match it.
+	GameID string `json:"game_id,omitempty"`
 }
 
 // PartyResponse is returned by every party RPC.
@@ -550,7 +557,15 @@ func PartyCreateRPC(ctx context.Context, logger runtime.Logger, _ *sql.DB, nk ru
 	if !allowPartyWrite(userID) {
 		return "", ErrRateLimited
 	}
-	p, err := CreateParty(ctx, nk, userID, time.Now)
+	game, err := gamectx.GameFromContext(ctx, "")
+	if err != nil {
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			logger.Error("party_create: invalid GAMES configuration: %v", err)
+			return "", ErrInternal
+		}
+		return "", err
+	}
+	p, err := CreateParty(ctx, nk, game, userID, time.Now)
 	if err != nil {
 		return "", clientError(logger, "party_create", userID, err)
 	}
@@ -574,7 +589,15 @@ func PartyJoinRPC(ctx context.Context, logger runtime.Logger, _ *sql.DB, nk runt
 	if req.PartyID == "" {
 		return "", ErrPartyIDRequired
 	}
-	p, err := JoinParty(ctx, nk, userID, req.PartyID, time.Now)
+	game, err := gamectx.GameFromContext(ctx, req.GameID)
+	if err != nil {
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			logger.Error("party_join: invalid GAMES configuration: %v", err)
+			return "", ErrInternal
+		}
+		return "", err
+	}
+	p, err := JoinParty(ctx, nk, game, userID, req.PartyID, time.Now)
 	if err != nil {
 		return "", clientError(logger, "party_join", userID, err)
 	}
@@ -593,7 +616,15 @@ func PartyLeaveRPC(ctx context.Context, logger runtime.Logger, _ *sql.DB, nk run
 	if !allowPartyWrite(userID) {
 		return "", ErrRateLimited
 	}
-	p, err := LeaveParty(ctx, nk, userID, time.Now)
+	game, err := gamectx.GameFromContext(ctx, "")
+	if err != nil {
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			logger.Error("party_leave: invalid GAMES configuration: %v", err)
+			return "", ErrInternal
+		}
+		return "", err
+	}
+	p, err := LeaveParty(ctx, nk, game, userID, time.Now)
 	if err != nil {
 		return "", clientError(logger, "party_leave", userID, err)
 	}
@@ -623,7 +654,15 @@ func PartyGetRPC(ctx context.Context, logger runtime.Logger, _ *sql.DB, nk runti
 	if req.PartyID == "" {
 		return "", ErrPartyIDRequired
 	}
-	p, err := GetParty(ctx, nk, req.PartyID)
+	game, err := gamectx.GameFromContext(ctx, req.GameID)
+	if err != nil {
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			logger.Error("party_get: invalid GAMES configuration: %v", err)
+			return "", ErrInternal
+		}
+		return "", err
+	}
+	p, err := GetParty(ctx, nk, game, req.PartyID)
 	if err != nil {
 		callerLabel, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
 		if callerLabel == "" {
