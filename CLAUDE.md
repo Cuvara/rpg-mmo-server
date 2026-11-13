@@ -76,11 +76,12 @@ Each module has its own `CLAUDE.md` with detailed role-specific instructions, pl
 
 ```
    (Client → Gateway is TCP, optionally TLS. Client → GameServer is KCP over UDP ONLY.)
-1. Client → Gateway:    MsgAuth { JWT }            (JWT verified locally, shared secret — no Nakama roundtrip)
+1. Client → Gateway:    MsgAuth { JWT }            (JWT verified locally, shared secret — no Nakama roundtrip;
+                                                    may carry `gid`, ADR-33)
 2. Gateway → Client:    MsgAuthResp { OK, UserID }
 3. Client → Gateway:    MsgEnterWorld { MapID }
 4. Gateway → Client:    MsgEnterWorldResp { ServerAddr, JoinToken }
-5. Client → GameServer: MsgJoinToken { Token }
+5. Client → GameServer: MsgJoinToken { Token }     (join token carries the same `gid` from ADR-33 leg 3)
 6. GameServer → Client: MsgJoinTokenResp { OK }
 7. Client → GameServer: MsgInput { MoveX, MoveY, AttackTargetID }  (per tick)
 8. GameServer → Client: MsgSnapshot { Tick, AckTick, Full, Entities[], Removed[] }  (per tick)
@@ -92,6 +93,21 @@ snapshots (default 30), deltas in between carrying only changed entities plus a
 despawn list. `AckTick` is the newest client input tick the server accepted for that
 player — the client's reconciliation anchor. Normative wire reference and client
 merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
+
+The game id travels in tokens, not in wire messages (ADR-33 in
+`backend/docs/ARCHITECTURE-DECISIONS.md`). The gateway token that Nakama
+`gateway_token` mints carries an optional JWT claim `gid` next to `cid` (Go
+`jwt.Claims.GameID`, tag `json:"gid,omitempty"`; C# `JwtValidator` claim `gid`).
+Nakama omits it for the default game and sets it for any other game in the `GAMES`
+allow-list. Absent `gid` means the default game, `DefaultGameID = "cuvara"` (Go
+`constants.DefaultGameID`, C# `GameServer.Games.GameId.DefaultGameId`). The gateway
+copies `gid` into the join token as it does `cid`, and the game server compares it
+with its own `GAMESERVER_GAME_ID` after the `sid` check and refuses a mismatch
+(ADR-33 D1 item 4). Neither is implemented yet: the gateway copy is leg 3 and the
+server check is leg 2. The client never names the game: `MsgEnterWorld { MapID }`
+is unchanged and the gateway composes `(game, map_id)` from the authenticated `gid`
+(ADR-33 D1 item 3, option C). `wire.proto` does not change and the protocol version
+is not bumped.
 
 ### Extension Seams (MVP → Production)
 
