@@ -29,7 +29,6 @@ public class AoiRadiusWiringTests
         Mode = "map",
         TickRate = 20,
         Capacity = 4,
-        JwtSecret = Secret,
         JoinTokenSecret = Secret,
         Aoi = aoi,
         LoggerFactory = NullLoggerFactory.Instance,

@@ -15,7 +15,7 @@ namespace GameServer.Tests.Persistence;
 [Collection(PostgresCollection.Name)]
 public class PostgresPersistenceIntegrationTests
 {
-    private const string JwtSecret = "integration-test-secret";
+    private const string JoinSecret = "integration-test-secret";
 
     private readonly PostgresFixture _pg;
 
@@ -40,8 +40,7 @@ public class PostgresPersistenceIntegrationTests
             Mode = "map",
             TickRate = 20,
             Capacity = 4,
-            JwtSecret = JwtSecret,
-            JoinTokenSecret = JwtSecret,
+            JoinTokenSecret = JoinSecret,
             SaveInterval = TimeSpan.FromMilliseconds(300),
             PlayerStore = store,
             LoggerFactory = NullLoggerFactory.Instance
@@ -59,7 +58,7 @@ public class PostgresPersistenceIntegrationTests
 
             // Join
             await SendAsync(stream, MsgType.JoinToken,
-                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, serverId, JwtSecret) });
+                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, serverId, JoinSecret) });
 
             var joinEnv = await WireProtocol.DecodeAsync(stream, cts.Token);
             Assert.NotNull(joinEnv);

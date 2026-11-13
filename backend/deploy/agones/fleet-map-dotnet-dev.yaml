@@ -182,6 +182,13 @@ spec:
                 # the controller is free to change per pod. Confirm on the live
                 # pod during stage 4:
                 #   kubectl exec -n rpg-realtime <pod> -c gameserver -- env | grep AGONES
+                # Unset = cuvara; a non-default game's fleet must be named '<game>-...' so pod names carry the prefix (leg 5).
+                - name: GAMESERVER_GAME_ID
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: game-id
+                      optional: true
                 - name: GAMESERVER_MODE
                   value: "map"
                 - name: GAMESERVER_MAP_ID

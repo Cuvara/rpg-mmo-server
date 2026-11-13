@@ -44,7 +44,7 @@ namespace GameServer.Tests.Server;
 [Collection(WallClockCollection.Name)]
 public class SnapshotCadenceTests
 {
-    private const string JwtSecret = "cadence-probe-secret-32-bytes-aaa";
+    private const string JoinSecret = "cadence-probe-secret-32-bytes-aaa";
     private const string ServerId = "gs-cadence-probe";
 
     /// <summary>Seconds discarded before measuring: the join keyframe and the phase-in.</summary>
@@ -68,7 +68,7 @@ public class SnapshotCadenceTests
         {
             ServerAddr = ":0", ServerId = ServerId, MapId = "map_cadence", Mode = "map",
             Transport = TransportKind.Kcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
-            Capacity = 8, JwtSecret = JwtSecret, JoinTokenSecret = JwtSecret,
+            Capacity = 8, JoinTokenSecret = JoinSecret,
             SaveInterval = TimeSpan.FromSeconds(300), PlayerStore = new MemoryPlayerStore(),
             LoggerFactory = NullLoggerFactory.Instance
         };
@@ -88,7 +88,7 @@ public class SnapshotCadenceTests
                 await ConnectWithRetryAsync(c, port);
                 var stream = c.GetStream();
                 await WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.JoinToken,
-                    new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+                    new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) },
                     WireEncoding.Json));
                 var joinEnv = await WireProtocol.DecodeAsync(stream, cts.Token);
                 Assert.NotNull(joinEnv);

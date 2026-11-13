@@ -55,6 +55,14 @@ internal static class ServerEnv
     /// </summary>
     public const string Id = "GAMESERVER_ID";
 
+    /// <summary>
+    /// The game this server serves (ADR-33), per fleet/service and never per map.
+    /// Unset or empty defaults to <c>GameServer.Games.GameId.DefaultGameId</c> (cuvara).
+    /// A value failing <c>GameId.IsValidGameId</c> exits 2. A non-default game also
+    /// requires the resolved server id to start with <c>&lt;game&gt;-</c> (D2 S1).
+    /// </summary>
+    public const string GameId = "GAMESERVER_GAME_ID";
+
     /// <summary>Map this server owns. Absent on a dungeon fleet on purpose (ADR-26).</summary>
     public const string MapId = "GAMESERVER_MAP_ID";
 

@@ -765,27 +765,34 @@ Two independent secrets:
 
 | Secret | Signs | Distributed to |
 |--------|-------|----------------|
-| `JWT_SECRET` | Nakama → client auth token | Nakama, gateway |
+| `JWT_SECRET` | Nakama → client auth token | Nakama, gateway — **never a game-server pod** |
 | `JOIN_TOKEN_SECRET` | gateway → game server join token | gateway, **every game-server pod** |
 
 `GameServerHost` verifies the join token against `JOIN_TOKEN_SECRET` only. The
 Go gateway signs it with the same variable (`backend/gateway/cmd/gateway/main.go`),
 so the two halves are symmetric by construction.
 
-**Fallback, and why it exists.** When `JOIN_TOKEN_SECRET` is unset both halves
-fall back to `JWT_SECRET` and both log the same start-up warning. This is the
-pre-split behaviour and keeps existing deployments working; it is also the reason
-the split has to be enabled on gateway and game servers *together*. Setting it on
-the gateway alone means the gateway signs with a key no game server holds and
-every join fails — which is exactly why the C# half had to land before the split
-could be turned on anywhere. The fallback decision lives in one place,
-`ServerOptions.EffectiveJoinTokenSecret`, mirroring Go's
-`config.Config.EffectiveJoinTokenSecret`.
+**Game servers no longer hold or read `JWT_SECRET` (ADR-33 D7).** The server has
+no `--jwt-secret` flag, no `JWT_SECRET` read and no `ServerOptions.JwtSecret`;
+deploy manifests do not need to give it to a game-server pod. `JOIN_TOKEN_SECRET`
+is required on both halves with no fallback: a game server without a usable one
+exits 2 at startup, and so does the gateway.
+
+**Superseded: the fallback.** The split originally shipped with a fallback: when
+`JOIN_TOKEN_SECRET` was unset both halves verified with `JWT_SECRET` and logged a
+start-up warning, so existing deployments kept working while the split was
+enabled on gateway and game servers *together*. Both halves have since made the
+join secret mandatory, and the game server then dropped `JWT_SECRET` entirely.
+With it went the two start-up warnings that used it ("`JWT_SECRET` not set" and
+"`JOIN_TOKEN_SECRET` and `JWT_SECRET` are the same value"). The "same value" check
+cannot run on a process that holds only one of the two secrets; it belongs at
+deploy time (ADR-33 leg 5), and the gateway, which holds both, still logs it.
 
 ### Rotation contract
 
-Both variables accept a comma-separated list, `"current,previous"`, parsed by
-`JwtKeyring` — the C# counterpart of Go's `shared/jwt.Keyring`. The contract is
+`JOIN_TOKEN_SECRET` accepts a comma-separated list, `"current,previous"`, parsed by
+`JwtKeyring` — the C# counterpart of Go's `shared/jwt.Keyring`, which also parses
+the gateway's `JWT_SECRET` the same way. The contract is
 deliberately identical on both sides, because any divergence surfaces only during
 a rotation, i.e. at the worst possible moment:
 

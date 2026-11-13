@@ -165,7 +165,7 @@ public class AtomicAdmissionTests
             MsgType.JoinToken,
             new JoinTokenRequest
             {
-                Token = TestHelpers.CreateTestJwt("user-gone", HardeningHarness.ServerId, HardeningHarness.JwtSecret)
+                Token = TestHelpers.CreateTestJwt("user-gone", HardeningHarness.ServerId, HardeningHarness.JoinSecret)
             },
             WireEncoding.Json);
         await vanishing.GetStream().WriteAsync(WireProtocol.Encode(join));

@@ -58,7 +58,6 @@ internal sealed class V3ServerHarness : IAsyncDisposable
             Transport = TransportKind.Kcp,
             TickRate = 20,
             MinProtocolVersion = minProtocolVersion,
-            JwtSecret = Secret,
             JoinTokenSecret = Secret,
             HoldTtl = TimeSpan.FromMilliseconds(200),
             SaveInterval = TimeSpan.FromHours(1),

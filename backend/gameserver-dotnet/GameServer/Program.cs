@@ -5,6 +5,7 @@ using GameServer;
 using GameServer.Agones;
 using GameServer.Content;
 using GameServer.Events;
+using GameServer.Games;
 using GameServer.Observability;
 using GameServer.Scaffolding;
 using GameServer.Persistence;
@@ -29,6 +30,8 @@ string? explicitMapId = GetArg(args, "--map-id") ?? Env(ServerEnv.MapId);
 // reads map_01 is otherwise a genuinely alarming thing to find.
 string mapId = explicitMapId ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env(ServerEnv.Id) ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
+string? configuredGameId = GetArg(args, "--game-id") ?? Env(ServerEnv.GameId);
+bool gameOk = ServerGame.TryResolve(configuredGameId, serverId, out string gameId, out string? gameError);
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env(ServerEnv.Capacity), out var cap) ? cap : 100;
 // Pre-join bounds (workspace audit F03). Capacity counts authenticated players only; these
 // two bound the phase before that — how many accepted sockets may sit in the handshake at
@@ -148,8 +151,7 @@ string nakamaHttpKey = Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey";
 // which correctly refuses a self-signed one. There is no accept-anything setting, here or
 // anywhere else in this system (ADR-24 decision 4).
 string? nakamaTlsPinPath = Env("NAKAMA_TLS_PIN");
-string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
-// Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
+// Secret the GATEWAY signs join tokens with, separate from the Nakama auth secret: this value
 // is distributed to every game-server pod, so a compromised pod must not be able to
 // mint Nakama-style auth tokens. REQUIRED (fatal if unset).
 // Comma-separated ("current,previous") to rotate without dropping joins.
@@ -235,8 +237,15 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 });
 var logger = loggerFactory.CreateLogger("Program");
 
-// First check after the logger exists: a server that cannot speak the transport its
-// clients will dial must not get as far as migrations, registration or Agones Ready.
+// Reject invalid game identity before migrations, registration or any connections.
+if (!gameOk)
+{
+    logger.LogCritical("{Error}", gameError);
+    return 2;
+}
+
+// A server that cannot speak the transport its clients will dial must not get as far
+// as migrations, registration or Agones Ready.
 if (!transportOk)
 {
     logger.LogCritical("{Error}", transportError);
@@ -461,6 +470,7 @@ logger.LogInformation("  Transport: {Transport}/udp{Encryption}", transport,
 logger.LogInformation("  KCP limits: {Limits}", kcpLimits);
 logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
+logger.LogInformation("  GameId:    {GameId}", gameId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
 logger.LogInformation("  Handshake: {Pending} pending max, {Timeout}ms deadline",
     maxPendingHandshakes, handshakeTimeoutMs);
@@ -823,18 +833,13 @@ logger.LogInformation(
     "everywhere today). See ADR-25 decision 6.",
     serverIdentity.PublicKeyBase64);
 
-if (string.IsNullOrEmpty(jwtSecret))
-{
-    logger.LogWarning("JWT_SECRET not set -- token validation will reject all tokens in production");
-}
-
 // JOIN_TOKEN_SECRET is mandatory: a game server that cannot verify join tokens
 // must not start, otherwise every client that tries to join gets a cryptic rejection.
 if (string.IsNullOrEmpty(joinTokenSecret))
 {
     logger.LogCritical("JOIN_TOKEN_SECRET is required but not set -- refusing to start. " +
                        "Set JOIN_TOKEN_SECRET to a dedicated secret (and the matching value on the gateway). " +
-                       "Do NOT reuse JWT_SECRET: a compromised game-server pod must not be able to forge auth tokens.");
+                       "Do not reuse the Nakama auth secret: a compromised game-server pod must not be able to forge auth tokens.");
     return 2;
 }
 var joinKeyring = JwtKeyring.Parse(joinTokenSecret);
@@ -842,11 +847,6 @@ if (!joinKeyring.IsValid)
 {
     logger.LogCritical("JOIN_TOKEN_SECRET contains no usable secrets -- refusing to start");
     return 2;
-}
-if (joinTokenSecret == jwtSecret)
-{
-    logger.LogWarning("JOIN_TOKEN_SECRET and JWT_SECRET are the same value -- a leak of either " +
-                      "secret compromises both the Nakama auth hop and the game-server hop. Use distinct secrets before launch.");
 }
 logger.LogInformation("  JoinToken: JOIN_TOKEN_SECRET, {Count} key(s){Rotating}",
     joinKeyring.Count,
@@ -1004,6 +1004,7 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
         registrationOptions = new RegistrationOptions
         {
             ServerId = serverId,
+            GameId = gameId,
             MapId = mapId,
             PublicAddr = publicAddr,
             Transport = transport,
@@ -1087,6 +1088,7 @@ var options = new ServerOptions
     TransportKey = transportKey,
     KcpLimits = kcpLimits,
     ServerId = serverId,
+    GameId = gameId,
     MapId = mapId,
     Mode = mode,
     TickRate = tickRate,
@@ -1114,7 +1116,6 @@ var options = new ServerOptions
     FieldDelta = fieldDelta,
     SealedTransport = sealedRequirement,
     ServerIdentity = serverIdentity,
-    JwtSecret = jwtSecret,
     JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
     SaveInterval = TimeSpan.FromSeconds(30),

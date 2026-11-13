@@ -111,6 +111,13 @@ spec:
                 # AGONES_SDK_HTTP_PORT is deliberately NOT set: Agones injects
                 # it per pod and the SDK defaults to 9358. Pinning it here
                 # pins a value the controller is free to change.
+                # Unset = cuvara; a non-default game's fleet must be named '<game>-...' so pod names carry the prefix (leg 5).
+                - name: GAMESERVER_GAME_ID
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: game-id
+                      optional: true
                 - name: GAMESERVER_MODE
                   value: "map"
                 - name: GAMESERVER_MAP_ID

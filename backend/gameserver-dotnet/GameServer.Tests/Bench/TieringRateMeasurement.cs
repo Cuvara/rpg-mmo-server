@@ -54,7 +54,7 @@ namespace GameServer.Tests.Bench;
 public sealed class TieringRateMeasurement
 {
     private const string EnvVar = "MEASURE_TIERING";
-    private const string JwtSecret = "tiering-measure-secret-32-bytes!";
+    private const string JoinSecret = "tiering-measure-secret-32-bytes!";
     private const string ServerId = "gs-tiermeasure";
     private const int Seed = 20260924;
 
@@ -144,7 +144,7 @@ public sealed class TieringRateMeasurement
         {
             ServerAddr = ":0", ServerId = ServerId, MapId = "map_tiermeasure", Mode = "map",
             Transport = TransportKind.Kcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
-            Capacity = 32, JwtSecret = JwtSecret, JoinTokenSecret = JwtSecret,
+            Capacity = 32, JoinTokenSecret = JoinSecret,
             SaveInterval = TimeSpan.FromHours(1), PlayerStore = new MemoryPlayerStore(),
             Importance = ImportanceSettings.Balanced,
             ReplicationSchedule = schedule!,
@@ -316,7 +316,7 @@ public sealed class TieringRateMeasurement
     private static async Task JoinAsync(Stream stream, string userId, WireEncoding encoding, CancellationToken ct)
     {
         await WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.JoinToken,
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) },
             encoding), ct);
         var env = await WireProtocol.DecodeAsync(stream, ct);
         Assert.NotNull(env);

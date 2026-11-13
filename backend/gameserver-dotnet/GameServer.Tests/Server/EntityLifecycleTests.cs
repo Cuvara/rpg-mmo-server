@@ -22,7 +22,7 @@ namespace GameServer.Tests.Server;
 /// </summary>
 public class EntityLifecycleTests
 {
-    private const string JwtSecret = "lifecycle-test-secret";
+    private const string JoinSecret = "lifecycle-test-secret";
     private const string ServerId = "gs-lifecycle";
     private static readonly TimeSpan ShortHold = TimeSpan.FromMilliseconds(300);
 
@@ -142,7 +142,7 @@ public class EntityLifecycleTests
         {
             var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, h.Port);
-            await SendJoinAsync(client.GetStream(), $"user-vanisher-{i}", JwtSecret);
+            await SendJoinAsync(client.GetStream(), $"user-vanisher-{i}", JoinSecret);
             client.Abort(); // vanish, not a graceful close
         }
 
@@ -183,7 +183,7 @@ public class EntityLifecycleTests
         {
             var doomed = new KcpTestClient();
             await ConnectWithRetryAsync(doomed, h.Port);
-            await SendJoinAsync(doomed.GetStream(), $"user-doomed-{i}", JwtSecret);
+            await SendJoinAsync(doomed.GetStream(), $"user-doomed-{i}", JoinSecret);
             doomed.Abort();
         }
 
@@ -281,8 +281,7 @@ public class EntityLifecycleTests
                     : KcpListenerOptions.Default,
                 TickRate = 20,
                 Capacity = capacity,
-                JwtSecret = JwtSecret,
-                JoinTokenSecret = JwtSecret,
+                JoinTokenSecret = JoinSecret,
                 HoldTtl = hold ?? ShortHold,
                 SaveInterval = TimeSpan.FromHours(1), // the periodic sweep is not under test
                 Metrics = metrics,
@@ -305,7 +304,7 @@ public class EntityLifecycleTests
             var client = new KcpTestClient();
             await ConnectWithRetryAsync(client, Port);
             var stream = client.GetStream();
-            await SendJoinAsync(stream, userId, JwtSecret);
+            await SendJoinAsync(stream, userId, JoinSecret);
 
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             var env = await WireProtocol.DecodeAsync(stream, cts.Token);

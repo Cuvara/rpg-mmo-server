@@ -33,6 +33,9 @@ public sealed record RegistrationOptions
     public required string ServerId { get; init; }
     public required string MapId { get; init; }
 
+    /// <summary>The game this server serves, from <c>GAMESERVER_GAME_ID</c>.</summary>
+    public string GameId { get; init; } = GameServer.Games.GameId.DefaultGameId;
+
     /// <summary>
     /// Address advertised to clients. The gateway hands this back verbatim in
     /// <c>MsgEnterWorldResp.ServerAddr</c>, so it must be dialable BY THE CLIENT
@@ -109,6 +112,10 @@ public sealed class RegistrationService : IAsyncDisposable
     internal int RegisterCount => _registerCount;
     private int _registerCount;
 
+    /// <summary>Registrations refused because another game owns the entry. Exposed for tests.</summary>
+    internal int RefusalCount => Volatile.Read(ref _refusalCount);
+    private int _refusalCount;
+
     public RegistrationService(
         IServerRegistry registry,
         RegistrationOptions options,
@@ -123,7 +130,11 @@ public sealed class RegistrationService : IAsyncDisposable
                 $"(want \"{GameServer.Net.Transport.TransportKind.Kcp}\")", nameof(options));
         }
         _registry = registry;
-        _options = options with { Transport = GameServer.Net.Transport.TransportKind.Kcp };
+        _options = options with
+        {
+            Transport = GameServer.Net.Transport.TransportKind.Kcp,
+            GameId = GameServer.Games.GameId.GameOrDefault(options.GameId),
+        };
         _playerCount = playerCount;
         _logger = logger;
         _interval = interval ?? RegistryDefaults.HeartbeatInterval(options.Ttl);
@@ -167,7 +178,8 @@ public sealed class RegistrationService : IAsyncDisposable
         _options.Transport,
         _options.Capacity,
         _playerCount(),
-        _options.IdentityKey);
+        _options.IdentityKey,
+        GameServer.Games.GameId.GameOrDefault(_options.GameId));
 
     /// <summary>
     /// Register immediately, then start the heartbeat loop.
@@ -179,8 +191,8 @@ public sealed class RegistrationService : IAsyncDisposable
         if (!await TryRegisterAsync(ct))
         {
             _logger.LogWarning(
-                "Initial registry registration failed for {ServerId}; the heartbeat loop will keep retrying every {Interval}s",
-                _options.ServerId, _interval.TotalSeconds);
+                "Initial registry registration failed for {ServerId} (game={GameId}); the heartbeat loop will keep retrying every {Interval}s",
+                _options.ServerId, _options.GameId, _interval.TotalSeconds);
         }
 
         _loop = Task.Run(() => RunAsync(ct), CancellationToken.None);
@@ -190,8 +202,8 @@ public sealed class RegistrationService : IAsyncDisposable
     private async Task RunAsync(CancellationToken ct)
     {
         _logger.LogInformation(
-            "Registry heartbeat started for {ServerId} (every {Interval}s, ttl {Ttl}s)",
-            _options.ServerId, _interval.TotalSeconds, _options.Ttl.TotalSeconds);
+            "Registry heartbeat started for {ServerId} (game={GameId}, every {Interval}s, ttl {Ttl}s)",
+            _options.ServerId, _options.GameId, _interval.TotalSeconds, _options.Ttl.TotalSeconds);
 
         while (!ct.IsCancellationRequested)
         {
@@ -203,15 +215,14 @@ public sealed class RegistrationService : IAsyncDisposable
 
             try
             {
-                bool alive = await _registry.HeartbeatAsync(_options.ServerId, ct);
+                bool alive = await _registry.HeartbeatAsync(_options.ServerId, _options.GameId, ct);
                 if (!alive)
                 {
-                    // The entry vanished. This is the Redis-wipe / expiry path and it
-                    // is expected to happen in production, so re-register rather than
-                    // just complaining about it.
+                    // Missing entries are repaired; foreign entries are refused by
+                    // registration until they expire, without extending their TTL.
                     _logger.LogWarning(
-                        "Registry entry for {ServerId} is gone (Redis wipe, failover or TTL lapse) — re-registering",
-                        _options.ServerId);
+                        "Registry entry for {ServerId} (game={GameId}) is gone or belongs to another game — re-registering",
+                        _options.ServerId, _options.GameId);
                     await TryRegisterAsync(ct);
                 }
                 else
@@ -224,12 +235,12 @@ public sealed class RegistrationService : IAsyncDisposable
             {
                 // Redis down. Keep serving; the next iteration retries.
                 _logger.LogWarning(ex,
-                    "Registry heartbeat failed for {ServerId}; retrying in {Interval}s",
-                    _options.ServerId, _interval.TotalSeconds);
+                    "Registry heartbeat failed for {ServerId} (game={GameId}); retrying in {Interval}s",
+                    _options.ServerId, _options.GameId, _interval.TotalSeconds);
             }
         }
 
-        _logger.LogInformation("Registry heartbeat stopped for {ServerId}", _options.ServerId);
+        _logger.LogInformation("Registry heartbeat stopped for {ServerId} (game={GameId})", _options.ServerId, _options.GameId);
     }
 
     /// <summary>Register, swallowing transport errors. Returns whether it succeeded.</summary>
@@ -243,9 +254,17 @@ public sealed class RegistrationService : IAsyncDisposable
             return true;
         }
         catch (OperationCanceledException) { throw; }
+        catch (RegistryGameMismatchException ex)
+        {
+            Interlocked.Increment(ref _refusalCount);
+            _logger.LogError(ex,
+                "Registry entry {ServerId} belongs to another game; refusing to overwrite it, this server ({GameId}) stays unregistered until the entry expires",
+                _options.ServerId, _options.GameId);
+            return false;
+        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Registry registration failed for {ServerId}", _options.ServerId);
+            _logger.LogWarning(ex, "Registry registration failed for {ServerId} (game={GameId})", _options.ServerId, _options.GameId);
             return false;
         }
     }
@@ -262,17 +281,17 @@ public sealed class RegistrationService : IAsyncDisposable
 
         try
         {
-            if (await _registry.UpdatePlayerCountAsync(_options.ServerId, count, ct))
+            if (await _registry.UpdatePlayerCountAsync(_options.ServerId, _options.GameId, count, ct))
             {
                 _lastPublishedCount = count;
             }
-            // A false result means the entry expired; the next heartbeat re-registers
-            // it with the current count, so there is nothing to do here.
+            // A false result means the entry is absent or foreign; the next heartbeat
+            // attempts registration with the current count.
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Registry player-count update failed for {ServerId}", _options.ServerId);
+            _logger.LogDebug(ex, "Registry player-count update failed for {ServerId} (game={GameId})", _options.ServerId, _options.GameId);
         }
     }
 
@@ -298,12 +317,12 @@ public sealed class RegistrationService : IAsyncDisposable
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await _registry.DeregisterAsync(_options.ServerId, _options.MapId, cts.Token);
+            await _registry.DeregisterAsync(_options.ServerId, _options.GameId, _options.MapId, cts.Token);
         }
         catch (Exception ex)
         {
             // Not fatal: the TTL removes the entry within seconds anyway.
-            _logger.LogWarning(ex, "Registry deregistration failed for {ServerId}", _options.ServerId);
+            _logger.LogWarning(ex, "Registry deregistration failed for {ServerId} (game={GameId})", _options.ServerId, _options.GameId);
         }
     }
 

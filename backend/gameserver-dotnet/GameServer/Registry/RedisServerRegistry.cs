@@ -86,6 +86,53 @@ redis.call('HSET', KEYS[1], 'player_count', ARGV[1])
 return 1
 ";
 
+    // Check ownership in the same command as the write, including legacy default-game hashes.
+    private const string GameHeartbeatLua = @"
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return 0
+end
+local current = redis.call('HGET', KEYS[1], 'game_id')
+if not current or current == '' then
+    current = ARGV[1]
+end
+if current ~= ARGV[2] then
+    return 0
+end
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+return 1
+";
+
+    private const string GameUpdatePlayerCountLua = @"
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return 0
+end
+local current = redis.call('HGET', KEYS[1], 'game_id')
+if not current or current == '' then
+    current = ARGV[1]
+end
+if current ~= ARGV[2] then
+    return 0
+end
+redis.call('HSET', KEYS[1], 'player_count', ARGV[3])
+return 1
+";
+
+    private const string GameDeregisterLua = @"
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return nil
+end
+local current = redis.call('HGET', KEYS[1], 'game_id')
+if not current or current == '' then
+    current = ARGV[1]
+end
+if current ~= ARGV[2] then
+    return false
+end
+local map = redis.call('HGET', KEYS[1], 'map_id')
+redis.call('DEL', KEYS[1])
+return map or ARGV[3]
+";
+
     private readonly IConnectionMultiplexer _mux;
     private readonly bool _ownsMux;
     private readonly TimeSpan _ttl;
@@ -170,8 +217,8 @@ return 1
             throw new RegistryGameMismatchException(info.ServerId, gameId);
 
         _logger.LogInformation(
-            "Registered {ServerId} in Redis: map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s scope={Scope} identity={IdentityKey}",
-            info.ServerId, info.MapId, info.Addr, info.Transport, info.Capacity, (int)_ttl.TotalSeconds, scope,
+            "Registered {ServerId} in Redis: game={GameId} map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s scope={Scope} identity={IdentityKey}",
+            info.ServerId, gameId, info.MapId, info.Addr, info.Transport, info.Capacity, (int)_ttl.TotalSeconds, scope,
             string.IsNullOrEmpty(info.IdentityKey) ? "(none)" : info.IdentityKey);
     }
 
@@ -182,6 +229,16 @@ return 1
         // KeyExpire returns false when the key does not exist — which is exactly the
         // "Redis was wiped or we expired" signal the caller re-registers on.
         return await Db.KeyExpireAsync(ServerKey(serverId), _ttl);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> HeartbeatAsync(string serverId, string gameId, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var result = await Db.ScriptEvaluateAsync(GameHeartbeatLua,
+            [ServerKey(serverId)],
+            [GameId.DefaultGameId, GameId.GameOrDefault(gameId), (long)_ttl.TotalMilliseconds]);
+        return (long)result == 1;
     }
 
     /// <inheritdoc />
@@ -208,7 +265,30 @@ return 1
         await del;
         if (srem != null) await srem;
 
-        _logger.LogInformation("Deregistered {ServerId} from Redis (map={MapId})", serverId, effectiveMap);
+        _logger.LogInformation("Deregistered {ServerId} from Redis (game={GameId}, map={MapId})", serverId, gameId, effectiveMap);
+    }
+
+    /// <inheritdoc />
+    public async Task DeregisterAsync(string serverId, string gameId, string mapId, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        string effectiveGame = GameId.GameOrDefault(gameId);
+        var db = Db;
+        string? storedMap = (string?)await db.ScriptEvaluateAsync(GameDeregisterLua,
+            [ServerKey(serverId)], [GameId.DefaultGameId, effectiveGame, mapId]);
+        // A string (including an empty one) means the hash was deleted; a null
+        // result means absent or foreign. Never remove a foreign game's index.
+        string effectiveMap = storedMap ?? mapId;
+        if (!string.IsNullOrEmpty(effectiveMap))
+            await db.SetRemoveAsync(MapIndexKey(effectiveGame, effectiveMap), serverId);
+
+        if (storedMap == null)
+            _logger.LogWarning(
+                "Skipped deregistering {ServerId} from Redis: entry is absent or belongs to another game (game={GameId}, map={MapId})",
+                serverId, effectiveGame, effectiveMap);
+        else
+            _logger.LogInformation("Deregistered {ServerId} from Redis (game={GameId}, map={MapId})",
+                serverId, effectiveGame, effectiveMap);
     }
 
     /// <summary>
@@ -222,11 +302,15 @@ return 1
         string effectiveGame = GameId.GameOrDefault(gameId);
         var db = Db;
         var ids = await db.SetMembersAsync(MapIndexKey(effectiveGame, mapId));
+        // Issue all reads before awaiting so StackExchange.Redis can pipeline them.
+        var reads = new Task<HashEntry[]>[ids.Length];
+        for (int i = 0; i < ids.Length; i++)
+            reads[i] = db.HashGetAllAsync(ServerKey(ids[i].ToString()));
+        var hashes = await Task.WhenAll(reads);
         var result = new List<ServerInfo>(ids.Length);
-        foreach (var id in ids)
+        foreach (var entries in hashes)
         {
             ct.ThrowIfCancellationRequested();
-            var entries = await db.HashGetAllAsync(ServerKey(id.ToString()));
             if (entries.Length == 0) continue;
             var info = FromHashEntries(entries);
             if (string.Equals(info.GameId, effectiveGame, StringComparison.Ordinal))
@@ -255,6 +339,16 @@ return 1
             UpdatePlayerCountLua,
             [ServerKey(serverId)],
             [count]);
+        return (long)result == 1;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> UpdatePlayerCountAsync(string serverId, string gameId, int count, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var result = await Db.ScriptEvaluateAsync(GameUpdatePlayerCountLua,
+            [ServerKey(serverId)],
+            [GameId.DefaultGameId, GameId.GameOrDefault(gameId), count]);
         return (long)result == 1;
     }
 

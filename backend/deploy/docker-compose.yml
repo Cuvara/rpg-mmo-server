@@ -414,6 +414,7 @@ services:
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
       GAMESERVER_ID: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}
+      GAMESERVER_GAME_ID: ${GAMESERVER_GAME_ID:-}
       # Multi-rate simulation. SIM_CRITICAL_HZ is the BASE tick rate; the other
       # two must divide it exactly and must not exceed it, or the server exits
       # with code 2 at startup rather than rounding. Snapshots are broadcast at

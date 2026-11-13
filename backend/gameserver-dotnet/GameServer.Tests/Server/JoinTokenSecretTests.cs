@@ -9,8 +9,8 @@ using GameServer.Tests.Infrastructure;
 namespace GameServer.Tests.Server;
 
 /// <summary>
-/// The join hop is verified with JOIN_TOKEN_SECRET, not JWT_SECRET (2026-08-06).
-/// JOIN_TOKEN_SECRET is distributed to every game-server pod; JWT_SECRET is not, so
+/// The join hop is verified with JOIN_TOKEN_SECRET (2026-08-06).
+/// JOIN_TOKEN_SECRET is distributed to every game-server pod; the Nakama auth secret is not, so
 /// sharing them meant one compromised pod could mint Nakama auth tokens for any user.
 ///
 /// These tests drive the real handshake over TCP, because the failure this change
@@ -27,27 +27,26 @@ public class JoinTokenSecretTests
     /// <summary>Split active: a token signed with JOIN_TOKEN_SECRET joins.</summary>
     [Fact]
     public async Task Join_TokenSignedWithJoinSecret_Accepted()
-        => await AssertJoinAsync(jwtSecret: AuthSecret, joinTokenSecret: JoinSecret,
+        => await AssertJoinAsync(joinTokenSecret: JoinSecret,
             tokenSecret: JoinSecret, expectOk: true);
 
     /// <summary>
     /// The point of the split: with JOIN_TOKEN_SECRET set, a token signed with
-    /// JWT_SECRET must NOT open a session — otherwise a leaked auth secret still
+    /// the Nakama auth secret must NOT open a session — otherwise a leaked auth secret still
     /// buys a join and the separation buys nothing.
     /// </summary>
     [Fact]
     public async Task Join_TokenSignedWithAuthSecret_RejectedWhenSplitActive()
-        => await AssertJoinAsync(jwtSecret: AuthSecret, joinTokenSecret: JoinSecret,
+        => await AssertJoinAsync(joinTokenSecret: JoinSecret,
             tokenSecret: AuthSecret, expectOk: false);
 
     /// <summary>
     /// JOIN_TOKEN_SECRET is now mandatory. When set to the same value as the
-    /// auth secret, tokens signed with that value are accepted (but an operator
-    /// warning is logged about using distinct secrets).
+    /// auth secret, tokens signed with that value are accepted.
     /// </summary>
     [Fact]
     public async Task Join_JoinSecretSameAsAuth_Accepted()
-        => await AssertJoinAsync(jwtSecret: AuthSecret, joinTokenSecret: AuthSecret,
+        => await AssertJoinAsync(joinTokenSecret: AuthSecret,
             tokenSecret: AuthSecret, expectOk: true);
 
     /// <summary>Rotation window: the previous join secret still verifies.</summary>
@@ -55,14 +54,13 @@ public class JoinTokenSecretTests
     [InlineData(JoinSecret)]     // signed with the new current key
     [InlineData(OldJoinSecret)]  // signed before the rotation — must still drain
     public async Task Join_DuringRotation_BothJoinSecretsAccepted(string tokenSecret)
-        => await AssertJoinAsync(jwtSecret: AuthSecret,
-            joinTokenSecret: $"{JoinSecret},{OldJoinSecret}",
+        => await AssertJoinAsync(joinTokenSecret: $"{JoinSecret},{OldJoinSecret}",
             tokenSecret: tokenSecret, expectOk: true);
 
     /// <summary>A key dropped from the keyring stops working.</summary>
     [Fact]
     public async Task Join_AfterRotationCompletes_OldJoinSecretRejected()
-        => await AssertJoinAsync(jwtSecret: AuthSecret, joinTokenSecret: JoinSecret,
+        => await AssertJoinAsync(joinTokenSecret: JoinSecret,
             tokenSecret: OldJoinSecret, expectOk: false);
 
     /// <summary>
@@ -72,20 +70,19 @@ public class JoinTokenSecretTests
     /// </summary>
     [Fact]
     public async Task Join_WhitespaceOnlySecret_RejectsEveryToken()
-        => await AssertJoinAsync(jwtSecret: "", joinTokenSecret: "   ",
+        => await AssertJoinAsync(joinTokenSecret: "   ",
             tokenSecret: JoinSecret, expectOk: false);
 
     /// <summary>Expiry beats the keyring: a matching key does not resurrect a dead token.</summary>
     [Fact]
     public async Task Join_ExpiredToken_RejectedEvenWhenKeyMatches()
-        => await AssertJoinAsync(jwtSecret: AuthSecret,
-            joinTokenSecret: $"{JoinSecret},{OldJoinSecret}",
+        => await AssertJoinAsync(joinTokenSecret: $"{JoinSecret},{OldJoinSecret}",
             tokenSecret: OldJoinSecret, expectOk: false, expired: true);
 
     // ── Helpers ──
 
     private static async Task AssertJoinAsync(
-        string jwtSecret, string joinTokenSecret, string tokenSecret, bool expectOk, bool expired = false)
+        string joinTokenSecret, string tokenSecret, bool expectOk, bool expired = false)
     {
         var options = new ServerOptions
         {
@@ -94,7 +91,6 @@ public class JoinTokenSecretTests
             MapId = "map_join_secret",
             TickRate = 20,
             Capacity = 8,
-            JwtSecret = jwtSecret,
             JoinTokenSecret = joinTokenSecret,
             SaveInterval = TimeSpan.FromSeconds(30),
             HoldTtl = TimeSpan.FromSeconds(1),
