@@ -74,7 +74,7 @@ func TestKickConsumer_TableDriven(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var closedUser string
-			closer := func(userID string) {
+			closer := func(game, userID, jti string) {
 				mu.Lock()
 				closedUser = userID
 				mu.Unlock()
@@ -116,7 +116,7 @@ func TestKickConsumer_MalformedCount(t *testing.T) {
 	stream := storage.NewMemoryEventStream()
 	t.Cleanup(func() { _ = stream.Close() })
 
-	kc := NewKickConsumer(stream, "gw-x", func(string) {}, logger.New("error"))
+	kc := NewKickConsumer(stream, "gw-x", func(string, string, string) {}, logger.New("error"))
 	if err := kc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestKickConsumer_StopIdempotent(t *testing.T) {
 	stream := storage.NewMemoryEventStream()
 	t.Cleanup(func() { _ = stream.Close() })
 
-	kc := NewKickConsumer(stream, "gw-y", func(string) {}, logger.New("error"))
+	kc := NewKickConsumer(stream, "gw-y", func(string, string, string) {}, logger.New("error"))
 	if err := kc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

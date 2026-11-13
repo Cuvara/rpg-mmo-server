@@ -97,7 +97,7 @@ transport.
 
 | Id | Message | Precondition | Behavior |
 |----|---------|--------------|----------|
-| 1 | `MsgAuth` | none — the only frame accepted without a session | Verify JWT locally (`session.VerifyClientJWT`, shared secret, no Nakama call) → `SessionStore.Set("session:{user_id}", TTL=1h)` → reply `MsgAuthResp{OK}`. Invalid token/payload → `MsgAuthResp{OK:false, Error}` |
+| 1 | `MsgAuth` | none — the only frame accepted without a session | Verify JWT locally (`session.VerifyClientJWT`, shared secret, no Nakama call) → check the token's game (`gid`, absent = `cuvara`) is in `GAMES` → `SessionStore.Set(constants.SessionKey(game, user_id), TTL=1h)` (`session:{user_id}` for `cuvara`, `session:{game}:{user_id}` otherwise) → reply `MsgAuthResp{OK}`. Invalid token/payload → `MsgAuthResp{OK:false, Error}`; a game not in `GAMES` → `game not configured`, with no session read or write |
 | 3 | `MsgEnterWorld` | live session | Least-loaded live server for `MapID` with `PlayerCount < Capacity`; a map with **no** live server may be allocated (waited for), a map whose servers are all full is refused → 30s join token (`sid` claim = server id), minted last → `MsgEnterWorldResp` |
 | 9 | `MsgDisconnect` | live session | Destroy the session record, half-close the socket |
 | 11 | `MsgPing` | **none — handled before the session check** | Reply `MsgPong{Timestamp echoed, ServerTime}` |
@@ -150,7 +150,14 @@ therefore part of the contract, not an implementation detail.
 
 | Reason | Emitted when |
 |---|---|
-| `duplicate_login` | the same user authenticated on another connection. The gateway evicts the old **gateway socket** it holds itself (same gateway only), and additionally publishes a `session_superseded` event on the `events:kick` Redis Stream so the **game server** evicts the old gameplay connection with the same two-frame pair and the same reason — the client sees one vocabulary no matter which hop evicted it (ADR-20) |
+| `duplicate_login` | the same user authenticated **in the same game** on another connection (ADR-33: a login to game B never reads, supersedes or kicks the account's game-A session). The gateway evicts the old **gateway socket** it holds itself (same gateway), and publishes a `session_superseded` event on the `events:kick` Redis Stream so the **game server** evicts the old gameplay connection with the same two-frame pair and the same reason — the client sees one vocabulary no matter which hop evicted it (ADR-20). When the old session belongs to another gateway, the same payload also goes to `events:gateway_kick` as `gateway_superseded` (ADR-17); that gateway closes only its (`game_id`, `user_id`) connection whose last join-token jti equals the event's `jti`, and treats any other jti as a no-op |
+
+**Kick payload** (`server.SessionSupersededEvent`, JSON, both streams):
+`{game_id, user_id, server_id, jti, old_gateway, new_gateway}`. `game_id` is
+always written, `cuvara` included; a consumer reads an absent `game_id` as
+`cuvara` (events from a pre-ADR-33 gateway). Both events are published only for
+an old session that completed an EnterWorld, so `jti` is always the old login's
+last join-token id.
 
 `wire.proto` names further reasons (`server_shutdown`, `session_expired`,
 `rate_limited`) as an intended vocabulary. **The gateway does not emit them
@@ -172,7 +179,8 @@ Every frame except `MsgAuth` goes through `checkSession`:
 
 1. Connection must be past `StateConnected` and carry a `UserID`; otherwise
    `not authenticated`.
-2. `SessionStore.Get("session:{user_id}")` must return the same user id; otherwise the
+2. `SessionStore.Get` on the connection's game-scoped key (`session:{user_id}` for
+   `cuvara`, `session:{game}:{user_id}` otherwise) must return the same user id; otherwise the
    connection is demoted to `StateConnected` and the client gets `session expired`.
    **Only `storage.ErrNotFound` counts as "gone".** A store *failure* (Redis
    unreachable, timeout) is a different condition and fails open: the connection
@@ -207,6 +215,7 @@ classified below is reported as `internal error` and logged server-side.
 |--------------|---------|
 | `invalid auth request` | payload did not decode |
 | `invalid token` | JWT signature/expiry rejected |
+| `game not configured` | the token verified but its game (`gid`, absent = `cuvara`) is not in this gateway's `GAMES` (log reason `game_not_configured`). **Terminal** for this deployment — a retry presents the same claim |
 | `session creation failed` | session store write failed |
 | `not authenticated` | frame sent before a successful `MsgAuth` |
 | `session expired` | session record gone (TTL, explicit disconnect, evicted elsewhere) |
@@ -474,7 +483,12 @@ start-up. For the two wait knobs a non-positive env value is also ignored; for
 
 | Symbol | Package | Description |
 |--------|---------|-------------|
-| `session.SessionKey(userID) string` | `gateway/session` | Canonical `session:{user_id}` key |
+| `session.SessionKey(userID) string` | `gateway/session` | Canonical `session:{user_id}` key (the default game) |
+| `session.GameSessionKey(game, userID) string` | `gateway/session` | `constants.SessionKey`: `session:{user_id}` for `cuvara`, `session:{game}:{user_id}` otherwise. `CreateGameSession` / `GetGameSession` / `UpdateGameSession` take the game; the user-only forms use `cuvara` |
+| `session.ParseGames(raw) (Games, error)` / `session.EnvGames` | `gateway/session` | The `GAMES` allow-list (empty = `cuvara` only; invalid entry = `ErrInvalidGames`). `Games.Allowed(game)`, `Games.IDs()` |
+| `server.WithGames(session.Games) Option` | `gateway/server` | Games admitted at auth; the zero value admits only `cuvara` |
+| `(*Gateway).FindAndCloseConnection(game, userID, jti)` / `server.ConnectionCloser` | `gateway/server` | `gateway_kick` callback: closes the (game, user) connection only when its last join-token jti equals `jti` |
+| `(*metrics.Metrics).SetGames(ids)` / `GameLabel(game)` | `gateway/metrics` | Configured `game` label values (unconfigured → `other`); recorders take the verified game |
 | `(*SessionManager).RefreshSession(ctx, sessionID) error` | `gateway/session` | Re-arms the session TTL; errors when the session is gone |
 | `registry.NewRegistryServiceWithAllocator(reg, alloc)` | `gateway/registry` | Registry that asks an `Allocator` for a new instance when a map has **no** live server |
 | `registry.WithAllocationWait(timeout, interval)` | `gateway/registry` | Bounds the wait for an allocated server's own registry entry |

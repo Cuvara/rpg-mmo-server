@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/constants"
+	"github.com/duycuong/rpg-mmo/shared/gameid"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
@@ -53,13 +55,23 @@ func NewSessionManager(store storage.SessionStore, gatewayID ...string) *Session
 // SessionKey returns the store key holding a user's session record
 // (constants.SessionKeyPrefix + userID).
 func SessionKey(userID string) string {
-	return constants.SessionKeyPrefix + userID
+	return GameSessionKey(constants.DefaultGameID, userID)
+}
+
+// GameSessionKey returns the store key for a game and user.
+func GameSessionKey(game, userID string) string {
+	return constants.SessionKey(game, userID)
 }
 
 // CreateSession stores a new session entry for the user as a JSON object.
 // Returns the session key.
 func (m *SessionManager) CreateSession(ctx context.Context, userID string) (string, error) {
-	key := SessionKey(userID)
+	return m.CreateGameSession(ctx, constants.DefaultGameID, userID)
+}
+
+// CreateGameSession stores a session for the given game and user.
+func (m *SessionManager) CreateGameSession(ctx context.Context, game, userID string) (string, error) {
+	key := GameSessionKey(game, userID)
 	now := time.Now().Unix()
 	data := SessionData{
 		GatewayID:    m.gatewayID,
@@ -79,7 +91,12 @@ func (m *SessionManager) CreateSession(ctx context.Context, userID string) (stri
 // GetSession reads and decodes the session data for the given user. Returns
 // ErrNotFound (via the store) when no session exists.
 func (m *SessionManager) GetSession(ctx context.Context, userID string) (SessionData, error) {
-	key := SessionKey(userID)
+	return m.GetGameSession(ctx, constants.DefaultGameID, userID)
+}
+
+// GetGameSession reads the session for the given game and user.
+func (m *SessionManager) GetGameSession(ctx context.Context, game, userID string) (SessionData, error) {
+	key := GameSessionKey(game, userID)
 	raw, err := m.store.Get(ctx, key)
 	if err != nil {
 		return SessionData{}, fmt.Errorf("get session: %w", err)
@@ -105,6 +122,9 @@ func (m *SessionManager) ValidateSession(ctx context.Context, sessionID string) 
 		if len(userID) > len(constants.SessionKeyPrefix) {
 			userID = userID[len(constants.SessionKeyPrefix):]
 		}
+		if game, user, ok := strings.Cut(userID, ":"); ok && user != "" && game != constants.DefaultGameID && gameid.ValidGameID(game) {
+			return user, nil
+		}
 		return userID, nil
 	}
 	return string(data), nil
@@ -123,7 +143,12 @@ func (m *SessionManager) RefreshSession(ctx context.Context, sessionID string) e
 // UpdateSession reads the session, applies mutFn, and writes it back with the
 // full SessionTTL. This is used to attach server_id/map_id after map assignment.
 func (m *SessionManager) UpdateSession(ctx context.Context, userID string, mutFn func(*SessionData)) error {
-	key := SessionKey(userID)
+	return m.UpdateGameSession(ctx, constants.DefaultGameID, userID, mutFn)
+}
+
+// UpdateGameSession updates the session for the given game and user.
+func (m *SessionManager) UpdateGameSession(ctx context.Context, game, userID string, mutFn func(*SessionData)) error {
+	key := GameSessionKey(game, userID)
 	raw, err := m.store.Get(ctx, key)
 	if err != nil {
 		return fmt.Errorf("update session: read: %w", err)

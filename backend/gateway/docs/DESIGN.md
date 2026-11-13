@@ -1,5 +1,62 @@
 # Gateway — Design Decisions
 
+## 2026-11-13 — Sessions, duplicate login and kicks are scoped by game (ADR-33 leg 3)
+
+### Context
+
+ADR-33 lets one account play several games against the same backend. The gateway
+token now carries an optional `gid` claim (absent = `cuvara`), but the gateway kept
+one session per user (`session:{user_id}`) and one tracked socket per user, so a
+login to game B would have read game A's session, published a supersede for it and
+kicked the game-A socket.
+
+### Decision
+
+- **Admitted games are configuration.** `GAMES` (comma-separated, mirroring Nakama's
+  `GAMES`; absent = `cuvara` only) is parsed at startup; any invalid entry refuses to
+  start. `handleAuth` refuses a verified token whose game is not configured with
+  `game not configured` (reason `game_not_configured`) before touching the session
+  store. Routing is not game-aware yet, so admitting an unknown game would hand it a
+  map server of another game.
+- **The game is latched with the character.** `SetAuthenticatedGame` stores `gid`
+  next to `cid` under the connection lock; `ClearIdentityGame` returns and clears both
+  atomically, so teardown keeps the exactly-once property of `ClearIdentity`.
+- **Session key.** `constants.SessionKey(game, user)`: `session:{user_id}` for the
+  default game, so existing records and every default-game reader keep working, and
+  `session:{game}:{user_id}` otherwise. Creation, validation, pong refresh, the
+  EnterWorld update and destruction all use the connection's game.
+- **Duplicate login is per (game, user).** Detection reads only the same game's
+  session; `userConns`, `trackUser` / `untrackUser` / `findUserConn`, `kickLocalUser`
+  and disconnect cleanup are keyed by `(game, user)`. Logging into game B therefore
+  never reads, supersedes or kicks game A, on one gateway or across two. A socket that
+  re-authenticates into another game or account untracks its previous key first, so a
+  later login to the old game cannot find and evict it.
+- **Kicks carry the game, and the cross-gateway close is jti-guarded.** Every
+  `SessionSupersededEvent` written has `game_id`, `cuvara` included. The
+  `events:gateway_kick` consumer closes only the `(game_id, user_id)` connection whose
+  last join-token jti (recorded at EnterWorld, cleared on re-auth and teardown) equals
+  the event's. Before this the consumer closed whatever socket the user had, so a kick
+  delivered after the user's newer login on that gateway had entered a world closed
+  the new login; the jti makes it a no-op, the same guard the game server uses.
+- **Metrics take the verified game only.** The four result-labelled families gain
+  `game`, mapped through `GAMES` with everything else as `other`. Label values come
+  from configuration, never from a client, so cardinality is bounded by `GAMES` + 1.
+
+### Consequences
+
+- Default-game behaviour is unchanged apart from the explicit `game_id` in kick
+  events and the new `game` label.
+- A gateway without `cuvara` in `GAMES` refuses default-game logins. That is the
+  configuration asking for it, not a fallback.
+- A connection that never entered a world has no jti and is never closed by a
+  `gateway_kick` event. Publishers only emit for sessions with a jti, so no such
+  event exists for it.
+- **Until l3-routing, a configured non-default game is routed by map id only**, to
+  whatever server serves that map regardless of its game. `gateway_allocations_total`
+  records the default game for the same reason. l3-routing must route EnterWorld per
+  game, or refuse it for a game it cannot route; it must not keep admitting such a
+  game into map-only routing.
+
 ## 2026-10-08 — TCP-only listener; gameplay is KCP/UDP only (ADR-32)
 
 ### Context
@@ -526,7 +583,8 @@ rather than closing the socket, so the client can re-`MsgAuth` on the same conne
 would leave a Redis-backed deployment reporting ghost-online players for up to an hour.
 `cleanupSession` takes the identity via `cc.ClearIdentity()`, which returns the user it
 cleared under the connection's lock, so a double call is a no-op and the two paths cannot
-both destroy the same session.
+both destroy the same session. *(Since ADR-33 leg 3 it uses `ClearIdentityGame`, which
+returns the game too, and destroys that game's session key; see the 2026-11-13 entry.)*
 
 **3a. Connection identity is mutex-guarded, and not by accident.**
 `ClientConn` is touched by two goroutines per connection: the read loop (`ReadLoop` →

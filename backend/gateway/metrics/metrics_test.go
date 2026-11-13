@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -19,10 +21,10 @@ func TestMetrics_RecordersUpdateCollectors(t *testing.T) {
 	m.ConnOpened()
 	m.ConnOpened()
 	m.ConnClosed()
-	m.AuthResult(true)
-	m.AuthResult(false)
-	m.AuthResult(false)
-	m.EnterWorldResult(true)
+	m.AuthResult(constants.DefaultGameID, true)
+	m.AuthResult(constants.DefaultGameID, false)
+	m.AuthResult(constants.DefaultGameID, false)
+	m.EnterWorldResult(constants.DefaultGameID, true)
 	m.AllocationResult(false)
 	m.RelayEvent()
 	m.RelayEvent()
@@ -34,16 +36,16 @@ func TestMetrics_RecordersUpdateCollectors(t *testing.T) {
 gateway_connections_active 1
 # HELP gateway_auth_total Client authentication attempts by result.
 # TYPE gateway_auth_total counter
-gateway_auth_total{result="fail"} 2
-gateway_auth_total{result="ok"} 1
+gateway_auth_total{game="` + constants.DefaultGameID + `",result="fail"} 2
+gateway_auth_total{game="` + constants.DefaultGameID + `",result="ok"} 1
 # HELP gateway_enter_world_total EnterWorld (map assignment) attempts by result.
 # TYPE gateway_enter_world_total counter
-gateway_enter_world_total{result="fail"} 0
-gateway_enter_world_total{result="ok"} 1
+gateway_enter_world_total{game="` + constants.DefaultGameID + `",result="fail"} 0
+gateway_enter_world_total{game="` + constants.DefaultGameID + `",result="ok"} 1
 # HELP gateway_allocations_total Game server allocation requests by result.
 # TYPE gateway_allocations_total counter
-gateway_allocations_total{result="fail"} 1
-gateway_allocations_total{result="ok"} 0
+gateway_allocations_total{game="` + constants.DefaultGameID + `",result="fail"} 1
+gateway_allocations_total{game="` + constants.DefaultGameID + `",result="ok"} 0
 # HELP gateway_relay_events_total Cross-server events delivered by the event relay.
 # TYPE gateway_relay_events_total counter
 gateway_relay_events_total 3
@@ -65,8 +67,8 @@ func TestMetrics_NilIsNoOp(t *testing.T) {
 	var m *Metrics
 	m.ConnOpened()
 	m.ConnClosed()
-	m.AuthResult(true)
-	m.EnterWorldResult(false)
+	m.AuthResult(constants.DefaultGameID, true)
+	m.EnterWorldResult(constants.DefaultGameID, false)
 	m.AllocationResult(true)
 	m.RelayEvent()
 }
@@ -90,7 +92,7 @@ func TestMetrics_LabelsPrecreated(t *testing.T) {
 func TestServe_MetricsAndHealthz(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New(reg)
-	m.AuthResult(true)
+	m.AuthResult(constants.DefaultGameID, true)
 
 	srv, err := Serve("127.0.0.1:0", reg, nil)
 	if err != nil {
@@ -112,7 +114,7 @@ func TestServe_MetricsAndHealthz(t *testing.T) {
 	if status != http.StatusOK {
 		t.Errorf("/metrics status = %d, want 200", status)
 	}
-	if !strings.Contains(body, `gateway_auth_total{result="ok"} 1`) {
+	if !strings.Contains(body, `gateway_auth_total{game="`+constants.DefaultGameID+`",result="ok"} 1`) {
 		t.Errorf("/metrics body missing gateway_auth_total:\n%s", body)
 	}
 }
@@ -208,5 +210,131 @@ func TestTransportPostureGaugesArePresentWhenZero(t *testing.T) {
 		if !seen[name] {
 			t.Errorf("%s absent from /metrics while reporting 0 — a security question must never be answered by a missing field", name)
 		}
+	}
+}
+
+func TestGameLabelsAndPriming(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		ids       []string
+		wantGames []string
+	}{
+		{"default and foo", []string{constants.DefaultGameID, "foo"}, []string{constants.DefaultGameID, "foo"}},
+		{"foo only", []string{"foo"}, []string{"foo"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := prometheus.NewRegistry()
+			m := New(reg)
+			m.SetGames(tt.ids)
+			for _, game := range []string{constants.DefaultGameID, "foo", "unknown", ""} {
+				want := GameOther
+				for _, configured := range tt.wantGames {
+					if game == configured {
+						want = game
+					}
+				}
+				if got := m.GameLabel(game); got != want {
+					t.Errorf("GameLabel(%q) = %q, want %q", game, got, want)
+				}
+			}
+			families, err := reg.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			counts := map[string]int{"gateway_auth_total": 2, "gateway_enter_world_total": 2, "gateway_allocations_total": 2, "gateway_session_checks_total": 3}
+			for _, family := range families {
+				perGame, ok := counts[family.GetName()]
+				if !ok {
+					continue
+				}
+				if got, want := len(family.Metric), perGame*len(tt.wantGames); got != want {
+					t.Errorf("%s has %d series, want %d", family.GetName(), got, want)
+				}
+				for _, metric := range family.Metric {
+					game := ""
+					for _, label := range metric.Label {
+						if label.GetName() == "game" {
+							game = label.GetValue()
+						}
+					}
+					found := false
+					for _, want := range tt.wantGames {
+						if game == want {
+							found = true
+						}
+					}
+					if !found {
+						t.Errorf("%s has unexpected game %q", family.GetName(), game)
+					}
+				}
+				delete(counts, family.GetName())
+			}
+			if len(counts) != 0 {
+				t.Errorf("missing families: %v", counts)
+			}
+		})
+	}
+}
+
+func TestUnconfiguredGameRecordsAsOther(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	m.AuthResult("unknown", true)
+	m.EnterWorldResult("", false)
+	m.AllocationResultGame("unknown", true)
+	m.SessionCheckResult("unknown", SessionCheckExpired)
+	for name, counter := range map[string]prometheus.Counter{
+		"auth":       m.AuthTotal.WithLabelValues(GameOther, ResultOK),
+		"enter":      m.EnterWorldTotal.WithLabelValues(GameOther, ResultFail),
+		"allocation": m.AllocationsTotal.WithLabelValues(GameOther, ResultOK),
+		"session":    m.SessionChecksTotal.WithLabelValues(GameOther, SessionCheckExpired),
+	} {
+		if got := testutil.ToFloat64(counter); got != 1 {
+			t.Errorf("%s = %v, want 1", name, got)
+		}
+	}
+}
+
+func TestNewGameMethodsNilSafe(t *testing.T) {
+	var m *Metrics
+	m.SetGames([]string{"foo"})
+	if got := m.GameLabel("foo"); got != GameOther {
+		t.Errorf("nil GameLabel = %q", got)
+	}
+	m.AllocationResultGame("foo", true)
+}
+
+func TestUnchangedFamilyLabels(t *testing.T) {
+	m, reg := NewDefault()
+	m.SetTransportPosture(transport.Posture(transport.KindTCP, "", ":8000"))
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"gateway_connections_active": "", "gateway_relay_events_total": "",
+		"gateway_rate_limited_total": "reason", "gateway_kick_publish_total": "result",
+		"gateway_transport_encrypted": "cipher,transport", "gateway_transport_authenticated": "cipher,transport",
+		"gateway_redis_up": "", "gateway_relay_up": "", "gateway_stream_group_loss_total": "",
+		"gateway_unversioned_handshakes_total": "", "gateway_protocol_version_refused_total": "",
+		"go_goroutines": "", "process_cpu_seconds_total": "",
+	}
+	for _, family := range families {
+		expected, ok := want[family.GetName()]
+		if !ok {
+			continue
+		}
+		for _, metric := range family.Metric {
+			var names []string
+			for _, label := range metric.Label {
+				names = append(names, label.GetName())
+			}
+			if got := strings.Join(names, ","); got != expected {
+				t.Errorf("%s labels = %q, want %q", family.GetName(), got, expected)
+			}
+		}
+		delete(want, family.GetName())
+	}
+	if len(want) != 0 {
+		t.Errorf("missing families: %v", want)
 	}
 }
