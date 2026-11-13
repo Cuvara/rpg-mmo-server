@@ -197,15 +197,13 @@ spec:
                       name: gameserver-config
                       key: advertise-host
                       optional: true
-                - name: JWT_SECRET
-                  valueFrom:
-                    secretKeyRef:
-                      name: rpg-app-secrets
-                      key: jwt-secret
-                # Same value as the gateway's, different value from
-                # JWT_SECRET. Not optional: a missing key must be a visible
-                # CreateContainerConfigError, not a server that rejects every
-                # join.
+                # The game server holds only JOIN_TOKEN_SECRET. It must match the
+                # gateway's value or every join fails, and must differ from the
+                # gateway-token signing secret; k8s/dev-up.sh enforces that.
+                # The gateway-token signing secret is deliberately absent here: a
+                # compromised pod holding it could sign gateway tokens for any
+                # user and gid (ADR-33 D7, owner decision 5).
+                # This key is not optional: the binary exits 2 when it is missing.
                 - name: JOIN_TOKEN_SECRET
                   valueFrom:
                     secretKeyRef:
