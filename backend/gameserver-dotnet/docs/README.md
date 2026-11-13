@@ -61,7 +61,7 @@ dotnet run --project GameServer -- \
   --sim-background-hz 5 \
   --map-width 1000 \
   --map-height 1000 \
-  --jwt-secret dev-secret-change-me \
+  --join-token-secret dev-join-secret-change-me \
   --agones \
   --redis localhost:6379
 ```
@@ -77,6 +77,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--addr` | `GAMESERVER_ADDR` | `:9000` | Game traffic listen address |
 | `--map-id` | `GAMESERVER_MAP_ID` | `map_01` | Map identifier, also the `map_id` metric label |
 | `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
+| `--game-id` | `GAMESERVER_GAME_ID` | `cuvara` | **The game this server serves** (ADR-33), set per fleet or service, never per map. Unset or empty is the default game `cuvara`. A value that fails the game-id validator (`^[a-z][a-z0-9]{1,23}$`, and not the reserved `gs`, `map` or `dungeon`) **exits 2**. A non-default game also **exits 2** unless the resolved server id (`--server-id`, then `GAMESERVER_ID`, then `POD_NAME`, then a generated `gs-<hex>`) starts with `<game>-` and has a non-empty suffix, so its fleets must be named `<game>-...`; the default game keeps today's ids (`map_01`, `gs-dotnet-map_01`, `gs-<hex>`). Both checks run before migrations, registration or any connection. The game is written as `game_id` into this server's registry entry, and every join token's `gid` claim is checked against it (`docs/API.md`, "Join refusal reasons"). Logged at startup as `GameId:` |
 | `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players. A join beyond it is refused with `"Server is full"` **and logged at Warning** with the count, the limit and the user — this refusal was silent until #145, so a server turning players away and a broken one produced identical logs. The value is published into the registry and enforced by the gateway too, so it is a fleet-wide admission limit, not a pod-local one. Also reported as `capacity` on `/status`. Admission is **atomic**: the slot is reserved before the player-store load and released if the join fails, so N concurrent joins against one free slot admit exactly one; a user rejoining over their own still-open connection *replaces* it and takes no second slot; a user in the reconnect hold window is not an occupant (see `docs/DESIGN.md`, "Admission hardening") |
 | `--max-pending-handshakes` | `GAMESERVER_MAX_PENDING_HANDSHAKES` | `256` | Most accepted sockets allowed in the join handshake at once. **Separate from `--capacity`**, which counts authenticated players only. An accept beyond it is closed on the spot with no reply and counted as `gameserver_handshakes_rejected_total{reason="pool_full"}`. Published as `handshakes_pending` on `/status` |
 | `--handshake-timeout-ms` | `GAMESERVER_HANDSHAKE_TIMEOUT_MS` | `5000` | Deadline, from accept, for a peer to deliver a complete, valid `MsgJoinToken` (and to read the reply to a rejected one). An idle socket, a partial length prefix or a partial body is closed at the deadline and counted as `reason="timeout"`; a frame that is not a join is closed immediately as `reason="malformed"`. Linked to shutdown, so pending reads unwind on stop. Covers only what the peer controls — the player-store load after verification runs on the host token |
@@ -120,8 +121,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | *(none)* | `GAMESERVER_BOT_SPREAD` | `120` | Radius of the disc bots are scattered over at startup. Deliberately wide: bots are what the enemy spawner anchors on, so where the bots are is where the fight is, and clustering them rebuilds the conveyor belt with extra steps |
 | *(none)* | `GAMESERVER_BOT_ENGAGE_RANGE` | `40` | How far a bot travels to engage an enemy. Beyond it the bot wanders — a "nearest enemy anywhere" rule collapses every bot onto whichever corner is busiest |
 | *(none)* | `GAMESERVER_BOT_HP` / `_ATTACK` / `_DEFENSE` / `_SPEED` | `100` / `10` / `5` / `4` | Per-bot stats. The defaults match a real player's except for speed, which is higher so bots visibly circulate |
-| `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret for the Nakama→client auth token. Only used here as the `JOIN_TOKEN_SECRET` fallback |
-| `--join-token-secret` | `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | HS256 secret the **gateway** signs join tokens with. Comma-separated (`current,previous`) to rotate — see below |
+| `--join-token-secret` | `JOIN_TOKEN_SECRET` | *(none — required)* | HS256 secret the **gateway** signs join tokens with. **Required, with no fallback**: unset, or a list with no usable entry, exits 2. Comma-separated (`current,previous`) to rotate — see below. The server reads no `JWT_SECRET` at all (ADR-33 D7) |
 | `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`. Empty, `off`, `none` or `disabled` turns it off — same vocabulary as the Go gateway. An address that parses as none of those disables the endpoint and logs an error; it does not stop the server |
 | `--game-db-url` | `GAME_DB_URL` | *(unset)* | Game-state PostgreSQL DSN — see below |
 | `--migrate-only` | `GAMESERVER_MIGRATE_ONLY=true` | off | Apply pending migrations, then exit — see below |
@@ -575,23 +575,27 @@ like a working liveness contract (ADR-14 decision 4).
 #### Join-token secret (`JOIN_TOKEN_SECRET`)
 
 The join token the client presents to this server is signed by the gateway with
-`JOIN_TOKEN_SECRET`, **not** with `JWT_SECRET`. The two must hold the same value
-on both halves — the gateway signs, this server verifies:
+`JOIN_TOKEN_SECRET`. The gateway and every game server must hold the same value
+— the gateway signs, this server verifies:
 
 ```bash
 export JOIN_TOKEN_SECRET="$(openssl rand -hex 32)"   # same value on gateway + every game server
 ```
 
-`JWT_SECRET` (the Nakama→client auth secret) is never distributed to game-server
-pods, which is the whole point: a compromised pod holds only the join secret and
-therefore cannot mint auth tokens for arbitrary users.
+**Required, no fallback.** A server started without `JOIN_TOKEN_SECRET`, or with
+a list that holds no usable secret, logs a critical line and exits 2 before it
+accepts a connection. Nothing else is tried in its place. Setting a different
+value on the gateway and the game servers breaks every join.
 
-**Fallback.** When `JOIN_TOKEN_SECRET` is unset the server verifies join tokens
-with `JWT_SECRET` and logs a start-up warning. The gateway does exactly the same,
-so an unconfigured deployment still works — but the split is not active. Setting
-it on **one** side only breaks every join.
+**The server does not read `JWT_SECRET`** (ADR-33 D7). That is the Nakama→client
+auth secret: it is never distributed to game-server pods, and the server has no
+flag, variable or option for it, so a compromised pod holds only the join secret
+and cannot mint auth tokens for arbitrary users. Because the server never sees
+the auth secret, it can no longer warn when the join secret equals it; that check
+moves to deploy time (ADR-33 leg 5). The gateway, which holds both, still warns at
+its own startup.
 
-**Rotation.** Both secrets accept a comma-separated list, `"current,previous"`.
+**Rotation.** The secret accepts a comma-separated list, `"current,previous"`.
 The gateway signs with the first entry; every entry verifies here, so old tokens
 drain instead of being rejected at the deploy. Procedure:
 
@@ -602,8 +606,7 @@ drain instead of being rejected at the deploy. Procedure:
 
 Whitespace around entries is trimmed and empty entries are dropped, so
 `"new, old"` and a trailing comma are fine. A spec with no usable secret at all
-(and no `JWT_SECRET` either) fails **closed** — every join is rejected and the
-start-up log says so.
+refuses to start (exit 2), as above.
 
 #### Player state persistence (`GAME_DB_URL`)
 
