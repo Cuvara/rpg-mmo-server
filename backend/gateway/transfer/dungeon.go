@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/gateway/registry"
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
@@ -123,7 +125,11 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 		case err == nil:
 			info, gerr := deps.Registry.GetServer(ctx, serverID)
 			if gerr == nil {
-				return mintForServer(info, userID, deps.CharacterID, deps.GameID, deps.JoinKeys)
+				result, mintErr := mintForServer(info, userID, deps.CharacterID, deps.GameID, deps.JoinKeys)
+				if errors.Is(mintErr, registry.ErrFleetMapMismatch) {
+					_ = deps.Index.Release(ctx, partyID)
+				}
+				return result, mintErr
 			}
 			// The mapping outlived the pod. Drop it and let this caller
 			// allocate a fresh instance rather than handing out a dead address.
@@ -169,6 +175,9 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 }
 
 func mintForServer(info storage.ServerInfo, userID, characterID, gameID string, joinKeys jwt.Keyring) (AssignResult, error) {
+	if constants.GameOrDefault(info.GameID) != constants.GameOrDefault(gameID) {
+		return AssignResult{}, fmt.Errorf("assign dungeon: server %s game %q does not match requested game %q: %w", info.ServerID, constants.GameOrDefault(info.GameID), constants.GameOrDefault(gameID), registry.ErrFleetMapMismatch)
+	}
 	if err := checkGameplayTransport(info); err != nil {
 		return AssignResult{}, fmt.Errorf("assign dungeon: %w", err)
 	}

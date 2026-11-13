@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
@@ -344,5 +345,42 @@ func TestAssignDungeonPassesGameToPartyAllocatorAndJoinToken(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&reg.allocated); got != 1 {
 		t.Fatalf("allocations = %d, want 1", got)
+	}
+}
+
+func TestAssignDungeonCachedInstanceGame(t *testing.T) {
+	for _, tc := range []struct {
+		name, requestedGame, serverGame string
+		mismatch                        bool
+	}{
+		{name: "different games", requestedGame: "ember", serverGame: "cuvara", mismatch: true},
+		{name: "absent server game is default", requestedGame: "ember", mismatch: true},
+		{name: "same game", requestedGame: "ember", serverGame: "ember"},
+		{name: "default game aliases", requestedGame: "cuvara"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			reg := newFakeRegistry()
+			reg.servers["instance"] = storage.ServerInfo{ServerID: "instance", GameID: tc.serverGame, Addr: "127.0.0.1:7100", Transport: "kcp"}
+			deps := testDeps(t, reg, &fakeParty{members: map[string][]string{"p1": {"u1"}}})
+			deps.GameID = tc.requestedGame
+			if err := deps.Index.Publish(ctx, "p1", "instance", time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			result, err := AssignDungeon(ctx, "u1", "p1", "dungeon_01", deps)
+			if tc.mismatch {
+				if !errors.Is(err, registry.ErrFleetMapMismatch) || result.JoinToken != "" {
+					t.Fatalf("result = %+v, err = %v; want mismatch and no token", result, err)
+				}
+				if _, err := deps.Index.Lookup(ctx, "p1"); !errors.Is(err, storage.ErrNotFound) {
+					t.Fatalf("stale mapping lookup err = %v, want ErrNotFound", err)
+				}
+			} else if err != nil || result.ServerID != "instance" || result.JoinToken == "" {
+				t.Fatalf("result = %+v, err = %v; want cached instance and token", result, err)
+			}
+			if got := atomic.LoadInt32(&reg.allocated); got != 0 {
+				t.Fatalf("allocations = %d, want 0", got)
+			}
+		})
 	}
 }
