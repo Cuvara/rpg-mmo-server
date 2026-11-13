@@ -1,3 +1,5 @@
+using System.Globalization;
+using GameServer.Games;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 
@@ -9,16 +11,19 @@ namespace GameServer.Registry;
 /// Layout (authoritative source: <c>shared/storage/redisstore/registry.go</c>):
 /// <code>
 ///   servers:id:{server_id}   HASH  server_id, map_id, addr, transport,
-///                                  capacity, player_count   (+ TTL)
-///   servers:map:{map_id}     SET   server ids on that map   (index, no TTL)
+///                                  capacity, player_count, identity_key, game_id (+ TTL)
+///   servers:map:{map_id}     SET   default-game server ids on that map (no TTL)
+///   servers:map:{game}:{map_id} SET server ids for another game (no TTL)
 ///
 /// Hash fields: server_id, map_id, addr, transport, capacity, player_count,
-/// identity_key. Mirrors shared/storage/redisstore/registry.go byte for byte.
+/// identity_key, game_id. Mirrors shared/storage/redisstore/registry.go byte for byte.
 /// </code>
 /// The hash is the source of truth: a server disappears on its own once it stops
 /// heartbeating, and the gateway prunes the map index lazily on lookup. Key
 /// names, field names and value formats must stay byte-identical to the Go side
 /// — the gateway reads these hashes directly, with no translation layer.
+/// Missing or empty game_id means the default game. Registration atomically refuses
+/// to overwrite a live server id belonging to another game before changing any keys.
 /// </summary>
 public sealed class RedisServerRegistry : IServerRegistry
 {
@@ -37,6 +42,36 @@ public sealed class RedisServerRegistry : IServerRegistry
     // with no translation layer, so the name and the base64 encoding of its value
     // must change on both sides in one commit or not at all.
     private const string FieldIdentityKey = "identity_key";
+    private const string FieldGameId = "game_id";
+
+    internal static readonly string[] HashFields =
+    [
+        FieldServerId, FieldMapId, FieldAddr, FieldTransport,
+        FieldCapacity, FieldPlayerCount, FieldIdentityKey, FieldGameId,
+    ];
+
+    // Shared verbatim with shared/testdata/multigame/register.lua and the Go registry.
+    // A single key writes only the hash; the optional second key adds map membership.
+    internal const string RegisterLua = @"-- ADR-33 S1: register a server only if servers:id:{id} is absent or names the same game.
+-- KEYS[1] servers:id:{server_id}; KEYS[2] (optional) the map index key.
+-- ARGV[1] default game id; ARGV[2] ttl in ms; ARGV[3..10] server_id, map_id, addr,
+-- transport, capacity, player_count, identity_key, game_id.
+if redis.call('EXISTS', KEYS[1]) == 1 then
+	local current = redis.call('HGET', KEYS[1], 'game_id')
+	if not current or current == '' then
+		current = ARGV[1]
+	end
+	if current ~= ARGV[10] then
+		return 0
+	end
+end
+redis.call('HSET', KEYS[1], 'server_id', ARGV[3], 'map_id', ARGV[4], 'addr', ARGV[5], 'transport', ARGV[6], 'capacity', ARGV[7], 'player_count', ARGV[8], 'identity_key', ARGV[9], 'game_id', ARGV[10])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+if #KEYS > 1 then
+	redis.call('SADD', KEYS[2], ARGV[3])
+end
+return 1
+";
 
     /// <summary>
     /// Sets player_count only if the hash still exists, so a stale writer cannot
@@ -108,7 +143,17 @@ return 1
     }
 
     internal static string ServerKey(string serverId) => IdPrefix + serverId;
-    internal static string MapKey(string mapId) => MapPrefix + mapId;
+    internal static string MapKey(string mapId) => MapIndexKey(null, mapId);
+
+    internal static string MapIndexKey(string? gameId, string mapId) =>
+        GameId.IsDefaultGame(gameId) ? MapPrefix + mapId : MapPrefix + gameId + ":" + mapId;
+
+    internal static RedisValue[] BuildRegisterArgs(ServerInfo info, TimeSpan ttl) =>
+    [
+        GameId.DefaultGameId, (long)ttl.TotalMilliseconds,
+        info.ServerId, info.MapId, info.Addr, info.Transport,
+        info.Capacity, info.PlayerCount, info.IdentityKey, GameId.GameOrDefault(info.GameId),
+    ];
 
     private IDatabase Db => _mux.GetDatabase();
 
@@ -116,38 +161,13 @@ return 1
     public async Task RegisterAsync(ServerInfo info, RegistrationScope scope, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var key = (RedisKey)ServerKey(info.ServerId);
-        var db = Db;
-
-        // Same operations, same order, as the Go TxPipeline: HSET, EXPIRE, SADD.
-        // Batched so they travel as one round trip.
-        //
-        // The SADD — and ONLY the SADD — is conditional. Under
-        // RegistrationScope.HashOnly the hash and its TTL are written exactly as
-        // before, so the gateway still reads this pod's dialable address and the
-        // entry still expires on its own when the pod dies; what is skipped is the
-        // map index, which would otherwise advertise a dungeon instance to
-        // FindServer (ADR-26 decision 8).
-        var batch = db.CreateBatch();
-        var hset = batch.HashSetAsync(key,
-        [
-            new HashEntry(FieldServerId, info.ServerId),
-            new HashEntry(FieldMapId, info.MapId),
-            new HashEntry(FieldAddr, info.Addr),
-            new HashEntry(FieldTransport, info.Transport),
-            new HashEntry(FieldCapacity, info.Capacity),
-            new HashEntry(FieldPlayerCount, info.PlayerCount),
-            new HashEntry(FieldIdentityKey, info.IdentityKey),
-        ]);
-        var expire = batch.KeyExpireAsync(key, _ttl);
-        Task<bool>? sadd = scope == RegistrationScope.MapIndexed
-            ? batch.SetAddAsync(MapKey(info.MapId), info.ServerId)
-            : null;
-        batch.Execute();
-
-        await hset;
-        await expire;
-        if (sadd != null) await sadd;
+        string gameId = GameId.GameOrDefault(info.GameId);
+        RedisKey[] keys = scope == RegistrationScope.MapIndexed
+            ? [ServerKey(info.ServerId), MapIndexKey(gameId, info.MapId)]
+            : [ServerKey(info.ServerId)];
+        var result = await Db.ScriptEvaluateAsync(RegisterLua, keys, BuildRegisterArgs(info, _ttl));
+        if ((long)result == 0)
+            throw new RegistryGameMismatchException(info.ServerId, gameId);
 
         _logger.LogInformation(
             "Registered {ServerId} in Redis: map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s scope={Scope} identity={IdentityKey}",
@@ -167,26 +187,64 @@ return 1
     /// <inheritdoc />
     public async Task DeregisterAsync(string serverId, string mapId, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var key = (RedisKey)ServerKey(serverId);
         var db = Db;
 
         // Prefer the map id recorded in Redis: if this process was started with one
         // map id and the entry says another, the index membership to remove is the
         // one Redis actually holds.
-        var storedMap = await db.HashGetAsync(key, FieldMapId);
-        string effectiveMap = storedMap.HasValue ? storedMap.ToString() : mapId;
+        var stored = await db.HashGetAsync(key, [(RedisValue)FieldMapId, FieldGameId]);
+        string effectiveMap = stored[0].HasValue ? stored[0].ToString() : mapId;
+        string gameId = GameId.GameOrDefault(stored[1].ToString());
 
         var batch = db.CreateBatch();
         var del = batch.KeyDeleteAsync(key);
         Task<bool>? srem = string.IsNullOrEmpty(effectiveMap)
             ? null
-            : batch.SetRemoveAsync(MapKey(effectiveMap), serverId);
+            : batch.SetRemoveAsync(MapIndexKey(gameId, effectiveMap), serverId);
         batch.Execute();
 
         await del;
         if (srem != null) await srem;
 
         _logger.LogInformation("Deregistered {ServerId} from Redis (map={MapId})", serverId, effectiveMap);
+    }
+
+    /// <summary>
+    /// Return live servers on a game's map, ignoring expired index members and entries
+    /// owned by another game. An omitted or empty game id selects the default game.
+    /// </summary>
+    public async Task<IReadOnlyList<ServerInfo>> FindByGameAndMapAsync(
+        string? gameId, string mapId, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        string effectiveGame = GameId.GameOrDefault(gameId);
+        var db = Db;
+        var ids = await db.SetMembersAsync(MapIndexKey(effectiveGame, mapId));
+        var result = new List<ServerInfo>(ids.Length);
+        foreach (var id in ids)
+        {
+            ct.ThrowIfCancellationRequested();
+            var entries = await db.HashGetAllAsync(ServerKey(id.ToString()));
+            if (entries.Length == 0) continue;
+            var info = FromHashEntries(entries);
+            if (string.Equals(info.GameId, effectiveGame, StringComparison.Ordinal))
+                result.Add(info);
+        }
+        return result;
+    }
+
+    internal static ServerInfo FromHashEntries(HashEntry[] entries)
+    {
+        var fields = new Dictionary<string, string>(entries.Length, StringComparer.Ordinal);
+        foreach (var entry in entries) fields[entry.Name.ToString()] = entry.Value.ToString();
+        string Field(string name) => fields.GetValueOrDefault(name, "");
+        int.TryParse(Field(FieldCapacity), NumberStyles.Integer, CultureInfo.InvariantCulture, out int capacity);
+        int.TryParse(Field(FieldPlayerCount), NumberStyles.Integer, CultureInfo.InvariantCulture, out int playerCount);
+        return new ServerInfo(
+            Field(FieldServerId), Field(FieldMapId), Field(FieldAddr), Field(FieldTransport),
+            capacity, playerCount, Field(FieldIdentityKey), GameId.GameOrDefault(Field(FieldGameId)));
     }
 
     /// <inheritdoc />

@@ -2,8 +2,11 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/duycuong/rpg-mmo/shared/constants"
 )
 
 func TestMemoryPlayerStore(t *testing.T) {
@@ -199,6 +202,7 @@ func TestMemoryServerRegistry_GetServerAndHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetServer() error: %v", err)
 	}
+	info.GameID = constants.DefaultGameID
 	if got != info {
 		t.Errorf("GetServer() = %+v, want %+v", got, info)
 	}
@@ -252,5 +256,139 @@ func TestMemoryServerRegistry_TTLExpiry(t *testing.T) {
 				t.Errorf("FindByMapID() = %d servers, want %d", len(found), tt.wantFound)
 			}
 		})
+	}
+}
+
+func TestMemoryServerRegistry_RegisterGameOwnership(t *testing.T) {
+	tests := []struct {
+		name          string
+		exists        bool
+		existingGame  string
+		requestedGame string
+		expired       bool
+		mismatch      bool
+	}{
+		{"other game", true, "foo", "bar", false, true},
+		{"other game to default", true, "foo", "", false, true},
+		{"same non-default game", true, "foo", "foo", false, false},
+		{"same default game", true, constants.DefaultGameID, "", false, false},
+		{"absent game to default", true, "", "", false, false},
+		{"empty game to explicit default", true, "", constants.DefaultGameID, false, false},
+		{"absent game to other", true, "", "foo", false, true},
+		{"absent entry to other", false, "", "foo", false, false},
+		{"absent entry to default", false, "", "", false, false},
+		{"expired other game", true, "bar", "foo", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			reg := NewMemoryServerRegistryWithTTL(time.Hour)
+			before := registryEntry{
+				info:     ServerInfo{ServerID: "gs-1", MapID: "map_01", Addr: "old:9000", GameID: tt.existingGame},
+				lastSeen: time.Now().Add(-30 * time.Minute),
+			}
+			if tt.expired {
+				before.lastSeen = time.Now().Add(-2 * time.Hour)
+			}
+			if tt.exists {
+				entry := before
+				reg.servers["gs-1"] = &entry
+			}
+			info := ServerInfo{ServerID: "gs-1", MapID: "map_01", Addr: "new:9000", GameID: tt.requestedGame}
+			err := reg.Register(ctx, info)
+			if tt.mismatch {
+				if !errors.Is(err, ErrGameMismatch) {
+					t.Fatalf("Register() error = %v, want ErrGameMismatch", err)
+				}
+				if after := *reg.servers["gs-1"]; after != before {
+					t.Errorf("refused registration changed entry: %+v -> %+v", before, after)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Register(): %v", err)
+			}
+			info.GameID = constants.GameOrDefault(info.GameID)
+			got, err := reg.GetServer(ctx, "gs-1")
+			if err != nil || got != info {
+				t.Errorf("GetServer() = %+v, %v, want %+v", got, err, info)
+			}
+			entry := reg.servers["gs-1"]
+			if entry.info.GameID != info.GameID || !entry.lastSeen.After(before.lastSeen) {
+				t.Errorf("stored entry = %+v, want normalized game %q and renewed liveness", entry, info.GameID)
+			}
+		})
+	}
+}
+
+func TestMemoryServerRegistry_GameLookups(t *testing.T) {
+	ctx := context.Background()
+	reg := NewMemoryServerRegistryWithTTL(time.Hour)
+	for _, info := range []ServerInfo{
+		{ServerID: "default", MapID: "map_01"},
+		{ServerID: "foo", MapID: "map_01", GameID: "foo"},
+		{ServerID: "bar", MapID: "map_01", GameID: "bar"},
+		{ServerID: "other-map", MapID: "map_02", GameID: "foo"},
+		{ServerID: "expired", MapID: "map_01", GameID: "foo"},
+	} {
+		if err := reg.Register(ctx, info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg.servers["expired"].lastSeen = time.Now().Add(-2 * time.Hour)
+	reg.servers["legacy"] = &registryEntry{
+		info: ServerInfo{ServerID: "legacy", MapID: "map_01"}, lastSeen: time.Now(),
+	}
+	tests := []struct {
+		name   string
+		gameID string
+		mapID  string
+		want   map[string]bool
+	}{
+		{"implicit default", "", "map_01", map[string]bool{"default": true, "legacy": true}},
+		{"explicit default", constants.DefaultGameID, "map_01", map[string]bool{"default": true, "legacy": true}},
+		{"foo", "foo", "map_01", map[string]bool{"foo": true}},
+		{"bar", "bar", "map_01", map[string]bool{"bar": true}},
+		{"other map", "foo", "map_02", map[string]bool{"other-map": true}},
+		{"unknown game", "unknown", "map_01", map[string]bool{}},
+		{"unknown map", "foo", "map_99", map[string]bool{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := reg.FindByGameAndMapID(ctx, tt.gameID, tt.mapID)
+			if err != nil || len(got) != len(tt.want) {
+				t.Fatalf("FindByGameAndMapID() = %+v, %v, want %v", got, err, tt.want)
+			}
+			for _, info := range got {
+				if !tt.want[info.ServerID] || info.GameID != constants.GameOrDefault(tt.gameID) {
+					t.Errorf("unexpected server %+v for game %q", info, tt.gameID)
+				}
+			}
+		})
+	}
+	all, err := reg.FindByMapID(ctx, "map_01")
+	if err != nil || len(all) != 4 {
+		t.Fatalf("FindByMapID() = %+v, %v, want all four live servers on map_01", all, err)
+	}
+	for _, info := range all {
+		if info.GameID == "" {
+			t.Errorf("FindByMapID() returned unnormalized GameID for %+v", info)
+		}
+	}
+	legacy, err := reg.GetServer(ctx, "legacy")
+	if err != nil || legacy.GameID != constants.DefaultGameID {
+		t.Errorf("GetServer(legacy) = %+v, %v, want default game", legacy, err)
+	}
+}
+
+func TestMemoryServerRegistry_GameOwnershipWithoutTTL(t *testing.T) {
+	reg := NewMemoryServerRegistry()
+	ctx := context.Background()
+	if err := reg.Register(ctx, ServerInfo{ServerID: "gs-1", GameID: "foo"}); err != nil {
+		t.Fatal(err)
+	}
+	reg.servers["gs-1"].lastSeen = time.Now().Add(-24 * time.Hour)
+	if err := reg.Register(ctx, ServerInfo{ServerID: "gs-1", GameID: "bar"}); !errors.Is(err, ErrGameMismatch) {
+		t.Errorf("Register() without TTL = %v, want ErrGameMismatch", err)
 	}
 }

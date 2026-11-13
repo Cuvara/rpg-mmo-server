@@ -10,6 +10,10 @@ import (
 // expired). Callers can test for it with errors.Is.
 var ErrNotFound = errors.New("not found")
 
+// ErrGameMismatch is returned when a server id is already owned by another game.
+// Callers can test for it with errors.Is.
+var ErrGameMismatch = errors.New("server id registered to another game")
+
 // Compile-time checks that every implementation satisfies its interface.
 var (
 	_ PlayerStore    = (*MemoryPlayerStore)(nil)
@@ -64,6 +68,9 @@ type ServerInfo struct {
 	// network is load-bearing for this field, and ADR-25 §6 says so explicitly
 	// rather than leaving it assumed.
 	IdentityKey string `json:"identity_key,omitempty"`
+
+	// GameID identifies the owning game; empty/absent means constants.DefaultGameID.
+	GameID string `json:"game_id"`
 }
 
 // Event is a cross-server event message.

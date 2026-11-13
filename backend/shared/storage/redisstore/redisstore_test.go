@@ -185,6 +185,7 @@ func TestRedisServerRegistry_RegisterAndLookup(t *testing.T) {
 		t.Fatalf("GetServer() error: %v", err)
 	}
 	want := testServer("gs-3", "map_02")
+	want.GameID = constants.DefaultGameID
 	if got != want {
 		t.Errorf("GetServer() = %+v, want %+v", got, want)
 	}
