@@ -93,6 +93,53 @@ It creates one probe account and leaves it (and 30 gold) behind. What each
 | `client record write rejected` | F02: `kills_alltime` is authoritative — Nakama refuses a client's own `WriteLeaderboardRecord` |
 | `server-side score for probe user = 3` | F02/F06: the server path did write the score, exactly once (3 kills, not 6 after the replay) |
 
+## Serve another game (ADR-33)
+
+1. Add the game id to `GAMES` in Nakama's runtime env, keeping `cuvara`:
+   `--runtime.env "GAMES=cuvara,foo"` (see `README.md` → *Configuration*).
+2. Restart Nakama and check the log for `allowed games: [cuvara foo]`. An invalid
+   entry stops start-up with `configure allowed games: …`.
+3. The game's clients send `vars: {"game": "foo"}` on every authenticate call.
+   Removing a game from `GAMES` refuses its logins, refreshes and `gateway_token`
+   calls (code 3); its stored `foo.*` data is left untouched.
+
+## Session refresh keeps the game (local stack)
+
+**Status: HUMAN_REQUIRED** until someone runs it against a real Nakama with the
+local-stack gate approved. Unit tests (`TestSessionRefresh_GameVarSeenByPlugin`,
+`TestGameFromContext_AfterSessionRefresh`, `TestBeforeSessionRefresh_Game`) only
+cover what the plugin sees; that Nakama itself copies `vars` from the refresh
+token into the new session is proven only by this test.
+
+`TestSessionRefresh_GameVarLocalStack` (`auth/refresh_localstack_test.go`, build
+tag `localstack`): device login with `vars.game` → `gateway_token` carries `gid`
+→ refresh with the `vars` field omitted → the new session's `vrs.game` and its `gateway_token`
+`gid` are still the game → a login and a refresh with a game outside `GAMES` are
+both refused (4xx, not 5xx). Only omitting `vars` keeps the token's vars; any
+supplied `vars` object, even empty, is validated as a replacement, and an empty
+object selects the default game `cuvara`. The test also records whether an empty
+object is refused or produces a session for the default game.
+
+1. Start the local stack with a plugin built from this code (repo-root
+   `./scripts/build-all.sh --skip-tests --plugin`, Nakama container stopped) and
+   Nakama started with the test game in `GAMES`, for example
+   `--runtime.env "GAMES=cuvara,mgtest"`.
+2. Run, from `backend/nakama`:
+
+   ```bash
+   NAKAMA_URL=http://127.0.0.1:7350 \
+   NAKAMA_SERVER_KEY=defaultkey \
+   MULTIGAME_TEST_GAME=mgtest \
+   go test -tags localstack ./auth/ -run Refresh -v
+   ```
+
+   `NAKAMA_URL` defaults to `http://127.0.0.1:7350` and `NAKAMA_SERVER_KEY` to
+   `defaultkey`. `MULTIGAME_TEST_GAME` is required and must be a valid
+   non-default game id that is in Nakama's `GAMES`; the test fails fast
+   otherwise. It creates throwaway device accounts (`l4refresh…`).
+3. Record the run (date, Nakama version, result) in the task evidence; until
+   then the refresh guarantee stays HUMAN_REQUIRED.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |
@@ -110,4 +157,9 @@ It creates one probe account and leaves it (and 30 gold) behind. What each
 | Gateway rejects every realtime token (`invalid signature`) | `JWT_SECRET` mismatch between Nakama and Gateway | Align the env var in both deployments and restart |
 | Gateway rejects tokens with `token expired` | Client cached a token past `expires_in` (3600s), or clock skew | Have the client re-call `gateway_token`; check NTP on both hosts |
 | `gateway_token` returns code 16 | Client called the RPC without a Nakama session | Authenticate first (device/email) and send the session token |
+| Nakama fails to start: `configure allowed games: …invalid GAMES entry` | A `GAMES` entry is not `^[a-z][a-z0-9]{1,23}$` (or the list has an empty entry, e.g. a trailing comma) | Fix the runtime env value and restart |
+| Every `cuvara` login refused with `game not allowed` after setting `GAMES` | `GAMES` is set but does not list `cuvara`; a set list is exact | Add `cuvara` to `GAMES` and restart |
+| A game's logins or `gateway_token` refused with `game not allowed` (code 3) | The client's `vars.game` is not in `GAMES` | Add the game to `GAMES`, or fix the client's `vars` |
+| `gateway_token` returns code 7 `game_id does not match the session game` | Client sent a `game_id` other than its session's `vars.game` | Drop `game_id` from the request, or log in again with the right `vars.game` |
+| `gateway_token` for a non-default game returns `character not found` for a character listed under `characters` | Non-default games check `<game>.characters` only, with no fallback | Expected; that game's roster RPCs are scoped by task l4-data |
 | Players log in with no profile | `StorageWrite` failing (DB pressure / permissions) | Check Nakama logs for `after authenticate …: ensure profile:` errors and PostgreSQL health |

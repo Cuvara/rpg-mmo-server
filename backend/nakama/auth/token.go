@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/duycuong/rpg-mmo/nakama/character"
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
+	"github.com/duycuong/rpg-mmo/shared/gameid"
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -26,6 +29,9 @@ type GatewayTokenRequest struct {
 	// token. Empty means the account's default character and omits the claim,
 	// which is exactly what every protocol 2 client gets.
 	CharacterID string `json:"character_id,omitempty"`
+
+	// GameID must match the authenticated caller's session game when supplied.
+	GameID string `json:"game_id,omitempty"`
 }
 
 // GatewayTokenResponse is the payload returned by the gateway_token RPC.
@@ -36,18 +42,27 @@ type GatewayTokenResponse struct {
 	// CharacterID echoes the `cid` claim the token carries; omitted for the
 	// default character.
 	CharacterID string `json:"character_id,omitempty"`
+	// GameID echoes the `gid` claim; omitted for the default game.
+	GameID string `json:"game_id,omitempty"`
 }
 
 // IssueGatewayToken signs a realtime token for userID using the shared HS256
 // JWT implementation, so the Gateway can verify it locally without a roundtrip.
 func IssueGatewayToken(userID, serverID string, cfg Config) (GatewayTokenResponse, error) {
-	return IssueGatewayTokenForCharacter(userID, serverID, "", cfg)
+	return IssueGatewayTokenForGame(userID, serverID, "", "", cfg)
 }
 
 // IssueGatewayTokenForCharacter is IssueGatewayToken with the `cid` claim
 // (ADR-31). It does NOT check ownership: the caller must have done so (see
 // GatewayTokenRPC). An empty characterID omits the claim.
 func IssueGatewayTokenForCharacter(userID, serverID, characterID string, cfg Config) (GatewayTokenResponse, error) {
+	return IssueGatewayTokenForGame(userID, serverID, characterID, "", cfg)
+}
+
+// IssueGatewayTokenForGame signs optional character and game claims. The caller
+// must validate the session game and character ownership before calling it.
+// Empty and default game IDs omit both gid and the response's game_id.
+func IssueGatewayTokenForGame(userID, serverID, characterID, gameID string, cfg Config) (GatewayTokenResponse, error) {
 	if userID == "" {
 		return GatewayTokenResponse{}, fmt.Errorf("issue gateway token: empty user id")
 	}
@@ -58,15 +73,19 @@ func IssueGatewayTokenForCharacter(userID, serverID, characterID string, cfg Con
 	if err != nil {
 		return GatewayTokenResponse{}, fmt.Errorf("issue gateway token: %w", err)
 	}
-	token, err := keys.SignWithCharacter(userID, serverID, characterID, cfg.TokenTTL)
+	token, err := keys.SignWithGame(userID, serverID, characterID, gameID, cfg.TokenTTL)
 	if err != nil {
 		return GatewayTokenResponse{}, fmt.Errorf("issue gateway token: %w", err)
+	}
+	if gameid.IsDefaultGame(gameID) {
+		gameID = ""
 	}
 	return GatewayTokenResponse{
 		Token:       token,
 		UserID:      userID,
 		ExpiresIn:   int64(cfg.TokenTTL.Seconds()),
 		CharacterID: characterID,
+		GameID:      gameID,
 	}, nil
 }
 
@@ -104,6 +123,15 @@ func gatewayToken(ctx context.Context, logger runtime.Logger, roster character.S
 		}
 	}
 
+	game, err := gamectx.GameFromContext(ctx, req.GameID)
+	if err != nil {
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			logger.Error("gateway_token: invalid GAMES configuration: %v", err)
+			return "", ErrInternal
+		}
+		return "", err
+	}
+
 	// ADR-31: a selected character must be the caller's. Checked here, at the
 	// only place the claim is minted, so the gateway and game server can trust
 	// `cid` without a roundtrip. "Not yours" and "does not exist" both answer
@@ -114,7 +142,12 @@ func gatewayToken(ctx context.Context, logger runtime.Logger, roster character.S
 			logger.Error("gateway_token: no storage to check character %s for %s", req.CharacterID, userID)
 			return "", ErrInternal
 		}
-		owns, err := character.Owns(ctx, roster, userID, req.CharacterID)
+		var owns bool
+		if gameid.IsDefaultGame(game) {
+			owns, err = character.Owns(ctx, roster, userID, req.CharacterID)
+		} else {
+			owns, err = ownsGameCharacter(ctx, roster, game, userID, req.CharacterID)
+		}
 		if err != nil {
 			logger.Error("gateway_token: %v", err)
 			return "", ErrInternal
@@ -125,7 +158,19 @@ func gatewayToken(ctx context.Context, logger runtime.Logger, roster character.S
 		}
 	}
 
-	resp, err := IssueGatewayTokenForCharacter(userID, req.ServerID, req.CharacterID, LoadConfig(ctx))
+	if !gameid.IsDefaultGame(game) {
+		if roster == nil {
+			logger.Error("gateway_token: no storage to ensure profile for game %s user %s", game, userID)
+			return "", ErrInternal
+		}
+		displayName, _ := ctx.Value(runtime.RUNTIME_CTX_USERNAME).(string)
+		if _, err := EnsureGameProfile(ctx, roster, game, userID, displayName); err != nil {
+			logger.Error("gateway_token: %v", err)
+			return "", ErrInternal
+		}
+	}
+
+	resp, err := IssueGatewayTokenForGame(userID, req.ServerID, req.CharacterID, game, LoadConfig(ctx))
 	if err != nil {
 		logger.Error("gateway_token: %v", err)
 		return "", ErrInternal
