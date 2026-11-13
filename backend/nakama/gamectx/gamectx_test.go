@@ -147,8 +147,11 @@ func TestGameFromVars(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := GameFromVars(gameContext(tt.games, "", nil), tt.vars)
-			if got != tt.want || err != tt.err {
+			if got != tt.want || !errors.Is(err, tt.err) {
 				t.Fatalf("GameFromVars(%v) = %q, %v; want %q, %v", tt.vars, got, err, tt.want, tt.err)
+			}
+			if errors.Is(err, ErrGamesConfig) && !strings.Contains(err.Error(), `entry ""`) {
+				t.Errorf("configuration error does not name invalid entry: %v", err)
 			}
 		})
 	}
@@ -191,7 +194,7 @@ func TestGameFromContext(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := GameFromContext(gameContext(tt.games, tt.userID, tt.vars), tt.payload)
-			if got != tt.want || err != tt.err {
+			if got != tt.want || !errors.Is(err, tt.err) {
 				t.Fatalf("GameFromContext(%q) = %q, %v; want %q, %v", tt.payload, got, err, tt.want, tt.err)
 			}
 		})

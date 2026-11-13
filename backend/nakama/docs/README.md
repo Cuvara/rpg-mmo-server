@@ -137,8 +137,10 @@ A client of a game other than `cuvara` sends its game id in the `vars` of
 ```
 
 No `vars.game` means `cuvara`, so existing clients need no change. Nakama keeps
-the vars in the session and across a refresh that sends no `vars`; the plugin
-reads the game from the session on every call, and `gateway_token` mints it as
+the vars in the session and across a refresh only when the `vars` field is
+omitted. Any supplied `vars` object, even empty, is validated as a replacement;
+an empty object selects the default game `cuvara`. The plugin reads the game
+from the session on every call, and `gateway_token` mints it as
 the `gid` claim. A client never changes game mid-session: a payload `game_id`
 that differs from the session game is refused (code 7). See `API.md` →
 *Game identity*.

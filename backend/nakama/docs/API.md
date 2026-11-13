@@ -374,7 +374,7 @@ Per-game data names come from `gamectx.Scoped(game, name)`: `name` for `cuvara`,
 |------|------------|-----------------|
 | `BeforeAuthenticateApple`, `Custom`, `Device`, `Facebook`, `FacebookInstantGame`, `GameCenter`, `Google`, `Steam` | `account.vars.game` must be in `GAMES` (code 3) | Request passed through unchanged; a request with no `account` passes through |
 | `BeforeAuthenticateEmail` | Same, checked first | Credential validation and email normalisation (below) |
-| `BeforeSessionRefresh` | Only when the refresh carries `vars`: then `vars.game` must be in `GAMES` (code 3), absent `game` = `cuvara` | A refresh with no `vars` passes through, so Nakama keeps the refresh token's vars and the game |
+| `BeforeSessionRefresh` | Any supplied `vars` object, even empty, is validated: `vars.game` must be in `GAMES` (code 3), absent `game` = `cuvara` | Only an omitted `vars` field passes through, so Nakama keeps the refresh token's vars and the game |
 | `AfterAuthenticateDevice`, `AfterAuthenticateEmail` | Re-validates `vars.game` | Creates the profile in `Scoped(game, "player")` (below) |
 
 ### `BeforeAuthenticateEmail`

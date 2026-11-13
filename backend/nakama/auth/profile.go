@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -105,6 +106,9 @@ func afterAuthenticate(ctx context.Context, logger runtime.Logger, nk runtime.Na
 	game, err := gamectx.GameFromVars(ctx, vars)
 	if err != nil {
 		logger.Error("after authenticate %s: invalid game: %v", method, err)
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			return ErrInternal
+		}
 		return err
 	}
 	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)

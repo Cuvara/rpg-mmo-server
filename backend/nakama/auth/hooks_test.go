@@ -158,7 +158,8 @@ func TestBeforeSessionRefresh_Game(t *testing.T) {
 	}{
 		{name: "nil request", games: "foo"},
 		{name: "nil vars preserve token game", games: "foo", in: &api.SessionRefreshRequest{Token: "refresh"}},
-		{name: "empty vars preserve token game", games: "foo", in: &api.SessionRefreshRequest{Vars: map[string]string{}}},
+		{name: "empty vars default excluded", games: "foo", in: &api.SessionRefreshRequest{Vars: map[string]string{}}, wantErr: gamectx.ErrGameNotAllowed},
+		{name: "empty vars select default", games: "cuvara,foo", in: &api.SessionRefreshRequest{Vars: map[string]string{}}},
 		{name: "allowed replacement", games: "cuvara,foo", in: &api.SessionRefreshRequest{Vars: map[string]string{"game": "foo"}}},
 		{name: "disallowed replacement", games: "cuvara", in: &api.SessionRefreshRequest{Vars: map[string]string{"game": "foo"}}, wantErr: gamectx.ErrGameNotAllowed},
 		{name: "replacement without game selects default", games: "cuvara,foo", in: &api.SessionRefreshRequest{Vars: map[string]string{"other": "value"}}},

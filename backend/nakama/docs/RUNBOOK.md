@@ -113,9 +113,12 @@ token into the new session is proven only by this test.
 
 `TestSessionRefresh_GameVarLocalStack` (`auth/refresh_localstack_test.go`, build
 tag `localstack`): device login with `vars.game` → `gateway_token` carries `gid`
-→ refresh with no `vars` → the new session's `vrs.game` and its `gateway_token`
+→ refresh with the `vars` field omitted → the new session's `vrs.game` and its `gateway_token`
 `gid` are still the game → a login and a refresh with a game outside `GAMES` are
-both refused (4xx, not 5xx).
+both refused (4xx, not 5xx). Only omitting `vars` keeps the token's vars; any
+supplied `vars` object, even empty, is validated as a replacement, and an empty
+object selects the default game `cuvara`. The test also records whether an empty
+object is refused or produces a session for the default game.
 
 1. Start the local stack with a plugin built from this code (repo-root
    `./scripts/build-all.sh --skip-tests --plugin`, Nakama container stopped) and

@@ -181,4 +181,34 @@ func TestSessionRefresh_GameVarLocalStack(t *testing.T) {
 		"token": refreshed.RefreshToken, "vars": map[string]string{"game": deniedGame},
 	})
 	assertDenied(status, body)
+
+	// An explicit empty vars object replaces the token's vars, selecting the
+	// default game if Nakama accepts the refresh.
+	status, body = post("/v2/account/session/refresh", "", map[string]any{
+		"token": refreshed.RefreshToken, "vars": map[string]string{},
+	})
+	if status >= 200 && status < 300 {
+		emptyVarsSession := decodeSession(body)
+		parts := strings.Split(emptyVarsSession.Token, ".")
+		if len(parts) != 3 {
+			t.Fatal("empty-vars refreshed session token is not a JWT")
+		}
+		claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			t.Fatalf("decode empty-vars refreshed session claims: %v", err)
+		}
+		var claims struct {
+			Vars map[string]string `json:"vrs"`
+		}
+		if err := json.Unmarshal(claimsJSON, &claims); err != nil {
+			t.Fatalf("decode empty-vars refreshed session vars: %v", err)
+		}
+		t.Logf("empty-vars refresh session vrs = %v", claims.Vars)
+		if got := claims.Vars["game"]; got != "" && got != "cuvara" {
+			t.Fatalf("empty-vars refresh vrs.game = %q, want default game", got)
+		}
+	} else {
+		assertDenied(status, body)
+		t.Logf("empty-vars refresh refused: HTTP %d: %s", status, body)
+	}
 }

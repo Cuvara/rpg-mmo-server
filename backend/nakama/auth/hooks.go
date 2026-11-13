@@ -109,9 +109,10 @@ func BeforeAuthenticateSteam(ctx context.Context, logger runtime.Logger, _ *sql.
 }
 
 // BeforeSessionRefresh validates replacement session variables. Nakama preserves
-// the refresh token's authenticated variables when the request has no variables.
+// the refresh token's authenticated variables only when vars is omitted. Any
+// supplied vars map, including an empty one, is validated as a replacement.
 func BeforeSessionRefresh(ctx context.Context, logger runtime.Logger, _ *sql.DB, _ runtime.NakamaModule, in *api.SessionRefreshRequest) (*api.SessionRefreshRequest, error) {
-	if len(in.GetVars()) == 0 {
+	if in == nil || in.Vars == nil {
 		return in, nil
 	}
 	if err := validateAuthGame(ctx, logger, in.GetVars()); err != nil {

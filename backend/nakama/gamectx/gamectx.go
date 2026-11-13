@@ -102,7 +102,7 @@ func GameFromContext(ctx context.Context, payloadGameID string) (string, error) 
 func validateGame(ctx context.Context, game string) (string, error) {
 	allowed, err := Allowed(ctx, game)
 	if err != nil {
-		return "", ErrGamesConfig
+		return "", err
 	}
 	if !gameid.ValidGameID(game) || !allowed {
 		return "", ErrGameNotAllowed

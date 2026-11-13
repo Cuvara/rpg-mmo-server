@@ -363,9 +363,10 @@ Center, Google, Steam, custom), so adding a login method later cannot open a
 bypass. `gateway_token` checks again through `GameFromContext`, because the
 allow-list can shrink while a session is alive.
 
-**Refresh.** A refresh with no `vars` passes through: Nakama copies the refresh
-token's vars into the new session, so the game survives. A refresh that sends
-`vars` replaces them, so it is validated like a login. What the plugin sees is
+**Refresh.** Only a refresh that omits the `vars` field passes through: Nakama
+copies the refresh token's vars into the new session, so the game survives. Any
+`vars` object replaces them and is validated like a login; an empty object selects
+the default game `cuvara`. What the plugin sees is
 unit-tested; that real Nakama carries the vars across a refresh is proven only
 by `TestSessionRefresh_GameVarLocalStack`, which is HUMAN_REQUIRED until it runs
 against a local stack (`RUNBOOK.md`).

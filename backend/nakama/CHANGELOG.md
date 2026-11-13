@@ -24,8 +24,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Before hooks on every auth method and on session refresh.** New
     `BeforeAuthenticateApple`, `Custom`, `Device`, `Facebook`, `FacebookInstantGame`,
     `GameCenter`, `Google`, `Steam` and `BeforeSessionRefresh` refuse a `vars.game` outside
-    `GAMES` with code 3. A refresh with no `vars` passes through, so Nakama keeps the
-    refresh token's vars; a refresh that replaces `vars` is validated like a login.
+    `GAMES` with code 3. Only an omitted `vars` field passes through, so Nakama keeps
+    the refresh token's vars; any supplied `vars` object, even empty, is validated
+    as a replacement like a login, with an empty object selecting `cuvara`.
   - **`gid` in `gateway_token`.** The RPC resolves the caller's game through
     `GameFromContext`, mints it as the `gid` claim through `shared/jwt`'s `SignWithGame`
     (omitted for `cuvara`, so the default token shape is unchanged) and echoes it as the
