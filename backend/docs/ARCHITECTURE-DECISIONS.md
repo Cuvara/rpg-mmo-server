@@ -4290,3 +4290,406 @@ to be flipped together — that no test could see.
   through the TCP proxy).
 - **M** — Decide whether WebGL is a supported gameplay target; if so, a relay transport ADR.
 
+---
+
+## ADR-33 — One backend stack serves many games: a game id travels with the session, the registry, the metrics and the Nakama data
+
+**Status:** proposed 2026-11-13, not accepted; draft for the owner (owner decision of 2026-11-13: several future games run on shared stacks). Extends ADR-31 (a claim
+that Nakama mints after an ownership check and the gateway copies into the join token is
+exactly the shape a game id would take) and ADR-19 (content is data on disk). Touches ADR-1
+(one writer per datum), ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a
+redirector), ADR-4 (Redis is shared, durable state), ADR-5 (Redis Streams are the only
+cross-server event path), ADR-7 (per-server capacity is unmeasured), ADR-18 (map fleets stay
+at one replica), ADR-20 (the `events:kick` stream), ADR-25 (the identity key in the registry
+hash) and ADR-26 (dungeon instances and the registration scope).
+
+**Context.** The Studio OS hub binds each game and each environment to a cluster. To show
+one game's servers, metrics and players on a cluster that carries several games, it needs a
+game identity to filter by in three places: the Redis server registry, the Prometheus
+metrics and the Nakama data. None of the three carries one today (see below). Until this ADR
+is decided and its legs ship, the hub runs one game per cluster.
+
+**Current state.** This is what the code at this branch's HEAD (develop @ `633a792`) does.
+Paths are relative to `backend/`. Every `path:line` below was opened at that revision. Where
+something does not exist, the entry names what was searched. A search of the `*.go`, `*.cs`,
+`*.proto`, `*.sql`, `*.yaml`/`*.yml` and Dockerfile sources under `backend/` (generated code
+excluded) for `game_id`, `gameid`, `GAME_ID`, `"gid"` and `tenant` finds no game identity
+anywhere. Its only hits are the word "tenant" in unrelated comments, e.g.
+`gameserver-dotnet/GameServer/Server/SimulationSchedule.cs:30`.
+
+### 1. Game identity and the session
+
+- **Nakama mints the gateway token.** The RPC id is `gateway_token`
+  (`nakama/auth/token.go:15`, registered at `nakama/main.go:29`). It needs a client session:
+  the user id comes from the Nakama context, and an empty one is refused
+  (`nakama/auth/token.go:87-90`). It is rate-limited per user id in that Nakama process's
+  memory, 0.2 calls/s with a burst of 5 (`nakama/auth/token.go:95-98`,
+  `nakama/auth/ratelimit.go:29-30`). The optional payload carries only `server_id` and
+  `character_id` (`nakama/auth/token.go:18-29`). A `character_id` must be on the caller's
+  roster (`nakama/auth/token.go:112-126`). The token is HS256, signed with the first
+  secret of `JWT_SECRET` (`nakama/auth/token.go:54-61`). Nakama reads that secret from its
+  runtime env (`nakama/auth/config.go:41-45`). Lifetime is `constants.SessionTTL`
+  (`nakama/auth/config.go:37`).
+- **Claims.** `shared/jwt/jwt.go:26-38` is the whole claim set: `sub` (user id), `sid`
+  (server id), `jti`, `cid` (character, ADR-31), `iat` and `exp`. A `jti` is generated only
+  when `sid` is non-empty, which means only on join tokens (`shared/jwt/jwt.go:72-78`). The
+  same struct serves the gateway token and the join token. There is no game claim, no `iss`
+  and no `aud`. The C# game server parses the same claim names
+  (`gameserver-dotnet/GameServer/Server/JwtValidator.cs:25`, `:33-45`).
+- **Gateway, `MsgAuth`** (`gateway/server/server.go:806-948`). The order is:
+  1. the protocol version check runs before the token is looked at (`:823-851`);
+  2. the token is verified against the `JWT_SECRET` keyring (`:855`);
+  3. `cid` is latched (`:866`);
+  4. duplicate-login detection reads the user's existing session (`:871-907`);
+  5. a new session is created (`:911`);
+  6. the connection is marked authenticated with user and character (`:920`);
+  7. the reply echoes the negotiated version (`:941`).
+
+  The session key is `session:{user_id}` (`shared/constants/keys.go:5`,
+  `gateway/session/manager.go:56`). Its JSON value holds `gateway_id`, `server_id`,
+  `map_id`, `join_token_jti`, `created_at` and `last_activity`
+  (`gateway/session/manager.go:15-30`). Neither the key nor the value names a game, so a user
+  id has at most one session per stack.
+- **Gateway, `MsgEnterWorld`** (`gateway/server/server.go:1076-1198`). A request whose
+  `character_id` differs from the token's `cid` is refused (`:1103-1111`). The `map_id` is
+  not validated. With an empty `party_id`, `req.MapID` goes straight to
+  `transfer.AssignMapCharacter`. With a party, it goes in as the dungeon content id
+  (`:1132-1136`). A search of the non-test Go under `gateway/` for any check on `MapID`
+  (empty value, allow-list, format) finds none. A map id is therefore any string the client
+  sends, and it succeeds only if a registry entry or an allocation serves exactly that string.
+  After assignment, the session records `server_id`, `map_id` and the join token's `jti`
+  (`:1166-1180`).
+- **How a map id resolves to a server.** `AssignMapCharacter`
+  (`gateway/transfer/map_assign.go:108-138`) does three things in order:
+  1. calls `RegistryService.FindServer` (`:109`);
+  2. refuses an entry whose transport is not `kcp` (`:113`);
+  3. mints the join token (`:117`).
+
+  `findServer` (`gateway/registry/registry.go:389-486`):
+  1. reads the `servers:map:{map_id}` index (`:390`);
+  2. refuses entries whose own `map_id` differs from the query (`:403-410`);
+  3. picks the least-loaded entry that has spare capacity (`:445-468`);
+  4. refuses when every entry is full (`:471-473`);
+  5. calls the allocator only when no entry exists (`:475-483`).
+
+  The Agones allocator selects a Fleet by **kind** (`map` or `dungeon`,
+  `gateway/registry/agones_allocator.go:25-26`), not by map id. The map id only labels the
+  result (`gateway/registry/agones_allocator.go:72-79`, `:224`). Defaults are namespace
+  `rpg-realtime` and fleet `map-servers-dotnet-dev`
+  (`gateway/registry/agones_allocator.go:46-47`). The k8s gateway sets
+  `ALLOCATOR_FLEET_MAP=map-servers-dotnet-k8s` and
+  `ALLOCATOR_FLEET_DUNGEON=dungeon-servers-dotnet-k8s`
+  (`deploy/k8s/app/40-gateway.yaml:253-261`). If an allocated pod self-registers under a
+  different map id, the assignment is refused and that map is not allocated again for a
+  while (`gateway/registry/registry.go:659-670`).
+- **Join token.** `GenerateJoinTokenCharacter` (`gateway/transfer/join_token.go:36-45`)
+  signs `sub`, `sid` (mandatory, `:37-39`), `cid` and a fresh `jti`, with lifetime
+  `constants.JoinTokenTTL` (`:40`). It signs with `JOIN_TOKEN_SECRET`, which is kept distinct
+  from `JWT_SECRET` on purpose (`gateway/transfer/join_token.go:13-16`). The gateway refuses
+  to start without it (`gateway/cmd/gateway/main.go:109-113`). On a join, the game server
+  checks, in order:
+  1. the protocol version (`gameserver-dotnet/GameServer/Server/GameServer.cs:1618`);
+  2. the signature (`:1643`);
+  3. that `sid` equals its own server id, with empty refused (`:1651`);
+  4. that the `jti` has not been used before (`:1659`).
+
+  Nothing on the join checks a map or a game. The `sid` pin is what ties a token to one
+  server.
+- **Wire messages** (`shared/proto/wire.proto`):
+  - `AuthRequest{token=1, protocol_version=2}` (`:197-204`)
+  - `AuthResponse{ok=1, user_id=2, error=3, protocol_version=4}` (`:207-218`)
+  - `EnterWorldRequest{map_id=1, party_id=2, character_id=3}` (`:234-244`)
+  - `EnterWorldResponse{server_addr=1, join_token=2, transport=3, error=4, reserved 5,
+    server_public_key=6}` (`:253-302`)
+  - `JoinTokenRequest{token=1, protocol_version=2}` (`:307-323`)
+  - `JoinTokenResponse{ok=1, user_id=2, error=3, tick_rate=4, protocol_version=5,
+    character_id=6}` (`:326-354`)
+  - `TransferMapRequest{map_id=1}` (`:1039-1041`)
+
+  No message carries a game id. The legacy JSON encoding mirrors these messages as Go structs
+  with snake_case tags (`shared/messages/messages.go:267`, `:302`, `:318`, `:343`).
+- **Protocol version.**
+  - Go: `WireProtocolVersion = 3` (`shared/messages/messages.go:245`) and
+    `MinSupportedProtocolVersion = 2` (`shared/messages/version.go:16`).
+  - C#: `ProtocolVersion = 3` and `MinSupportedProtocolVersion = 2`
+    (`gameserver-dotnet/GameServer/Net/WireProtocol.cs:106`, `:121`).
+  - Unity client: the third copy is `Runtime/Protocol/WireProtocolVersion.cs` in the Netcode
+    repository, named at `shared/messages/messages.go:241-244`. It was not opened for this
+    ADR.
+
+  The bump rule bumps for "a message or field that a receiver MUST act on to stay correct"
+  (`shared/proto/wire.proto:115-129`). It explicitly does not bump for an optional field
+  whose default old peers decode and handle as before (`shared/proto/wire.proto:130-140`).
+  C# restates the same rule (`gameserver-dotnet/GameServer/Net/WireProtocol.cs:92-99`).
+
+### 2. The Redis server registry and the event streams
+
+- **Registry keys.** `servers:id:{server_id}` is a HASH whose TTL is the heartbeat TTL.
+  `servers:map:{map_id}` is a SET of server ids with no TTL
+  (`shared/storage/redisstore/registry.go:15-31`; prefix `servers:` at
+  `shared/constants/keys.go:6`). The C# side repeats the prefixes as literals
+  (`gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:26-27`, `:110-111`). The
+  map id is the only partition of the index (`shared/storage/redisstore/registry.go:71`).
+- **Hash fields.** The fields are `server_id`, `map_id`, `addr`, `transport`, `capacity`,
+  `player_count` and `identity_key` (`shared/storage/redisstore/registry.go:20-24`; C#
+  constants at `gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:30-39`). Both
+  sides declare them a cross-language contract that changes in one commit or not at all
+  (`shared/storage/redisstore/registry.go:20-24`,
+  `gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:18-21`). The Go value type is
+  `storage.ServerInfo` (`shared/storage/interfaces.go:40-67`).
+- **Writers.** The C# game server writes its own entry: HSET of all seven fields, then
+  EXPIRE, then SADD into the map index
+  (`gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:116-150`). The SADD runs
+  only under `RegistrationScope.MapIndexed`, so a dungeon pod writes the hash but never joins
+  `servers:map:` (`:125-145`). `player_count` is written by an EXISTS-guarded script that is
+  identical in Go and C# (`shared/storage/redisstore/registry.go:33-41`,
+  `gameserver-dotnet/GameServer/Registry/RedisServerRegistry.cs:41-52`). The Go `Register`
+  (`shared/storage/redisstore/registry.go:75-96`) writes the same layout. The gateway does
+  not write an entry for a server it allocated; it waits for the pod's own entry
+  (`gateway/registry/registry.go:358-365`).
+- **Readers.** The gateway reads by map (`FindByMapID`,
+  `shared/storage/redisstore/registry.go:145-173`, which prunes dead ids from the set at
+  `:170`) and by id (`GetServer`, `:132-143`). `infoFromFields` turns an absent field into
+  its zero value (`shared/storage/redisstore/registry.go:198-212`).
+- **Other gateway keys.** The dungeon index uses `dungeon:alloc:{party_id}` and
+  `dungeon:party:{party_id}` (`shared/storage/redisstore/dungeon.go:13-24`). Sessions use
+  `session:{user_id}` (section 1). Neither has a game component.
+- **Event streams.** A stream's key is `events:{name}` (`shared/constants/keys.go:7`,
+  `shared/storage/redisstore/stream.go:259-261`, C#
+  `gameserver-dotnet/GameServer/Events/RedisEventStream.cs:41`). Each entry has the fields
+  `type` and `payload` (`shared/storage/redisstore/stream.go:20-21`,
+  `gameserver-dotnet/GameServer/Events/RedisEventStream.cs:44-47`). Both sides trim at
+  `MAXLEN ~ 30000` (`shared/storage/redisstore/stream.go:68`,
+  `gameserver-dotnet/GameServer/Events/RedisEventStream.cs:54`). The streams in use:
+  - **`events:game`** (`shared/constants/keys.go:11`).
+    - The C# server publishes `entity_killed`
+      (`gameserver-dotnet/GameServer/Server/GameServer.cs:2976`) with payload
+      `{victim_id, victim_type, killer_id, map_id, server_id}`
+      (`gameserver-dotnet/GameServer/Events/EventPublisher.cs:9-14`, published at `:102-108`).
+    - The gateway's registry watcher publishes `gateway:server_down` with payload
+      `{server_id, map_id}` (`gateway/registry/watcher.go:31`, `:35-38`) onto the same stream
+      through an adapter (`gateway/cmd/gateway/main.go:595-606`). The watcher's own comment
+      still calls this a Pub/Sub channel (`gateway/registry/watcher.go:30`).
+    - The gateway relay consumes the stream in consumer group `gateway`
+      (`gateway/cmd/gateway/main.go:191`, `gateway/events/relay.go:16`, `:90`). It acts only
+      on `server_down` and logs every other event (`gateway/server/server.go:353-366`,
+      `:376-398`).
+  - **`events:kick`** (`shared/constants/keys.go:13-15`).
+    - The gateway publishes `session_superseded` on a duplicate login
+      (`shared/constants/keys.go:18`, `gateway/server/kick.go:42-44`), with payload
+      `{user_id, server_id, jti, old_gateway, new_gateway}` (`gateway/server/kick.go:13-19`).
+    - Each game server reads it in its own consumer group `gs:{server_id}`
+      (`gameserver-dotnet/GameServer/Events/RedisKickConsumer.cs:54-57`, `:119`) and drops
+      entries for other server ids (`:224`).
+  - **`events:gateway_kick`** (`shared/constants/keys.go:22-25`).
+    - The gateway publishes the same payload, gateway to gateway
+      (`gateway/server/kick.go:63-65`).
+    - Each gateway instance reads it in its own group `gw:{gateway_id}`
+      (`gateway/server/kick_consumer.go:19-20`, `:77`).
+
+  No stream key, group or payload has a game field. Kick events are partitioned by server
+  id or gateway id. `events:game` is not partitioned at all.
+
+### 3. Metrics
+
+- **Gateway.** `gateway/metrics/metrics.go:146-212` defines 15 metric families, all named
+  `gateway_*`. Their only labels are:
+  - `result`: auth, enter_world, allocations, session_checks, kick_publish;
+  - `reason`: rate_limited;
+  - `transport` and `cipher`: the two transport gauges.
+
+  The Go runtime and process collectors are registered as well
+  (`gateway/metrics/metrics.go:254-255`). No gateway series carries a map, server or game
+  label.
+- **Game server.** One OpenTelemetry meter, `rpg.gameserver`
+  (`gameserver-dotnet/GameServer/Observability/GameMetrics.cs:66`), publishes 60 distinct
+  instrument names in that file. The exporter turns them into Prometheus names
+  (`GameMetrics.cs:6-30`). The constructor takes one `mapId` (`GameMetrics.cs:163`, called
+  from `gameserver-dotnet/GameServer/Program.cs:857`) and builds every tag list from it
+  (`GameMetrics.cs:168-190`). Most instruments carry `map_id` plus at most one small
+  enumerated label (`group`, `reason`, `outcome`, `generation`). Two carry no `map_id`:
+  player saves, labelled only `status` (`GameMetrics.cs:171-172`), and published events,
+  labelled only `type` (`GameMetrics.cs:1060`). A search of `GameMetrics.cs` for
+  `server_id` finds no server or pod label.
+- **Scrape and use.**
+  - `deploy/monitoring/prometheus.yaml` scrapes static targets that each get one label,
+    `service` (`:57-117`), plus one external label, `env: dev` (`:43-44`).
+  - The dashboard and the alert rules group by `map_id`
+    (`deploy/monitoring/dashboards/rpg-gameplay.json:35`, `:54`;
+    `deploy/monitoring/alerts.yaml:38-78`).
+- **Cardinality today.** A pod's `map_id` is a single constant, so the number of
+  game-server series grows with the number of live map servers on the stack. The map fleet
+  runs one replica (`deploy/agones/fleet-map-dotnet-dev.yaml:49-57`).
+
+### 4. Nakama data
+
+- **Accounts.** The plugin registers after-authenticate hooks for device and email, and a
+  before-authenticate hook for email (`nakama/main.go:32-40`). After a login it makes sure a
+  profile object exists in collection `player`, key `profile`
+  (`nakama/auth/profile.go:15-20`, `:42`, `:103-111`). The profile holds `level`,
+  `created_at` and `display_name` (`nakama/auth/profile.go:26-31`). The account is Nakama's
+  own user id, and nothing in the plugin scopes it.
+- **Character roster (ADR-31).** Collection `characters`, key `roster`, one object per user
+  (`nakama/character/character.go:49-54`). It is served by RPCs `character_list`,
+  `character_create` and `character_delete` (`nakama/main.go:74-89`), and `gateway_token`
+  checks ownership against it (`nakama/auth/token.go:117`). On the game server, the default
+  character's id is the user id
+  (`gameserver-dotnet/GameServer/Persistence/CharacterStore.cs:126-130`).
+- **Wallet and rewards.**
+  - There is one currency key, `gold` (`nakama/economy/reward.go:57`,
+    `nakama/economy/reward_batch.go:202`).
+  - `reward_kill` (`nakama/economy/reward.go:15`) takes `{user_id, victim_id, map_id}`
+    (`:21-25`).
+  - `reward_kills` (`nakama/economy/reward_batch.go:25`) takes
+    `{user_id, kills, map_id, batch_id}` (`:59-67`). It is made idempotent by a receipt in
+    collection `reward_receipts`, keyed by `batch_id`, written in the same transaction as the
+    wallet update (`:46`, `:188-209`).
+  - Wallet ledger metadata records `map_id` (`nakama/economy/reward.go:58-62`,
+    `nakama/economy/reward_batch.go:203-208`).
+  - The mutation RPCs refuse client sessions (`nakama/economy/caller.go:30-41`). The game
+    server calls them with `NAKAMA_HTTP_KEY` in the URL
+    (`gameserver-dotnet/GameServer/Nakama/NakamaClient.cs:112`, `:204`). It reads that key at
+    `gameserver-dotnet/GameServer/Program.cs:144`, defaulting to `defaulthttpkey`.
+- **Leaderboards.** There is one leaderboard, `kills_alltime`: authoritative, descending,
+  incremental, never reset (`nakama/economy/leaderboard.go:16`, `:94-102`). It is reached
+  through `submit_kill` (`:112`) and `get_leaderboard` (`:166`).
+- **Party.** Four storage-backed RPCs, `party_create`, `party_join`, `party_leave` and
+  `party_get` (`nakama/main.go:56-72`), with a cap of 4 members
+  (`nakama/social/party.go:70`). Data lives in collections `party` and `party_member`
+  (key `current`) (`nakama/social/party.go:77-84`). The gateway calls `party_get` over
+  `runtime.http_key` (`nakama/main.go:56-58`).
+- **Absent.** The plugin imports only `auth`, `character`, `economy` and `social`
+  (`nakama/main.go:12-15`), and `social` is party only. There are no friends, chat,
+  groups/guilds, matchmaking or notifications. Every collection, key and leaderboard id
+  above is an unprefixed Go constant.
+
+### 5. The game-state database
+
+- **Tables.** The game-state schema has four tables:
+  - `player_states`, keyed by `user_id`
+    (`deploy/db/migrations/gamestate/001_init.sql:15-26`);
+  - `character_state`, keyed by `character_id`, with `user_id`, `map_id`, position, `hp`,
+    `level` and `xp` (`deploy/db/migrations/gamestate/002_characters.sql:26-41`);
+  - `character_items`, keyed by `instance_id`, with a foreign key to the character
+    (`:51-75`);
+  - `item_grants`, keyed by `grant_id` (`:79-87`).
+
+  No table has a game column. The only scoping columns are `user_id`, `character_id` and
+  `map_id`.
+- **Migrations.**
+  - The numbered SQL is embedded in the server
+    (`gameserver-dotnet/GameServer/Persistence/Migrations/001_init.sql`,
+    `002_characters.sql`). `Migrator` applies it, recording versions in a `schema_migrations`
+    table and holding a session-level advisory lock
+    (`gameserver-dotnet/GameServer/Persistence/Migrator.cs:46-56`, `:68`, `:102-108`).
+  - Two paths run it: every game server at boot when `GAME_DB_URL` is set
+    (`gameserver-dotnet/GameServer/Program.cs:964-974`), and the one-shot `--migrate-only` /
+    `GAMESERVER_MIGRATE_ONLY` step (`Program.cs:165`, `:687-700`;
+    `gameserver-dotnet/GameServer/ServerEnv.cs:155`).
+  - Ops copies sit under `deploy/db/migrations/gamestate/`. `deploy/db/init-gamestate.sql`
+    is a first-boot seed only (`:1-19`).
+- **Connection.** Each process gets one DSN (`gameserver-dotnet/GameServer/Program.cs:162`),
+  from Secret key `game-db-url` (`deploy/agones/fleet-map-dotnet-dev.yaml:463-467`). That
+  database is a separate Postgres instance from Nakama's meta DB
+  (`deploy/k8s/data/postgres-game.yaml`, `deploy/k8s/data/postgres-meta.yaml`).
+
+### 6. Content
+
+- **Location and loading.**
+  - The directory is `--content-dir`, else `CONTENT_DIR`, else found by walking upward
+    from the binary (`gameserver-dotnet/GameServer/Program.cs:888-889`).
+  - Boot is refused when content is missing (`:891-898`) or invalid (`:900-916`).
+  - The content hash is logged (`:903-907`) and served at `/content` (`:1263`;
+    `gameserver-dotnet/GameServer/Observability/MetricsEndpoint.cs:248`).
+  - Map geometry is `content/maps/<map_id>.json`, and a flat world is used when that file
+    is absent (`Program.cs:918-933`).
+
+  Today's tree is `content/{abilities,items,loot,stats,statuses}.json` plus
+  `content/maps/dev_arena.json`. It is one directory and one set. No setting names a game,
+  and there is no per-game subdirectory.
+- **Image.** `deploy/docker/Dockerfile.gameserver-dotnet` copies the whole `content/`
+  directory into the image at `/app/content` (`:64-75`). The fleet runs one image,
+  `rpg-mmo/gameserver-dotnet:dev` (`deploy/agones/fleet-map-dotnet-dev.yaml:131`).
+- **Per-fleet configuration.**
+  - The map fleet sets `GAMESERVER_MODE=map` and `GAMESERVER_MAP_ID=map_01`
+    (`deploy/agones/fleet-map-dotnet-dev.yaml:185-188`;
+    `deploy/k8s/app/50-fleet-map.yaml:114-117`).
+  - The dungeon fleet pins no map id (`deploy/k8s/app/60-fleet-dungeon.yaml:6-7`).
+  - The server falls back to `map_01` when the map id is unset
+    (`gameserver-dotnet/GameServer/Program.cs:30`).
+  - Map fleets run `replicas: 1` because every pod carries the same map id
+    (`deploy/agones/fleet-map-dotnet-dev.yaml:49-57`).
+- **Shared.GameLogic.** The package is `com.rpgmmo.shared-gamelogic` 0.7.0
+  (`gameserver-dotnet/Shared.GameLogic/package.json:2-3`). One copy of it is used by both
+  server validation and client prediction (`Components/GameConstants.cs:3-7`).
+  - **Generic and driven by content:** the definition types loaded from content
+    (`Content/AbilityDefinition.cs`, `ItemDefinition.cs`, `StatDefinition.cs`,
+    `StatusDefinition.cs`, `ContentDatabase.cs`), world geometry (`World/`), and the
+    systems in `Systems/` (motor, movement, AOI, projectile, status, ability, validation).
+  - **Compiled-in game rules that are not content:** `GameConstants`, i.e. attack range
+    3.0, attack cooldown 500 ms, minimum damage 1, default map 1000×1000, AOI radius 50 and
+    tick rate 15 (`Components/GameConstants.cs:93-142`). Also the command opcodes
+    (`Gameplay/GameplayOpcodes.cs:15-36`) and their `Gameplay/gameplay.proto`.
+
+### 7. Isolation today
+
+- **Redis.** Each stack has one Redis.
+  - The gateway opens one client and uses it for sessions, the registry, the streams and the
+    dungeon index (`gateway/cmd/gateway/main.go:188-198`).
+  - Every game server uses `REDIS_ADDR` (`gameserver-dotnet/GameServer/Program.cs:168`).
+  - Keys have no namespace beyond the prefixes in section 2.
+- **Databases.** Every game server on a stack uses one game-state DSN (section 5). Each stack
+  has one Nakama and one meta database (section 4).
+- **Secrets.** Each is a single value in one Secret per stack
+  (`deploy/k8s/app/30-secret-template.yaml:42-71`):
+  - `JWT_SECRET`: Nakama signs with it and the gateway verifies with it. It is also
+    injected into game servers (`deploy/agones/fleet-map-dotnet-dev.yaml:277-282`), which
+    read it (`gameserver-dotnet/GameServer/Program.cs:151`) and use it only for startup
+    warnings (`:826-829`, `:846-850`).
+  - `JOIN_TOKEN_SECRET`: the gateway signs with it and every game server verifies with it
+    (`Program.cs:156`, `:833-844`). Because the game server checks only signature, `sid`
+    and `jti` (section 1), whoever holds this secret can mint a join token for any server on
+    the stack.
+  - `TRANSPORT_KEY`: the datagram pre-shared key.
+  - `NAKAMA_HTTP_KEY`: the server-to-server key for Nakama (`Program.cs:144`).
+- **Rate limits.**
+  - Gateway: connections per minute per source IP, and messages per second per connection
+    (`gateway/cmd/gateway/main.go:61-62`, `:388-389`).
+  - Nakama: `gateway_token` per user id, per Nakama process
+    (`nakama/auth/ratelimit.go:29-51`).
+
+  None of these limits is per game.
+- **Orchestration.** Each kind (`map`, `dungeon`) maps to one fleet in one namespace
+  (section 1).
+- **Where isolation exists.** Isolation exists between environments, not between games.
+  `deploy/environments.tsv:25-28` reserves a deploy directory, compose project, name prefix
+  and port set for each environment, and `deploy/preflight-isolation.sh` enforces those rows.
+
+### 8. What a rollout must keep working for the existing single game
+
+- **An absent claim already has a meaning.** A token without `cid` means the account's
+  default character, and readers must tolerate the claim being absent
+  (`shared/jwt/jwt.go:30-35`).
+- **Version negotiation.**
+  - The admitted window is [2, 3] (section 1).
+  - The configured minimum defaults to 0 on the gateway
+    (`gateway/cmd/gateway/main.go:63`) and on the game server
+    (`gameserver-dotnet/GameServer/Program.cs:42-44`). At 0, unversioned peers are admitted
+    and counted (`shared/messages/version.go:30-41`).
+  - Servers echo the peer's own version back when it is inside the window
+    (`shared/messages/version.go:98-116`).
+- **Legacy JSON.** It is still accepted and is told apart from Protobuf by its first byte
+  `{` (`shared/messages/codec.go:17-35`). A new message field therefore exists both in
+  `wire.proto` and in the Go JSON struct (section 1).
+- **Registry tolerance.** An absent hash field reads as its zero value
+  (`shared/storage/redisstore/registry.go:198-212`). Entries are written by the C# server
+  and read by Go with no translation layer (section 2).
+- **Defaults the single game runs on.**
+  - map id `map_01` (`gameserver-dotnet/GameServer/Program.cs:30`);
+  - map fleet `map-servers-dotnet-dev` (`gateway/registry/agones_allocator.go:47`);
+  - one leaderboard id, one currency key and fixed collection names (section 4);
+  - one content directory baked into one image (section 6).
+- **Not verified here.** Which map id strings shipped Unity clients send is client-side
+  code in other repositories.
+
+<!-- ADR-33 decisions: next subtask -->
