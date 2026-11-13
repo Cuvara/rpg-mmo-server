@@ -854,7 +854,7 @@ logger.LogInformation("  JoinToken: JOIN_TOKEN_SECRET, {Count} key(s){Rotating}"
 
 // ── Metrics (OpenTelemetry -> Prometheus) ──
 
-using var metrics = new GameMetrics(mapId);
+using var metrics = new GameMetrics(mapId, gameId: gameId);
 
 // Published as gauges as well as on /status: a scrape must be able to answer "is this
 // server encrypted" without a human reading a log line from boot time. Registered here,
