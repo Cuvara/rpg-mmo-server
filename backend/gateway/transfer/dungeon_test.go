@@ -16,13 +16,17 @@ import (
 // --- doubles ---------------------------------------------------------------
 
 type fakeParty struct {
-	members map[string][]string
-	err     error
-	calls   int32
+	members      map[string][]string
+	err          error
+	calls        int32
+	expectedGame string
 }
 
-func (f *fakeParty) IsMember(_ context.Context, partyID, userID string) (bool, error) {
+func (f *fakeParty) IsMember(_ context.Context, gameID, partyID, userID string) (bool, error) {
 	atomic.AddInt32(&f.calls, 1)
+	if f.expectedGame != "" && gameID != f.expectedGame {
+		return false, fmt.Errorf("membership game = %q, want %q", gameID, f.expectedGame)
+	}
 	if f.err != nil {
 		return false, f.err
 	}
@@ -51,7 +55,7 @@ func newFakeRegistry() *fakeRegistry {
 	return &fakeRegistry{servers: make(map[string]storage.ServerInfo)}
 }
 
-func (f *fakeRegistry) AllocateDungeon(_ context.Context, contentID string) (storage.ServerInfo, error) {
+func (f *fakeRegistry) AllocateDungeon(_ context.Context, gameID, contentID string) (storage.ServerInfo, error) {
 	atomic.AddInt32(&f.allocated, 1)
 	if f.allocDelay > 0 {
 		time.Sleep(f.allocDelay)
@@ -64,6 +68,7 @@ func (f *fakeRegistry) AllocateDungeon(_ context.Context, contentID string) (sto
 	f.nextID++
 	id := fmt.Sprintf("dungeon-pod-%d", f.nextID)
 	info := storage.ServerInfo{
+		GameID:    gameID,
 		ServerID:  id,
 		MapID:     contentID,
 		Addr:      fmt.Sprintf("10.0.0.%d:7100", f.nextID),
@@ -313,5 +318,31 @@ func TestAnEmptyPartyIDIsRejectedBeforeAnythingElse(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&party.calls); got != 0 {
 		t.Fatalf("party checked %d times for an empty id, want 0", got)
+	}
+}
+
+func TestAssignDungeonPassesGameToPartyAllocatorAndJoinToken(t *testing.T) {
+	reg := newFakeRegistry()
+	party := &fakeParty{members: map[string][]string{"p1": {"u1", "u2"}}, expectedGame: "ember"}
+	deps := testDeps(t, reg, party)
+	deps.GameID = "ember"
+	deps.CharacterID = "char-1"
+	// Exercise both the allocating and already-published paths.
+	for _, user := range []string{"u1", "u2"} {
+		result, err := AssignDungeon(context.Background(), user, "p1", "dungeon_01", deps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := reg.GetServer(context.Background(), result.ServerID)
+		if err != nil || info.GameID != deps.GameID {
+			t.Fatalf("allocator game lost: info=%+v err=%v", info, err)
+		}
+		claims, err := deps.JoinKeys.Verify(result.JoinToken)
+		if err != nil || claims.GameID != deps.GameID || claims.CharacterID != deps.CharacterID || claims.UserID != user {
+			t.Fatalf("join identity lost: claims=%+v err=%v", claims, err)
+		}
+	}
+	if got := atomic.LoadInt32(&reg.allocated); got != 1 {
+		t.Fatalf("allocations = %d, want 1", got)
 	}
 }

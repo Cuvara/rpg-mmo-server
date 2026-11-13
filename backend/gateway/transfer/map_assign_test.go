@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/registry"
+	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
@@ -66,8 +67,9 @@ type selfRegisteringAllocator struct {
 	selfMap string
 }
 
-func (a *selfRegisteringAllocator) AllocateServer(_ context.Context, mapID string) (storage.ServerInfo, error) {
+func (a *selfRegisteringAllocator) AllocateServer(_ context.Context, gameID, mapID string) (storage.ServerInfo, error) {
 	info := a.info
+	info.GameID = gameID
 	info.MapID = mapID
 	if a.store != nil {
 		self := info
@@ -168,5 +170,37 @@ func TestAssignMap_NoServer(t *testing.T) {
 	_, err := AssignMap(ctx, "user1", "map_nonexistent", reg, "secret")
 	if err == nil {
 		t.Error("AssignMap() should fail when no server available")
+	}
+}
+
+func TestAssignMapCharacterScopesServerAndTokenToGame(t *testing.T) {
+	ctx := context.Background()
+	reg := registry.NewRegistryService(storage.NewMemoryServerRegistry())
+	for _, game := range []string{"cuvara", "ember"} {
+		if err := reg.RegisterServer(ctx, storage.ServerInfo{
+			GameID: game, ServerID: game + "-gs-1", MapID: "map_01",
+			Addr: game + ":7100", Transport: "kcp", Capacity: 100,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, game := range []string{"cuvara", "ember"} {
+		t.Run(game, func(t *testing.T) {
+			keys, err := jwt.NewKeyring(game + "-join-secret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := AssignMapCharacter(ctx, "u1", "char-1", game, "map_01", reg, keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err := keys.Verify(result.JoinToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ServerID != game+"-gs-1" || result.ServerAddr != game+":7100" || claims.Game() != game || claims.CharacterID != "char-1" || result.JTI != claims.Jti {
+				t.Fatalf("wrong game's assignment: result=%+v claims=%+v", result, claims)
+			}
+		})
 	}
 }
