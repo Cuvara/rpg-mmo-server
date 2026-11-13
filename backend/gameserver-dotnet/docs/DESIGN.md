@@ -2112,6 +2112,28 @@ progression), the shape is: persist `(killerId, batchId, kills)` when a batch
 is cut, delete on `Granted`, replay the table on start-up — the receipts on
 Nakama's side already make that replay safe.
 
+### Every kill RPC names its game (ADR-33 D4, 2026-11-13)
+
+`NakamaClient` takes the server's game (`ServerOptions.GameId`, from
+`GAMESERVER_GAME_ID`; null or empty resolves to `cuvara`) and exposes it as
+`NakamaClient.GameId`. The request DTOs of all three kill RPCs carry it as
+`game_id`, always written, `cuvara` included:
+
+| RPC | Sent by | Payload |
+|---|---|---|
+| `reward_kills` | `KillRewardBatcher`, via `RewardKillsAsync` | `{ game_id, user_id, kills, map_id, batch_id }` |
+| `reward_kill` | `RewardKillAsync` | `{ game_id, user_id, victim_id, map_id }` |
+| `submit_kill` | `SubmitKillAsync` | `{ game_id, user_id }` |
+
+The batcher needed no change of its own: the game rides on the client it sends
+through, so a retried batch keeps both its `batch_id` and its game. A Nakama
+built before ADR-33 ignores the unknown field. A game-aware Nakama
+(`backend/nakama/gamectx`) lets the payload's `game_id` select the game for an
+HTTP-key call like these, checks it against its `GAMES` allow-list, and scopes a
+non-default game's data names (`<game>.<name>`); the default game's names stay
+bare. Tests: `NakamaGameIdTests` reads the serialized JSON of all three calls,
+for an unset game (`cuvara`) and for another game.
+
 ## Downlink budget: bounding a snapshot by bytes, not by radius (2026-09-09)
 
 Wire-visible behaviour: `docs/API.md`, "Downlink budget". This section is the *why*.
@@ -2726,3 +2748,69 @@ commands in `backend/loadtest/results/2026-10-14-kcp-449/`):
   players with AI on (`gameserver_kcp_receive_busy_seconds_total`).
 - Every bot shares one source IP and the generator shares the host (ADR-7), runs last
   60 s, and there is no soak run. These are local numbers, not a capacity rating.
+
+## Content manifest: content declares its game and package version (2026-11-13, ADR-33 D6)
+
+A content tree is written for one game and against one `Shared.GameLogic`. Before
+ADR-33 nothing said which, so a server could boot another game's items, or content
+whose schema a newer package reads differently, and every symptom would surface
+downstream. `backend/content/game.json` now says it:
+
+```json
+{
+  "$comment": "Content manifest for ADR-33 D6.",
+  "game_id": "cuvara",
+  "shared_gamelogic_version": "0.7.0"
+}
+```
+
+- `game_id`: the game this content belongs to; must pass `GameId.IsValidGameId`.
+- `shared_gamelogic_version`: the `Shared.GameLogic` version the content was authored
+  against. Its major is the leading digits, ended by `.`, `-`, `+` or the end of the
+  string.
+- Any other key (`$comment` here) is ignored.
+
+### The boot check
+
+`GameManifest.Check(contentDir, gameId)` (`GameServer/Content/GameManifest.cs`) runs in
+`Program.cs` right after `ContentLoader.Load`, next to the invalid-content refusal and
+before map geometry, the boot-time migration, registration or the listener
+(`--migrate-only` exits before content loads, so it never reads the manifest). A
+refusal is logged at Critical, naming the manifest path, and the process **exits 1**.
+In order:
+
+| Manifest | Result |
+|---|---|
+| Absent, default game (`GAMESERVER_GAME_ID` unset, empty or `cuvara`) | **Boots** with a Warning: the content is treated as `cuvara` so an old content tree still boots |
+| Absent, any other game | **Refuses**: add `game.json` for that game |
+| Unreadable, not JSON, or JSON `null` | **Refuses** |
+| `game_id` missing or invalid | **Refuses** |
+| `shared_gamelogic_version` missing or without a leading major | **Refuses** |
+| `game_id` differs from the server's game (absent `GAMESERVER_GAME_ID` = `cuvara`) | **Refuses**, naming both games |
+| Major differs from the compiled package's | **Refuses**, naming both versions |
+| Otherwise | **Boots**; logs `Content manifest: game …, Shared.GameLogic version … (server …)` at Information |
+
+**Owner decision, 2026-11-13: absent manifest.** The default game treats a missing
+`game.json` as `cuvara` with a Warning, so a content tree from before ADR-33 still
+boots; any other game refuses to start, because for it a missing manifest means the
+content's game is unknown, and the default would be the wrong game.
+
+**Only the major is compared.** Minor and patch differences boot: content for `0.8.1`
+boots on a `0.7.0` server. While the package is `0.x`, every `0.x` content version
+therefore boots on every `0.x` server; the check bites from `1.0.0`. The rule says a
+major is the only version step allowed to change what content means.
+
+### Where the compiled version comes from
+
+`package.json` is not compiled into the binary ("Packaging for Unity" above: MSBuild
+treats it as `None`), so the server cannot read the package's version
+at run time. `GameManifest.CompiledSharedGameLogicVersion` is a copy of
+`Shared.GameLogic/package.json`'s `version`, and the guard test
+`GameManifestTests.CompiledVersionMatchesPackage` fails the suite when the two differ.
+A `Shared.GameLogic` version bump therefore has to update the constant in the same
+commit; a major bump also has to update `game.json`, or the repository's own content
+stops booting (`GameManifestTests.RepositoryManifestMatchesDefaultGame`).
+
+Tests: `GameManifestTests` covers compatible versions, each refusal row above, both
+names in the mismatch messages, the absent-manifest rule for `cuvara`, empty and another
+game, the constant against `package.json`, and the repository manifest.
