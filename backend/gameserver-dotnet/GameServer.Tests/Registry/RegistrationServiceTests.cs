@@ -1,4 +1,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
+using GameServer.Games;
 using GameServer.Registry;
 using StackExchange.Redis;
 
@@ -256,5 +259,163 @@ public class RegistrationServiceTests
         Assert.False(await db.KeyExistsAsync($"servers:id:{serverId}"));
 
         cts.Cancel();
+    }
+}
+
+/// <summary>Ownership and retry behavior without Redis or Docker.</summary>
+public class RegistrationServiceUnitTests
+{
+    private static RegistrationOptions Options => new()
+    {
+        ServerId = "foo-server", MapId = "map_01", PublicAddr = "localhost:9200",
+    };
+
+    [Theory]
+    [InlineData(null, GameId.DefaultGameId)]
+    [InlineData("", GameId.DefaultGameId)]
+    [InlineData("foo", "foo")]
+    public async Task BuildInfo_CarriesConfiguredGameOrDefault(string? gameId, string expected)
+    {
+        var registry = new MemoryRegistry();
+        var options = gameId == null ? Options : Options with { GameId = gameId };
+        using var cts = new CancellationTokenSource();
+        await using var service = new RegistrationService(registry, options, () => 7,
+            NullLogger.Instance, TimeSpan.FromDays(1));
+        try
+        {
+            await service.StartAsync(cts.Token);
+            Assert.Equal(expected, registry.LastInfo!.GameId);
+            Assert.Equal(7, registry.LastInfo.PlayerCount);
+            Assert.Equal(1, service.RegisterCount);
+        }
+        finally { cts.Cancel(); }
+    }
+
+    [Fact]
+    public async Task Mismatch_LeavesServiceUnregistered_LogsError_AndDoesNotEscapeStart()
+    {
+        var registry = new MemoryRegistry { Refuse = true };
+        var logger = new RecordingLogger();
+        using var cts = new CancellationTokenSource();
+        await using var service = new RegistrationService(registry, Options with { GameId = "foo" },
+            () => 0, logger, TimeSpan.FromDays(1));
+        try
+        {
+            await service.StartAsync(cts.Token);
+            Assert.Equal(0, service.RegisterCount);
+            Assert.Equal(1, service.RefusalCount);
+            Assert.Null(registry.LastInfo);
+            var error = Assert.Single(logger.Entries.Where(entry => entry.Level == LogLevel.Error));
+            Assert.IsType<RegistryGameMismatchException>(error.Error);
+            Assert.Contains("foo-server", error.Message);
+            Assert.Contains("(foo)", error.Message);
+            Assert.Contains("refusing to overwrite", error.Message);
+        }
+        finally { cts.Cancel(); }
+    }
+
+    [Fact]
+    public async Task HeartbeatAndCountPublish_UseOnlyGameAwareOverloads()
+    {
+        var registry = new MemoryRegistry();
+        int players = 0;
+        using var cts = new CancellationTokenSource();
+        await using var service = new RegistrationService(registry, Options with { GameId = "foo" },
+            () => Volatile.Read(ref players), NullLogger.Instance, TimeSpan.FromMilliseconds(10));
+        try
+        {
+            await service.StartAsync(cts.Token);
+            Volatile.Write(ref players, 3);
+            var heartbeat = await registry.Heartbeat.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var update = await registry.CountUpdate.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(("foo-server", "foo"), heartbeat);
+            Assert.Equal(("foo-server", "foo", 3), update);
+            Assert.Equal(0, registry.LegacyCalls);
+        }
+        finally { cts.Cancel(); }
+    }
+
+    [Fact]
+    public async Task ForeignHeartbeat_RetriesRefusedRegistration_ThenRegistersWhenOwnershipClears()
+    {
+        var registry = new MemoryRegistry { Refuse = true };
+        using var cts = new CancellationTokenSource();
+        await using var service = new RegistrationService(registry, Options with { GameId = "foo" },
+            () => 0, NullLogger.Instance, TimeSpan.FromMilliseconds(10));
+        try
+        {
+            await service.StartAsync(cts.Token);
+            await registry.SecondRefusal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(0, service.RegisterCount);
+            Assert.True(service.RefusalCount >= 1);
+            registry.Refuse = false;
+            var info = await registry.Registered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("foo", info.GameId);
+            Assert.Equal(0, registry.LegacyCalls);
+        }
+        finally { cts.Cancel(); }
+    }
+
+    private sealed class MemoryRegistry : IServerRegistry
+    {
+        public volatile bool Refuse;
+        public ServerInfo? LastInfo;
+        public int LegacyCalls;
+        private int _refusals;
+        public TaskCompletionSource<(string, string)> Heartbeat { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<(string, string, int)> CountUpdate { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource SecondRefusal { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<ServerInfo> Registered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task RegisterAsync(ServerInfo info, RegistrationScope scope, CancellationToken ct)
+        {
+            if (Refuse)
+            {
+                if (Interlocked.Increment(ref _refusals) >= 2) SecondRefusal.TrySetResult();
+                throw new RegistryGameMismatchException(info.ServerId, info.GameId);
+            }
+            LastInfo = info;
+            Registered.TrySetResult(info);
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> HeartbeatAsync(string serverId, string gameId, CancellationToken ct)
+        {
+            Heartbeat.TrySetResult((serverId, gameId));
+            return Task.FromResult(LastInfo != null);
+        }
+
+        public Task<bool> UpdatePlayerCountAsync(string serverId, string gameId, int count, CancellationToken ct)
+        {
+            CountUpdate.TrySetResult((serverId, gameId, count));
+            return Task.FromResult(LastInfo != null);
+        }
+
+        public Task<bool> HeartbeatAsync(string serverId, CancellationToken ct)
+        {
+            Interlocked.Increment(ref LegacyCalls);
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> UpdatePlayerCountAsync(string serverId, int count, CancellationToken ct)
+        {
+            Interlocked.Increment(ref LegacyCalls);
+            return Task.FromResult(true);
+        }
+
+        public Task DeregisterAsync(string serverId, string mapId, CancellationToken ct) => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RecordingLogger : ILogger
+    {
+        public ConcurrentQueue<(LogLevel Level, string Message, Exception? Error)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Enqueue((logLevel, formatter(state, exception), exception));
     }
 }

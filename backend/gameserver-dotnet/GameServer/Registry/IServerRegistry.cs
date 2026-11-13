@@ -34,8 +34,9 @@ public interface IServerRegistry : IAsyncDisposable
     /// <summary>
     /// Write the server hash, arm its heartbeat TTL, and — when
     /// <paramref name="scope"/> is <see cref="RegistrationScope.MapIndexed"/> — index it
-    /// under its map. Registering an already-registered server overwrites it — this is the
-    /// re-registration path after a Redis outage, so it must be idempotent.
+    /// under its map. Registering an already-registered server overwrites it only when
+    /// it belongs to the same game; another game's entry is refused. Re-registration
+    /// after a Redis outage must be idempotent.
     /// </summary>
     /// <param name="info">How this server describes itself to the gateway.</param>
     /// <param name="scope">
@@ -57,6 +58,10 @@ public interface IServerRegistry : IAsyncDisposable
     /// </returns>
     Task<bool> HeartbeatAsync(string serverId, CancellationToken ct);
 
+    /// <summary>Re-arm only an entry belonging to this game; false means absent or foreign.</summary>
+    Task<bool> HeartbeatAsync(string serverId, string gameId, CancellationToken ct) =>
+        HeartbeatAsync(serverId, ct);
+
     /// <summary>Remove the hash and its map-index entry. Used on graceful shutdown.</summary>
     Task DeregisterAsync(string serverId, string mapId, CancellationToken ct);
 
@@ -69,4 +74,8 @@ public interface IServerRegistry : IAsyncDisposable
     /// implementation.
     /// </returns>
     Task<bool> UpdatePlayerCountAsync(string serverId, int count, CancellationToken ct);
+
+    /// <summary>Update only an entry belonging to this game; false means absent or foreign.</summary>
+    Task<bool> UpdatePlayerCountAsync(string serverId, string gameId, int count, CancellationToken ct) =>
+        UpdatePlayerCountAsync(serverId, count, ct);
 }
