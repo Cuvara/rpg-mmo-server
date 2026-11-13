@@ -2,7 +2,7 @@ package constants
 
 // Redis key patterns. Use fmt.Sprintf to fill placeholders.
 const (
-	SessionKeyPrefix  = "session:" // session:{user_id}
+	SessionKeyPrefix  = "session:" // session:{user_id} (default) or session:{game}:{user_id}
 	ServerRegistryKey = "servers:" // servers:{map_id}
 	EventStreamPrefix = "events:"  // events:{stream_name}
 
@@ -24,3 +24,11 @@ const (
 	// EventGatewaySuperseded is the event type carried on GatewayKickStream.
 	EventGatewaySuperseded = "gateway_superseded"
 )
+
+// SessionKey returns the session store key for a game and user.
+func SessionKey(gameID, userID string) string {
+	if GameOrDefault(gameID) == DefaultGameID {
+		return SessionKeyPrefix + userID
+	}
+	return SessionKeyPrefix + gameID + ":" + userID
+}
