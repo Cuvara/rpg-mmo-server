@@ -21,7 +21,7 @@ namespace GameServer.Tests.Server;
 /// </summary>
 internal sealed class HardeningHarness : IAsyncDisposable
 {
-    public const string JwtSecret = "hardening-test-secret";
+    public const string JoinSecret = "hardening-test-secret";
     public const string ServerId = "gs-hardening";
     public const string MapId = "map_hardening";
 
@@ -58,8 +58,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
             HandshakeTimeout = handshakeTimeout ?? ServerOptions.DefaultHandshakeTimeout,
             MaxInputsPerConnection = maxInputsPerConnection,
             MaxPendingInputs = maxPendingInputs,
-            JwtSecret = JwtSecret,
-            JoinTokenSecret = JwtSecret,
+            JoinTokenSecret = JoinSecret,
             HoldTtl = hold ?? TimeSpan.FromMilliseconds(200),
             SaveInterval = TimeSpan.FromHours(1),
             PlayerStore = playerStore,
@@ -111,7 +110,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
             MsgType.JoinToken,
             new JoinTokenRequest
             {
-                Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret),
+                Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret),
                 ProtocolVersion = protocolVersion,
             },
             encoding);

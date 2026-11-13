@@ -20,7 +20,7 @@ namespace GameServer.Tests.Server;
 /// </summary>
 public class TransferMapTests
 {
-    private const string JwtSecret = "transfer-test-secret";
+    private const string JoinSecret = "transfer-test-secret";
     private const string ServerId = "gs-transfer";
     private const string MapId = "map_01";
 
@@ -276,8 +276,7 @@ public class TransferMapTests
                 Transport = TransportKind.Kcp,
                 TickRate = 20,
                 Capacity = 100,
-                JwtSecret = JwtSecret,
-                JoinTokenSecret = JwtSecret,
+                JoinTokenSecret = JoinSecret,
                 HoldTtl = TimeSpan.FromMilliseconds(300),
                 SaveInterval = TimeSpan.FromHours(1),
                 Metrics = metrics,
@@ -306,7 +305,7 @@ public class TransferMapTests
 
             var env = WireProtocol.NewEnvelope(
                 MsgType.JoinToken,
-                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) },
                 WireEncoding.Json);
             byte[] frame = WireProtocol.Encode(env);
             await stream.WriteAsync(frame);

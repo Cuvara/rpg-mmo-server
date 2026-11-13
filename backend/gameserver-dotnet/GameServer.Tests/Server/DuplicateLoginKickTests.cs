@@ -21,7 +21,7 @@ namespace GameServer.Tests.Server;
 /// </summary>
 public class DuplicateLoginKickTests
 {
-    private const string JwtSecret = "kick-test-secret";
+    private const string JoinSecret = "kick-test-secret";
     private const string ServerId = "gs-kick";
     private const string MapId = "map_01";
 
@@ -300,8 +300,7 @@ public class DuplicateLoginKickTests
                 Transport = TransportKind.Kcp,
                 TickRate = 20,
                 Capacity = 100,
-                JwtSecret = JwtSecret,
-                JoinTokenSecret = JwtSecret,
+                JoinTokenSecret = JoinSecret,
                 HoldTtl = TimeSpan.FromSeconds(30),
                 SaveInterval = TimeSpan.FromHours(1),
                 Metrics = metrics,
@@ -326,7 +325,7 @@ public class DuplicateLoginKickTests
                 MsgType.JoinToken,
                 new JoinTokenRequest
                 {
-                    Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret, jti: jti)
+                    Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret, jti: jti)
                 },
                 WireEncoding.Json);
             await stream.WriteAsync(WireProtocol.Encode(env));

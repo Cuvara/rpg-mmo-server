@@ -24,7 +24,7 @@ namespace GameServer.Tests.Agones;
 /// </summary>
 public class AgonesAddressRegistrationTests
 {
-    private const string JwtSecret = "agones-address-test-secret-32byte!";
+    private const string JoinSecret = "agones-address-test-secret-32byte!";
     private const string ServerId = "gs-agones-address-test";
     private const string MapId = "map_agones_address";
 
@@ -564,8 +564,7 @@ public class AgonesAddressRegistrationTests
         Mode = "map",
         TickRate = 20,
         Capacity = 8,
-        JwtSecret = JwtSecret,
-        JoinTokenSecret = JwtSecret,
+        JoinTokenSecret = JoinSecret,
         SaveInterval = TimeSpan.FromSeconds(30),
         HoldTtl = TimeSpan.FromSeconds(30),
         PlayerStore = new MemoryPlayerStore(),

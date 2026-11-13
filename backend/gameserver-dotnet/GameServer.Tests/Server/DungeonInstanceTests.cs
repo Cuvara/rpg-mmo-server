@@ -23,7 +23,7 @@ namespace GameServer.Tests.Server;
 /// </summary>
 public class DungeonInstanceTests
 {
-    private const string JwtSecret = "dungeon-test-secret";
+    private const string JoinSecret = "dungeon-test-secret";
     private const string ServerId = "gs-dungeon";
     private static readonly TimeSpan ShortHold = TimeSpan.FromMilliseconds(400);
 
@@ -538,8 +538,7 @@ public class DungeonInstanceTests
                 Transport = TransportKind.Kcp,
                 TickRate = 20,
                 Capacity = 8,
-                JwtSecret = JwtSecret,
-                JoinTokenSecret = JwtSecret,
+                JoinTokenSecret = JoinSecret,
                 HoldTtl = hold ?? ShortHold,
                 DungeonJoinDeadline = joinDeadline ?? ServerOptions.DefaultDungeonJoinDeadline,
                 JoinDeadlineClock = joinClock,
@@ -575,7 +574,7 @@ public class DungeonInstanceTests
             var stream = client.GetStream();
             var env = WireProtocol.NewEnvelope(
                 MsgType.JoinToken,
-                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) },
                 WireEncoding.Json);
             await stream.WriteAsync(WireProtocol.Encode(env));
             await stream.FlushAsync();

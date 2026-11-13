@@ -21,7 +21,7 @@ namespace GameServer.Tests.Agones;
 /// </summary>
 public class AgonesLifecycleTests
 {
-    private const string JwtSecret = "agones-lifecycle-test-secret-32b!!";
+    private const string JoinSecret = "agones-lifecycle-test-secret-32b!!";
     private const string ServerId = "gs-agones-test";
 
     /// <summary>Ready must be reported before the registry ever sees this server.</summary>
@@ -194,8 +194,7 @@ public class AgonesLifecycleTests
         Mode = "map",
         TickRate = 20,
         Capacity = 8,
-        JwtSecret = JwtSecret,
-        JoinTokenSecret = JwtSecret,
+        JoinTokenSecret = JoinSecret,
         SaveInterval = TimeSpan.FromSeconds(30),
         HoldTtl = TimeSpan.FromSeconds(30),
         PlayerStore = new MemoryPlayerStore(),
@@ -336,7 +335,7 @@ public class AgonesLifecycleTests
     {
         var env = WireProtocol.NewEnvelope(
             MsgType.JoinToken,
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) },
             WireEncoding.Json);
         await stream.WriteAsync(WireProtocol.Encode(env), ct);
         await stream.FlushAsync(ct);

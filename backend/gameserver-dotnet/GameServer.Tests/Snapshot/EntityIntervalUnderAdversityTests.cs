@@ -45,7 +45,7 @@ namespace GameServer.Tests.Snapshot;
 [Collection(AdversityCollection.Name)]
 public class EntityIntervalUnderAdversityTests
 {
-    private const string JwtSecret = "interval-test-secret-32-bytes-aa";
+    private const string JoinSecret = "interval-test-secret-32-bytes-aa";
     private const string ServerId = "gs-interval";
 
     /// <summary>Seeded, and named in every failure message.</summary>
@@ -240,7 +240,7 @@ public class EntityIntervalUnderAdversityTests
         {
             ServerAddr = ":0", ServerId = ServerId, MapId = "map_interval", Mode = "map",
             Transport = TransportKind.Kcp, TickRate = rates!.CriticalHz, SimulationRates = rates,
-            Capacity = 16, JwtSecret = JwtSecret, JoinTokenSecret = JwtSecret,
+            Capacity = 16, JoinTokenSecret = JoinSecret,
             SaveInterval = TimeSpan.FromHours(1), PlayerStore = new MemoryPlayerStore(),
             Importance = ImportanceSettings.Balanced,
             ReplicationSchedule = schedule!,
@@ -481,7 +481,7 @@ public class EntityIntervalUnderAdversityTests
     private static async Task JoinAsync(Stream stream, string userId, CancellationToken ct)
     {
         await WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.JoinToken,
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) },
             WireEncoding.Json), ct);
         var env = await WireProtocol.DecodeAsync(stream, ct);
         Assert.NotNull(env);

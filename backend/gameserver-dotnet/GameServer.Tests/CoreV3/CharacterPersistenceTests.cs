@@ -176,7 +176,6 @@ public class CharacterPersistenceTests
             Transport = TransportKind.Kcp,
             TickRate = 20,
             Capacity = 10,
-            JwtSecret = Secret,
             JoinTokenSecret = Secret,
             HoldTtl = TimeSpan.FromSeconds(10),
             SaveInterval = TimeSpan.FromHours(1),
