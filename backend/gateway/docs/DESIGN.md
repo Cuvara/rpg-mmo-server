@@ -1,5 +1,80 @@
 # Gateway — Design Decisions
 
+## 2026-11-13 — EnterWorld is routed per (game, map) (ADR-33 leg 3, routing)
+
+### Context
+
+The session entry below admitted configured non-default games but still routed
+EnterWorld by map id only, so a game-B player asking for `map_01` could be handed
+game A's `map_01` server, with a join token signed by the one shared join secret.
+Map ids are chosen per game, so collisions are expected, not exotic.
+
+### Decision
+
+- **The game comes from the session, never the request.** `handleEnterWorld` reads
+  user, state and game under one lock (`ClientConn.IdentityGame`). `MsgEnterWorld`
+  and `wire.proto` are unchanged (ADR-33 D1 item 3, option C).
+- **Ids are validated before anything observes them.** `MapID` (also the dungeon
+  content id when `PartyID` is set) must pass `gameid.ValidMapID`
+  (`^[A-Za-z0-9_-]{1,64}$`) before any registry read, party RPC or allocation; a
+  refusal is `invalid map id`. The id becomes part of a Redis key and an allocation
+  request, so it is checked at the boundary rather than trusted downstream.
+- **A game without a join keyring is not routable.** `transfer.JoinKeyrings` holds
+  `cuvara`'s keyring (`JOIN_TOKEN_SECRET`) and one per other game
+  (`JOIN_TOKEN_SECRET_<GAME>`). `For(game)` never falls back to `cuvara`'s keys: a
+  fallback would let every game's servers verify every other game's tokens. A
+  configured game without one is refused with `game not routable` before lookup.
+  Startup warns on a missing secret, on a game secret equal to `JWT_SECRET`, and when
+  any rotation key is shared between two games' join secrets; warnings, because a
+  dev stack legitimately reuses values.
+- **Lookup is by (game, map).** `FindServerGame` → `FindByGameAndMapID`, whose
+  non-default index is `servers:map:{game}:{map_id}` while `cuvara` keeps
+  `servers:map:{map_id}`. Next to the existing "entry serves another map" check,
+  `findServer` refuses an entry whose `game_id` differs (`ErrFleetMapMismatch`):
+  the index is keyed by game, so such an entry means the store is lying, and it is
+  refused rather than filtered, as for maps.
+- **Fleets are per (game, kind).** `cuvara` keeps `ALLOCATOR_FLEET_MAP`,
+  `ALLOCATOR_FLEET_DUNGEON` and `ALLOCATOR_NAMESPACE`, so no deployed setting
+  changes. Another game reads `ALLOCATOR_FLEET_MAP_<GAME>`,
+  `ALLOCATOR_FLEET_DUNGEON_<GAME>` and `ALLOCATOR_NAMESPACE_<GAME>`, the namespace
+  defaulting to `<ALLOCATOR_NAMESPACE>-<game>` (ADR-33 D7). An unset fleet fails with
+  `ErrKindNotConfigured` naming the game and the setting. Env only: per-game flags
+  would multiply with `GAMES`.
+- **Allocation is checked against the game twice.** The allocated GameServer name
+  must carry the `<game>-` prefix for a non-default game (`gameid.ValidServerID`),
+  and the pod's own registry entry must report the requested game. The second check
+  is the one that matters, because the pod self-registers under its fleet's game;
+  the first catches a wrong fleet before the registration wait. A map-path game
+  mismatch is remembered like a map mismatch, since a fleet's game is as fixed as
+  its map. The mismatch memory and allocation single-flight are keyed by
+  `(game, map)`.
+- **Dungeons follow the same rules.** `AllocateDungeon(game, contentID)` picks the
+  game's dungeon fleet and refuses a server of another game. A cached party →
+  server mapping whose server now belongs to another game is refused and
+  **released**, so the next member allocates afresh instead of hitting the same
+  stale mapping. `party_get` gets `game_id` so Nakama answers for that game's party.
+- **Join tokens carry `gid` only for non-default games.** `cuvara` tokens keep their
+  claim set byte for byte, so game servers and tests that predate ADR-33 are
+  unaffected.
+- **`server_down` names the game.** The watcher stores each tracked server's
+  `ServerInfo` rather than its map id, so the event still carries `game_id` after
+  the registry entry (the only other source of it) has expired. Allocated dungeon
+  servers are now tracked too.
+- **Metrics:** `gateway_enter_world_total` and `gateway_allocations_total` take the
+  routed game; dungeon allocations are now counted.
+
+### Consequences
+
+- Default-game deployments need no new settings and see no wire or token change.
+- Adding a game to `GAMES` is not enough to route it: it also needs
+  `JOIN_TOKEN_SECRET_<GAME>` on the gateway (and the same value on that game's
+  servers), plus `ALLOCATOR_FLEET_MAP_<GAME>` when allocation is on.
+- The game server does not yet compare `gid` with its own game (ADR-33 leg 2). Until
+  it does, the per-game join secret is the separation between games' servers, which
+  is why a shared key is warned about.
+- Fixed in passing: an expired session cleared the connection identity but left its
+  `(game, user)` entry in `userConns`; `checkSession` now untracks it like teardown.
+
 ## 2026-11-13 — Sessions, duplicate login and kicks are scoped by game (ADR-33 leg 3)
 
 ### Context
@@ -51,11 +126,10 @@ kicked the game-A socket.
 - A connection that never entered a world has no jti and is never closed by a
   `gateway_kick` event. Publishers only emit for sessions with a jti, so no such
   event exists for it.
-- **Until l3-routing, a configured non-default game is routed by map id only**, to
-  whatever server serves that map regardless of its game. `gateway_allocations_total`
-  records the default game for the same reason. l3-routing must route EnterWorld per
-  game, or refuse it for a game it cannot route; it must not keep admitting such a
-  game into map-only routing.
+- ~~Until l3-routing, a configured non-default game is routed by map id only.~~
+  Resolved by the routing entry above: EnterWorld is routed per `(game, map)`, a game
+  without a join secret is refused with `game not routable`, and
+  `gateway_allocations_total` records the requested game.
 
 ## 2026-10-08 — TCP-only listener; gameplay is KCP/UDP only (ADR-32)
 

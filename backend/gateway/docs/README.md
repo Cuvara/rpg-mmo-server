@@ -102,6 +102,11 @@ token's `sid` is the allocated GameServer name, which the pod also registers as
 (`POD_NAME` → `--server-id`). An exhausted fleet answers `UnAllocated` and surfaces as
 `registry.ErrNoCapacity`. In-cluster the gateway's ServiceAccount needs
 `create` on `gameserverallocations.allocation.agones.dev` in that namespace.
+The flags above configure the default game (`cuvara`). Every other game in `GAMES`
+allocates from its own fleets in its own namespace (`ALLOCATOR_FLEET_MAP_<GAME>`,
+`ALLOCATOR_FLEET_DUNGEON_<GAME>`, `ALLOCATOR_NAMESPACE_<GAME>` defaulting to
+`<namespace>-<game>`; see Configuration), so the ServiceAccount needs the same `create`
+in each of those namespaces.
 See `docs/API.md` for the wire flow and `docs/DESIGN.md` for the rationale.
 
 ### Security
@@ -210,7 +215,10 @@ All three Redis stores share one client/pool.
 | `GATEWAY_ADDR` | `:8000` | Listen address |
 | `JWT_SECRET` | `dev-secret-change-me` | Client auth-token verification (shared with Nakama). Comma-separated list to rotate: `new,old` — first signs, all verify |
 | `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | Join-token signing (shared with gameserver-dotnet). Also rotatable. Unset logs a warning |
-| `GAMES` | *(empty → `cuvara` only)* | Games this gateway admits (ADR-33), comma-separated, mirroring Nakama's `GAMES`. Each entry must be a valid game id (`gameid.ValidGameID`); an invalid or empty entry is **fatal** at startup. A client token whose `gid` (absent = `cuvara`) is not listed is refused at auth with `game not configured`. A configured non-default game is routed by map id only until l3-routing routes or refuses it per game |
+| `GAMES` | *(empty → `cuvara` only)* | Games this gateway admits (ADR-33), comma-separated, mirroring Nakama's `GAMES`. Each entry must be a valid game id (`gameid.ValidGameID`); an invalid or empty entry is **fatal** at startup. A client token whose `gid` (absent = `cuvara`) is not listed is refused at auth with `game not configured`. EnterWorld is routed per (game, map); a listed non-default game also needs `JOIN_TOKEN_SECRET_<GAME>` below, or its EnterWorld is refused with `game not routable` |
+| `JOIN_TOKEN_SECRET_<GAME>` | *(none)* | Join-token signing for non-default game `<game>` (`<GAME>` = id upper-cased), comma-separated to rotate. No fallback to `JOIN_TOKEN_SECRET` or `JWT_SECRET`; unset = that game is not routable (startup warning naming the setting). Give the same value to that game's servers. Startup also **warns** when it equals `JWT_SECRET`, or when any of its rotation keys is also a key of another game's join secret (`cuvara`'s included): a server holding a shared key could forge the other game's join tokens |
+| `ALLOCATOR_FLEET_MAP_<GAME>` / `ALLOCATOR_FLEET_DUNGEON_<GAME>` | *(none)* | Agones fleets for non-default game `<game>` (ADR-33 D7); `cuvara` keeps `ALLOCATOR_FLEET_MAP` / `ALLOCATOR_FLEET_DUNGEON`. Unset = that kind fails with `ErrKindNotConfigured` naming the game and setting. Only with `--allocator=agones` |
+| `ALLOCATOR_NAMESPACE_<GAME>` | `<ALLOCATOR_NAMESPACE>-<game>` | Namespace holding that game's fleets (ADR-33 D7). Allocated GameServer names must start with `<game>-` |
 | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` | *(empty)* | TLS on the gateway listener (ADR-23). Both empty = plaintext. Setting one is fatal |
 | `GATEWAY_CONN_RATE_PER_MIN` | `10` | Per-IP connection rate limit (`0` disables) |
 | `GATEWAY_CONN_BURST` | `10` | Per-IP burst |
@@ -316,8 +324,9 @@ through `GAMES`: a configured game reports its id, anything else reports `other`
 before a token verified (malformed request, protocol refusal, invalid token,
 `game_not_configured`, EnterWorld before auth); a client cannot mint label values.
 Each configured game is zero-primed for every result, `other` is not.
-`gateway_allocations_total` records the default game for every allocation until
-l3-routing threads the game through. Queries that select on `result` alone, and
+`gateway_enter_world_total` and `gateway_allocations_total` record the game the
+request was routed for; `gateway_allocations_total` counts map **and** dungeon
+allocations. Queries that select on `result` alone, and
 `sum by (result)`, keep working; only an exact-label-set match needs `game`.
 
 `gateway_kick_publish_total` counts duplicate-login supersede events published to
