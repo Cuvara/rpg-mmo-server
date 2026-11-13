@@ -106,7 +106,11 @@ type SessionStore interface {
 type ServerRegistry interface {
 	Register(ctx context.Context, info ServerInfo) error
 	Deregister(ctx context.Context, serverID string) error
+	// FindByMapID returns live servers on mapID for constants.DefaultGameID only.
 	FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error)
+	// FindByGameAndMapID returns live servers owned by gameID on mapID.
+	// An empty gameID means constants.DefaultGameID.
+	FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]ServerInfo, error)
 	UpdatePlayerCount(ctx context.Context, serverID string, count int) error
 	// Heartbeat marks the server as alive, resetting its liveness TTL.
 	// Returns an error if the server is unknown (or already expired).

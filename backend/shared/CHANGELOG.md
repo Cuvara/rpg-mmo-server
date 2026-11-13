@@ -62,6 +62,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     miniredis in `redisstore/registry_game_test.go`, memory parity in `memory_test.go`.
 
 ### Changed
+- **Game-scoped registry lookup (ADR-33 leg 3).** `storage.ServerRegistry` now exposes
+  `FindByGameAndMapID(ctx, gameID, mapID)` (empty game = `constants.DefaultGameID`).
+  `FindByMapID` keeps its signature and returns only default-game servers in both memory
+  and Redis, including when a foreign-game id appears in Redis's default-game index.
+  Table-driven memory/miniredis parity coverage registers the same `map_01` in two games
+  and checks explicit, implicit and legacy default-game lookups.
 - `EntitySnapshot.speed` is now proto3 `optional` without changing its field number or
   type: absent means unknown, and present zero means immobile. Go protobuf conversion
   encodes scalar DTO speed explicitly; decoding to the Go DTO still collapses absent and

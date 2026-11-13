@@ -23,12 +23,12 @@ func newFailingRegistry(inner storage.ServerRegistry, failures int, err error) *
 	return f
 }
 
-func (f *failingRegistry) FindByMapID(ctx context.Context, mapID string) ([]storage.ServerInfo, error) {
+func (f *failingRegistry) FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]storage.ServerInfo, error) {
 	f.callCount.Add(1)
 	if f.failsRemaining.Add(-1) >= 0 {
 		return nil, f.err
 	}
-	return f.ServerRegistry.FindByMapID(ctx, mapID)
+	return f.ServerRegistry.FindByGameAndMapID(ctx, gameID, mapID)
 }
 
 func (f *failingRegistry) GetServer(ctx context.Context, serverID string) (storage.ServerInfo, error) {
@@ -63,7 +63,7 @@ func TestRetry_SucceedsAfterTransientFailure(t *testing.T) {
 		t.Errorf("ServerID = %q, want %q", got.ServerID, "srv1")
 	}
 	if calls := reg.callCount.Load(); calls != 3 {
-		t.Errorf("FindByMapID called %d times, want 3", calls)
+		t.Errorf("FindByGameAndMapID called %d times, want 3", calls)
 	}
 	if warns := spy.calls.Load(); warns != 2 {
 		t.Errorf("Warn called %d times, want 2", warns)
@@ -80,7 +80,7 @@ func TestRetry_ExhaustsRetries(t *testing.T) {
 		t.Fatal("FindServer() should fail after exhausting retries")
 	}
 	if calls := reg.callCount.Load(); calls != 4 {
-		t.Errorf("FindByMapID called %d times, want 4", calls)
+		t.Errorf("FindByGameAndMapID called %d times, want 4", calls)
 	}
 }
 
@@ -94,7 +94,7 @@ func TestRetry_DoesNotRetryBusinessLogicError(t *testing.T) {
 		t.Fatal("FindServer() should fail on ErrNotFound")
 	}
 	if calls := reg.callCount.Load(); calls != 1 {
-		t.Errorf("FindByMapID called %d times, want 1", calls)
+		t.Errorf("FindByGameAndMapID called %d times, want 1", calls)
 	}
 }
 
@@ -112,7 +112,7 @@ func TestRetry_NoRetryOnSuccess(t *testing.T) {
 		t.Fatalf("FindServer() error: %v", err)
 	}
 	if calls := reg.callCount.Load(); calls != 1 {
-		t.Errorf("FindByMapID called %d times, want 1", calls)
+		t.Errorf("FindByGameAndMapID called %d times, want 1", calls)
 	}
 }
 

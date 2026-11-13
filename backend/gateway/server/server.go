@@ -20,6 +20,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
 	"github.com/duycuong/rpg-mmo/shared/constants"
 	gameerrors "github.com/duycuong/rpg-mmo/shared/errors"
+	"github.com/duycuong/rpg-mmo/shared/gameid"
 	sharedjwt "github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/ratelimit"
@@ -48,10 +49,13 @@ type Gateway struct {
 	logger       *slog.Logger
 
 	// authKeys verifies client auth tokens (JWT_SECRET, possibly a rotation
-	// list). joinKeys signs join tokens (JOIN_TOKEN_SECRET, defaulting to
-	// JWT_SECRET). Both are parsed once at construction.
-	authKeys sharedjwt.Keyring
-	joinKeys sharedjwt.Keyring
+	// list). joinKeys seeds the cuvara join keyring (JOIN_TOKEN_SECRET,
+	// defaulting to JWT_SECRET); gameJoinKeys seeds each other game's keys.
+	// joinKeyrings is built once after all construction options are applied.
+	authKeys     sharedjwt.Keyring
+	joinKeys     sharedjwt.Keyring
+	gameJoinKeys map[string]sharedjwt.Keyring
+	joinKeyrings transfer.JoinKeyrings
 
 	// connLimiter bounds accepts per source IP; msgRate/msgBurst seed each
 	// connection's own inbound-frame bucket. Both are no-ops when unset.
@@ -175,13 +179,30 @@ func WithKickConsumer(kc *KickConsumer) Option {
 func (g *Gateway) KickConsumerConfigured() bool { return g.kickConsumer != nil }
 
 // WithJoinTokenSecret sets the secret (or comma-separated rotation list) used
-// to sign gateway -> game server join tokens. Without it the gateway falls back
-// to the auth JWT secret, which is the pre-split behaviour: one leaked secret
-// then forges both client auth tokens and join tokens.
+// to sign cuvara join tokens. Without it cuvara falls back to the auth JWT
+// secret, which is the pre-split behaviour: one leaked secret then forges both
+// client auth tokens and join tokens. Other games require their own option.
 func WithJoinTokenSecret(spec string) Option {
 	return func(g *Gateway) {
 		if keys, err := sharedjwt.ParseKeyring(spec); err == nil {
 			g.joinKeys = keys
+		}
+	}
+}
+
+// WithGameJoinTokenSecret sets a game's dedicated join-token signing keyring.
+// Missing or invalid non-default secrets leave that game unroutable, with no
+// fallback to the cuvara or auth secret. An empty game means cuvara.
+func WithGameJoinTokenSecret(game, spec string) Option {
+	if gameid.IsDefaultGame(game) {
+		return WithJoinTokenSecret(spec)
+	}
+	return func(g *Gateway) {
+		if !gameid.ValidGameID(game) {
+			return
+		}
+		if keys, err := sharedjwt.ParseKeyring(spec); err == nil {
+			g.gameJoinKeys[game] = keys
 		}
 	}
 }
@@ -287,6 +308,7 @@ func New(
 		jwtSecret:        jwtSecret,
 		authKeys:         authKeys,
 		joinKeys:         authKeys,
+		gameJoinKeys:     make(map[string]sharedjwt.Keyring),
 		logger:           logger,
 		enterWorldBudget: EnterWorldBudget,
 		conns:            make(map[*ClientConn]struct{}),
@@ -296,6 +318,9 @@ func New(
 	for _, opt := range opts {
 		opt(g)
 	}
+	// A zero default keyring keeps the gateway fail-closed, matching the
+	// constructor's empty-auth-secret behavior.
+	g.joinKeyrings, _ = transfer.NewJoinKeyrings(g.joinKeys, g.gameJoinKeys)
 	return g
 }
 
@@ -771,7 +796,7 @@ func (g *Gateway) refreshSessionOnPong(cc *ClientConn) {
 // store and refreshes its TTL (activity heartbeat). Returns false — after
 // replying with the appropriate error — when the session is gone.
 func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
-	connUser, connState := cc.Identity()
+	connUser, connState, game := cc.IdentityGame()
 	if connState == StateConnected || connUser == "" {
 		if msgType == messages.MsgEnterWorld {
 			g.metrics.EnterWorldResult("", false)
@@ -783,7 +808,6 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 	}
 
 	ctx := context.Background()
-	game := cc.Game()
 	key := session.GameSessionKey(game, connUser)
 	_, err := g.sessions.ValidateSession(ctx, key)
 
@@ -796,7 +820,8 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 	if err != nil {
 		g.metrics.SessionCheckResult(game, metrics.SessionCheckExpired)
 		g.logger.Info("session expired", "conn", cc.ID(), "user", connUser, "err", err)
-		cc.ClearIdentity()
+		oldGame, oldUser := cc.ClearIdentityGame()
+		g.untrackUser(oldGame, oldUser, cc)
 		if msgType == messages.MsgEnterWorld {
 			g.metrics.EnterWorldResult(game, false)
 			g.sendEnterWorldError(cc, "session expired")
@@ -1111,7 +1136,7 @@ func (g *Gateway) sendAuthRefusalAndClose(cc *ClientConn, reason string) {
 // to the next hop.
 func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	start := time.Now()
-	userID, state := cc.Identity()
+	userID, state, game := cc.IdentityGame()
 	if state != StateAuthenticated && state != StateInWorld {
 		g.metrics.EnterWorldResult("", false)
 		g.logger.Warn("enter world failed",
@@ -1122,10 +1147,28 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 
 	var req messages.EnterWorldRequest
 	if err := env.UnmarshalPayload(&req); err != nil {
-		g.metrics.EnterWorldResult(cc.Game(), false)
+		g.metrics.EnterWorldResult(game, false)
 		g.logger.Warn("enter world failed",
 			"conn", cc.ID(), "user", userID, "reason", "malformed_request", "err", err)
 		g.sendEnterWorldError(cc, "invalid enter world request")
+		return
+	}
+
+	// The same field names a map or dungeon content. Validate before any
+	// registry lookup, membership request or allocation can observe it.
+	if !gameid.ValidMapID(req.MapID) {
+		g.metrics.EnterWorldResult(game, false)
+		g.logger.Warn("enter world failed",
+			"conn", cc.ID(), "user", userID, "game", game, "reason", "invalid_map_id")
+		g.sendEnterWorldError(cc, "invalid map id")
+		return
+	}
+	joinKeys, ok := g.joinKeyrings.For(game)
+	if !ok {
+		g.metrics.EnterWorldResult(game, false)
+		g.logger.Warn("enter world failed",
+			"conn", cc.ID(), "user", userID, "game", game, "reason", "game_not_routable")
+		g.sendEnterWorldError(cc, "game not routable")
 		return
 	}
 
@@ -1138,7 +1181,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	// token says", which is every protocol 2 client.
 	characterID := cc.CharacterID()
 	if req.CharacterID != "" && req.CharacterID != characterID {
-		g.metrics.EnterWorldResult(cc.Game(), false)
+		g.metrics.EnterWorldResult(game, false)
 		g.logger.Warn("enter world failed",
 			"conn", cc.ID(), "user", userID, "reason", msgCharacterMismatch,
 			"requested_character", req.CharacterID, "token_character", characterID)
@@ -1166,20 +1209,20 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	var result transfer.AssignResult
 	var err error
 	if req.PartyID != "" {
-		result, err = g.assignDungeon(ctx, userID, characterID, req.PartyID, req.MapID)
+		result, err = g.assignDungeon(ctx, userID, characterID, game, req.PartyID, req.MapID, joinKeys)
 	} else {
-		result, err = transfer.AssignMapCharacter(ctx, userID, characterID, req.MapID, g.registry, g.joinKeys)
+		result, err = transfer.AssignMapCharacter(ctx, userID, characterID, game, req.MapID, g.registry, joinKeys)
 	}
 	if err != nil {
-		g.metrics.EnterWorldResult(cc.Game(), false)
+		g.metrics.EnterWorldResult(game, false)
 		g.logger.Error("enter world failed",
-			"conn", cc.ID(), "user", userID, "map", req.MapID, "party", req.PartyID,
+			"conn", cc.ID(), "user", userID, "game", game, "map", req.MapID, "party", req.PartyID,
 			"reason", "no_assignment", "err", err,
 			"dur_ms", time.Since(start).Milliseconds())
 		g.sendEnterWorldError(cc, clientSafeAssignError(err))
 		return
 	}
-	g.metrics.EnterWorldResult(cc.Game(), true)
+	g.metrics.EnterWorldResult(game, true)
 
 	cc.SetInWorld()
 
@@ -1188,7 +1231,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	// also the only record anywhere of which server a client was sent to, so
 	// it carries the server id and address the client is about to dial.
 	g.logger.Info("enter world assigned",
-		"conn", cc.ID(), "user", userID, "map", req.MapID, "party", req.PartyID,
+		"conn", cc.ID(), "user", userID, "game", game, "map", req.MapID, "party", req.PartyID,
 		"server", result.ServerID, "server_addr", result.ServerAddr,
 		"transport", result.Transport,
 		// Whether this assignment carried a server identity key (ADR-25), not
@@ -1202,7 +1245,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	// context, not the budget one: an assignment that resolved near the
 	// deadline must still record where the client went.
 	cc.SetJoinTokenJTI(result.JTI)
-	if uerr := g.sessions.UpdateGameSession(context.Background(), cc.Game(), userID, func(sd *session.SessionData) {
+	if uerr := g.sessions.UpdateGameSession(context.Background(), game, userID, func(sd *session.SessionData) {
 		sd.ServerID = result.ServerID
 		sd.MapID = req.MapID
 		// The jti of the token minted above. This is what a later duplicate
@@ -1356,7 +1399,7 @@ func clientSafeAssignError(err error) string {
 // dungeon fleet and no Nakama URL is a valid deployment today, and it must fail
 // a dungeon request legibly rather than panic on a nil field. That is the same
 // posture the allocator already takes for an unconfigured dungeon fleet.
-func (g *Gateway) assignDungeon(ctx context.Context, userID, characterID, partyID, contentID string) (transfer.AssignResult, error) {
+func (g *Gateway) assignDungeon(ctx context.Context, userID, characterID, game, partyID, contentID string, joinKeys sharedjwt.Keyring) (transfer.AssignResult, error) {
 	if g.dungeonIndex == nil || g.partyMembers == nil {
 		return transfer.AssignResult{}, fmt.Errorf("assign dungeon: %w",
 			gameerrors.New(gameerrors.ErrNotImplemented,
@@ -1367,7 +1410,8 @@ func (g *Gateway) assignDungeon(ctx context.Context, userID, characterID, partyI
 		Registry:    g.registry,
 		Index:       g.dungeonIndex,
 		Party:       g.partyMembers,
-		JoinKeys:    g.joinKeys,
+		GameID:      game,
+		JoinKeys:    joinKeys,
 		CharacterID: characterID,
 	})
 }

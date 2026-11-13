@@ -40,13 +40,14 @@ type countingAllocator struct {
 	selfMapID string
 }
 
-func (c *countingAllocator) AllocateServer(_ context.Context, mapID string) (storage.ServerInfo, error) {
+func (c *countingAllocator) AllocateServer(_ context.Context, gameID, mapID string) (storage.ServerInfo, error) {
 	c.hits.Add(1)
 	if c.err != nil {
 		return storage.ServerInfo{}, c.err
 	}
 	info := c.info
 	info.MapID = mapID
+	info.GameID = gameID
 	if c.selfRegister != nil {
 		self := info
 		if c.selfAddr != "" {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
 )
@@ -125,12 +126,13 @@ type fakeAllocator struct {
 	selfMapID string
 }
 
-func (f *fakeAllocator) AllocateServer(_ context.Context, mapID string) (storage.ServerInfo, error) {
+func (f *fakeAllocator) AllocateServer(_ context.Context, gameID, mapID string) (storage.ServerInfo, error) {
 	f.hits++
 	if f.err != nil {
 		return storage.ServerInfo{}, f.err
 	}
 	info := f.info
+	info.GameID = constants.GameOrDefault(gameID)
 	info.MapID = mapID
 	if f.selfRegister != nil {
 		self := info
@@ -438,7 +440,7 @@ type lyingRegistry struct {
 	lie storage.ServerInfo
 }
 
-func (l *lyingRegistry) FindByMapID(_ context.Context, _ string) ([]storage.ServerInfo, error) {
+func (l *lyingRegistry) FindByGameAndMapID(_ context.Context, _, _ string) ([]storage.ServerInfo, error) {
 	return []storage.ServerInfo{l.lie}, nil
 }
 
@@ -455,13 +457,14 @@ type concurrentAllocator struct {
 	info          storage.ServerInfo
 }
 
-func (c *concurrentAllocator) AllocateServer(_ context.Context, mapID string) (storage.ServerInfo, error) {
+func (c *concurrentAllocator) AllocateServer(_ context.Context, gameID, mapID string) (storage.ServerInfo, error) {
 	c.hits.Add(1)
 	time.Sleep(c.hold)
 	if c.err != nil {
 		return storage.ServerInfo{}, c.err
 	}
 	info := c.info
+	info.GameID = constants.GameOrDefault(gameID)
 	info.MapID = mapID
 	info.ServerID = c.info.ServerID + "-" + mapID
 	if c.store != nil {
@@ -767,7 +770,7 @@ type rotatingRegistry struct {
 	calls   int
 }
 
-func (r *rotatingRegistry) FindByMapID(_ context.Context, _ string) ([]storage.ServerInfo, error) {
+func (r *rotatingRegistry) FindByGameAndMapID(_ context.Context, _, _ string) ([]storage.ServerInfo, error) {
 	out := make([]storage.ServerInfo, 0, len(r.servers))
 	for i := range r.servers {
 		out = append(out, r.servers[(i+r.calls)%len(r.servers)])

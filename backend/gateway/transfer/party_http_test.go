@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -75,7 +76,7 @@ func TestPartyErrorsAreClassifiedByCodeNotStatus(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			_, err := NewNakamaParty(srv.URL, "testkey", 0).IsMember(context.Background(), "p1", "u1")
+			_, err := NewNakamaParty(srv.URL, "testkey", 0).IsMember(context.Background(), "cuvara", "p1", "u1")
 			switch {
 			case tt.wantUnkown:
 				if !errors.Is(err, ErrPartyUnknown) {
@@ -107,12 +108,12 @@ func TestPartyGetDecodesTheShippedShape(t *testing.T) {
 
 	p := NewNakamaParty(srv.URL, "testkey", 0)
 
-	ok, err := p.IsMember(context.Background(), "8f14e45f", "u2")
+	ok, err := p.IsMember(context.Background(), "cuvara", "8f14e45f", "u2")
 	if err != nil || !ok {
 		t.Fatalf("member u2: ok=%v err=%v", ok, err)
 	}
 
-	ok, err = p.IsMember(context.Background(), "8f14e45f", "intruder")
+	ok, err = p.IsMember(context.Background(), "cuvara", "8f14e45f", "intruder")
 	if err != nil {
 		t.Fatalf("non-member lookup errored: %v", err)
 	}
@@ -137,4 +138,42 @@ func writeJSONString(w http.ResponseWriter, payload string) error {
 	}
 	_, err := w.Write([]byte(`{"payload":"` + escaped + `"}`))
 	return err
+}
+
+func TestPartyGetPayloadCarriesGameID(t *testing.T) {
+	for _, game := range []string{"", "cuvara", "ember"} {
+		t.Run("game="+game, func(t *testing.T) {
+			wantGame := game
+			if wantGame == "" {
+				wantGame = "cuvara"
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v2/rpc/party_get" || r.URL.Query().Get("http_key") != "testkey" {
+					t.Errorf("unexpected RPC request: %s %s", r.Method, r.URL)
+				}
+				var inner string
+				if err := json.NewDecoder(r.Body).Decode(&inner); err != nil {
+					t.Errorf("decode RPC envelope: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				var payload map[string]string
+				if err := json.Unmarshal([]byte(inner), &payload); err != nil {
+					t.Errorf("decode RPC payload: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if payload["game_id"] != wantGame || payload["party_id"] != "p1" {
+					t.Errorf("party_get payload = %v, want game_id=%s party_id=p1", payload, wantGame)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = writeJSONString(w, `{"party_id":"p1","leader_id":"u1","members":["u1"]}`)
+			}))
+			defer srv.Close()
+			ok, err := NewNakamaParty(srv.URL, "testkey", 0).IsMember(context.Background(), game, "p1", "u1")
+			if err != nil || !ok {
+				t.Fatalf("IsMember: ok=%v err=%v", ok, err)
+			}
+		})
+	}
 }
