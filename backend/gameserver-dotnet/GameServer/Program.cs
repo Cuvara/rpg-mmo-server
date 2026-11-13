@@ -1241,7 +1241,7 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
         kickConsumer = await RedisKickConsumer.ConnectAsync(
             redisAddr, redisPassword, serverId,
             p => server.KickPlayerAsync(p.UserId, p.Jti),
-            loggerFactory.CreateLogger<RedisKickConsumer>());
+            loggerFactory.CreateLogger<RedisKickConsumer>(), gameId: gameId);
     }
     catch (Exception ex)
     {
