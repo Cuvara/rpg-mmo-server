@@ -142,12 +142,7 @@ func gatewayToken(ctx context.Context, logger runtime.Logger, roster character.S
 			logger.Error("gateway_token: no storage to check character %s for %s", req.CharacterID, userID)
 			return "", ErrInternal
 		}
-		var owns bool
-		if gameid.IsDefaultGame(game) {
-			owns, err = character.Owns(ctx, roster, userID, req.CharacterID)
-		} else {
-			owns, err = ownsGameCharacter(ctx, roster, game, userID, req.CharacterID)
-		}
+		owns, err := character.Owns(ctx, roster, game, userID, req.CharacterID)
 		if err != nil {
 			logger.Error("gateway_token: %v", err)
 			return "", ErrInternal
