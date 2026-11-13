@@ -246,13 +246,6 @@ public class ServerOptions
     /// </remarks>
     public Net.Sealed.ServerIdentity ServerIdentity { get; set; } = Net.Sealed.ServerIdentity.Generate();
     /// <summary>
-    /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
-    /// client auth token. The game server itself never sees that token; this is
-    /// only the fallback for <see cref="JoinTokenSecret"/>.
-    /// </summary>
-    public string JwtSecret { get; set; } = "";
-
-    /// <summary>
     /// HS256 secret (or comma-separated rotation list, "current,previous") that the
     /// gateway signs join tokens with — <c>JOIN_TOKEN_SECRET</c>. REQUIRED: the
     /// server refuses to start when this is empty.
