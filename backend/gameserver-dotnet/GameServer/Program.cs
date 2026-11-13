@@ -915,6 +915,18 @@ catch (ContentLoadException ex)
     return 1;
 }
 
+GameManifestResult manifest = GameManifest.Check(contentDir, gameId);
+if (manifest.Refusal != null)
+{
+    logger.LogCritical("{Message}", manifest.Refusal);
+    return 1;
+}
+if (manifest.Warning != null)
+    logger.LogWarning("{Message}", manifest.Warning);
+else
+    logger.LogInformation("Content manifest: game {GameId}, Shared.GameLogic version {Version} (server {ServerVersion})",
+        manifest.GameId, manifest.Version, GameManifest.CompiledSharedGameLogicVersion);
+
 // ── Map geometry (ADR-28) ──
 //
 // content/maps/<map_id>.json when it exists; the flat protocol 2 world inside the configured
@@ -1241,7 +1253,7 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
         kickConsumer = await RedisKickConsumer.ConnectAsync(
             redisAddr, redisPassword, serverId,
             p => server.KickPlayerAsync(p.UserId, p.Jti),
-            loggerFactory.CreateLogger<RedisKickConsumer>());
+            loggerFactory.CreateLogger<RedisKickConsumer>(), gameId: gameId);
     }
     catch (Exception ex)
     {

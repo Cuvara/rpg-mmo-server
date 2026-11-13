@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `IsValidGameId` and Go `ValidGameID` now reserve `other` because the gateway metrics label buckets unknown games as `other`.
+
 ### Added
 
 - Game IDs `gs`, `map` and `dungeon` are reserved to avoid default-game server ID collisions.
@@ -27,6 +31,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `RedisServerRegistry.FindByGameAndMapAsync` issues all hash reads before awaiting them, so they pipeline, and keeps the index read order (`FindByGameAndMap_PreservesIndexReadOrder`).
   - Registry log lines (register, heartbeat start/stop/failure, re-register, player count, deregister) name the game.
   - Documented in `docs/README.md` (knob table, join-token secret), `docs/API.md` (registry entry, join refusal reasons) and `docs/DESIGN.md` (join-token secret split).
+- Game identity on events, Nakama calls and content, ADR-33 leg 2 (D2 event streams, D4, D6). Default-game behaviour, wire and protocol version are unchanged; a default-game server with no `game.json` still boots.
+  - `entity_killed` on `events:game` carries `game_id`: `DeathPayload.GameId` (trailing optional member, so positional construction is source-compatible), filled by `EventPublisher` from the server's game (new optional `gameId` constructor argument, wired from `ServerOptions.GameId`; null or empty = `cuvara`) whenever the payload's own is empty. Always written, `cuvara` included. Tests: `EventGameTests.DeathEvent_ContainsGameId` reads the serialized JSON.
+  - The `events:kick` consumer is game-aware: `RedisKickConsumer` takes the server's game (optional `gameId` on `ConnectAsync` and the constructor, wired from `Program.cs`) and, after the `server_id` filter, compares it with the event's `game_id` (absent or empty = `cuvara`). A mismatch is logged at Warning with user, server, jti and both games and counted in the new `GameMismatches` property; the entry is still dispatched, so the jti guard alone decides the kick. Another server's entry is skipped before the compare and is not a mismatch. `HandleEntryAsync` is now `internal` as a test seam. Tests: `EventGameTests.KickEntry_ReportsMismatchButStillDispatches` (with and without `game_id`, matching and mismatching), `KickEntry_ForeignServerOfAnotherGame_IsNotAMismatch`.
+  - `reward_kills`, `reward_kill` and `submit_kill` carry `game_id`: `NakamaClient` takes the server's game (optional `gameId` on both constructors, wired from `ServerOptions.GameId` in `GameServerHost`) and exposes it as `NakamaClient.GameId`; `RewardKillsRequest`, `RewardKillRequest` and `SubmitKillRequest` gain `game_id`, always written. `KillRewardBatcher` sends it through the client unchanged. A Nakama built before ADR-33 ignores the field. Tests: `NakamaGameIdTests` reads the serialized JSON of all three calls for an unset game and for another game.
+  - Content manifest `backend/content/game.json` (`game_id` `cuvara`, `shared_gamelogic_version` `0.7.0`) and the boot check `GameServer.Content.GameManifest.Check`, run in `Program.cs` right after the content load: the server exits 1 when the manifest cannot be read or parsed, has a missing or invalid `game_id` or version, names another game than `GAMESERVER_GAME_ID` (absent = `cuvara`), or declares another `Shared.GameLogic` major than the compiled one. Owner decision 2026-11-13: an absent manifest boots the default game as `cuvara` with a Warning, so an old content tree still boots, and refuses any other game. The compiled version is the constant `GameManifest.CompiledSharedGameLogicVersion` (`package.json` is not compiled in), held equal to `Shared.GameLogic/package.json` by the guard test `GameManifestTests.CompiledVersionMatchesPackage`. Tests: `GameManifestTests`.
+  - Documented in `docs/API.md` (`events:kick` game compare, new `events:game` section), `docs/README.md` (`--game-id` row) and `docs/DESIGN.md` (kill RPC game id, "Content manifest").
 
 ### Removed
 
@@ -35,6 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `docs/API.md`, join refusal reasons: the counter note now says a `protocol_version_mismatch` refusal counts as `gameserver_handshakes_rejected_total{reason="protocol_version"}` (docs only).
 - Local full-suite instability on a loaded host (#515, partial); test-only except one internal seam. Each fixed family is a wall-clock budget the test did not need, or a read deadline that also covered the work it was waiting for:
   - `DeltaSnapshotWireTests` (3 tests): the snapshot reader stopped at a count or at 5 s from its creation, which also covered the whole tick-producing phase, so a contended host made the client reconstruct a state several ticks old (expected 20, actual 17.9999962 is six ticks). It now collects in the background and waits for the snapshot stamped with the final server tick, with a 30 s budget that starts after the last tick.
   - `DungeonInstanceTests.InstanceMidRun_IsNeverKilledByTheDeadline` and `InstanceThatEmptied_FollowsDecisionSixAndNotTheDeadline`: a 200 ms join deadline ran from boot, so a join slower than that made the instance release itself under the player (null join reply). Product behaviour is correct; the tests drive the deadline with an injected clock (`ServerOptions.JoinDeadlineClock`, an internal `TimeProvider`, null in production, same monotonic timestamp as before). New control `InstanceThatIsNeverJoined_ReleasesItselfWhenTheClockPassesTheDeadline` uses a one-hour deadline, so only the injected clock can fire it; it fails when the seam is ignored. `InstanceThatEmptied...` also raised its reconnect hold from 5 s to 10 s (the hold runs on real time and is not injectable) and no longer sleeps half the hold; it still races that real hold under a stall of roughly 8 s or more, so it is listed as open rather than fixed.

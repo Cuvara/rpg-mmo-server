@@ -66,12 +66,14 @@ public sealed class RedisKickConsumer : IAsyncDisposable
     private readonly Func<SessionSupersededPayload, Task> _handler;
     private readonly ILogger _logger;
     private readonly TimeSpan _pollInterval;
+    private readonly string _gameId;
 
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
 
     private long _consumed;
     private long _malformed;
+    private long _gameMismatches;
 
     /// <summary>Entries read from the stream (own and foreign) since construction.</summary>
     public long Consumed => Interlocked.Read(ref _consumed);
@@ -79,6 +81,9 @@ public sealed class RedisKickConsumer : IAsyncDisposable
     /// <summary>Entries ACKed unhandled because the payload would not parse.
     /// Every increment is a contract violation worth looking at.</summary>
     public long Malformed => Interlocked.Read(ref _malformed);
+
+    /// <summary>Parsed entries whose game differs from this server's game.</summary>
+    public long GameMismatches => Interlocked.Read(ref _gameMismatches);
 
     /// <summary>
     /// Connect to Redis and return a started consumer. Same connection semantics
@@ -88,7 +93,7 @@ public sealed class RedisKickConsumer : IAsyncDisposable
     public static async Task<RedisKickConsumer> ConnectAsync(
         string addr, string? password, string serverId,
         Func<SessionSupersededPayload, Task> handler, ILogger logger,
-        TimeSpan? pollInterval = null)
+        TimeSpan? pollInterval = null, string? gameId = null)
     {
         var options = RedisServerRegistry.BuildOptions(addr, password);
         // RESP2, pinned. SE.Redis v3 negotiates RESP3 (HELLO 3) by default, and this
@@ -101,7 +106,7 @@ public sealed class RedisKickConsumer : IAsyncDisposable
         // client-side caching, no push messages), so the portable reply shape wins.
         options.Protocol = RedisProtocol.Resp2;
         var mux = await ConnectionMultiplexer.ConnectAsync(options);
-        var consumer = new RedisKickConsumer(mux, serverId, handler, logger, ownsMux: true, pollInterval);
+        var consumer = new RedisKickConsumer(mux, serverId, handler, logger, ownsMux: true, pollInterval, gameId);
         await consumer.StartAsync();
         return consumer;
     }
@@ -111,7 +116,7 @@ public sealed class RedisKickConsumer : IAsyncDisposable
     public RedisKickConsumer(
         IConnectionMultiplexer mux, string serverId,
         Func<SessionSupersededPayload, Task> handler, ILogger logger,
-        bool ownsMux = false, TimeSpan? pollInterval = null)
+        bool ownsMux = false, TimeSpan? pollInterval = null, string? gameId = null)
     {
         _mux = mux;
         _ownsMux = ownsMux;
@@ -120,6 +125,7 @@ public sealed class RedisKickConsumer : IAsyncDisposable
         _handler = handler;
         _logger = logger;
         _pollInterval = pollInterval ?? DefaultPollInterval;
+        _gameId = global::GameServer.Games.GameId.GameOrDefault(gameId);
     }
 
     /// <summary>
@@ -195,7 +201,7 @@ public sealed class RedisKickConsumer : IAsyncDisposable
         }
     }
 
-    private async Task HandleEntryAsync(StreamEntry entry)
+    internal async Task HandleEntryAsync(StreamEntry entry)
     {
         Interlocked.Increment(ref _consumed);
 
@@ -225,6 +231,16 @@ public sealed class RedisKickConsumer : IAsyncDisposable
         {
             // Broadcast stream: another server's kick. Skip quietly.
             return;
+        }
+        // ADR-33: logged and counted, never dropped; the jti guard still decides.
+        // Checked after the server filter: the stream is shared by every game's
+        // servers, so another server's kick of another game is not a mismatch.
+        if (!string.Equals(parsed.Game, _gameId, StringComparison.Ordinal))
+        {
+            Interlocked.Increment(ref _gameMismatches);
+            _logger.LogWarning(
+                "Kick consumer: user {UserId}, server {ServerId}, jti {Jti} event game {EventGame} differs from server game {ServerGame}",
+                parsed.UserId, parsed.ServerId, parsed.Jti, parsed.Game, _gameId);
         }
 
         try

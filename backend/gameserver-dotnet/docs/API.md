@@ -107,13 +107,41 @@ Entry fields on the Redis Stream `events:kick` are the standard event pair
 `user_id`, `server_id` and `jti` are mandatory (a consumer MUST treat a payload
 missing any of them as malformed: count it, ACK it, act on nothing);
 `old_gateway`/`new_gateway` are diagnostic. `game_id` is an optional string;
-absent or empty means the default game `cuvara`. Starting in ADR-33 leg 3, the
-gateway writes it and consumers compare it with their own game. `jti` is the join-token jti of the
+absent or empty means the default game `cuvara`. The gateway starts writing it
+in ADR-33 leg 3; the game server consumer already accepts payloads with and
+without it (ADR-33 leg 2). After the `server_id` filter below, the consumer
+compares the event's game with its own `GAMESERVER_GAME_ID` (both resolved,
+ordinal compare). A mismatch is **logged at Warning** (user, server, jti, both
+games) and **counted** (`RedisKickConsumer.GameMismatches`, an in-process
+property with no metric or `/status` field yet), and is **never dropped**: the
+entry is still handed to the kick handler, so the jti guard alone decides which
+connection, if any, is kicked. An entry for another server is skipped before the
+game compare, so another game's kick on the shared stream is not a mismatch.
+`jti` is the join-token jti of the
 superseded session's map assignment — the consumer kicks only the connection
 that authenticated with exactly that jti, which is what makes late delivery and
 at-least-once redelivery safe (newest login wins). Consumer groups are
 `gs:{server_id}`, one per game server, created at `$` and destroyed on graceful
 shutdown; events whose `server_id` names another server are ACKed and skipped.
+
+### Server-internal: the `events:game` stream (`entity_killed`)
+
+Not a client-facing message either. The game server publishes one entry per
+death on the Redis Stream `events:game` (Go `constants.GameEventStream`; C#
+`EventStreams.Game`, `GameServer/Events/EventPublisher.cs`) when `REDIS_ADDR` is
+set, and nothing otherwise. Entry fields are `type` = `entity_killed` and
+`payload` = UTF-8 JSON (`DeathPayload`):
+
+```json
+{ "victim_id": "mob-7", "victim_type": "mob", "killer_id": "u-42", "map_id": "map_01", "server_id": "gs-1", "game_id": "cuvara" }
+```
+
+`killer_id` may be null. **`game_id` is always written** (ADR-33 D2): it is the
+game this server serves, `GAMESERVER_GAME_ID`, and an explicit `cuvara` for the
+default game, never an absent or empty field. A payload that already names a
+game keeps it; the publisher fills only an empty one. A reader built before
+ADR-33 ignores the extra field; a game-aware reader treats an absent or empty
+`game_id` (an entry from an older server) as `cuvara`.
 
 ### Server-internal: the registry entry (`servers:id:{server_id}`)
 
@@ -182,9 +210,11 @@ and the close. The checks run in this order and the first failure answers:
 | 8 | `Server is full` | `GAMESERVER_CAPACITY` reached |
 | 9 | `character does not belong to this account` | The character named in the token belongs to another account |
 
-Rows 1 and 2 also count as `gameserver_handshakes_rejected_total{reason="malformed"}`;
-the authenticated refusals from row 4 on have no counter of their own, the game
-refusal included.
+Rows 1 and 2 also count as `gameserver_handshakes_rejected_total{reason="malformed"}`,
+and row 3 (`protocol_version_mismatch`) counts as
+`gameserver_handshakes_rejected_total{reason="protocol_version"}`: the label is
+`protocol_version`, not the `error` string. The authenticated refusals from row 4
+on have no counter of their own, the game refusal included.
 
 **The game rule.** An absent or empty `gid` claim means the default game `cuvara`,
 and so does an unset or empty `GAMESERVER_GAME_ID`; the two resolved values must
