@@ -24,6 +24,10 @@ namespace GameServer.Registry;
 /// — the gateway reads these hashes directly, with no translation layer.
 /// Missing or empty game_id means the default game. Registration atomically refuses
 /// to overwrite a live server id belonging to another game before changing any keys.
+///
+/// Standalone Redis (or a Sentinel-managed primary) only: the registration script
+/// spans two keys in different hash slots, so this layout does not work on Redis
+/// Cluster. See <see cref="StandaloneCommandMap"/>.
 /// </summary>
 public sealed class RedisServerRegistry : IServerRegistry
 {
@@ -186,8 +190,32 @@ return map or ARGV[3]
         options.AbortOnConnectFail = false;
         options.ConnectRetry = 3;
         options.ClientName = "gameserver";
+        options.CommandMap = StandaloneCommandMap;
         return options;
     }
+
+    /// <summary>
+    /// The command map every game-server Redis connection uses: <c>CLUSTER</c> disabled.
+    /// </summary>
+    /// <remarks>
+    /// The registry key scheme is <b>not cluster-safe</b>: <see cref="RegisterLua"/> takes
+    /// <c>servers:id:{server_id}</c> and the map index key in one script, and the two hash
+    /// to different slots. The supported topology is a standalone Redis (or a Sentinel-managed
+    /// primary), never Redis Cluster.
+    /// <para>
+    /// StackExchange.Redis decides "cluster" partly by sending <c>CLUSTER NODES</c> during
+    /// auto-configuration; a server that answers it is treated as a cluster, and every
+    /// multi-key command whose keys hash to different slots is then refused client-side
+    /// ("Multi-key operations must involve a single slot"). A real standalone Redis refuses
+    /// <c>CLUSTER NODES</c>, so this changes nothing there. miniredis — the Redis the
+    /// <c>-tags integration</c> suite runs — answers it with a fake one-node topology, which
+    /// made every registration fail there. A real Redis Cluster is still detected with this
+    /// map (it reports cluster mode in <c>INFO</c>), so pointing the server at one keeps
+    /// failing loudly at registration instead of silently half-writing.
+    /// </para>
+    /// </remarks>
+    internal static readonly CommandMap StandaloneCommandMap =
+        CommandMap.Create(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "CLUSTER" }, available: false);
 
     internal static string ServerKey(string serverId) => IdPrefix + serverId;
     internal static string MapKey(string mapId) => MapIndexKey(null, mapId);

@@ -165,6 +165,16 @@ check-and-set script are pinned by the shared fixtures in
   it names another game, no key changes: the server logs the refusal at Error,
   registration fails, and the server stays unregistered until that entry expires.
   It never overwrites another game's entry.
+- **Standalone Redis only; the key scheme is not cluster-safe.** The check-and-set
+  script takes `servers:id:{server_id}` and the map index key together, and the two
+  hash to different slots, so Redis Cluster refuses it (and the Go side's
+  pipelines across the same keys would fail the same way). Supported: one standalone
+  Redis or a Sentinel-managed primary. The C# connection disables the `CLUSTER`
+  command (`RedisServerRegistry.StandaloneCommandMap`) so that StackExchange.Redis
+  does not mistake a server that merely answers `CLUSTER NODES`, such as miniredis,
+  for a cluster and refuse the script client-side. A real cluster is still detected
+  and still fails registration loudly. Making the layout cluster-safe would mean
+  hash-tagged key names, which is a contract change on both sides.
 - **Heartbeat and player-count updates are game-checked.** Each is one script that
   re-arms the TTL or writes `player_count` only when the entry belongs to this
   server's game; an absent or foreign entry returns false, the foreign TTL is not

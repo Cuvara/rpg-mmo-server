@@ -849,6 +849,14 @@ returns 0 without touching any key (`storage.ErrGameMismatch` in Go,
   server between games. The check and the write must be one atomic step; a Lua script is the
   only way to do that in a single round trip. An expired id is free to take, matching the
   hash-is-truth liveness rule above.
+- **Not cluster-safe, by consequence.** The script takes `servers:id:{id}` and the map
+  index key together, and `Deregister`'s `TxPipeline` deletes and removes across the same
+  two keys. They hash to different slots, so Redis Cluster refuses both (`CROSSSLOT`). The
+  supported topology is one standalone Redis or a Sentinel-managed primary (ADR-4), and the
+  Go store uses a plain `redis.Client`, not a cluster client. Making it cluster-safe would
+  need hash-tagged key names, a contract change on both sides. The C# connection disables
+  `CLUSTER` so StackExchange.Redis does not mistake miniredis, which answers `CLUSTER NODES`,
+  for a cluster (`gameserver-dotnet/CHANGELOG.md`, 2026-11-14).
 - **Leg 3 widens the interface.** `storage.ServerRegistry.FindByGameAndMapID` makes the
   game-scoped lookup available to the gateway and its test fakes; `FindByMapID` keeps its
   existing signature for default-game callers.

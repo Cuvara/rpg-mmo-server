@@ -263,6 +263,8 @@ unchanged. `Deregister` removes the id from the index named by the stored `game_
 to the Go and C# copies): if `servers:id:{id}` exists and its `game_id` (absent = default)
 differs from the caller's, it returns 0 and writes nothing, surfaced as `ErrGameMismatch`;
 otherwise it does `HSET` of the eight fields, `PEXPIRE` and `SADD` to the game's map index.
+The script spans two keys in different hash slots, so the registry needs a standalone Redis
+(or a Sentinel-managed primary); it does not work on Redis Cluster (`docs/DESIGN.md`).
 `FindByMapID` reads `servers:map:{map_id}` as before; `FindByGameAndMapID` reads the game's
 index, skips entries whose `game_id` names another game and prunes expired ids the same way.
 `UpdatePlayerCount` and its script are unchanged.

@@ -130,4 +130,23 @@ public class RegistryContractTests
         ]);
         Assert.Equal(new ServerInfo("foo-1", "map_01", "localhost:9200", "kcp", 100, 7, "public-key", "foo"), info);
     }
+
+    // RegisterLua spans servers:id:{id} and the map index key (different slots). With CLUSTER
+    // available, StackExchange.Redis treats any server that answers CLUSTER NODES (miniredis,
+    // which the integration suite runs) as a cluster and refuses that script client-side, so
+    // the server never registers. The registry, the event stream and the kick consumer all
+    // build their connection here, so pin it for every address/password shape.
+    [Theory]
+    [InlineData("127.0.0.1:6379", null)]
+    [InlineData("redis:6379", "secret")]
+    [InlineData("", null)]
+    public void BuildOptions_DisablesClusterAutoDetection(string addr, string? password)
+    {
+        var options = RedisServerRegistry.BuildOptions(addr, password);
+
+        Assert.Same(RedisServerRegistry.StandaloneCommandMap, options.CommandMap);
+        Assert.Equal("$CLUSTER=", options.CommandMap.ToString());
+        Assert.Contains("$CLUSTER=", options.ToString());
+        Assert.False(options.AbortOnConnectFail);
+    }
 }

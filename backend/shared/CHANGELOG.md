@@ -6,6 +6,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Docs only: `docs/DESIGN.md` (ADR-33 registry section) and `docs/API.md` now say the registry
+  key scheme is not cluster-safe. The register script and `Deregister`'s `TxPipeline` each span
+  `servers:id:{id}` and the map index key, which hash to different slots, so the registry needs
+  a standalone Redis or a Sentinel-managed primary. No code, key or field change.
 - Docs only: `docs/API.md` lists `FindByGameAndMapID` on the `storage.ServerRegistry`
   interface (ADR-33 leg 3 widened it) and drops the notes saying it was a concrete method only.
 
