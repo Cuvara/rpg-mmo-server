@@ -22,6 +22,13 @@
 # Redis answers "which address serves this map", with neither reading the
 # other. A `list` on gameservers would let a future change quietly cross that
 # line.
+#
+# OTHER GAMES (ADR-33 D7). The Role below covers cuvara's namespace only. A
+# non-default game's fleets live in `<this namespace>-<game>`, and the gateway's
+# grant there is a Role + RoleBinding IN THAT NAMESPACE with this same single
+# rule, bound to the `rpg-gateway` ServiceAccount below. It is rendered by
+# deploy/k8s/games/render.py (see k8s/games/README.md), not added here: a
+# ClusterRole would hand the gateway every namespace's allocations at once.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

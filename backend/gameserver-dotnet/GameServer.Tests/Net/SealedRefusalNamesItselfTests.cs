@@ -45,7 +45,7 @@ namespace GameServer.Tests.Net;
 public class SealedRefusalNamesItselfTests
 {
     private const string ServerId = "gs-sealed-refusal";
-    private const string JwtSecret = "test-secret-for-sealed-refusal-tests";
+    private const string JoinSecret = "test-secret-for-sealed-refusal-tests";
 
     private static ServerOptions RequireSealed() => new()
     {
@@ -55,8 +55,7 @@ public class SealedRefusalNamesItselfTests
         Mode = "map",
         TickRate = 20,
         Capacity = 8,
-        JwtSecret = JwtSecret,
-        JoinTokenSecret = JwtSecret,
+        JoinTokenSecret = JoinSecret,
         SaveInterval = TimeSpan.FromSeconds(30),
         HoldTtl = TimeSpan.FromSeconds(30),
         PlayerStore = new MemoryPlayerStore(),
@@ -76,7 +75,7 @@ public class SealedRefusalNamesItselfTests
 
         var join = WireProtocol.NewEnvelope(
             MsgType.JoinToken,
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt("u-json", ServerId, JwtSecret) },
+            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt("u-json", ServerId, JoinSecret) },
             WireEncoding.Json);
         await stream.WriteAsync(WireProtocol.Encode(join), cts.Token);
         await stream.FlushAsync(cts.Token);
@@ -114,7 +113,7 @@ public class SealedRefusalNamesItselfTests
 
         var join = WireProtocol.NewEnvelope(
             MsgType.JoinToken,
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt("u-proto", ServerId, JwtSecret) },
+            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt("u-proto", ServerId, JoinSecret) },
             WireEncoding.Proto);
         await stream.WriteAsync(WireProtocol.Encode(join), cts.Token);
         await stream.FlushAsync(cts.Token);

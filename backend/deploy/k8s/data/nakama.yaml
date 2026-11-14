@@ -128,6 +128,29 @@ spec:
                   name: nakama-config
                   key: tls-key-path
                   optional: true
+            # Games allow-list (ADR-33 D1), read by the plugin's gamectx: the
+            # runtime env first, then this process variable. ABSENT for the
+            # single game: the `games` key is not in nakama-config, and
+            # `optional: true` then leaves the variable undefined, which the
+            # plugin reads as cuvara only. Once set, it is the exact list
+            # (cuvara included only if named) and must agree with the gateway's
+            # GAMES (k8s/app/40-gateway.yaml, gateway-config key `games`).
+            #
+            # ADDING A GAME NEEDS A NAKAMA RESTART: the plugin creates each
+            # game's leaderboards in InitModule, so a new id has no leaderboard
+            # (and is not allowed) until the pod restarts with the new list.
+            # nakama-config may not exist yet (it is created only by the TLS
+            # recipe in README.md), so create it if absent, then patch:
+            #   kubectl -n rpg-k8s-data create configmap nakama-config   # if absent
+            #   kubectl -n rpg-k8s-data patch configmap nakama-config --type=merge \
+            #     -p '{"data":{"games":"cuvara,<game>"}}'
+            #   kubectl -n rpg-k8s-data rollout restart deployment/nakama
+            - name: GAMES
+              valueFrom:
+                configMapKeyRef:
+                  name: nakama-config
+                  key: games
+                  optional: true
           # Do NOT set LEADERBOARD_MIGRATE=recreate here: it deletes every
           # kills_alltime record. If the plugin refuses to load with
           # "leaderboard kills_alltime exists with authoritative=false", use

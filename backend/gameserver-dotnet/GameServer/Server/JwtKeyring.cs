@@ -23,7 +23,7 @@ namespace GameServer.Server;
 /// </summary>
 public sealed class JwtKeyring
 {
-    /// <summary>Separator used in the JWT_SECRET / JOIN_TOKEN_SECRET env vars.</summary>
+    /// <summary>Separator used in the JOIN_TOKEN_SECRET env var.</summary>
     public const char Separator = ',';
 
     /// <summary>A keyring holding no secrets. Rejects every token.</summary>

@@ -6,6 +6,72 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Multi-game auth, ADR-33 leg 4 (D1 Option B).** One Nakama serves several games; the
+  game travels as the Nakama session variable `game`. Default-game (`cuvara`) behaviour is
+  unchanged.
+  - **Package `gamectx`** (`gamectx/`), importable by the data packages (task l4-data).
+    `VarGame` = `"game"`. `EnvGames` = `GAMES`, the allow-list read from the Nakama runtime
+    env (process env fallback only when the runtime env has no `GAMES` key): absent or blank
+    = `cuvara` only; set = exactly the listed games, comma-separated, trimmed, de-duplicated,
+    with **no implicit `cuvara`**; any entry failing `^[a-z][a-z0-9]{1,23}$` makes
+    `InitModule` fail (`configure allowed games: …`). `GameFromVars(ctx, vars)` validates a
+    `vars` map (absent `game` = `cuvara`). `GameFromContext(ctx, payloadGameID)`: with a
+    session, the session var wins (absent = `cuvara`) and a non-empty payload `game_id`
+    that differs is refused (`ErrGameMismatch`, code 7); without a session (`http_key`
+    caller) the payload selects the game and context vars are ignored; the result must be in
+    `GAMES` (`ErrGameNotAllowed`, code 3). `Scoped(game, name)` returns `name` for `cuvara`
+    and `<game>.<name>` otherwise.
+  - **Before hooks on every auth method and on session refresh.** New
+    `BeforeAuthenticateApple`, `Custom`, `Device`, `Facebook`, `FacebookInstantGame`,
+    `GameCenter`, `Google`, `Steam` and `BeforeSessionRefresh` refuse a `vars.game` outside
+    `GAMES` with code 3. An omitted or empty `vars` keeps the refresh token's vars
+    (real Nakama cannot tell an empty map from an absent one; proven against Nakama
+    3.40.0); a non-empty `vars` object is validated as a replacement like a login.
+  - **`gid` in `gateway_token`.** The RPC resolves the caller's game through
+    `GameFromContext`, mints it as the `gid` claim through `shared/jwt`'s `SignWithGame`
+    (omitted for `cuvara`, so the default token shape is unchanged) and echoes it as the
+    response's `game_id` (also omitted for `cuvara`). The request may carry an optional
+    `game_id`, which must equal the session game. New `auth.IssueGatewayTokenForGame`.
+  - **Per-game roster check.** `character_id` is checked by `character.Owns` against the
+    session game's roster, `Scoped(game, "characters")`: `characters` for `cuvara`,
+    `<game>.characters` for any other game, with no fallback to `characters`.
+  - **Per-game profile** `<game>.player`/`profile`, created on the first game-scoped login,
+    by the after-authenticate hooks **and** by `gateway_token`, so a player whose account
+    predates the game gets one on their first token. New `auth.EnsureGameProfile`
+    (idempotent read-then-write, like `EnsureProfile`).
+  - **Tests.** `gamectx` (allow-list parsing, env precedence, resolution, mismatch,
+    `Scoped`, runtime error codes), every before hook, `gateway_token` game paths (no `GAMES`
+    = no `gid`, rejections, `<game>.characters` roster, profile created once), and
+    `TestSessionRefresh_GameVarSeenByPlugin` / `TestGameFromContext_AfterSessionRefresh`
+    for what the plugin sees across a refresh. `auth/refresh_localstack_test.go`
+    (build tag `localstack`) proves on a real Nakama that a refresh keeps `vrs.game` and
+    the refreshed session still mints `gid`; it is **HUMAN_REQUIRED** until run against a
+    local stack (see `docs/RUNBOOK.md`).
+- **Multi-game data, ADR-33 leg 4 (D4 Data under B).** Nakama data is per game; `cuvara`
+  keeps its bare names, data and payloads, so no migration.
+  - **Optional payload `game_id`** on `reward_kill`, `reward_kills`, `submit_kill`,
+    `party_get` and `party_join`, resolved by `gamectx.GameFromContext`. It selects the game
+    only when the call has no session (the game server's or the gateway's `http_key` call);
+    absent = `cuvara`. With a client session (`party_get`, `party_join`) the session var
+    `game` decides and a differing `game_id` is refused with code 7. A game outside `GAMES`
+    is refused with code 3 before any storage, wallet or leaderboard access; an invalid
+    `GAMES` at request time answers code 13.
+  - **Per-game leaderboards.** `SetupLeaderboards(ctx, logger, nk, games)` (was
+    `(ctx, logger, nk)`) creates `<game>.kills_alltime` (authoritative, desc, incr, no reset)
+    for each non-default game in `GAMES`, with the same authoritative check and
+    `LEADERBOARD_MIGRATE=recreate` rule per board. `kills_alltime` is always ensured and stays
+    `cuvara`'s.
+  - **Ledger metadata `game_id`** on `reward_kill` and `reward_kills` wallet updates for a
+    non-default game; omitted for `cuvara`, so its ledger rows are unchanged.
+  - New `economy.CurrencyGold` (`"gold"`), the unscoped wallet currency key.
+  - **Tests.** `TestSubmitKill_NonDefaultGameWritesScopedLeaderboard`,
+    `TestRewardKills_NonDefaultGameWritesScopedLeaderboardAndGold` (write `<game>.kills_alltime`,
+    not `kills_alltime`, and credit `<game>.gold`), `TestRewardKill_NonDefaultGameCreditsScopedGold`,
+    `TestMutationRPCs_DefaultGamePreservesDevelop`, `TestGetLeaderboard_GameFromSession`,
+    `TestSetupLeaderboards_Games` (`economy/game_test.go`); `TestRosterGameIsolation`,
+    `TestRosterDefaultGameAliases`, `TestRosterRPCGame` (`character/character_game_test.go`);
+    `TestPartyRPCs_CannotCrossGames`, `TestPartyMembership_OnePartyPerGame`,
+    `TestPartyGetRPC_ServerGame` (`social/party_game_test.go`).
 - **Character roster RPCs (ADR-31): `character_list`, `character_create`, `character_delete`**
   (`character/`), registered in `InitModule`. One version-checked storage object per user
   (collection `characters`, key `roster`, owner-read / server-write), so concurrent creates
@@ -148,10 +214,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   board by default, and deletes+recreates only on opt-in.
 
 ### Changed
+- **`BeforeAuthenticateEmail` and the after-authenticate hooks are game-aware (ADR-33).**
+  `BeforeAuthenticateEmail` refuses a disallowed `vars.game` (code 3) before validating
+  credentials; `AfterAuthenticateDevice` / `AfterAuthenticateEmail` create the profile in
+  `Scoped(game, "player")`. For `cuvara` that is still `player`, so default-game behaviour
+  is unchanged. `docs/API.md`, `docs/DESIGN.md`, `docs/README.md` and `docs/RUNBOOK.md`
+  describe `GAMES`, the client `vars` contract, the hooks, `gid` and the local-stack test.
+- **Game-scoped names in `character/`, `economy/` and `social/` (ADR-33 D4).** The roster
+  collection `characters`, the wallet currency key `gold`, the receipt collection
+  `reward_receipts`, the party collections `party` and `party_member` and the leaderboard id
+  `kills_alltime` are all resolved through `gamectx.Scoped(game, …)`: bare for `cuvara`,
+  `<game>.<name>` for any other game, with no fallback across games. A party, its membership
+  index and a roster belong to one game; a user can be in one party per game.
+  - Client RPCs (`character_list`, `character_create`, `character_delete`, `party_create`,
+    `party_join`, `party_leave`, `party_get` with a session, `get_leaderboard`) use the
+    session var `game`. `get_leaderboard` reports the board it read in `leaderboard_id`; an
+    `http_key` call to it reads `kills_alltime`.
+  - `character.ReadRoster`, `List`, `Create`, `Delete`, `Owns` and `social.CreateParty`,
+    `JoinParty`, `LeaveParty`, `GetParty` take a `game` argument.
+  - `gateway_token` checks `cid` through the scoped `character.Owns` for every game,
+    replacing the separate non-default-game path.
+  - `docs/API.md`, `docs/DESIGN.md`, `docs/README.md` and `docs/RUNBOOK.md` describe the
+    scoped names, the payload `game_id` rules and the per-game leaderboards.
 - `docs/API.md`, `docs/RUNBOOK.md`, `docs/DESIGN.md`, `docs/README.md` describe the
   server-only contract, error code 7, the leaderboard migration, the exactly-once
   receipt mechanics, `status`/`replayed`, code 11, receipt retention and how to audit
   a disputed batch.
+
+### Removed
+- `auth/roster_game.go` (`ownsGameCharacter`), the non-default-game roster check added with
+  the multi-game auth work. The scoped `character.Owns` covers every game (ADR-33 D4).
 
 ## [0.9.0] - 2026-09-05
 

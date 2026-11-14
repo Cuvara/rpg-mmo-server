@@ -8,6 +8,7 @@ Public symbols other modules code against. Signatures here are authoritative.
 func Sign(userID, secret string, expiry time.Duration) (string, error)
 func SignWithServer(userID, serverID, secret string, expiry time.Duration) (string, error)
 func SignWithCharacter(userID, serverID, characterID, secret string, expiry time.Duration) (string, error)
+func SignWithGame(userID, serverID, characterID, gameID, secret string, expiry time.Duration) (string, error)
 func Verify(token, secret string) (Claims, error)
 
 type Claims struct {
@@ -15,10 +16,12 @@ type Claims struct {
     ServerID    string `json:"sid,omitempty"`
     Jti         string `json:"jti,omitempty"`
     CharacterID string `json:"cid,omitempty"` // ADR-31
+    GameID      string `json:"gid,omitempty"` // ADR-33
     IssuedAt    int64  `json:"iat"`
     ExpireAt    int64  `json:"exp"`
 }
 func (c Claims) IsExpired() bool
+func (c Claims) Game() string // constants.GameOrDefault(c.GameID)
 ```
 
 `Verify` enforces, in order: 3-segment format → header check (`alg == "HS256"` **and**
@@ -31,6 +34,15 @@ The API is unchanged — callers need no edits.
 the C# `JwtValidator` reads it. Empty = claim omitted = the account's default character, so
 readers MUST tolerate absence (every pre-protocol-3 token). `Keyring.SignWithCharacter` is
 the keyring variant. The `jti` rule is unchanged: a jti is added iff `serverID` is non-empty.
+
+`gid` (ADR-33): the game the token belongs to. **Absent means the default game**
+(`constants.DefaultGameID`), so readers MUST tolerate absence and should read it through
+`Claims.Game()`. Only `SignWithGame` (and `Keyring.SignWithGame`) sets it. An empty game or
+`DefaultGameID` omits the claim, so a default-game token keeps today's claim set byte for
+byte. A non-empty game that fails `gameid.ValidGameID` is refused with an error.
+`SignWithCharacter` now delegates with an empty game, so every existing signing call is
+source- and byte-compatible. The C# `JwtValidator` reads it into `JwtClaims.GameId` (empty
+when absent). **Nothing mints a non-empty `gid` yet** and no reader acts on it.
 
 ### `Keyring` — secret rotation
 
@@ -48,6 +60,8 @@ func (k Keyring) Valid() bool
 func (k Keyring) Signing() string   // the first secret
 func (k Keyring) Sign(userID string, expiry time.Duration) (string, error)
 func (k Keyring) SignWithServer(userID, serverID string, expiry time.Duration) (string, error)
+func (k Keyring) SignWithCharacter(userID, serverID, characterID string, expiry time.Duration) (string, error)
+func (k Keyring) SignWithGame(userID, serverID, characterID, gameID string, expiry time.Duration) (string, error)
 func (k Keyring) Verify(token string) (Claims, error)
 func (c Claims) IsZero() bool
 ```
@@ -105,7 +119,14 @@ Redis-backed counter keyed identically.
 
 ```go
 var ErrNotFound = errors.New("not found")   // wrapped by Redis impls; test with errors.Is
+var ErrGameMismatch = errors.New("server id registered to another game") // ADR-33; test with errors.Is
 ```
+
+`ServerInfo.GameID` (`json:"game_id"`, ADR-33) names the game that owns the entry. Empty
+means `constants.DefaultGameID`; both registries normalise it on write and return it filled
+in from `GetServer` and the lookups. `Register` returns an error wrapping `ErrGameMismatch`
+when a **live** entry with the same server id belongs to another game, and changes nothing;
+re-registering the same game is accepted, and an expired id is free.
 
 ### Interfaces
 
@@ -126,7 +147,8 @@ type SessionStore interface {
 type ServerRegistry interface {
     Register(ctx context.Context, info ServerInfo) error
     Deregister(ctx context.Context, serverID string) error
-    FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error)
+    FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error)                   // default game only
+    FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]ServerInfo, error)   // ADR-33; "" = default game
     UpdatePlayerCount(ctx context.Context, serverID string, count int) error
     Heartbeat(ctx context.Context, serverID string) error               // NEW
     GetServer(ctx context.Context, serverID string) (ServerInfo, error) // NEW
@@ -150,6 +172,11 @@ func NewMemorySessionStore() *MemorySessionStore
 func NewMemoryServerRegistry() *MemoryServerRegistry                              // no heartbeat expiry
 func NewMemoryServerRegistryWithTTL(ttl time.Duration) *MemoryServerRegistry      // NEW, expiry like Redis
 func NewMemoryEventStream() *MemoryEventStream
+```
+
+```go
+// storage.ServerRegistry, ADR-33. FindByMapID delegates to it with the default game.
+func (r *MemoryServerRegistry) FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]ServerInfo, error)
 ```
 
 `NewMemoryServerRegistry()` keeps entries forever (ttl 0) — existing behaviour is
@@ -192,7 +219,9 @@ func (r *ServerRegistry) FindByMapID(ctx context.Context, mapID string) ([]stora
 func (r *ServerRegistry) UpdatePlayerCount(ctx context.Context, serverID string, count int) error
 func (r *ServerRegistry) Heartbeat(ctx context.Context, serverID string) error
 func (r *ServerRegistry) GetServer(ctx context.Context, serverID string) (storage.ServerInfo, error)
+func (r *ServerRegistry) FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]storage.ServerInfo, error) // ADR-33
 func (r *ServerRegistry) Close() error
+func MapIndexKey(gameID, mapID string) string // ADR-33: servers:map:{map_id} or servers:map:{game}:{map_id}
 
 // EventStream — Redis Streams consumer group
 func NewEventStream(addr, password, group, consumer string) *EventStream
@@ -217,9 +246,28 @@ func (s *EventStream) Close() error
 | Purpose | Key | Type | TTL |
 |---------|-----|------|-----|
 | Session | `session:{user_id}` (caller-built, `constants.SessionKeyPrefix`) | string | `constants.SessionTTL` (1h) |
-| Server record | `servers:id:{server_id}` | hash (`server_id`, `map_id`, `addr`, `capacity`, `player_count`) | `constants.ServerHeartbeatTTL` (15s) |
-| Map index | `servers:map:{map_id}` | set of server ids | none (pruned lazily) |
+| Server record | `servers:id:{server_id}` | hash, eight fields: `server_id`, `map_id`, `addr`, `transport`, `capacity`, `player_count`, `identity_key`, `game_id` | `constants.ServerHeartbeatTTL` (15s) |
+| Map index, default game | `servers:map:{map_id}` | set of server ids | none (pruned lazily) |
+| Map index, other game | `servers:map:{game}:{map_id}` | set of server ids | none (pruned lazily) |
 | Event stream | `events:{stream}` | stream | none |
+
+The registry hash is a cross-language contract: the C# game server
+(`GameServer/Registry/RedisServerRegistry.cs`) writes the same names and encodings, and
+`testdata/multigame/registry.json` pins the field order and the expected index keys for
+both languages. An absent or empty `game_id` reads as `constants.DefaultGameID`; writers
+always write it (explicit `cuvara` for the default game). `MapIndexKey` keeps the original
+`servers:map:{map_id}` for the default game (`""` or `cuvara`), so default-game keys are
+unchanged. `Deregister` removes the id from the index named by the stored `game_id`.
+
+`Register` is a single Lua check-and-set (`testdata/multigame/register.lua`, byte-identical
+to the Go and C# copies): if `servers:id:{id}` exists and its `game_id` (absent = default)
+differs from the caller's, it returns 0 and writes nothing, surfaced as `ErrGameMismatch`;
+otherwise it does `HSET` of the eight fields, `PEXPIRE` and `SADD` to the game's map index.
+The script spans two keys in different hash slots, so the registry needs a standalone Redis
+(or a Sentinel-managed primary); it does not work on Redis Cluster (`docs/DESIGN.md`).
+`FindByMapID` reads `servers:map:{map_id}` as before; `FindByGameAndMapID` reads the game's
+index, skips entries whose `game_id` names another game and prunes expired ids the same way.
+`UpdatePlayerCount` and its script are unchanged.
 
 ### Usage
 
@@ -422,6 +470,43 @@ Example: `postgres://game:localdev@localhost:5433/gamestate?sslmode=disable`
 `ServerHeartbeatTTL` (15s) is now wired: it is the default liveness window of
 `redisstore.ServerRegistry`. `EventStreamPrefix` (`events:`) is now wired as the
 Redis Streams key prefix.
+
+`DefaultGameID` (`"cuvara"`, ADR-33) is the existing game's identity. It is a wire
+contract, not configuration, declared once here and once in C#
+(`GameServer.Games.GameId.DefaultGameId`). `GameOrDefault(id)` returns `DefaultGameID` for
+`""` and any other id unchanged (no trimming, no validation): absent means the default game.
+
+```go
+const DefaultGameID = "cuvara"
+func GameOrDefault(id string) string
+```
+
+## `gameid` — identity formats (ADR-33 Terms)
+
+```go
+func ValidGameID(id string) bool         // ^[a-z][a-z0-9]{1,23}$
+func ValidMapID(id string) bool          // ^[A-Za-z0-9_-]{1,64}$
+func IsDefaultGame(game string) bool     // "" or constants.DefaultGameID
+func ValidServerID(game, id string) bool // game-qualified server id
+```
+
+| Id | Rule | Notes |
+|---|---|---|
+| Game id | `^[a-z][a-z0-9]{1,23}$`: 2-24 ASCII bytes, a lowercase letter first, then lowercase letters or digits | No `-`, `_`, `:`, `/`, `.`, uppercase, whitespace or non-ASCII |
+| Map id | `^[A-Za-z0-9_-]{1,64}$`: 1-64 ASCII bytes | No `:` or `/`, so a map id can sit inside a game-qualified key |
+| Server id, default game (`game` is `""` or `"cuvara"`) | Any non-empty id | Preserves every id accepted today (`gs-...`, pod names) |
+| Server id, other game | `<game>-` then a non-empty suffix; `game` must itself be a valid game id | Suffix otherwise unrestricted. For game `foo`: `foo-1` passes; `foo-`, `foo`, `gs-1` and `foobar-1` (another game's prefix) are refused |
+
+The checks are byte-wise ASCII, not regex engines: a trailing newline is not an end anchor
+and non-ASCII letters or digits are refused. The C# twins are in `GameServer.Games.GameId`
+(`IsValidGameId`, `IsValidMapId`, `IsDefaultGame`, `IsValidServerId`).
+
+**One fixture, two languages.** `testdata/multigame/identity.json` holds `default_game_id`
+and every game id, map id and (game, server id) case with its expected verdict.
+`gameid.TestIdentityFixtureParity` (Go) and
+`GameIdTests.SharedFixture_MatchesConstantsAndValidators` (C#) both read it, so the two
+constants and the three validators cannot drift. Add a case there, not to one language's
+table only.
 
 ## `messages` — wire protocol
 

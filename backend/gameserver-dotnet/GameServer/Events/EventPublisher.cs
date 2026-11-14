@@ -12,7 +12,8 @@ public record DeathPayload(
     [property: JsonPropertyName("victim_type")] string VictimType,
     [property: JsonPropertyName("killer_id")] string? KillerId,
     [property: JsonPropertyName("map_id")] string MapId,
-    [property: JsonPropertyName("server_id")] string ServerId);
+    [property: JsonPropertyName("server_id")] string ServerId,
+    [property: JsonPropertyName("game_id")] string? GameId = null);
 
 /// <summary>Generic game event for streaming.</summary>
 public record GameEvent(
@@ -60,6 +61,7 @@ public sealed class EventPublisher : IDisposable
     private readonly IEventStream _stream;
     private readonly ILogger _logger;
     private readonly GameMetrics? _metrics;
+    private readonly string _gameId;
 
     // Deaths are queued here by the tick thread and serialized + published by the
     // drain task below. QueueDeath used to be PublishDeathAsync called directly from
@@ -81,11 +83,12 @@ public sealed class EventPublisher : IDisposable
 
     private readonly Task _drain;
 
-    public EventPublisher(IEventStream stream, ILogger logger, GameMetrics? metrics = null)
+    public EventPublisher(IEventStream stream, ILogger logger, GameMetrics? metrics = null, string? gameId = null)
     {
         _stream = stream;
         _logger = logger;
         _metrics = metrics;
+        _gameId = global::GameServer.Games.GameId.GameOrDefault(gameId);
         _drain = Task.Run(DrainAsync);
     }
 
@@ -103,6 +106,7 @@ public sealed class EventPublisher : IDisposable
     {
         try
         {
+            if (string.IsNullOrEmpty(payload.GameId)) payload = payload with { GameId = _gameId };
             byte[] data = JsonSerializer.SerializeToUtf8Bytes(payload, EventJsonContext.Default.DeathPayload);
             var evt = new GameEvent(eventType, data);
             var task = _stream.PublishAsync(EventStreams.Game, evt, CancellationToken.None);

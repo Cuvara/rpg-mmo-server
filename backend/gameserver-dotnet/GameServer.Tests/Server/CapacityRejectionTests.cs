@@ -24,7 +24,7 @@ namespace GameServer.Tests.Server;
 /// </summary>
 public class CapacityRejectionTests
 {
-    private const string JwtSecret = "capacity-test-secret";
+    private const string JoinSecret = "capacity-test-secret";
     private const string ServerId = "gs-capacity";
 
     [Fact]
@@ -92,7 +92,7 @@ public class CapacityRejectionTests
         // capacity check this file is about.
         var join = WireProtocol.NewEnvelope(
             MsgType.JoinToken,
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) },
             WireEncoding.Json);
         await stream.WriteAsync(WireProtocol.Encode(join));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
@@ -169,8 +169,7 @@ public class CapacityRejectionTests
                 Transport = TransportKind.Kcp,
                 TickRate = 20,
                 Capacity = capacity,
-                JwtSecret = JwtSecret,
-                JoinTokenSecret = JwtSecret,
+                JoinTokenSecret = JoinSecret,
                 HoldTtl = TimeSpan.FromMilliseconds(200),
                 SaveInterval = TimeSpan.FromHours(1),
                 Metrics = metrics,

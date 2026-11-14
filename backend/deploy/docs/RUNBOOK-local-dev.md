@@ -102,8 +102,9 @@ The client needs **one address and one secret**, and nothing else:
   authenticates here (device auth) and calls the `gateway_token` RPC to get the
   JWT it then sends in `MsgAuth`.
 - **Secrets** — read them out of `backend/deploy/.env`. `JWT_SECRET` is shared
-  by Nakama, the gateway and the game server; `JOIN_TOKEN_SECRET` is shared by
-  the gateway and the game server only. A client never sees either: it receives
+  by Nakama and the gateway only; the game server does not receive it (ADR-33
+  D7). `JOIN_TOKEN_SECRET` is shared by the gateway and the game server only,
+  and must differ from `JWT_SECRET`. A client never sees either: it receives
   a signed JWT from Nakama and an opaque join token from the gateway.
 
 `GAMESERVER_PUBLIC_ADDR` is handed to clients **verbatim** in
@@ -130,6 +131,34 @@ WSL2 and the Unity client on Windows, do not assume WSL2's NAT-mode localhost
 forwarding carries UDP — see `backend/docs/NETWORKING.md` ("Local development").
 A join that times out right after `EnterWorld` is almost always UDP not
 arriving or a key mismatch, never a server error.
+
+### Serving more than one game (ADR-33)
+
+The stack serves one game, `cuvara`, and every games setting below is empty or
+absent by default, which means exactly that. Nothing needs setting for cuvara.
+
+- **`GAMES`** in `.env` — comma-separated game ids. Compose passes the one
+  variable to both the `nakama` and the `gateway` service, so the two lists
+  cannot drift locally (in k8s they are two ConfigMap keys, `nakama-config` and
+  `gateway-config` key `games`, and must agree). Empty = cuvara only. Once set
+  it is the exact list: cuvara is served only if named, so a second game is
+  `GAMES=cuvara,ember`, never `GAMES=ember`.
+- **Per non-default game** (`<GAME>` = the id uppercased), on the gateway:
+  `ALLOCATOR_FLEET_MAP_<GAME>`, `ALLOCATOR_FLEET_DUNGEON_<GAME>`, optional
+  `ALLOCATOR_NAMESPACE_<GAME>` (default `<ALLOCATOR_NAMESPACE>-<game>`) and
+  `JOIN_TOKEN_SECRET_<GAME>`, which must differ from `JWT_SECRET` and from every
+  other game's join key (ADR-33 D7). The compose `gateway` service carries them
+  as a commented block; uncomment the lines for your game, since a variable in
+  `.env` alone does not reach the container. A missing or unparseable
+  `JOIN_TOKEN_SECRET_<GAME>` does not stop the gateway: it logs a WARN naming
+  the variable and refuses `EnterWorld` for that game only. `./stack.sh
+  check-secrets` checks every set `JOIN_TOKEN_SECRET_<GAME>` against `JWT_SECRET`.
+  The k8s names are printed by
+  `python deploy/k8s/games/render.py --game <game> --print gateway-env`.
+- **Restart Nakama after changing `GAMES`.** The plugin creates each game's
+  leaderboards when it loads, so a newly listed game has no leaderboard (and is
+  not yet allowed) until `docker compose up -d nakama` recreates the container.
+  Restart the gateway too; it reads `GAMES` only at startup.
 
 ### Two stacks side by side
 
@@ -190,6 +219,15 @@ they only diverge if something overrides one of them.
 **Either binary exits immediately with a non-zero status** — `JOIN_TOKEN_SECRET`
 is mandatory on both the gateway and the game server, they must match, and both
 refuse to start without it. `.env.example` sets a dev default.
+
+**`./stack.sh up` stops with `ERROR: JOIN_TOKEN_SECRET must not share a key
+with JWT_SECRET.`** (or the same line naming `JOIN_TOKEN_SECRET_<GAME>`) — the
+join secret, one of its comma-separated rotation keys, or a key of a set
+`JOIN_TOKEN_SECRET_<GAME>` equals a `JWT_SECRET` key. The game
+server holds the join secret, so reusing the JWT secret would let a compromised
+server sign gateway tokens (ADR-33 D7). Generate a separate value. `./stack.sh
+check-secrets` runs the same check on its own, offline, before you start
+anything; it names variables, never values.
 
 **Exported environment variables seem to be ignored by compose** — on this
 project's dev box `docker` is a shell shim to the Windows `docker.exe`
@@ -418,7 +456,7 @@ Common failures:
 | `plugin was built with a different version of package` | pluginbuilder tag ≠ nakama tag | Align versions, rebuild plugin |
 | Console lists no runtime modules | `modules/nakama.so` missing | `make plugin` then `make up` |
 | `dial tcp: connect: connection refused` on migrate | postgres not ready | Healthcheck should prevent this; check `docker compose logs postgres` |
-| Gateway rejects Nakama-issued tokens | secret mismatch | `JWT_SECRET` in `.env` must equal `JWT_SECRET` exported for gateway/gameserver |
+| Gateway rejects Nakama-issued tokens | secret mismatch | `JWT_SECRET` in `.env` must equal `JWT_SECRET` exported for the gateway (the game server does not read it) |
 | Port already allocated | host process on 5432/6379/7350 | Change `POSTGRES_PORT` / `REDIS_PORT` in `.env` or stop the host service |
 | `NOAUTH Authentication required` from gateway/gameserver | `REDIS_PASSWORD` set in `.env` but not exported to the host process | Export the same `REDIS_PASSWORD` before `go run` |
 | `dial tcp [::1]:6379: connect: connection refused` | Redis not up, or `REDIS_PORT` remapped | `make ps`; set `REDIS_ADDR=localhost:$REDIS_PORT` |
@@ -464,7 +502,7 @@ streams — `go-redis` v9) via `REDIS_ADDR` / `REDIS_PASSWORD` from
 publishes Redis on the host, so the defaults work as-is.
 
 ```bash
-export JWT_SECRET=dev-secret-change-me      # must equal .env JWT_SECRET
+export JWT_SECRET=dev-secret-change-me      # gateway only; must equal .env JWT_SECRET
 export JOIN_TOKEN_SECRET=dev-join-secret-change-me   # must equal .env; NOT JWT_SECRET
 export REDIS_ADDR=localhost:6379            # match REDIS_PORT if you changed it
 export REDIS_PASSWORD=                      # must equal .env REDIS_PASSWORD
@@ -472,8 +510,8 @@ export META_DB_URL='postgres://nakama:localdev@localhost:5432/nakama?sslmode=dis
 # Game state DB — omit to keep the in-memory player store (state lost on restart).
 export GAME_DB_URL='postgres://game:localdev@localhost:5433/gamestate?sslmode=disable'
 
-cd backend/gameserver && go run ./cmd/gameserver/ --addr=:9000 --map-id=map_01
-cd backend/gateway    && go run ./cmd/gateway/    --addr=:8000
+cd backend/gameserver-dotnet && dotnet run --project GameServer -- --addr=:9000 --map-id=map_01
+cd backend/gateway           && go run ./cmd/gateway/ --addr=:8000
 ```
 
 Container-to-container the address is `redis:6379` (service name); only host

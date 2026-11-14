@@ -97,8 +97,8 @@ transport.
 
 | Id | Message | Precondition | Behavior |
 |----|---------|--------------|----------|
-| 1 | `MsgAuth` | none — the only frame accepted without a session | Verify JWT locally (`session.VerifyClientJWT`, shared secret, no Nakama call) → `SessionStore.Set("session:{user_id}", TTL=1h)` → reply `MsgAuthResp{OK}`. Invalid token/payload → `MsgAuthResp{OK:false, Error}` |
-| 3 | `MsgEnterWorld` | live session | Least-loaded live server for `MapID` with `PlayerCount < Capacity`; a map with **no** live server may be allocated (waited for), a map whose servers are all full is refused → 30s join token (`sid` claim = server id), minted last → `MsgEnterWorldResp` |
+| 1 | `MsgAuth` | none — the only frame accepted without a session | Verify JWT locally (`session.VerifyClientJWT`, shared secret, no Nakama call) → check the token's game (`gid`, absent = `cuvara`) is in `GAMES` → `SessionStore.Set(constants.SessionKey(game, user_id), TTL=1h)` (`session:{user_id}` for `cuvara`, `session:{game}:{user_id}` otherwise) → reply `MsgAuthResp{OK}`. Invalid token/payload → `MsgAuthResp{OK:false, Error}`; a game not in `GAMES` → `game not configured`, with no session read or write |
+| 3 | `MsgEnterWorld` | live session | Validate `MapID` (also the dungeon content id when `PartyID` is set) against `^[A-Za-z0-9_-]{1,64}$` → require a join keyring for the session's game → least-loaded live server for **(game, `MapID`)** with `PlayerCount < Capacity`; a map with **no** live server may be allocated from that game's fleet (waited for), a map whose servers are all full is refused → 30s join token (`sid` claim = server id, `gid` for a non-default game), minted last with that game's join secret → `MsgEnterWorldResp`. The game is the session's verified `gid` (absent = `cuvara`); the request never names it (ADR-33) |
 | 9 | `MsgDisconnect` | live session | Destroy the session record, half-close the socket |
 | 11 | `MsgPing` | **none — handled before the session check** | Reply `MsgPong{Timestamp echoed, ServerTime}` |
 | 12 | `MsgPong` | **none — handled before the session check** | Refresh the connection's liveness timer; on an authenticated connection also re-arm the session TTL (at most once per minute, store errors fail open) |
@@ -150,7 +150,14 @@ therefore part of the contract, not an implementation detail.
 
 | Reason | Emitted when |
 |---|---|
-| `duplicate_login` | the same user authenticated on another connection. The gateway evicts the old **gateway socket** it holds itself (same gateway only), and additionally publishes a `session_superseded` event on the `events:kick` Redis Stream so the **game server** evicts the old gameplay connection with the same two-frame pair and the same reason — the client sees one vocabulary no matter which hop evicted it (ADR-20) |
+| `duplicate_login` | the same user authenticated **in the same game** on another connection (ADR-33: a login to game B never reads, supersedes or kicks the account's game-A session). The gateway evicts the old **gateway socket** it holds itself (same gateway), and publishes a `session_superseded` event on the `events:kick` Redis Stream so the **game server** evicts the old gameplay connection with the same two-frame pair and the same reason — the client sees one vocabulary no matter which hop evicted it (ADR-20). When the old session belongs to another gateway, the same payload also goes to `events:gateway_kick` as `gateway_superseded` (ADR-17); that gateway closes only its (`game_id`, `user_id`) connection whose last join-token jti equals the event's `jti`, and treats any other jti as a no-op |
+
+**Kick payload** (`server.SessionSupersededEvent`, JSON, both streams):
+`{game_id, user_id, server_id, jti, old_gateway, new_gateway}`. `game_id` is
+always written, `cuvara` included; a consumer reads an absent `game_id` as
+`cuvara` (events from a pre-ADR-33 gateway). Both events are published only for
+an old session that completed an EnterWorld, so `jti` is always the old login's
+last join-token id.
 
 `wire.proto` names further reasons (`server_shutdown`, `session_expired`,
 `rate_limited`) as an intended vocabulary. **The gateway does not emit them
@@ -172,7 +179,8 @@ Every frame except `MsgAuth` goes through `checkSession`:
 
 1. Connection must be past `StateConnected` and carry a `UserID`; otherwise
    `not authenticated`.
-2. `SessionStore.Get("session:{user_id}")` must return the same user id; otherwise the
+2. `SessionStore.Get` on the connection's game-scoped key (`session:{user_id}` for
+   `cuvara`, `session:{game}:{user_id}` otherwise) must return the same user id; otherwise the
    connection is demoted to `StateConnected` and the client gets `session expired`.
    **Only `storage.ErrNotFound` counts as "gone".** A store *failure* (Redis
    unreachable, timeout) is a different condition and fails open: the connection
@@ -207,14 +215,17 @@ classified below is reported as `internal error` and logged server-side.
 |--------------|---------|
 | `invalid auth request` | payload did not decode |
 | `invalid token` | JWT signature/expiry rejected |
+| `game not configured` | the token verified but its game (`gid`, absent = `cuvara`) is not in this gateway's `GAMES` (log reason `game_not_configured`). **Terminal** for this deployment — a retry presents the same claim |
 | `session creation failed` | session store write failed |
 | `not authenticated` | frame sent before a successful `MsgAuth` |
 | `session expired` | session record gone (TTL, explicit disconnect, evicted elsewhere) |
 | `invalid enter world request` | `MsgEnterWorld` payload did not decode |
+| `invalid map id` | `map_id` (or the dungeon content id in the same field) is empty, longer than 64 bytes or contains a character outside `A-Z a-z 0-9 _ -` (log reason `invalid_map_id`). Checked before any lookup, party check or allocation. **Terminal** — the same request fails the same way |
+| `game not routable` | the session's game is admitted by `GAMES` but this gateway has no join-token secret for it (`JOIN_TOKEN_SECRET_<GAME>` unset, blank or unparseable; log reason `game_not_routable`). Checked before any lookup. **Terminal until an operator sets the secret** |
 | `no server available for map` | the map's live server(s) are full, or the map has no server and allocation failed for a reason other than an exhausted fleet. **Do not retry** — retrying cannot create capacity, and ADR-2 forbids adding a second server to a full map |
 | `all servers busy, retry shortly` | the map has no live server and the allocation API answered `UnAllocated`: every GameServer in the fleet is taken and none is `Ready` at this instant (`registry.ErrNoCapacity`). **Retryable** — retry after a few seconds. Distinct from `no server available for map`: nothing here is full, the fleet is momentarily empty and the Fleet controller is already bringing a replacement to `Ready` (5.38s measured on k3d, ADR-18) |
 | `server is starting, retry shortly` | an allocation is (or was) under way for this map but no address exists yet: the allocated pod had not registered itself when the wait window expired, or the handler's own `server.EnterWorldBudget` (18s) ran out while the allocation was still in flight — the allocation keeps running detached either way. **Retryable** — retry after a few seconds. Distinct from `all servers busy, retry shortly`, where no server was allocated at all |
-| `map is not available` | no fleet or server in this deployment hosts the requested `map_id`: the pod that answered the allocation serves a different map (its fleet's `GAMESERVER_MAP_ID`), or the registry index returned a server for another map. **Terminal — do not retry**: retrying cannot change which map a fleet serves, and every retry costs a GameServer Agones never un-allocates. Distinct from `no server available for map`, which means the map exists but is full |
+| `map is not available` | no fleet or server in this deployment hosts the requested `map_id` **for the session's game**: the pod that answered the allocation serves a different map (its fleet's `GAMESERVER_MAP_ID`) or belongs to another game, the registry index returned a server for another map or another game, or a party's cached dungeon instance belongs to another game (that mapping is released). **Terminal — do not retry**: retrying cannot change which map a fleet serves, and every retry costs a GameServer Agones never un-allocates. Distinct from `no server available for map`, which means the map exists but is full |
 | `server_transport_unsupported` | the selected game server's registry entry does not advertise `kcp` (empty, `tcp` or unknown — a stale or misconfigured deployment). Logged with the server id; no join token is minted. **Terminal until an operator fixes the deployment** — a retry lands on the same entry |
 | `not implemented` | the requested transfer mode is unimplemented (e.g. dungeon) |
 | `internal error` | anything else — store failure, allocator failure, token signing failure |
@@ -237,8 +248,26 @@ This keeps a Redis-backed store from reporting ghost-online players after a drop
 ## Join token
 
 `transfer.GenerateJoinToken(userID, serverID, secret)` — HS256, TTL
-`constants.JoinTokenTTL` (30s), claims `{sub: userID, sid: serverID, jti, cid?}`. The
+`constants.JoinTokenTTL` (30s), claims `{sub: userID, sid: serverID, jti, cid?, gid?}`. The
 game server verifies it as the first frame on its socket.
+
+### Game (`gid`, ADR-33)
+
+The join token's `gid` is **copied from the session's game** (the gateway token's verified
+`gid`), never from the request (`GenerateJoinTokenCharacter(userID, serverID, characterID,
+gameID, keys)`). For `cuvara` the claim is **omitted**, so a default-game join token has
+exactly the claim set it had before ADR-33. Any other game's token carries `gid`.
+
+Each game signs with **its own keyring** (`transfer.JoinKeyrings`): `cuvara` with
+`JOIN_TOKEN_SECRET`, game `<g>` with `JOIN_TOKEN_SECRET_<G>` (upper-cased, same
+comma-separated rotation format). There is no fallback to `JOIN_TOKEN_SECRET` or
+`JWT_SECRET`; a game in `GAMES` without its secret is refused at EnterWorld with
+`game not routable`. The secret must also be given to that game's servers. The game
+server compares `gid` (absent meaning `cuvara`) with its own `GAMESERVER_GAME_ID`
+after the `sid` check and refuses a mismatch with `Token is for a different game`
+(ADR-33 leg 2); the distinct secret is defence in depth on top of that check. At
+startup the gateway warns when a game's secret is missing, equals `JWT_SECRET`, or
+shares any rotation key with another game's join secret (`cuvara`'s included).
 
 ### Character (`cid`, ADR-31)
 
@@ -391,9 +420,10 @@ The map on the entry is now compared with the requested one, and a mismatch is
 refused with `map is not available` (`registry.ErrFleetMapMismatch`) — a
 configuration fault, deliberately **not** a flavour of `ErrNoServerAvailable`,
 because "grow the fleet" and "fix `GAMESERVER_MAP_ID`" are opposite operator
-responses. The same comparison runs on the registry path: `FindByMapID` is keyed
-by `map_id`, so an entry it returns for another map means the store's index is
-lying, and that is refused too rather than quietly filtered.
+responses. The same comparison runs on the registry path: `FindByGameAndMapID` is
+keyed by `(game, map_id)`, so an entry it returns for another map or another game
+means the store's index is lying, and that is refused too rather than quietly
+filtered.
 
 **A proven mismatch is remembered, and it is the one cached failure.** Agones has
 no un-allocate and this project has no `Deallocate`, so an `Allocated` GameServer
@@ -464,21 +494,63 @@ through the downward API), then the legacy `gs-<mode>-<map_id>` default.
 | `--allocation-poll-interval` | `ALLOCATION_POLL_INTERVAL` | `250ms` | Registry re-check interval during that wait (≤80 single-key reads over the full window) |
 | `--allocation-mismatch-ttl` | `ALLOCATION_MISMATCH_TTL` | `60s` | How long a proven "the configured fleet does not serve this `map_id`" verdict is remembered, refusing further allocations for that map with `map is not available`. Bounds the leak to one GameServer per map per window. A **negative** value disables the memory and restores allocate-per-retry; it is logged loudly at start-up and is an escape hatch, not a tuning knob |
 
-All three accept Go duration strings (`15s`, `500ms`). Flag wins, then env, then
+**Per-game fleets (ADR-33 D7).** The rows above configure `cuvara`. Each other game in
+`GAMES` is configured by environment only (no flags), `<GAME>` being the game id
+upper-cased:
+
+| Env | Default | Description |
+|-----|---------|-------------|
+| `ALLOCATOR_FLEET_MAP_<GAME>` | *(none)* | That game's map fleet. Unset: a map allocation for the game fails with `ErrKindNotConfigured` naming the kind, the game and this setting (client: `no server available for map`) |
+| `ALLOCATOR_FLEET_DUNGEON_<GAME>` | *(none)* | That game's dungeon fleet; unset fails the same way |
+| `ALLOCATOR_NAMESPACE_<GAME>` | `<ALLOCATOR_NAMESPACE>-<game>` (e.g. `rpg-realtime-<game>`) | Namespace holding that game's fleets; the allocation is posted there |
+
+An allocated GameServer name must start with `<game>-` for a non-default game
+(`gameid.ValidServerID`), or the allocation is refused before the registration wait;
+`cuvara` accepts any non-empty name. The pod's own registry entry must then report the
+requested game, or the assignment fails with `map is not available` and, for a map, the
+`(game, map)` pair is remembered for `--allocation-mismatch-ttl` exactly like a map
+mismatch. The mismatch memory and the allocation single-flight are keyed by
+`(game, map_id)`, so two games' `map_01` never share either.
+
+The three duration settings in the first table (`--allocation-wait-timeout`,
+`--allocation-poll-interval`, `--allocation-mismatch-ttl`) accept Go duration strings
+(`15s`, `500ms`) and apply to every game. Flag wins, then env, then
 the default; an unparseable value is logged and ignored rather than failing
 start-up. For the two wait knobs a non-positive env value is also ignored; for
 `--allocation-mismatch-ttl` a negative value is honoured, because negative means
 "disabled" there. They only apply when `--allocator=agones`.
 
+## Events and internal calls carrying the game (ADR-33)
+
+| Payload | Where | Game field |
+|---------|-------|------------|
+| `server_down` (`registry.ServerDownEvent`) | published by the registry watcher to the gateway's event stream `gateway:server_down` (Redis Streams on the Redis backend, ADR-5; not Pub/Sub) | `{"game_id", "server_id", "map_id"}`. `game_id` is always written, `cuvara` included; it is the game the server was tracked under, so it survives the registry entry's expiry. A consumer reads an absent `game_id` as `cuvara` (`SubscribeServerDown` normalises it) |
+| `party_get` request (`transfer.NakamaParty.IsMember`) | gateway → Nakama RPC, dungeon entry only | inner payload `{"party_id", "game_id"}`, `game_id` from the session's game and always written (`cuvara` included) |
+
 ## Go API additions
 
 | Symbol | Package | Description |
 |--------|---------|-------------|
-| `session.SessionKey(userID) string` | `gateway/session` | Canonical `session:{user_id}` key |
+| `session.SessionKey(userID) string` | `gateway/session` | Canonical `session:{user_id}` key (the default game) |
+| `session.GameSessionKey(game, userID) string` | `gateway/session` | `constants.SessionKey`: `session:{user_id}` for `cuvara`, `session:{game}:{user_id}` otherwise. `CreateGameSession` / `GetGameSession` / `UpdateGameSession` take the game; the user-only forms use `cuvara` |
+| `session.ParseGames(raw) (Games, error)` / `session.EnvGames` | `gateway/session` | The `GAMES` allow-list (empty = `cuvara` only; invalid entry = `ErrInvalidGames`). `Games.Allowed(game)`, `Games.IDs()` |
+| `server.WithGames(session.Games) Option` | `gateway/server` | Games admitted at auth; the zero value admits only `cuvara` |
+| `(*Gateway).FindAndCloseConnection(game, userID, jti)` / `server.ConnectionCloser` | `gateway/server` | `gateway_kick` callback: closes the (game, user) connection only when its last join-token jti equals `jti` |
+| `(*metrics.Metrics).SetGames(ids)` / `GameLabel(game)` | `gateway/metrics` | Configured `game` label values (unconfigured → `other`); recorders take the verified game |
 | `(*SessionManager).RefreshSession(ctx, sessionID) error` | `gateway/session` | Re-arms the session TTL; errors when the session is gone |
 | `registry.NewRegistryServiceWithAllocator(reg, alloc)` | `gateway/registry` | Registry that asks an `Allocator` for a new instance when a map has **no** live server |
 | `registry.WithAllocationWait(timeout, interval)` | `gateway/registry` | Bounds the wait for an allocated server's own registry entry |
-| `registry.ErrKindNotConfigured` | `gateway/registry` | Sentinel: no Fleet configured for the requested allocation kind (the default state of `KindDungeon`) |
+| `registry.ErrKindNotConfigured` | `gateway/registry` | Sentinel: no Fleet configured for the requested (game, kind) — the default state of `KindDungeon`, and of every kind for a game without `ALLOCATOR_FLEET_*_<GAME>`. The message names the game and the setting |
+| `(*RegistryService).FindServerGame(ctx, gameID, mapID)` | `gateway/registry` | Lookup by (game, map) through `storage.ServerRegistry.FindByGameAndMapID`; refuses an entry of another game with `ErrFleetMapMismatch`. `FindServer(ctx, mapID)` is the `cuvara` form |
+| `registry.Allocator.AllocateServer(ctx, gameID, mapID)` / `(*RegistryService).AllocateDungeon(ctx, gameID, contentID)` | `gateway/registry` | Allocation for a game (empty = `cuvara`); `AllocationRequest.Game` likewise |
+| `registry.FleetEnvName(kind, game)` / `registry.GameFleets` / `AgonesConfig.Games` | `gateway/registry` | Per-game fleet settings: `ALLOCATOR_FLEET_MAP` / `_DUNGEON` for `cuvara`, `..._<GAME>` otherwise; `GameFleets.Namespace` defaults to `<namespace>-<game>` |
+| `(*RegistryWatcher).TrackServerInfo(storage.ServerInfo)` | `gateway/registry` | Tracks a server with its game so `server_down` carries `game_id`; `TrackServer(id, map)` tracks a `cuvara` server |
+| `transfer.JoinKeyrings` / `NewJoinKeyrings(defaultKeys, games)` / `For(game)` | `gateway/transfer` | One join-token keyring per game; `For` never falls back to `cuvara`'s keys |
+| `transfer.GenerateJoinTokenCharacter(userID, serverID, characterID, gameID, keys)` | `gateway/transfer` | Adds `gid` for a non-default game, omits it for `cuvara` |
+| `transfer.AssignMapCharacter(ctx, userID, characterID, gameID, mapID, reg, keys)` / `DungeonDeps.GameID` | `gateway/transfer` | Map and dungeon assignment for a game; `keys` must be that game's keyring |
+| `transfer.PartyMembership.IsMember(ctx, gameID, partyID, userID)` | `gateway/transfer` | Sends `game_id` in the `party_get` payload |
+| `server.WithGameJoinTokenSecret(game, spec) Option` | `gateway/server` | A non-default game's join secret (`JOIN_TOKEN_SECRET_<GAME>`); for `cuvara` it is `WithJoinTokenSecret`. An invalid spec leaves the game unroutable |
+| `(*ClientConn).IdentityGame()` | `gateway/server` | User, state and game read under one lock |
 | `server.MaxHandlerBlockingWait` | `gateway/server` | `pongTimeout - pingInterval`: the longest a handler may block the read loop before starving the heartbeat |
 | `server.EnterWorldBudget` | `gateway/server` | `MaxHandlerBlockingWait - 2s`: the single deadline over the whole `MsgEnterWorld` assignment path, so its stacked legs (lookup retries + allocation call + registration wait ≈ 35s worst case) cannot outlive the heartbeat window (issue #235) |
 | `registry.RetryTotalTimeout` | `gateway/registry` | Total cap on transient-error retry loops (lookup/get); exported so the guard test derives the stacked enter_world worst case from the constants the code runs on |

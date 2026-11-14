@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/duycuong/rpg-mmo/shared/constants"
+	"github.com/duycuong/rpg-mmo/shared/gameid"
 )
 
 type header struct {
@@ -33,9 +36,15 @@ type Claims struct {
 	// absent) means the account's default character, which is what every
 	// token minted before protocol 3 carries, so readers must tolerate absence.
 	CharacterID string `json:"cid,omitempty"`
-	IssuedAt    int64  `json:"iat"`
-	ExpireAt    int64  `json:"exp"`
+	// GameID is the `gid` claim (ADR-33). Absence means constants.DefaultGameID;
+	// readers must tolerate absence. Issuers do not populate it before leg 4.
+	GameID   string `json:"gid,omitempty"`
+	IssuedAt int64  `json:"iat"`
+	ExpireAt int64  `json:"exp"`
 }
+
+// Game returns the claim's game, defaulting an absent claim.
+func (c Claims) Game() string { return constants.GameOrDefault(c.GameID) }
 
 // IsExpired returns true if the token has expired, accounting for ClockSkew.
 func (c Claims) IsExpired() bool {
@@ -61,11 +70,24 @@ func SignWithServer(userID, serverID, secret string, expiry time.Duration) (stri
 // readers interpret as the account's default character. As with
 // SignWithServer, a non-empty serverID (join tokens) adds a unique JTI.
 func SignWithCharacter(userID, serverID, characterID, secret string, expiry time.Duration) (string, error) {
+	return SignWithGame(userID, serverID, characterID, "", secret, expiry)
+}
+
+// SignWithGame creates a token with an optional game ID (ADR-33). Empty and
+// default game IDs omit gid to preserve the default game's existing token shape.
+func SignWithGame(userID, serverID, characterID, gameID, secret string, expiry time.Duration) (string, error) {
+	if gameID != "" && !gameid.ValidGameID(gameID) {
+		return "", fmt.Errorf("sign: %w", fmt.Errorf("invalid game ID %q", gameID))
+	}
+	if gameID == constants.DefaultGameID {
+		gameID = ""
+	}
 	now := time.Now()
 	claims := Claims{
 		UserID:      userID,
 		ServerID:    serverID,
 		CharacterID: characterID,
+		GameID:      gameID,
 		IssuedAt:    now.Unix(),
 		ExpireAt:    now.Add(expiry).Unix(),
 	}

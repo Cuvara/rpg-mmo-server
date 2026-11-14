@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -67,10 +68,10 @@ func TestRegistryMetrics_AllocationsTotal(t *testing.T) {
 				t.Fatalf("FindServer err = %v, wantErr %v", err, tt.wantErr)
 			}
 
-			if got := testutil.ToFloat64(m.AllocationsTotal.WithLabelValues(metrics.ResultOK)); got != tt.wantOK {
+			if got := testutil.ToFloat64(m.AllocationsTotal.WithLabelValues(constants.DefaultGameID, metrics.ResultOK)); got != tt.wantOK {
 				t.Errorf("allocations ok = %v, want %v", got, tt.wantOK)
 			}
-			if got := testutil.ToFloat64(m.AllocationsTotal.WithLabelValues(metrics.ResultFail)); got != tt.wantFail {
+			if got := testutil.ToFloat64(m.AllocationsTotal.WithLabelValues(constants.DefaultGameID, metrics.ResultFail)); got != tt.wantFail {
 				t.Errorf("allocations fail = %v, want %v", got, tt.wantFail)
 			}
 		})
@@ -87,7 +88,7 @@ func TestRegistryMetrics_NoAllocatorNoCount(t *testing.T) {
 		t.Fatal("FindServer should fail with no server and no allocator")
 	}
 	for _, res := range []string{metrics.ResultOK, metrics.ResultFail} {
-		if got := testutil.ToFloat64(m.AllocationsTotal.WithLabelValues(res)); got != 0 {
+		if got := testutil.ToFloat64(m.AllocationsTotal.WithLabelValues(constants.DefaultGameID, res)); got != 0 {
 			t.Errorf("allocations %s = %v, want 0", res, got)
 		}
 	}

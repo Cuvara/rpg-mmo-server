@@ -16,7 +16,7 @@ namespace GameServer.Tests.Server;
 /// </summary>
 public class GameServerHostShutdownTests
 {
-    private const string JwtSecret = "shutdown-test-secret-key-32-bytes!!";
+    private const string JoinSecret = "shutdown-test-secret-key-32-bytes!!";
     private const string ServerId = "gs-shutdown-test";
 
     /// <summary>Bare double shutdown on a server that never ran must be a no-op, not a throw.</summary>
@@ -136,8 +136,7 @@ public class GameServerHostShutdownTests
         Mode = "map",
         TickRate = 20,
         Capacity = 8,
-        JwtSecret = JwtSecret,
-        JoinTokenSecret = JwtSecret,
+        JoinTokenSecret = JoinSecret,
         // Long enough that the periodic sweep never fires: the saves under test are the
         // shutdown ones, so a background sweep would muddy the timing assertion.
         SaveInterval = TimeSpan.FromSeconds(30),
@@ -166,7 +165,7 @@ public class GameServerHostShutdownTests
 
     private static async Task JoinAsync(Stream stream, string userId, CancellationToken ct)
     {
-        var env = WireProtocol.NewEnvelope(MsgType.JoinToken, new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) }, WireEncoding.Json);
+        var env = WireProtocol.NewEnvelope(MsgType.JoinToken, new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) }, WireEncoding.Json);
         await stream.WriteAsync(WireProtocol.Encode(env), ct);
         await stream.FlushAsync(ct);
 

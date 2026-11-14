@@ -84,7 +84,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # Shared HS256 secret. MUST match JWT_SECRET used by gateway/gameserver
+      # Shared HS256 secret. MUST match JWT_SECRET used by the gateway
       # (backend/shared/config: env JWT_SECRET, default "dev-secret-change-me").
       # Nakama signs client session tokens with session.encryption_key, so the
       # gateway can verify them locally with no roundtrip.
@@ -97,6 +97,12 @@ services:
       # SQL instead (backend/nakama/docs/RUNBOOK.md, "Migrate a
       # non-authoritative kills_alltime leaderboard", path A).
       LEADERBOARD_MIGRATE: recreate
+      # Games allow-list (ADR-33 D1). Empty = cuvara only (the plugin's gamectx
+      # reads an empty or absent GAMES as the default game). Once set, it is the
+      # exact list, cuvara included only if named, and must agree with the
+      # gateway's GAMES below. Adding a game needs a Nakama restart: the plugin
+      # creates each game's leaderboards at module load.
+      GAMES: ${GAMES:-}
       # ---------------------------------------------------------------------
       # Meta-hop TLS (ADR-24) — OFF, and pinned explicitly.
       # ---------------------------------------------------------------------
@@ -338,6 +344,26 @@ services:
       # is obviously wrong if anything ever asks for one, rather than pointing
       # at a plausible name that is equally absent.
       ALLOCATOR_FLEET_DUNGEON: ${ALLOCATOR_FLEET_DUNGEON:-}
+      # ---------------------------------------------------------------------
+      # Games served (ADR-33 D1, leg 3) — empty = cuvara only, today's shape.
+      # ---------------------------------------------------------------------
+      # Comma-separated game ids. Once set, cuvara is served ONLY if listed, so
+      # a second game is `cuvara,<game>`. Must agree with the nakama service's
+      # GAMES above (same variable, so one .env line sets both).
+      GAMES: ${GAMES:-}
+      # Per non-default game (none today), `<GAME>` = the id uppercased; the
+      # gateway reads these for every id in GAMES other than cuvara:
+      #   ALLOCATOR_FLEET_MAP_<GAME>: <game>-map-servers-dotnet-<env>
+      #   ALLOCATOR_FLEET_DUNGEON_<GAME>: <game>-dungeon-servers-dotnet-<env>
+      #   ALLOCATOR_NAMESPACE_<GAME>: <ALLOCATOR_NAMESPACE>-<game>   # optional; this is the default
+      #   JOIN_TOKEN_SECRET_<GAME>: <the game's join secret>        # distinct from JWT_SECRET and every other game's
+      # e.g. for `ember`:
+      #   ALLOCATOR_FLEET_MAP_EMBER: ${ALLOCATOR_FLEET_MAP_EMBER:-}
+      #   ALLOCATOR_FLEET_DUNGEON_EMBER: ${ALLOCATOR_FLEET_DUNGEON_EMBER:-}
+      #   JOIN_TOKEN_SECRET_EMBER: ${JOIN_TOKEN_SECRET_EMBER:-}
+      # A missing or unparseable JOIN_TOKEN_SECRET_<GAME> does not stop the
+      # gateway: it logs a WARN naming the variable and refuses EnterWorld for
+      # that game only. `./stack.sh check-secrets` checks the set ones.
       # ALLOCATOR_TRANSPORT was REMOVED: every game server is KCP/UDP, so the
       # gateway stamps "kcp" on allocated servers unconditionally (setting it
       # now only logs a WARN). The gateway's own listener stays TCP.
@@ -377,9 +403,11 @@ services:
     # because one configuration channel is easier to read than two, and because
     # agones/fleet-map-dotnet-dev.yaml uses the same one.)
     environment:
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
-      # Verifies join tokens signed by the gateway. Same value as the gateway
-      # service above, and NOT JWT_SECRET (see the comment there).
+      # The game server holds only JOIN_TOKEN_SECRET. It must match the gateway's
+      # value or every join fails, and must differ from JWT_SECRET; stack.sh
+      # enforces the difference at deploy time. JWT_SECRET is deliberately absent:
+      # a compromised server holding it could sign gateway tokens for any user
+      # and gid (ADR-33 D7). The binary exits 2 if JOIN_TOKEN_SECRET is missing.
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
       # PINNED OFF ON PURPOSE — this is a decision, not an oversight.
@@ -414,6 +442,7 @@ services:
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
       GAMESERVER_ID: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}
+      GAMESERVER_GAME_ID: ${GAMESERVER_GAME_ID:-}
       # Multi-rate simulation. SIM_CRITICAL_HZ is the BASE tick rate; the other
       # two must divide it exactly and must not exceed it, or the server exits
       # with code 2 at startup rather than rounding. Snapshots are broadcast at

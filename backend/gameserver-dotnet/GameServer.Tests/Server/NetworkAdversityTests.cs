@@ -64,7 +64,7 @@ public sealed class AdversityCollection
 [Collection(AdversityCollection.Name)]
 public class NetworkAdversityTests
 {
-    private const string JwtSecret = "adversity-test-secret-32-bytes-aa";
+    private const string JoinSecret = "adversity-test-secret-32-bytes-aa";
     private const string ServerId = "gs-adversity";
 
     /// <summary>
@@ -913,8 +913,7 @@ public class NetworkAdversityTests
             TickRate = rates!.CriticalHz,
             SimulationRates = rates,
             Capacity = 8,
-            JwtSecret = JwtSecret,
-            JoinTokenSecret = JwtSecret,
+            JoinTokenSecret = JoinSecret,
             HoldTtl = hold,
             KcpLimits = idleTimeoutMs > 0
                 ? KcpListenerOptions.Default with { IdleTimeoutMs = idleTimeoutMs }
@@ -940,7 +939,7 @@ public class NetworkAdversityTests
     private static async Task JoinAsync(Stream stream, string userId, CancellationToken ct)
     {
         await WriteFrameAsync(stream, WireProtocol.NewEnvelope(MsgType.JoinToken,
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) },
             WireEncoding.Json), ct);
         var env = await WireProtocol.DecodeAsync(stream, ct);
         Assert.NotNull(env);

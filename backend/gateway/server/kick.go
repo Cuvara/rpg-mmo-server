@@ -16,11 +16,16 @@ type SessionSupersededEvent struct {
 	JTI        string `json:"jti"`
 	OldGateway string `json:"old_gateway,omitempty"`
 	NewGateway string `json:"new_gateway,omitempty"`
+	// GameID is the ADR-33 game identity; absent means constants.DefaultGameID.
+	// Publishers always include it, even for the default game.
+	GameID string `json:"game_id,omitempty"`
 }
+
+func (e SessionSupersededEvent) Game() string { return constants.GameOrDefault(e.GameID) }
 
 const kickPublishTimeout = 2 * time.Second
 
-func (g *Gateway) publishSupersede(userID string, existing session.SessionData) {
+func (g *Gateway) publishSupersede(game, userID string, existing session.SessionData) {
 	if existing.ServerID == "" || existing.JoinTokenJTI == "" {
 		return
 	}
@@ -29,7 +34,7 @@ func (g *Gateway) publishSupersede(userID string, existing session.SessionData) 
 		return
 	}
 	payload, err := json.Marshal(SessionSupersededEvent{
-		UserID: userID, ServerID: existing.ServerID, JTI: existing.JoinTokenJTI,
+		GameID: constants.GameOrDefault(game), UserID: userID, ServerID: existing.ServerID, JTI: existing.JoinTokenJTI,
 		OldGateway: existing.GatewayID, NewGateway: g.sessions.GatewayID(),
 	})
 	if err != nil {

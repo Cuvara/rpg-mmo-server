@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using GameServer.Games;
 using GameServer.Registry;
 using StackExchange.Redis;
 
@@ -65,7 +66,8 @@ public class RedisServerRegistryTests
         // silent break, because the gateway would read an empty key and every client that
         // requires identity would refuse a server that is perfectly capable of it.
         Assert.Equal(TestIdentityKey, hash["identity_key"]);
-        Assert.Equal(7, hash.Count); // no extra fields the gateway would not expect
+        Assert.Equal(GameId.DefaultGameId, hash["game_id"]);
+        Assert.Equal(8, hash.Count); // no extra fields the gateway would not expect
 
         // The map index is a plain SET of ids, with no TTL of its own.
         Assert.True(await db.SetContainsAsync("servers:map:map_shape", serverId));
@@ -118,7 +120,8 @@ public class RedisServerRegistryTests
 
         Assert.True(hash.ContainsKey("identity_key"));
         Assert.Equal("", hash["identity_key"]);
-        Assert.Equal(7, hash.Count);
+        Assert.Equal(GameId.DefaultGameId, hash["game_id"]);
+        Assert.Equal(8, hash.Count);
         // Still findable: an identity-less server is a server, not a broken entry.
         Assert.True(await db.SetContainsAsync("servers:map:map_noid", serverId));
     }
@@ -218,5 +221,386 @@ public class RedisServerRegistryTests
         await db.KeyDeleteAsync($"servers:id:{serverId}");
         Assert.False(await reg.UpdatePlayerCountAsync(serverId, 9, default));
         Assert.False(await db.KeyExistsAsync($"servers:id:{serverId}"));
+    }
+
+    [SkippableTheory]
+    [InlineData("foo", "bar", false)]
+    [InlineData(GameId.DefaultGameId, "foo", false)]
+    [InlineData("foo", GameId.DefaultGameId, false)]
+    [InlineData("foo", "foo", true)]
+    [InlineData(GameId.DefaultGameId, GameId.DefaultGameId, true)]
+    [InlineData(null, GameId.DefaultGameId, true)]
+    [InlineData(null, "foo", false)]
+    [InlineData("", GameId.DefaultGameId, true)]
+    [InlineData("", "foo", false)]
+    public async Task Register_ChecksExistingGameBeforeChangingAnyKeys(
+        string? storedGame, string requestedGame, bool accepted)
+    {
+        _redis.SkipUnlessAvailable(nameof(Register_ChecksExistingGameBeforeChangingAnyKeys));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"gs-cas-{Guid.NewGuid():N}";
+        string oldMap = $"map_old_{Guid.NewGuid():N}";
+        string newMap = $"map_new_{Guid.NewGuid():N}";
+        string key = RedisServerRegistry.ServerKey(serverId);
+        var oldHash = new List<HashEntry>
+        {
+            new("server_id", serverId), new("map_id", oldMap), new("addr", "old:9200"),
+            new("transport", "kcp"), new("capacity", "50"), new("player_count", "1"),
+            new("identity_key", "old-key"),
+        };
+        if (storedGame != null) oldHash.Add(new HashEntry("game_id", storedGame));
+        await db.HashSetAsync(key, oldHash.ToArray());
+        string oldIndex = RedisServerRegistry.MapIndexKey(storedGame, oldMap);
+        string newIndex = RedisServerRegistry.MapIndexKey(requestedGame, newMap);
+        await db.SetAddAsync(oldIndex, serverId);
+        var requested = Info(serverId, newMap, players: 9) with { GameId = requestedGame };
+
+        if (accepted)
+        {
+            await reg.RegisterAsync(requested, RegistrationScope.MapIndexed, default);
+            Assert.Equal(requested, RedisServerRegistry.FromHashEntries(await db.HashGetAllAsync(key)));
+            Assert.True(await db.SetContainsAsync(newIndex, serverId));
+            Assert.NotNull(await db.KeyTimeToLiveAsync(key));
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<RegistryGameMismatchException>(() =>
+                reg.RegisterAsync(requested, RegistrationScope.MapIndexed, default));
+            Assert.Equal(serverId, error.ServerId);
+            Assert.Equal(requestedGame, error.GameId);
+            Assert.Contains(serverId, error.Message);
+            Assert.Contains(requestedGame, error.Message);
+            var hash = await db.HashGetAllAsync(key);
+            Assert.Equal(oldHash.OrderBy(entry => entry.Name.ToString()), hash.OrderBy(entry => entry.Name.ToString()));
+            Assert.Null(await db.KeyTimeToLiveAsync(key)); // refusal did not arm a TTL
+            Assert.True(await db.SetContainsAsync(oldIndex, serverId));
+            Assert.False(await db.KeyExistsAsync(newIndex));
+        }
+    }
+
+    [SkippableFact]
+    public async Task Register_AbsentNonDefaultGameUsesItsOwnMapIndex()
+    {
+        _redis.SkipUnlessAvailable(nameof(Register_AbsentNonDefaultGameUsesItsOwnMapIndex));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"foo-{Guid.NewGuid():N}";
+        var info = Info(serverId, "map_01") with { GameId = "foo" };
+
+        Assert.False(await db.KeyExistsAsync(RedisServerRegistry.ServerKey(serverId)));
+        await reg.RegisterAsync(info, RegistrationScope.MapIndexed, default);
+
+        Assert.Equal(info, RedisServerRegistry.FromHashEntries(
+            await db.HashGetAllAsync(RedisServerRegistry.ServerKey(serverId))));
+        Assert.True(await db.SetContainsAsync("servers:map:foo:map_01", serverId));
+        Assert.False(await db.SetContainsAsync("servers:map:map_01", serverId));
+    }
+
+    [SkippableTheory]
+    [InlineData(GameId.DefaultGameId)]
+    [InlineData("foo")]
+    public async Task HashOnly_WritesGameButDoesNotCreateAMapIndex(string gameId)
+    {
+        _redis.SkipUnlessAvailable(nameof(HashOnly_WritesGameButDoesNotCreateAMapIndex));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"{gameId}-{Guid.NewGuid():N}";
+        string mapId = $"dungeon_{Guid.NewGuid():N}";
+        await reg.RegisterAsync(Info(serverId, mapId) with { GameId = gameId }, RegistrationScope.HashOnly, default);
+
+        Assert.Equal(gameId, (await db.HashGetAsync(RedisServerRegistry.ServerKey(serverId), "game_id")).ToString());
+        Assert.Equal(8, await db.HashLengthAsync(RedisServerRegistry.ServerKey(serverId)));
+        Assert.NotNull(await db.KeyTimeToLiveAsync(RedisServerRegistry.ServerKey(serverId)));
+        Assert.False(await db.KeyExistsAsync(RedisServerRegistry.MapIndexKey(gameId, mapId)));
+        Assert.False(await db.KeyExistsAsync(RedisServerRegistry.MapKey(mapId)));
+    }
+
+    [SkippableTheory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(GameId.DefaultGameId)]
+    [InlineData("foo")]
+    public async Task FindByGameAndMap_FiltersForeignAndExpiredEntries(string? gameId)
+    {
+        _redis.SkipUnlessAvailable(nameof(FindByGameAndMap_FiltersForeignAndExpiredEntries));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string effectiveGame = GameId.GameOrDefault(gameId);
+        string mapId = $"map_lookup_{Guid.NewGuid():N}";
+        var expected = Info($"{effectiveGame}-{Guid.NewGuid():N}", mapId) with { GameId = effectiveGame };
+        var foreign = Info($"bar-{Guid.NewGuid():N}", mapId) with { GameId = "bar" };
+        await reg.RegisterAsync(expected, RegistrationScope.MapIndexed, default);
+        await reg.RegisterAsync(foreign, RegistrationScope.MapIndexed, default);
+        string index = RedisServerRegistry.MapIndexKey(gameId, mapId);
+        string expiredId = $"expired-{Guid.NewGuid():N}";
+        await db.SetAddAsync(index, [foreign.ServerId, expiredId]);
+
+        var found = await reg.FindByGameAndMapAsync(gameId, mapId, default);
+
+        Assert.Equal(expected, Assert.Single(found));
+        Assert.True(await db.SetContainsAsync(index, expiredId)); // lookup need not prune
+    }
+
+    [SkippableFact]
+    public async Task FindByGameAndMap_LegacyHashBelongsToDefaultGame()
+    {
+        _redis.SkipUnlessAvailable(nameof(FindByGameAndMap_LegacyHashBelongsToDefaultGame));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"gs-legacy-{Guid.NewGuid():N}";
+        string mapId = $"map_legacy_{Guid.NewGuid():N}";
+        await reg.RegisterAsync(Info(serverId, mapId), RegistrationScope.MapIndexed, default);
+        await db.HashDeleteAsync(RedisServerRegistry.ServerKey(serverId), "game_id");
+
+        var info = Assert.Single(await reg.FindByGameAndMapAsync(null, mapId, default));
+        Assert.Equal(serverId, info.ServerId);
+        Assert.Equal(GameId.DefaultGameId, info.GameId);
+    }
+
+    [SkippableTheory]
+    [InlineData(null)]
+    [InlineData("foo")]
+    public async Task Deregister_UsesTheStoredGameAndMap(string? gameId)
+    {
+        _redis.SkipUnlessAvailable(nameof(Deregister_UsesTheStoredGameAndMap));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"gs-dereg-game-{Guid.NewGuid():N}";
+        string storedMap = $"map_stored_{Guid.NewGuid():N}";
+        var info = Info(serverId, storedMap) with { GameId = GameId.GameOrDefault(gameId) };
+        await reg.RegisterAsync(info, RegistrationScope.MapIndexed, default);
+        if (gameId == null) await db.HashDeleteAsync(RedisServerRegistry.ServerKey(serverId), "game_id");
+
+        await reg.DeregisterAsync(serverId, "map_incorrect", default);
+
+        Assert.False(await db.KeyExistsAsync(RedisServerRegistry.ServerKey(serverId)));
+        Assert.False(await db.SetContainsAsync(RedisServerRegistry.MapIndexKey(gameId, storedMap), serverId));
+    }
+
+    [SkippableFact]
+    public async Task GameAwareDeregister_PreservesForeignHashExpiryAndIndex()
+    {
+        _redis.SkipUnlessAvailable(nameof(GameAwareDeregister_PreservesForeignHashExpiryAndIndex));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"foo-deregister-{Guid.NewGuid():N}";
+        string mapId = $"map_foreign_{Guid.NewGuid():N}";
+        await reg.RegisterAsync(Info(serverId, mapId, players: 7) with { GameId = "bar" },
+            RegistrationScope.MapIndexed, default);
+        string key = RedisServerRegistry.ServerKey(serverId);
+        string foreignIndex = RedisServerRegistry.MapIndexKey("bar", mapId);
+        string ownIndex = RedisServerRegistry.MapIndexKey("foo", mapId);
+        await db.SetAddAsync(ownIndex, serverId); // stale membership is safe to remove
+        var beforeHash = await db.HashGetAllAsync(key);
+        long beforeExpiry = (long)await db.ExecuteAsync("PEXPIRETIME", key);
+        Assert.True(beforeExpiry > 0);
+
+        await reg.DeregisterAsync(serverId, "foo", mapId, default);
+
+        Assert.Equal(beforeHash.OrderBy(entry => entry.Name.ToString()),
+            (await db.HashGetAllAsync(key)).OrderBy(entry => entry.Name.ToString()));
+        Assert.Equal(beforeExpiry, (long)await db.ExecuteAsync("PEXPIRETIME", key));
+        Assert.True(await db.SetContainsAsync(foreignIndex, serverId));
+        Assert.False(await db.SetContainsAsync(ownIndex, serverId));
+    }
+
+    [SkippableFact]
+    public async Task GameAwareDeregister_RemovesSameGameHashAndStoredMapMembership()
+    {
+        _redis.SkipUnlessAvailable(nameof(GameAwareDeregister_RemovesSameGameHashAndStoredMapMembership));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"foo-deregister-{Guid.NewGuid():N}";
+        string storedMap = $"map_owned_{Guid.NewGuid():N}";
+        await reg.RegisterAsync(Info(serverId, storedMap) with { GameId = "foo" },
+            RegistrationScope.MapIndexed, default);
+
+        await reg.DeregisterAsync(serverId, "foo", "map_incorrect", default);
+
+        Assert.False(await db.KeyExistsAsync(RedisServerRegistry.ServerKey(serverId)));
+        Assert.False(await db.SetContainsAsync(RedisServerRegistry.MapIndexKey("foo", storedMap), serverId));
+    }
+
+    [SkippableFact]
+    public async Task GameAwareDeregister_RemovesLegacyDefaultGameHashAndIndex()
+    {
+        _redis.SkipUnlessAvailable(nameof(GameAwareDeregister_RemovesLegacyDefaultGameHashAndIndex));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        // Both pre-game_id hashes and hashes with an empty game_id belong to cuvara.
+        foreach (string? storedGame in new string?[] { null, "" })
+        {
+            string serverId = $"gs-legacy-deregister-{Guid.NewGuid():N}";
+            string mapId = $"map_legacy_deregister_{Guid.NewGuid():N}";
+            string key = RedisServerRegistry.ServerKey(serverId);
+            await reg.RegisterAsync(Info(serverId, mapId), RegistrationScope.MapIndexed, default);
+            if (storedGame == null) await db.HashDeleteAsync(key, "game_id");
+            else await db.HashSetAsync(key, "game_id", storedGame);
+
+            await reg.DeregisterAsync(serverId, GameId.DefaultGameId, mapId, default);
+
+            Assert.False(await db.KeyExistsAsync(key));
+            Assert.False(await db.SetContainsAsync(RedisServerRegistry.MapIndexKey(GameId.DefaultGameId, mapId), serverId));
+        }
+    }
+
+    [SkippableFact]
+    public async Task NonDefaultService_RegistersGameAndItsMapIndex()
+    {
+        _redis.SkipUnlessAvailable(nameof(NonDefaultService_RegistersGameAndItsMapIndex));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        using var cts = new CancellationTokenSource();
+        string serverId = $"foo-{Guid.NewGuid():N}";
+        await using var service = new RegistrationService(reg, new RegistrationOptions
+        {
+            ServerId = serverId, MapId = "map_01", GameId = "foo", PublicAddr = "localhost:9200",
+        }, () => 3, NullLogger.Instance, TimeSpan.FromDays(1));
+        try
+        {
+            await service.StartAsync(cts.Token);
+            var db = mux.GetDatabase();
+            Assert.Equal("foo", (await db.HashGetAsync(RedisServerRegistry.ServerKey(serverId), "game_id")).ToString());
+            Assert.True(await db.SetContainsAsync("servers:map:foo:map_01", serverId));
+            Assert.False(await db.SetContainsAsync("servers:map:map_01", serverId));
+            Assert.Equal(1, service.RegisterCount);
+        }
+        finally { cts.Cancel(); }
+    }
+
+    [SkippableFact]
+    public async Task ServiceRefusal_LeavesForeignHashExpiryAndIndexUnchanged()
+    {
+        _redis.SkipUnlessAvailable(nameof(ServiceRefusal_LeavesForeignHashExpiryAndIndexUnchanged));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        var db = mux.GetDatabase();
+        string serverId = $"foo-conflict-{Guid.NewGuid():N}";
+        string mapId = $"map_conflict_{Guid.NewGuid():N}";
+        var foreign = Info(serverId, mapId, players: 7) with { GameId = "bar" };
+        await reg.RegisterAsync(foreign, RegistrationScope.MapIndexed, default);
+        string key = RedisServerRegistry.ServerKey(serverId);
+        string foreignIndex = RedisServerRegistry.MapIndexKey("bar", mapId);
+        var beforeHash = await db.HashGetAllAsync(key);
+        var beforeIndex = await db.SetMembersAsync(foreignIndex);
+        // Redis 7 exposes the absolute expiry time, so clock steps and elapsed time
+        // cannot disguise a refusal extending (or removing) the foreign entry's TTL.
+        long beforeExpiry = (long)await db.ExecuteAsync("PEXPIRETIME", key);
+        Assert.True(beforeExpiry > 0);
+        using var cts = new CancellationTokenSource();
+        await using var service = new RegistrationService(reg, new RegistrationOptions
+        {
+            ServerId = serverId, MapId = mapId, GameId = "foo", PublicAddr = "localhost:9200",
+        }, () => 99, NullLogger.Instance, TimeSpan.FromDays(1));
+        try
+        {
+            await service.StartAsync(cts.Token);
+            await service.PublishPlayerCountIfChangedAsync(default);
+            await service.DeregisterAsync();
+            Assert.Equal(0, service.RegisterCount);
+            Assert.Equal(1, service.RefusalCount);
+            Assert.Equal(beforeHash.OrderBy(entry => entry.Name.ToString()),
+                (await db.HashGetAllAsync(key)).OrderBy(entry => entry.Name.ToString()));
+            Assert.Equal(beforeExpiry, (long)await db.ExecuteAsync("PEXPIRETIME", key));
+            Assert.Equal(beforeIndex, await db.SetMembersAsync(foreignIndex));
+            Assert.False(await db.KeyExistsAsync(RedisServerRegistry.MapIndexKey("foo", mapId)));
+        }
+        finally { cts.Cancel(); }
+    }
+
+    [SkippableTheory]
+    [InlineData("foo", "bar", false)]
+    [InlineData("foo", "foo", true)]
+    [InlineData(GameId.DefaultGameId, GameId.DefaultGameId, true)]
+    [InlineData(null, GameId.DefaultGameId, true)]
+    [InlineData("", GameId.DefaultGameId, true)]
+    [InlineData(null, "foo", false)]
+    [InlineData("", "foo", false)]
+    [InlineData("foo", "", false)]
+    [InlineData(GameId.DefaultGameId, "", true)]
+    public async Task GameAwareMaintenance_OnlyTouchesSameGameEntries(
+        string? storedGame, string requestedGame, bool accepted)
+    {
+        _redis.SkipUnlessAvailable(nameof(GameAwareMaintenance_OnlyTouchesSameGameEntries));
+        var heartbeatTtl = TimeSpan.FromMinutes(1);
+        var (reg, mux) = await ConnectAsync(heartbeatTtl);
+        using var connection = mux;
+        await using var registry = reg;
+        var db = mux.GetDatabase();
+        string serverId = $"gs-owned-{Guid.NewGuid():N}";
+        string key = RedisServerRegistry.ServerKey(serverId);
+        await reg.RegisterAsync(Info(serverId, "map_maintenance", players: 7) with
+        {
+            GameId = GameId.GameOrDefault(storedGame),
+        }, RegistrationScope.HashOnly, default);
+        if (storedGame == null) await db.HashDeleteAsync(key, "game_id");
+        else await db.HashSetAsync(key, "game_id", storedGame);
+        await db.KeyExpireAsync(key, TimeSpan.FromSeconds(15));
+        long beforeExpiry = (long)await db.ExecuteAsync("PEXPIRETIME", key);
+
+        Assert.Equal(accepted, await reg.HeartbeatAsync(serverId, requestedGame, default));
+        long afterHeartbeatExpiry = (long)await db.ExecuteAsync("PEXPIRETIME", key);
+        if (accepted)
+        {
+            var ttl = await db.KeyTimeToLiveAsync(key);
+            Assert.NotNull(ttl);
+            Assert.InRange(ttl!.Value, heartbeatTtl - TimeSpan.FromSeconds(1), heartbeatTtl);
+        }
+        else Assert.Equal(beforeExpiry, afterHeartbeatExpiry);
+
+        Assert.Equal(accepted, await reg.UpdatePlayerCountAsync(serverId, requestedGame, 42, default));
+        Assert.Equal(accepted ? "42" : "7", (await db.HashGetAsync(key, "player_count")).ToString());
+        Assert.Equal(afterHeartbeatExpiry, (long)await db.ExecuteAsync("PEXPIRETIME", key));
+        Assert.Equal(storedGame ?? "", (await db.HashGetAsync(key, "game_id")).ToString());
+    }
+
+    [SkippableFact]
+    public async Task GameAwareMaintenance_DoesNotResurrectMissingEntries()
+    {
+        _redis.SkipUnlessAvailable(nameof(GameAwareMaintenance_DoesNotResurrectMissingEntries));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        string serverId = $"foo-absent-{Guid.NewGuid():N}";
+        Assert.False(await reg.HeartbeatAsync(serverId, "foo", default));
+        Assert.False(await reg.UpdatePlayerCountAsync(serverId, "foo", 42, default));
+        Assert.False(await mux.GetDatabase().KeyExistsAsync(RedisServerRegistry.ServerKey(serverId)));
+    }
+
+    [SkippableFact]
+    public async Task FindByGameAndMap_PreservesIndexReadOrder()
+    {
+        _redis.SkipUnlessAvailable(nameof(FindByGameAndMap_PreservesIndexReadOrder));
+        var (reg, mux) = await ConnectAsync();
+        using var connection = mux;
+        await using var registry = reg;
+        string mapId = $"map_order_{Guid.NewGuid():N}";
+        for (int i = 0; i < 4; i++)
+            await reg.RegisterAsync(Info($"foo-{Guid.NewGuid():N}", mapId) with { GameId = "foo" },
+                RegistrationScope.MapIndexed, default);
+        var ids = await mux.GetDatabase().SetMembersAsync(RedisServerRegistry.MapIndexKey("foo", mapId));
+
+        var found = await reg.FindByGameAndMapAsync("foo", mapId, default);
+
+        Assert.Equal(ids.Select(id => id.ToString()), found.Select(info => info.ServerId));
     }
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
@@ -27,18 +28,19 @@ const (
 	// cannot silently invert.
 	watchPollInterval = 5 * time.Second
 
-	// ServerDownChannel is the Redis Pub/Sub channel for server-down events.
+	// ServerDownChannel is the Redis Stream for server-down events (ADR-5).
 	ServerDownChannel = "gateway:server_down"
 )
 
 // ServerDownEvent is published when a server's heartbeat expires.
 type ServerDownEvent struct {
+	GameID   string `json:"game_id"`
 	ServerID string `json:"server_id"`
 	MapID    string `json:"map_id"`
 }
 
-// Publisher publishes messages to a channel. In production this is backed by
-// Redis Pub/Sub; tests use an in-memory implementation.
+// Publisher publishes messages to a named stream. In production this is backed
+// by a Redis Stream; tests use an in-memory implementation.
 type Publisher interface {
 	Publish(ctx context.Context, channel string, message []byte) error
 }
@@ -51,14 +53,14 @@ type Subscriber interface {
 
 // RegistryWatcher periodically polls known servers and detects when one
 // disappears (heartbeat TTL expired). On detection it publishes a
-// ServerDownEvent to the gateway:server_down channel and clears cached state.
+// ServerDownEvent to the gateway:server_down stream and clears cached state.
 type RegistryWatcher struct {
 	reg       storage.ServerRegistry
 	publisher Publisher
 	log       logger
 
 	mu           sync.Mutex
-	knownServers map[string]string // serverID -> mapID
+	knownServers map[string]storage.ServerInfo // serverID -> tracked identity
 	stopped      chan struct{}
 }
 
@@ -68,16 +70,23 @@ func NewRegistryWatcher(reg storage.ServerRegistry, pub Publisher, log logger) *
 		reg:          reg,
 		publisher:    pub,
 		log:          log,
-		knownServers: make(map[string]string),
+		knownServers: make(map[string]storage.ServerInfo),
 		stopped:      make(chan struct{}),
 	}
 }
 
-// TrackServer adds a server to the set of known servers to monitor.
+// TrackServer adds a default-game server to the set of known servers to monitor.
 func (w *RegistryWatcher) TrackServer(serverID, mapID string) {
+	w.TrackServerInfo(storage.ServerInfo{ServerID: serverID, MapID: mapID})
+}
+
+// TrackServerInfo remembers the owning game alongside the server's map so a
+// server_down event retains its identity after the registry entry expires.
+func (w *RegistryWatcher) TrackServerInfo(info storage.ServerInfo) {
+	info.GameID = constants.GameOrDefault(info.GameID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.knownServers[serverID] = mapID
+	w.knownServers[info.ServerID] = info
 }
 
 // UntrackServer removes a server from monitoring (e.g. on graceful deregister).
@@ -123,13 +132,14 @@ func (w *RegistryWatcher) pollLoop(ctx context.Context) {
 func (w *RegistryWatcher) checkServers(ctx context.Context) {
 	w.mu.Lock()
 	// Snapshot the known set so we don't hold the lock during Redis calls.
-	snapshot := make(map[string]string, len(w.knownServers))
-	for id, mapID := range w.knownServers {
-		snapshot[id] = mapID
+	snapshot := make(map[string]storage.ServerInfo, len(w.knownServers))
+	for id, info := range w.knownServers {
+		snapshot[id] = info
 	}
 	w.mu.Unlock()
 
-	for serverID, mapID := range snapshot {
+	for serverID, info := range snapshot {
+		mapID := info.MapID
 		_, err := w.reg.GetServer(ctx, serverID)
 		if err == nil {
 			continue
@@ -156,7 +166,7 @@ func (w *RegistryWatcher) checkServers(ctx context.Context) {
 		delete(w.knownServers, serverID)
 		w.mu.Unlock()
 
-		event := ServerDownEvent{ServerID: serverID, MapID: mapID}
+		event := ServerDownEvent{GameID: constants.GameOrDefault(info.GameID), ServerID: serverID, MapID: mapID}
 		payload, _ := json.Marshal(event)
 
 		if w.publisher != nil {
@@ -177,6 +187,7 @@ func SubscribeServerDown(ctx context.Context, sub Subscriber, onDown func(Server
 			log.Warn("failed to unmarshal server_down event", "error", err)
 			return
 		}
+		event.GameID = constants.GameOrDefault(event.GameID)
 		onDown(event)
 	})
 }

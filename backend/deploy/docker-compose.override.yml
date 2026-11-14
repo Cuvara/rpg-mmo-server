@@ -44,7 +44,11 @@ services:
       postgres-game:
         condition: service_healthy
     environment:
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # The game server holds only JOIN_TOKEN_SECRET. It must match the gateway's
+      # value or every join fails, and must differ from JWT_SECRET; stack.sh
+      # enforces the difference at deploy time. JWT_SECRET is deliberately absent:
+      # a compromised server holding it could sign gateway tokens for any user
+      # and gid (ADR-33 D7). The binary exits 2 if JOIN_TOKEN_SECRET is missing.
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
       # PINNED OFF ON PURPOSE, and it must stay in step with the map_01 service in
@@ -60,6 +64,7 @@ services:
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: map_02
       GAMESERVER_ID: gs-dotnet-map_02
+      GAMESERVER_GAME_ID: ${GAMESERVER_GAME_ID:-}
       # Same rates as the map_01 service in docker-compose.yml — two map servers
       # on different simulation rates would replicate at different cadences, so a
       # client would see the world change speed when it transferred between them.

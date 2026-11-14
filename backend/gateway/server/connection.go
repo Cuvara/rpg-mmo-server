@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/ratelimit"
 )
@@ -46,7 +47,9 @@ type ClientConn struct {
 	// characterID is the gateway token's `cid` claim (ADR-31), latched at auth
 	// with userID and cleared with it. Empty means the account's default
 	// character. Guarded by mu like userID.
-	characterID string
+	characterID  string
+	game         string
+	joinTokenJTI string
 
 	sendCh chan messages.Envelope
 	done   chan struct{}
@@ -248,6 +251,14 @@ func (c *ClientConn) Identity() (string, ConnState) {
 	return c.userID, c.state
 }
 
+// IdentityGame returns the user, lifecycle state and verified game under one
+// lock, so routing cannot pair an identity with another transition's game.
+func (c *ClientConn) IdentityGame() (string, ConnState, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.userID, c.state, constants.GameOrDefault(c.game)
+}
+
 // SetAuthenticated binds a verified user to the connection, playing the
 // account's default character.
 func (c *ClientConn) SetAuthenticated(userID string) {
@@ -258,10 +269,17 @@ func (c *ClientConn) SetAuthenticated(userID string) {
 // gateway token names (its `cid` claim, ADR-31; empty = default character).
 // Both are set under one lock so a reader never sees one without the other.
 func (c *ClientConn) SetAuthenticatedCharacter(userID, characterID string) {
+	c.SetAuthenticatedGame(userID, characterID, constants.DefaultGameID)
+}
+
+// SetAuthenticatedGame latches the verified account, character and game together.
+func (c *ClientConn) SetAuthenticatedGame(userID, characterID, game string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.userID = userID
 	c.characterID = characterID
+	c.game = constants.GameOrDefault(game)
+	c.joinTokenJTI = ""
 	c.state = StateAuthenticated
 }
 
@@ -271,6 +289,29 @@ func (c *ClientConn) CharacterID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.characterID
+}
+
+// Game returns the authenticated game, or the default game before auth.
+func (c *ClientConn) Game() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return constants.GameOrDefault(c.game)
+}
+
+// SetJoinTokenJTI records the last assignment token, unless identity was cleared.
+func (c *ClientConn) SetJoinTokenJTI(jti string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.userID != "" {
+		c.joinTokenJTI = jti
+	}
+}
+
+// JoinTokenJTI returns the last assignment token's ID, or empty before assignment.
+func (c *ClientConn) JoinTokenJTI() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.joinTokenJTI
 }
 
 // SetInWorld marks the connection as assigned to a game server. It is a no-op
@@ -293,13 +334,21 @@ func (c *ClientConn) SetInWorld() {
 // it") happen under one lock, so an explicit MsgDisconnect and the deferred
 // cleanup in handleConn cannot both decide they own the same session.
 func (c *ClientConn) ClearIdentity() string {
+	_, userID := c.ClearIdentityGame()
+	return userID
+}
+
+// ClearIdentityGame atomically clears identity and returns its previous game and user.
+func (c *ClientConn) ClearIdentityGame() (game, userID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	userID := c.userID
+	game, userID = constants.GameOrDefault(c.game), c.userID
+	c.game = ""
+	c.joinTokenJTI = ""
 	c.userID = ""
 	c.characterID = ""
 	c.state = StateConnected
-	return userID
+	return game, userID
 }
 
 // SetReadDeadline sets the read deadline on the underlying connection.

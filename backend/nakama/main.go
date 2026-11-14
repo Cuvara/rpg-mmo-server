@@ -12,6 +12,7 @@ import (
 	"github.com/duycuong/rpg-mmo/nakama/auth"
 	"github.com/duycuong/rpg-mmo/nakama/character"
 	"github.com/duycuong/rpg-mmo/nakama/economy"
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
 	"github.com/duycuong/rpg-mmo/nakama/social"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -25,6 +26,11 @@ func main() {}
 // symbol after loading the shared object and invokes it once at start-up.
 func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
 	start := time.Now()
+	games, err := gamectx.AllowList(ctx)
+	if err != nil {
+		return fmt.Errorf("configure allowed games: %w", err)
+	}
+	logger.Info("allowed games: %v", games)
 
 	if err := initializer.RegisterRpc(auth.RPCGatewayToken, auth.GatewayTokenRPC); err != nil {
 		return fmt.Errorf("register rpc %s: %w", auth.RPCGatewayToken, err)
@@ -37,6 +43,33 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	}
 	if err := initializer.RegisterBeforeAuthenticateEmail(auth.BeforeAuthenticateEmail); err != nil {
 		return fmt.Errorf("register before authenticate email: %w", err)
+	}
+	if err := initializer.RegisterBeforeAuthenticateApple(auth.BeforeAuthenticateApple); err != nil {
+		return fmt.Errorf("register before authenticate apple: %w", err)
+	}
+	if err := initializer.RegisterBeforeAuthenticateCustom(auth.BeforeAuthenticateCustom); err != nil {
+		return fmt.Errorf("register before authenticate custom: %w", err)
+	}
+	if err := initializer.RegisterBeforeAuthenticateDevice(auth.BeforeAuthenticateDevice); err != nil {
+		return fmt.Errorf("register before authenticate device: %w", err)
+	}
+	if err := initializer.RegisterBeforeAuthenticateFacebook(auth.BeforeAuthenticateFacebook); err != nil {
+		return fmt.Errorf("register before authenticate facebook: %w", err)
+	}
+	if err := initializer.RegisterBeforeAuthenticateFacebookInstantGame(auth.BeforeAuthenticateFacebookInstantGame); err != nil {
+		return fmt.Errorf("register before authenticate facebook instant game: %w", err)
+	}
+	if err := initializer.RegisterBeforeAuthenticateGameCenter(auth.BeforeAuthenticateGameCenter); err != nil {
+		return fmt.Errorf("register before authenticate game center: %w", err)
+	}
+	if err := initializer.RegisterBeforeAuthenticateGoogle(auth.BeforeAuthenticateGoogle); err != nil {
+		return fmt.Errorf("register before authenticate google: %w", err)
+	}
+	if err := initializer.RegisterBeforeAuthenticateSteam(auth.BeforeAuthenticateSteam); err != nil {
+		return fmt.Errorf("register before authenticate steam: %w", err)
+	}
+	if err := initializer.RegisterBeforeSessionRefresh(auth.BeforeSessionRefresh); err != nil {
+		return fmt.Errorf("register before session refresh: %w", err)
 	}
 
 	// Economy RPCs
@@ -89,7 +122,7 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	}
 
 	// Create leaderboards (idempotent)
-	if err := economy.SetupLeaderboards(ctx, logger, nk); err != nil {
+	if err := economy.SetupLeaderboards(ctx, logger, nk, games); err != nil {
 		return fmt.Errorf("setup leaderboards: %w", err)
 	}
 

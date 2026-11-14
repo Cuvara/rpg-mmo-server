@@ -141,7 +141,6 @@ public class JoinTickRateTests
             TickRate = tickRate,
             SimulationRates = rates,
             Capacity = 8,
-            JwtSecret = "",
             JoinTokenSecret = JoinSecret,
             SaveInterval = TimeSpan.FromSeconds(30),
             HoldTtl = TimeSpan.FromSeconds(1),

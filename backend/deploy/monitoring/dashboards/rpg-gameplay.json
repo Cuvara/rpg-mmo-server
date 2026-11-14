@@ -12,7 +12,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "Game server tick duration p99",
-      "description": "histogram_quantile over gameserver_tick_duration_seconds. Budget: 10-15Hz tick => p99 must stay well under 66-100ms.",
+      "description": "histogram_quantile over gameserver_tick_duration_seconds, one series per (game, map_id) (ADR-33 D3: map ids are only unique within a game). Budget: 10-15Hz tick => p99 must stay well under 66-100ms.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
@@ -32,8 +32,8 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, map_id) (rate(gameserver_tick_duration_seconds_bucket[5m])))",
-          "legendFormat": "p99 {{map_id}}"
+          "expr": "histogram_quantile(0.99, sum by (le, game, map_id) (rate(gameserver_tick_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{game}}/{{map_id}}"
         }
       ]
     },
@@ -41,7 +41,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Players online",
-      "description": "gameserver_players_online — entities simulated per map server.",
+      "description": "gameserver_players_online — entities simulated per map server, one series per (game, map_id); total is every game together.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
@@ -51,8 +51,8 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (map_id) (gameserver_players_online)",
-          "legendFormat": "{{map_id}}"
+          "expr": "sum by (game, map_id) (gameserver_players_online)",
+          "legendFormat": "{{game}}/{{map_id}}"
         },
         {
           "refId": "B",

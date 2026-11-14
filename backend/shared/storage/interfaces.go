@@ -10,6 +10,10 @@ import (
 // expired). Callers can test for it with errors.Is.
 var ErrNotFound = errors.New("not found")
 
+// ErrGameMismatch is returned when a server id is already owned by another game.
+// Callers can test for it with errors.Is.
+var ErrGameMismatch = errors.New("server id registered to another game")
+
 // Compile-time checks that every implementation satisfies its interface.
 var (
 	_ PlayerStore    = (*MemoryPlayerStore)(nil)
@@ -64,6 +68,9 @@ type ServerInfo struct {
 	// network is load-bearing for this field, and ADR-25 §6 says so explicitly
 	// rather than leaving it assumed.
 	IdentityKey string `json:"identity_key,omitempty"`
+
+	// GameID identifies the owning game; empty/absent means constants.DefaultGameID.
+	GameID string `json:"game_id"`
 }
 
 // Event is a cross-server event message.
@@ -99,7 +106,11 @@ type SessionStore interface {
 type ServerRegistry interface {
 	Register(ctx context.Context, info ServerInfo) error
 	Deregister(ctx context.Context, serverID string) error
+	// FindByMapID returns live servers on mapID for constants.DefaultGameID only.
 	FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error)
+	// FindByGameAndMapID returns live servers owned by gameID on mapID.
+	// An empty gameID means constants.DefaultGameID.
+	FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]ServerInfo, error)
 	UpdatePlayerCount(ctx context.Context, serverID string, count int) error
 	// Heartbeat marks the server as alive, resetting its liveness TTL.
 	// Returns an error if the server is unknown (or already expired).

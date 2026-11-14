@@ -324,3 +324,148 @@ Two torn states are handled rather than ignored, because either would strand a
 player: a membership index whose party no longer exists is cleared by
 `party_leave` (otherwise that user could never join anything again), and an
 index pointing at a party that does not list the user is likewise dropped.
+
+---
+
+## 2026-11-13 — Multi-game auth: the game is a session variable (ADR-33 leg 4, D1 Option B)
+
+One Nakama serves several games (ADR-33). The game travels as the Nakama
+session variable `game` (`gamectx.VarGame`), set by the client in `vars` at
+login and copied by Nakama into the session token, so every later call carries
+it without a payload field the client could change per call.
+
+### Game resolution
+
+| Where | Function | Rule |
+|-------|----------|------|
+| Before-auth hooks (every method), `BeforeSessionRefresh`, after-auth hooks | `gamectx.GameFromVars(ctx, vars)` | `vars.game`, absent = `cuvara`; must be in `GAMES` |
+| RPCs | `gamectx.GameFromContext(ctx, payloadGameID)` | With a session: the session var wins (absent = `cuvara`); a non-empty payload `game_id` that differs is refused (code 7). Without a session (`http_key` caller, e.g. the game server or gateway): the payload `game_id` selects the game (absent = `cuvara`) and context vars are ignored. The result must be in `GAMES` (code 3) |
+
+`GAMES` (`gamectx.EnvGames`) is read like every other plugin knob: runtime env
+first, process env only when the runtime env has no `GAMES` key.
+
+- **Absent = `cuvara` only.** A Nakama with no `GAMES` behaves exactly as before
+  ADR-33: every existing login works and `gateway_token` mints no `gid`.
+- **Set = exactly the list.** `cuvara` is not implied. Implying it would make it
+  impossible to run a stack that does not serve the original game, and an exact
+  list is what an operator reads in the config.
+- **Invalid = start-up failure.** `InitModule` parses `GAMES` before registering
+  anything, so a typo cannot ship a Nakama that refuses every login. If an
+  invalid value is still met at request time, it is logged and the client gets
+  code 13, never the raw config error.
+
+**Why check in every before-auth hook and not only in `gateway_token`.** A
+session for a game outside the list would otherwise exist and reach every meta
+RPC (economy, roster, party) before anything refused it. Refusing at login keeps
+an unknown game out of the session entirely. Every method the runtime exposes is
+hooked, including those the client does not use yet (Apple, Facebook, Game
+Center, Google, Steam, custom), so adding a login method later cannot open a
+bypass. `gateway_token` checks again through `GameFromContext`, because the
+allow-list can shrink while a session is alive.
+
+**Refresh.** A refresh with `vars` omitted or empty keeps the refresh token's
+vars: over JSON and protobuf an empty map cannot be told apart from an absent
+one, so Nakama copies the token's vars into the new session and the game
+survives. A non-empty `vars` object replaces them and is validated like a login.
+The plugin's check on a non-nil empty map (default game must be in `GAMES`) is
+harmless and stays: the session keeps its game either way, so the check can only
+refuse a refresh, and only when `cuvara` is missing from `GAMES`. What the
+plugin sees is unit-tested; that real Nakama carries the vars across a refresh,
+including an empty `vars` object, was proven against real Nakama 3.40.0 on
+2026-11-14 by `TestSessionRefresh_GameVarLocalStack` (`RUNBOOK.md`).
+
+### `gid` in `gateway_token`
+
+The game the RPC resolved is minted as the `gid` claim through `shared/jwt`
+`SignWithGame` (ADR-33 leg 1), so the gateway and game server read it from the
+token without a roundtrip, as with `cid`. `gid` is **omitted for `cuvara`**: a
+default-game token is byte-for-byte what it was before, and verifiers read an
+absent `gid` as `cuvara` (`Claims.Game()`). The request's optional `game_id` can
+only confirm the session game, never pick another one.
+
+### Scoped names (D4 Data under B)
+
+`gamectx.Scoped(game, name)` returns `name` for `cuvara` and `<game>.<name>`
+otherwise. Keeping the default game's names bare means no migration of existing
+data; the dot cannot appear in a game id (`^[a-z][a-z0-9]{1,23}$`), so a scoped
+name never collides with a bare one.
+
+The per-game profile is created on the first game-scoped login by the
+after-authenticate hooks **and** by `gateway_token`, because an account created
+for one game that later logs in to another through a method without an
+after-auth hook (or before this change) would otherwise reach the game with no
+profile.
+
+**Open follow-up: `EnsureGameProfile` duplicates `EnsureProfile`.** Both do the
+same idempotent read-then-write; `EnsureGameProfile` only adds the scoped
+collection and a nil-store check. `EnsureProfile` has no production caller left
+(the hooks and `gateway_token` all call `EnsureGameProfile`), only tests. Folding
+it into `EnsureGameProfile(ctx, nk, "cuvara", …)` or removing it is not settled
+here.
+
+## 2026-11-13 — Multi-game data: every game-scoped name goes through `Scoped` (ADR-33 leg 4, D4 Data under B)
+
+One Nakama, accounts shared across games, data scoped per game (ADR-33 D4
+Option B). The auth leg above scoped the profile; this leg scopes everything
+else the plugin stores.
+
+### One resolver, no fallback
+
+Every collection, wallet currency key and leaderboard id in `character/`,
+`economy/` and `social/` is built by `gamectx.Scoped(game, name)` at the call
+site, from an unscoped constant (`character.Collection`, `economy.CurrencyGold`,
+`ReceiptCollection`, `LeaderboardKillsAllTime`, `social.PartyCollection`,
+`MembershipCollection`). No code uses a bare constant as a storage name.
+
+| Data | `cuvara` | other game |
+|------|----------|------------|
+| Profile (`EnsureGameProfile`) | `player`/`profile` | `<game>.player`/`profile` |
+| Roster (roster RPCs and `gateway_token`'s `character.Owns`) | `characters`/`roster` | `<game>.characters`/`roster` |
+| Wallet currency (`reward_kill`, `reward_kills`) | `gold` | `<game>.gold` |
+| Receipts (`reward_kills`) | `reward_receipts` | `<game>.reward_receipts` |
+| Party and membership index | `party`, `party_member` | `<game>.party`, `<game>.party_member` |
+| Kills board (`submit_kill`, `reward_kills`, `get_leaderboard`) | `kills_alltime` | `<game>.kills_alltime` |
+
+- **No fallback across games.** A read for game `foo` never looks at the bare
+  name when `foo.*` is empty: an empty roster is an empty roster, not a reason
+  to read `characters`. A fallback would let one game see another's data, and
+  would make "this account plays this game" impossible to tell from storage.
+- **The default game is untouched.** `Scoped("cuvara", name) == name`, and
+  ledger metadata gains `game_id` only for a non-default game, so existing
+  objects, the existing board, the existing wallet key and the existing
+  payloads are byte-for-byte what they were. No migration.
+- **A roster belongs to one game, and so does a party.** `gateway_token` checks
+  `cid` against the session game's roster only, so a character created in one
+  game cannot be played in another. Party and membership records are both
+  scoped and written in the same `MultiUpdate`, so a party cannot span games;
+  the membership index is per game, so a user can be in one party per game.
+- **Leaderboards are created, not discovered.** A Nakama leaderboard must exist
+  before a record is written, so `SetupLeaderboards` creates
+  `<game>.kills_alltime` for each non-default game in `GAMES` at start-up, with
+  the same authoritative check and `LEADERBOARD_MIGRATE` rule as
+  `kills_alltime`. `kills_alltime` is always ensured, even if `GAMES` omits
+  `cuvara`, so dropping `cuvara` from the list never deletes its board.
+
+### Where the game comes from
+
+- **Client RPCs** (`character_*`, `party_*`, `get_leaderboard`) use the session
+  var through `GameFromContext`. `party_join` and `party_get` accept a
+  `game_id` that must match it, since they share `PartyRequest` with the
+  gateway's call.
+- **Server-to-server RPCs** (`reward_kill`, `reward_kills`, `submit_kill`, and
+  `party_get` from the gateway) have no session, so the payload's optional
+  `game_id` selects the game, absent = `cuvara`. Old callers that omit it keep
+  landing on `cuvara`, and old Nakama builds ignore it, so the game server and
+  gateway can ship the field before or after this plugin.
+- The resolved game is always checked against `GAMES` (code 3) before any
+  storage, wallet or leaderboard access, and after the server-only guard and
+  the payload's own checks, so a malformed call still gets its specific error.
+
+### Accepted risk: one `NAKAMA_HTTP_KEY` for every game
+
+The server-to-server RPCs trust the payload `game_id` only because the caller
+holds `runtime.http_key` (`economy.requireServerCaller`). Nakama has one such
+key, so on a shared stack any game's server can credit any game's wallet or
+write any game's board. ADR-33 D4/D7 accept this for games the studio itself
+operates; a game that needs isolation from it gets its own stack, and with it
+its own Nakama and key (D7 criteria).

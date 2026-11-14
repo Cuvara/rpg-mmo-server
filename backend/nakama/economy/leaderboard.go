@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
+	"github.com/duycuong/rpg-mmo/shared/gameid"
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -30,8 +33,8 @@ type leaderboardAdmin interface {
 	LeaderboardDelete(ctx context.Context, id string) error
 }
 
-// SetupLeaderboards creates the kills leaderboard if it does not exist and
-// verifies that an existing one is authoritative. Called once from InitModule.
+// SetupLeaderboards ensures the default kills leaderboard and one scoped board
+// per non-default game exist and are authoritative. Called once from InitModule.
 //
 // The board is authoritative: only the runtime (i.e. the server-only RPCs)
 // may write records, so a client cannot post its own score through Nakama's
@@ -47,8 +50,8 @@ type leaderboardAdmin interface {
 //   - LEADERBOARD_MIGRATE=recreate: the board is deleted and recreated
 //     authoritative. This discards every existing record, so it is opt-in and
 //     meant for dev/staging only.
-func SetupLeaderboards(ctx context.Context, logger runtime.Logger, nk runtime.NakamaModule) error {
-	return setupLeaderboardsCore(ctx, logger, nk, migrateMode(ctx))
+func SetupLeaderboards(ctx context.Context, logger runtime.Logger, nk runtime.NakamaModule, games []string) error {
+	return setupLeaderboardsCore(ctx, logger, nk, migrateMode(ctx), games)
 }
 
 // migrateMode reads LeaderboardMigrateEnv from the Nakama runtime env first
@@ -62,29 +65,46 @@ func migrateMode(ctx context.Context) string {
 	return os.Getenv(LeaderboardMigrateEnv)
 }
 
-func setupLeaderboardsCore(ctx context.Context, logger runtime.Logger, nk leaderboardAdmin, migrate string) error {
-	boards, err := nk.LeaderboardsGetId(ctx, []string{LeaderboardKillsAllTime})
+func setupLeaderboardsCore(ctx context.Context, logger runtime.Logger, nk leaderboardAdmin, migrate string, games []string) error {
+	if err := ensureLeaderboard(ctx, logger, nk, gamectx.Scoped("", LeaderboardKillsAllTime), migrate); err != nil {
+		return err
+	}
+	seen := make(map[string]bool)
+	for _, game := range games {
+		if gameid.IsDefaultGame(game) || seen[game] {
+			continue
+		}
+		seen[game] = true
+		if err := ensureLeaderboard(ctx, logger, nk, gamectx.Scoped(game, LeaderboardKillsAllTime), migrate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureLeaderboard(ctx context.Context, logger runtime.Logger, nk leaderboardAdmin, id, migrate string) error {
+	boards, err := nk.LeaderboardsGetId(ctx, []string{id})
 	if err != nil {
-		return fmt.Errorf("get leaderboard %s: %w", LeaderboardKillsAllTime, err)
+		return fmt.Errorf("get leaderboard %s: %w", id, err)
 	}
 	for _, b := range boards {
-		if b.GetId() != LeaderboardKillsAllTime {
+		if b.GetId() != id {
 			continue
 		}
 		if b.GetAuthoritative() {
-			logger.Info("Leaderboard %s ready (authoritative, sort=desc, operator=incr, no reset)", LeaderboardKillsAllTime)
+			logger.Info("Leaderboard %s ready (authoritative, sort=desc, operator=incr, no reset)", id)
 			return nil
 		}
 		if migrate != "recreate" {
 			return fmt.Errorf("leaderboard %s exists with authoritative=false, so clients can write their own scores; "+
 				"fix: UPDATE leaderboard SET authoritative = true WHERE id = '%s' on the Nakama DB and restart Nakama "+
 				"(keeps records), or set %s=recreate to delete and recreate it (discards records) — see docs/RUNBOOK.md",
-				LeaderboardKillsAllTime, LeaderboardKillsAllTime, LeaderboardMigrateEnv)
+				id, id, LeaderboardMigrateEnv)
 		}
 		logger.Warn("Leaderboard %s exists with authoritative=false; %s=recreate set — deleting and recreating it, all records are discarded",
-			LeaderboardKillsAllTime, LeaderboardMigrateEnv)
-		if err := nk.LeaderboardDelete(ctx, LeaderboardKillsAllTime); err != nil {
-			return fmt.Errorf("delete non-authoritative leaderboard %s: %w", LeaderboardKillsAllTime, err)
+			id, LeaderboardMigrateEnv)
+		if err := nk.LeaderboardDelete(ctx, id); err != nil {
+			return fmt.Errorf("delete non-authoritative leaderboard %s: %w", id, err)
 		}
 	}
 
@@ -92,19 +112,19 @@ func setupLeaderboardsCore(ctx context.Context, logger runtime.Logger, nk leader
 	// LeaderboardCreate signature: (ctx, id, authoritative, sortOrder, operator, resetSchedule, metadata, enableRanks)
 	// sortOrder: "desc" or "asc"; operator: "incr", "best", or "set".
 	err = nk.LeaderboardCreate(ctx,
-		LeaderboardKillsAllTime, // id
-		true,                    // authoritative — runtime writes only, never client sessions
-		"desc",                  // sort order
-		"incr",                  // operator — each submit adds to the score
-		"",                      // reset schedule (empty = never reset)
-		nil,                     // metadata
-		true,                    // enable ranks
+		id,     // id
+		true,   // authoritative — runtime writes only, never client sessions
+		"desc", // sort order
+		"incr", // operator — each submit adds to the score
+		"",     // reset schedule (empty = never reset)
+		nil,    // metadata
+		true,   // enable ranks
 	)
 	if err != nil {
-		return fmt.Errorf("create leaderboard %s: %w", LeaderboardKillsAllTime, err)
+		return fmt.Errorf("create leaderboard %s: %w", id, err)
 	}
 
-	logger.Info("Leaderboard %s created (authoritative, sort=desc, operator=incr, no reset)", LeaderboardKillsAllTime)
+	logger.Info("Leaderboard %s created (authoritative, sort=desc, operator=incr, no reset)", id)
 	return nil
 }
 
@@ -113,6 +133,7 @@ const RPCSubmitKill = "submit_kill"
 
 // SubmitKillRequest is the payload the game server sends.
 type SubmitKillRequest struct {
+	GameID string `json:"game_id,omitempty"`
 	UserID string `json:"user_id"`
 }
 
@@ -136,11 +157,19 @@ func submitKillCore(ctx context.Context, logger runtime.Logger, nk killGranter, 
 	if req.UserID == "" {
 		return "", runtime.NewError("user_id is required", 3)
 	}
+	game, err := gamectx.GameFromContext(ctx, req.GameID)
+	if errors.Is(err, gamectx.ErrGamesConfig) {
+		logger.Error("resolve submit_kill game: %v", err)
+		return "", runtime.NewError("internal error", 13)
+	}
+	if err != nil {
+		return "", err
+	}
 
 	// Write score=1 with operator=INCR → adds 1 to the existing score.
 	// LeaderboardRecordWrite: (ctx, id, ownerID, username, score, subscore, metadata, overrideOperator)
 	record, err := nk.LeaderboardRecordWrite(ctx,
-		LeaderboardKillsAllTime,
+		gamectx.Scoped(game, LeaderboardKillsAllTime),
 		req.UserID, // owner
 		"",         // username (auto-filled by Nakama)
 		1,          // score — incremented by operator
@@ -167,10 +196,19 @@ const RPCGetLeaderboard = "get_leaderboard"
 
 // GetLeaderboardRPC returns the top N records from the kills leaderboard.
 func GetLeaderboardRPC(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+	game, err := gamectx.GameFromContext(ctx, "")
+	if errors.Is(err, gamectx.ErrGamesConfig) {
+		logger.Error("resolve get_leaderboard game: %v", err)
+		return "", runtime.NewError("internal error", 13)
+	}
+	if err != nil {
+		return "", err
+	}
+	id := gamectx.Scoped(game, LeaderboardKillsAllTime)
 	limit := 10
 
 	records, _, _, _, err := nk.LeaderboardRecordsList(ctx,
-		LeaderboardKillsAllTime,
+		id,
 		[]string{}, // owner IDs filter (empty = all)
 		limit,
 		"", // cursor
@@ -202,7 +240,7 @@ func GetLeaderboardRPC(ctx context.Context, logger runtime.Logger, db *sql.DB, n
 	}
 
 	resp := map[string]interface{}{
-		"leaderboard_id": LeaderboardKillsAllTime,
+		"leaderboard_id": id,
 		"records":        entries,
 	}
 	out, _ := json.Marshal(resp)

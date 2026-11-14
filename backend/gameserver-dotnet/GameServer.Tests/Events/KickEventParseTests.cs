@@ -38,6 +38,20 @@ public class KickEventParseTests
             Encoding.UTF8.GetBytes("""{"user_id":"u1","server_id":"srv1","jti":"j"}"""));
         Assert.NotNull(p);
         Assert.Null(p!.OldGateway);
+        Assert.Null(p.GameId);
+        Assert.Equal("cuvara", p.Game);
+    }
+
+    [Theory]
+    [InlineData("foo", "foo")]
+    [InlineData("", "cuvara")]
+    public void Parses_OptionalGameId(string gameId, string expectedGame)
+    {
+        var raw = $$"""{"user_id":"u1","server_id":"srv1","jti":"j","game_id":"{{gameId}}"}""";
+        var p = KickEvents.TryParse(Encoding.UTF8.GetBytes(raw));
+        Assert.NotNull(p);
+        Assert.Equal(gameId, p!.GameId);
+        Assert.Equal(expectedGame, p.Game);
     }
 
     [Theory]

@@ -63,4 +63,39 @@ public class JwtCharacterClaimTests
         var claims = new JwtValidator.JwtClaims("u", "s", 0, "j");
         Assert.Equal("", claims.CharacterId);
     }
+
+    [Theory]
+    [InlineData("\"gid\":\"othergame\",", "othergame")]
+    [InlineData("", "")]
+    [InlineData("\"gid\":\"\",", "")]
+    public void Verify_ReadsGidAlongsideCid_AndToleratesAbsence(string gidField, string expectedGame)
+    {
+        string token = Sign($$"""{"sub":"u1","sid":"gs-1","cid":"char-7",{{gidField}}"exp":{{Exp}}}""");
+
+        var claims = JwtValidator.Verify(token, Secret);
+
+        Assert.NotNull(claims);
+        Assert.Equal("char-7", claims!.CharacterId);
+        Assert.Equal(expectedGame, claims.GameId);
+    }
+
+    [Fact]
+    public void Keyring_CarriesGidThroughRotation()
+    {
+        string token = Sign($$"""{"sub":"u1","gid":"othergame","exp":{{Exp}}}""", "previous-secret");
+        var keyring = JwtKeyring.Parse("current-secret,previous-secret");
+
+        var claims = keyring.Verify(token);
+
+        Assert.NotNull(claims);
+        Assert.Equal("othergame", claims!.GameId);
+    }
+
+    [Fact]
+    public void JwtClaims_PositionalConstruction_DefaultsGidToEmpty()
+    {
+        var claims = new JwtValidator.JwtClaims("u", "s", 0, "j", "character");
+        Assert.Equal("", claims.GameId);
+    }
+
 }

@@ -20,6 +20,16 @@ nowhere else.
 Manifests: `data/` (kustomize) and `app/` (numbered, applied in order). Read
 `app/README.md` for the app tier's own design notes.
 
+**Other games (ADR-33 leg 5).** `app/` is the default game, `cuvara`, and stays
+as it is. A non-default game gets its own namespace `rpg-k8s-realtime-<game>`
+with a ResourceQuota, fleets `<game>-map-servers-dotnet-<env>` and
+`<game>-dungeon-servers-dotnet-<env>` (`GAMESERVER_GAME_ID` from the namespace's
+own `gameserver-config` key `game-id`, no `JWT_SECRET`), a Secret template and
+the gateway's allocate Role there — all rendered from `app/` by
+`games/render.py`, never hand-copied. Fleet names are capped at 51 characters
+because Agones 1.59.0 names pods fleet + 12. Nothing is instantiated for a real
+second game and `dev-up.sh` applies none of it. Read `games/README.md`.
+
 ## Bring dev up
 
 ```bash

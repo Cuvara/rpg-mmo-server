@@ -31,6 +31,10 @@ namespace GameServer.Registry;
 /// client that requires identity then refuses at the sealed handshake, which is the right
 /// place for that decision; the registry never makes it.
 /// </param>
+/// <param name="GameId">
+/// Game that owns this entry. Omitted or empty values mean the default game, preserving
+/// existing constructors and the default game's map-index keys.
+/// </param>
 public sealed record ServerInfo(
     string ServerId,
     string MapId,
@@ -38,4 +42,5 @@ public sealed record ServerInfo(
     string Transport,
     int Capacity,
     int PlayerCount,
-    string IdentityKey = "");
+    string IdentityKey = "",
+    string GameId = global::GameServer.Games.GameId.DefaultGameId);

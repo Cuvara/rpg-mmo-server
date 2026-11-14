@@ -199,7 +199,7 @@ func (m *memStore) MultiUpdate(_ context.Context, _ []*runtime.AccountUpdate, wr
 // mustParty reads a party out of the store or fails the test.
 func (m *memStore) mustParty(t *testing.T, partyID string) *Party {
 	t.Helper()
-	p, _, err := readParty(context.Background(), m, partyID)
+	p, _, err := readParty(context.Background(), m, "", partyID)
 	if err != nil {
 		t.Fatalf("read party %s: %v", partyID, err)
 	}
@@ -223,10 +223,10 @@ func (m *memStore) seedParty(t *testing.T, partyID string, members ...string) *P
 		CreatedAt: fixedNow().Unix(),
 		UpdatedAt: fixedNow().Unix(),
 	}
-	w := partyWrite(p, "")
+	w := partyWrite("", p, "")
 	m.put(w.Collection, w.Key, w.UserID, w.Value)
 	for _, u := range members {
-		mw := membershipWrite(u, partyID, fixedNow())
+		mw := membershipWrite("", u, partyID, fixedNow())
 		m.put(mw.Collection, mw.Key, mw.UserID, mw.Value)
 	}
 	return p

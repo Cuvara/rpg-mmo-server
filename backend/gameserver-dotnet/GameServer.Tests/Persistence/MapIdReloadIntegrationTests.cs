@@ -24,7 +24,7 @@ namespace GameServer.Tests.Persistence;
 [Collection(PostgresCollection.Name)]
 public class MapIdReloadIntegrationTests
 {
-    private const string JwtSecret = "integration-test-secret";
+    private const string JoinSecret = "integration-test-secret";
     private const string HomeMap = "map_home";
     private const string OtherMap = "map_other";
 
@@ -166,8 +166,7 @@ public class MapIdReloadIntegrationTests
             Transport = TransportKind.Kcp,
             TickRate = 20,
             Capacity = 4,
-            JwtSecret = JwtSecret,
-            JoinTokenSecret = JwtSecret,
+            JoinTokenSecret = JoinSecret,
             SaveInterval = TimeSpan.FromMilliseconds(300),
             PlayerStore = store,
             LoggerFactory = NullLoggerFactory.Instance
@@ -184,7 +183,7 @@ public class MapIdReloadIntegrationTests
             await using var stream = client.GetStream();
 
             await SendAsync(stream, MsgType.JoinToken,
-                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, serverId, JwtSecret) });
+                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, serverId, JoinSecret) });
 
             var joinEnv = await WireProtocol.DecodeAsync(stream, cts.Token);
             Assert.NotNull(joinEnv);

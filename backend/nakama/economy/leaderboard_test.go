@@ -97,7 +97,7 @@ func TestSetupLeaderboards(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			m := &mockLbAdmin{existing: c.existing}
-			err := setupLeaderboardsCore(context.Background(), noopLogger{}, m, c.migrate)
+			err := setupLeaderboardsCore(context.Background(), noopLogger{}, m, c.migrate, nil)
 			if c.wantErr == "" && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -123,7 +123,7 @@ func TestSetupLeaderboards(t *testing.T) {
 
 func TestSetupLeaderboards_GetFailureIsAnError(t *testing.T) {
 	m := &mockLbAdmin{getErr: errors.New("db down")}
-	if err := setupLeaderboardsCore(context.Background(), noopLogger{}, m, ""); err == nil {
+	if err := setupLeaderboardsCore(context.Background(), noopLogger{}, m, "", nil); err == nil {
 		t.Fatal("want error")
 	}
 	if len(m.creates) != 0 || len(m.deletes) != 0 {

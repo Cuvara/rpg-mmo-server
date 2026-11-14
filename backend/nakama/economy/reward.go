@@ -6,8 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
+	"github.com/duycuong/rpg-mmo/shared/gameid"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
@@ -17,8 +20,12 @@ const RPCRewardKill = "reward_kill"
 // GoldPerKill is the gold awarded per enemy kill.
 const GoldPerKill = 10
 
+// CurrencyGold is the game's wallet currency, scoped before every wallet access.
+const CurrencyGold = "gold"
+
 // RewardKillRequest is the payload the game server sends.
 type RewardKillRequest struct {
+	GameID   string `json:"game_id,omitempty"`
 	UserID   string `json:"user_id"`
 	VictimID string `json:"victim_id"`
 	MapID    string `json:"map_id"`
@@ -52,13 +59,24 @@ func rewardKillCore(ctx context.Context, logger runtime.Logger, nk killGranter, 
 	if req.UserID == "" {
 		return "", runtime.NewError("user_id is required", 3)
 	}
+	game, err := gamectx.GameFromContext(ctx, req.GameID)
+	if errors.Is(err, gamectx.ErrGamesConfig) {
+		logger.Error("resolve reward_kill game: %v", err)
+		return "", runtime.NewError("internal error", 13)
+	}
+	if err != nil {
+		return "", err
+	}
 
 	// Award gold via Nakama wallet — atomic, handles concurrent updates.
-	changeset := map[string]int64{"gold": GoldPerKill}
+	changeset := map[string]int64{gamectx.Scoped(game, CurrencyGold): GoldPerKill}
 	metadata := map[string]interface{}{
 		"source":    "enemy_kill",
 		"victim_id": req.VictimID,
 		"map_id":    req.MapID,
+	}
+	if !gameid.IsDefaultGame(game) {
+		metadata["game_id"] = game
 	}
 
 	updated, _, err := nk.WalletUpdate(ctx, req.UserID, changeset, metadata, true)
@@ -68,7 +86,7 @@ func rewardKillCore(ctx context.Context, logger runtime.Logger, nk killGranter, 
 	}
 
 	gold := int64(0)
-	if v, ok := updated["gold"]; ok {
+	if v, ok := updated[gamectx.Scoped(game, CurrencyGold)]; ok {
 		gold = v
 	}
 

@@ -106,12 +106,83 @@ Entry fields on the Redis Stream `events:kick` are the standard event pair
 
 `user_id`, `server_id` and `jti` are mandatory (a consumer MUST treat a payload
 missing any of them as malformed: count it, ACK it, act on nothing);
-`old_gateway`/`new_gateway` are diagnostic. `jti` is the join-token jti of the
+`old_gateway`/`new_gateway` are diagnostic. `game_id` is an optional string;
+absent or empty means the default game `cuvara`. The gateway starts writing it
+in ADR-33 leg 3; the game server consumer already accepts payloads with and
+without it (ADR-33 leg 2). After the `server_id` filter below, the consumer
+compares the event's game with its own `GAMESERVER_GAME_ID` (both resolved,
+ordinal compare). A mismatch is **logged at Warning** (user, server, jti, both
+games) and **counted** (`RedisKickConsumer.GameMismatches`, an in-process
+property with no metric or `/status` field yet), and is **never dropped**: the
+entry is still handed to the kick handler, so the jti guard alone decides which
+connection, if any, is kicked. An entry for another server is skipped before the
+game compare, so another game's kick on the shared stream is not a mismatch.
+`jti` is the join-token jti of the
 superseded session's map assignment — the consumer kicks only the connection
 that authenticated with exactly that jti, which is what makes late delivery and
 at-least-once redelivery safe (newest login wins). Consumer groups are
 `gs:{server_id}`, one per game server, created at `$` and destroyed on graceful
 shutdown; events whose `server_id` names another server are ACKed and skipped.
+
+### Server-internal: the `events:game` stream (`entity_killed`)
+
+Not a client-facing message either. The game server publishes one entry per
+death on the Redis Stream `events:game` (Go `constants.GameEventStream`; C#
+`EventStreams.Game`, `GameServer/Events/EventPublisher.cs`) when `REDIS_ADDR` is
+set, and nothing otherwise. Entry fields are `type` = `entity_killed` and
+`payload` = UTF-8 JSON (`DeathPayload`):
+
+```json
+{ "victim_id": "mob-7", "victim_type": "mob", "killer_id": "u-42", "map_id": "map_01", "server_id": "gs-1", "game_id": "cuvara" }
+```
+
+`killer_id` may be null. **`game_id` is always written** (ADR-33 D2): it is the
+game this server serves, `GAMESERVER_GAME_ID`, and an explicit `cuvara` for the
+default game, never an absent or empty field. A payload that already names a
+game keeps it; the publisher fills only an empty one. A reader built before
+ADR-33 ignores the extra field; a game-aware reader treats an absent or empty
+`game_id` (an entry from an older server) as `cuvara`.
+
+### Server-internal: the registry entry (`servers:id:{server_id}`)
+
+Not a client-facing message either; recorded here because the Go gateway reads
+what this server writes (Go `shared/storage/redisstore/registry.go`, C#
+`GameServer/Registry/RedisServerRegistry.cs`, ADR-33). Field order and the
+check-and-set script are pinned by the shared fixtures in
+`backend/shared/testdata/multigame/`.
+
+- **Every entry carries `game_id`.** The server writes its `GAMESERVER_GAME_ID`,
+  and an explicit `cuvara` for the default game, never an empty field. A reader
+  treats an absent or empty `game_id` (an entry written before ADR-33) as
+  `cuvara`.
+- **The map index is per game.** A map-indexed server adds its id to
+  `servers:map:{map_id}` for the default game and to
+  `servers:map:{game}:{map_id}` for any other game. A dungeon pod writes the hash
+  only, as before.
+- **Registration is a check-and-set.** One Lua script writes the hash, its TTL
+  and the index entry only if the live `servers:id:{server_id}` is absent or
+  belongs to the same game (an entry without `game_id` counts as `cuvara`). If
+  it names another game, no key changes: the server logs the refusal at Error,
+  registration fails, and the server stays unregistered until that entry expires.
+  It never overwrites another game's entry.
+- **Standalone Redis only; the key scheme is not cluster-safe.** The check-and-set
+  script takes `servers:id:{server_id}` and the map index key together, and the two
+  hash to different slots, so Redis Cluster refuses it (and the Go side's
+  pipelines across the same keys would fail the same way). Supported: one standalone
+  Redis or a Sentinel-managed primary. The C# connection disables the `CLUSTER`
+  command (`RedisServerRegistry.StandaloneCommandMap`) so that StackExchange.Redis
+  does not mistake a server that merely answers `CLUSTER NODES`, such as miniredis,
+  for a cluster and refuse the script client-side. A real cluster is still detected
+  and still fails registration loudly. Making the layout cluster-safe would mean
+  hash-tagged key names, which is a contract change on both sides.
+- **Heartbeat and player-count updates are game-checked.** Each is one script that
+  re-arms the TTL or writes `player_count` only when the entry belongs to this
+  server's game; an absent or foreign entry returns false, the foreign TTL is not
+  extended, and the next heartbeat attempts registration again (which the
+  check-and-set refuses while the foreign entry lives).
+- **Deregistration is game-checked too.** On shutdown the server deletes the hash
+  only if it belongs to its own game, and removes its id only from its own game's
+  map index.
 
 ### `join_token_resp` (6) — `tick_rate` is the client's prediction rate
 
@@ -131,6 +202,39 @@ hammering the game server. `"Server is full"` is an authenticated refusal on
 `GAMESERVER_CAPACITY` and is decided atomically: a user rejoining over their own
 still-open connection is admitted as a replacement, not refused as a second
 player. Details and metrics: `docs/DESIGN.md`, "Admission hardening".
+
+#### Join refusal reasons
+
+A refused join gets `{ "ok": false, "error": "<reason>", "protocol_version": N }`
+and the close. The checks run in this order and the first failure answers:
+
+| Order | `error` | Cause |
+|---|---|---|
+| 1 | `Expected JoinToken message` | First frame was not a `join_token` |
+| 2 | `Malformed JoinToken message` | The `join_token` body did not decode |
+| 3 | `protocol_version_mismatch` | Peer protocol version outside the supported window (see "Protocol version") |
+| 4 | `Invalid or expired token` | Signature does not verify against `JOIN_TOKEN_SECRET`, or `exp` has passed |
+| 5 | `Token is for a different server` | The token's `sid` is empty or names another server |
+| 6 | `Token is for a different game` | The token's `gid` names another game than this server's `GAMESERVER_GAME_ID` (ADR-33) |
+| 7 | `Token already used` | The token's `jti` was missing or already consumed (replay) |
+| 8 | `Server is full` | `GAMESERVER_CAPACITY` reached |
+| 9 | `character does not belong to this account` | The character named in the token belongs to another account |
+
+Rows 1 and 2 also count as `gameserver_handshakes_rejected_total{reason="malformed"}`,
+and row 3 (`protocol_version_mismatch`) counts as
+`gameserver_handshakes_rejected_total{reason="protocol_version"}`: the label is
+`protocol_version`, not the `error` string. The authenticated refusals from row 4
+on have no counter of their own, the game refusal included.
+
+**The game rule.** An absent or empty `gid` claim means the default game `cuvara`,
+and so does an unset or empty `GAMESERVER_GAME_ID`; the two resolved values must
+be equal (ordinal compare). A token without `gid` therefore joins a default-game
+server exactly as before ADR-33, and is refused by a server of any other game.
+The game check runs after the `sid` check and **before** the `jti` is consumed and
+before a capacity slot is reserved, so a token refused for its game is not burned
+and takes no slot. The server logs the refusal at Warning with both games. Like
+the `sid` refusal, it is a permanent answer for that token: the client must go
+back to the gateway for a new assignment rather than retry it.
 
 **Normative definition.** `tick_rate` is **the rate, in Hz, at which the
 authoritative simulation tick advances — which is also the rate at which player

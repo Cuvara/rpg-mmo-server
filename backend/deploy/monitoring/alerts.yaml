@@ -35,12 +35,12 @@ groups:
       # this rule a routine background rate to hide in.
       - alert: NakamaRewardsNotLanding
         expr: |
-          sum by (map_id) (
+          sum by (game, map_id) (
             rate(gameserver_nakama_reward_outcomes_total{outcome=~"partial|not_granted|unknown"}[5m])
           )
           /
           clamp_min(
-            sum by (map_id) (rate(gameserver_nakama_reward_outcomes_total[5m])),
+            sum by (game, map_id) (rate(gameserver_nakama_reward_outcomes_total[5m])),
             0.001
           ) > 0.5
         for: 10m
@@ -48,8 +48,8 @@ groups:
           severity: warning
         annotations:
           summary: >-
-            More than half of reward_kills answers on {{ $labels.map_id }} did not land
-            for 10 minutes.
+            More than half of reward_kills answers on {{ $labels.game }}/{{ $labels.map_id }}
+            did not land for 10 minutes.
           description: >-
             Players are killing things and not being paid, while the game itself looks
             healthy -- this hop fails quietly by design of the code around it (ADR-24
@@ -58,7 +58,8 @@ groups:
             was created with), whether NAKAMA_TLS_PIN is set for a self-signed
             certificate, and whether Nakama's client API on :7350 answers at all -- the
             k8s probes watch :9100 and cannot see :7350 wedge.
-            Per-pod attribution:
+            Per-pod attribution (namespace rpg-k8s-realtime for the default game
+            cuvara, rpg-k8s-realtime-<game> for any other, ADR-33 D7):
             kubectl -n rpg-k8s-realtime logs -l agones.dev/role=gameserver --prefix
             --tail=200 | grep -E 'NakamaTLS|reward|certificate'
 
@@ -68,14 +69,15 @@ groups:
       # "nobody is playing", which is not an incident.
       - alert: NakamaRewardPathSilent
         expr: |
-          sum by (map_id) (rate(gameserver_nakama_reward_outcomes_total[15m])) == 0
-          and on (map_id) sum by (map_id) (gameserver_players_online) > 0
+          sum by (game, map_id) (rate(gameserver_nakama_reward_outcomes_total[15m])) == 0
+          and on (game, map_id) sum by (game, map_id) (gameserver_players_online) > 0
         for: 30m
         labels:
           severity: info
         annotations:
           summary: >-
-            No reward_kills answers on {{ $labels.map_id }} in 15 minutes with players online.
+            No reward_kills answers on {{ $labels.game }}/{{ $labels.map_id }} in 15 minutes
+            with players online.
           description: >-
             Either nothing is dying, or the reward path is not being reached at all
             (NAKAMA_URL unset logs `Nakama: disabled` at boot and issues no RPC -- which

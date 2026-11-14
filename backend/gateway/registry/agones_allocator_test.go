@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/duycuong/rpg-mmo/shared/transport"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/storage"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // allocatedBody is a trimmed copy of a real Agones allocation response.
@@ -46,6 +48,7 @@ func TestAgonesAllocator_Allocate(t *testing.T) {
 			status: http.StatusCreated,
 			body:   allocatedBody,
 			want: storage.ServerInfo{
+				GameID:      constants.DefaultGameID,
 				ServerID:    "map-servers-dev-xjh7p-6ndtl",
 				MapID:       "map_01",
 				Addr:        "192.168.65.3:7257",
@@ -106,7 +109,7 @@ func TestAgonesAllocator_Allocate(t *testing.T) {
 			defer srv.Close()
 
 			alloc := newAgonesAllocator(srv.Client(), srv.URL, AgonesConfig{Timeout: tt.timeout})
-			got, err := alloc.AllocateServer(context.Background(), "map_01")
+			got, err := alloc.AllocateServer(context.Background(), constants.DefaultGameID, "map_01")
 
 			if tt.wantErr {
 				if err == nil {
@@ -264,11 +267,124 @@ func TestAgonesAllocator_Transport(t *testing.T) {
 	defer srv.Close()
 
 	alloc := newAgonesAllocator(srv.Client(), srv.URL, AgonesConfig{})
-	got, err := alloc.AllocateServer(context.Background(), "map_01")
+	got, err := alloc.AllocateServer(context.Background(), constants.DefaultGameID, "map_01")
 	if err != nil {
 		t.Fatalf("AllocateServer: %v", err)
 	}
 	if got.Transport != transport.Gameplay {
 		t.Errorf("Transport = %q, want %q", got.Transport, transport.Gameplay)
+	}
+}
+
+func TestAgonesAllocator_PerGameFleetSelection(t *testing.T) {
+	for _, tt := range []struct {
+		name, game, kind, fleet, namespace, env string
+	}{
+		{name: "absent game map", fleet: "default-map", namespace: "stack"},
+		{name: "cuvara map", game: constants.DefaultGameID, kind: KindMap, fleet: "default-map", namespace: "stack"},
+		{name: "cuvara dungeon", game: constants.DefaultGameID, kind: KindDungeon, fleet: "default-dungeon", namespace: "stack"},
+		{name: "foo map", game: "foo", kind: KindMap, fleet: "foo-map", namespace: "stack-foo"},
+		{name: "foo dungeon", game: "foo", kind: KindDungeon, fleet: "foo-dungeon", namespace: "stack-foo"},
+		{name: "bar map custom namespace", game: "bar", kind: KindMap, fleet: "bar-map", namespace: "custom-bar"},
+		{name: "bar dungeon missing", game: "bar", kind: KindDungeon, env: "ALLOCATOR_FLEET_DUNGEON_BAR"},
+		{name: "unknown game map", game: "baz", kind: KindMap, env: "ALLOCATOR_FLEET_MAP_BAZ"},
+		{name: "unknown game dungeon", game: "baz", kind: KindDungeon, env: "ALLOCATOR_FLEET_DUNGEON_BAZ"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			var gotBody allocationRequestBody
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				gotPath = r.URL.Path
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Error(err)
+				}
+				body := allocatedBody
+				if tt.game != "" && tt.game != constants.DefaultGameID {
+					body = strings.ReplaceAll(body, "map-servers-dev-xjh7p-6ndtl", tt.game+"-allocated-server")
+				}
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			alloc := newAgonesAllocator(srv.Client(), srv.URL, AgonesConfig{
+				Namespace: "stack", FleetMap: "default-map", FleetDungeon: "default-dungeon",
+				Games: map[string]GameFleets{
+					"foo": {Map: "foo-map", Dungeon: "foo-dungeon"},
+					"bar": {Map: "bar-map", Namespace: "custom-bar"},
+					// Default-game settings retain precedence over Games entries.
+					constants.DefaultGameID: {Map: "ignored", Dungeon: "ignored", Namespace: "ignored"},
+				},
+			})
+			got, err := alloc.Allocate(context.Background(), AllocationRequest{Game: tt.game, Kind: tt.kind, MapID: "map_01"})
+			if tt.env != "" {
+				if !errors.Is(err, ErrKindNotConfigured) || !strings.Contains(err.Error(), tt.env) || !strings.Contains(err.Error(), tt.game) {
+					t.Fatalf("Allocate = %+v, %v; want ErrKindNotConfigured naming %s and %s", got, err, tt.game, tt.env)
+				}
+				if calls != 0 || got != (storage.ServerInfo{}) {
+					t.Fatalf("unconfigured allocation issued %d HTTP calls or returned %+v", calls, got)
+				}
+				return
+			}
+			if err != nil || calls != 1 || got.GameID != constants.GameOrDefault(tt.game) || got.MapID != "map_01" {
+				t.Fatalf("Allocate = %+v, %v; calls=%d", got, err, calls)
+			}
+			wantPath := fmt.Sprintf(allocationPath, tt.namespace)
+			if gotPath != wantPath || gotBody.Metadata.Namespace != tt.namespace {
+				t.Errorf("namespace: path=%q body=%q; want %q", gotPath, gotBody.Metadata.Namespace, tt.namespace)
+			}
+			if len(gotBody.Spec.Selectors) != 1 || gotBody.Spec.Selectors[0].MatchLabels[fleetLabel] != tt.fleet {
+				t.Errorf("fleet selectors = %+v; want %s", gotBody.Spec.Selectors, tt.fleet)
+			}
+		})
+	}
+}
+
+func TestFleetEnvName(t *testing.T) {
+	for _, tt := range []struct{ game, kind, want string }{
+		{"", KindMap, "ALLOCATOR_FLEET_MAP"},
+		{constants.DefaultGameID, KindMap, "ALLOCATOR_FLEET_MAP"},
+		{"", KindDungeon, "ALLOCATOR_FLEET_DUNGEON"},
+		{constants.DefaultGameID, KindDungeon, "ALLOCATOR_FLEET_DUNGEON"},
+		{"foo", KindMap, "ALLOCATOR_FLEET_MAP_FOO"},
+		{"foo", KindDungeon, "ALLOCATOR_FLEET_DUNGEON_FOO"},
+	} {
+		t.Run(tt.game+"/"+tt.kind, func(t *testing.T) {
+			if got := FleetEnvName(tt.kind, tt.game); got != tt.want {
+				t.Errorf("FleetEnvName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgonesAllocator_AllocatedNameMustBelongToGame(t *testing.T) {
+	for _, tt := range []struct {
+		game, server string
+		wantErr      bool
+	}{
+		{constants.DefaultGameID, "map-servers-dev-xjh7p-6ndtl", false},
+		{"foo", "foo-map-servers-dev-xjh7p-6ndtl", false},
+		{"foo", "map-servers-dev-xjh7p-6ndtl", true},
+		{"foo", "foobar-map-servers-dev-xjh7p-6ndtl", true},
+		{"foo", "bar-map-servers-dev-xjh7p-6ndtl", true},
+		{"foo", "foo-", true},
+	} {
+		t.Run(tt.game+"/"+tt.server, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, strings.ReplaceAll(allocatedBody, "map-servers-dev-xjh7p-6ndtl", tt.server))
+			}))
+			defer srv.Close()
+			alloc := newAgonesAllocator(srv.Client(), srv.URL, AgonesConfig{Games: map[string]GameFleets{
+				"foo": {Map: "foo-fleet"},
+			}})
+			got, err := alloc.AllocateServer(context.Background(), tt.game, "map_01")
+			if tt.wantErr {
+				if err == nil || got != (storage.ServerInfo{}) || !strings.Contains(err.Error(), tt.game+"-") || !strings.Contains(err.Error(), tt.server) {
+					t.Fatalf("AllocateServer = %+v, %v; want refusal naming server and expected game prefix", got, err)
+				}
+			} else if err != nil || got.ServerID != tt.server || got.GameID != tt.game {
+				t.Fatalf("AllocateServer = %+v, %v", got, err)
+			}
+		})
 	}
 }

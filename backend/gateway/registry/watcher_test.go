@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
@@ -242,5 +243,47 @@ func TestRegistryWatcher_UntrackPreventsDetection(t *testing.T) {
 	watcher.checkServers(ctx)
 	if pubsub.MessageCount() != 0 {
 		t.Errorf("expected no messages for untracked server, got %d", pubsub.MessageCount())
+	}
+}
+
+func TestRegistryWatcher_ServerDownCarriesTrackedGame(t *testing.T) {
+	for _, game := range []string{"", constants.DefaultGameID, "foo"} {
+		for _, path := range []string{"register", "lookup"} {
+			t.Run(game+"/"+path, func(t *testing.T) {
+				ctx := context.Background()
+				store := storage.NewMemoryServerRegistry()
+				pub := NewMemoryPubSub()
+				watcher := NewRegistryWatcher(store, pub, &spyLogger{})
+				svc := NewRegistryService(store, WithWatcher(watcher))
+				info := storage.ServerInfo{GameID: game, ServerID: "tracked-server", MapID: "map_01", Capacity: 10}
+				if path == "register" {
+					if err := svc.RegisterServer(ctx, info); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := store.Register(ctx, info); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := svc.FindServerGame(ctx, game, "map_01"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := store.Deregister(ctx, info.ServerID); err != nil {
+					t.Fatal(err)
+				}
+				watcher.checkServers(ctx)
+				watcher.checkServers(ctx)
+				if pub.MessageCount() != 1 {
+					t.Fatalf("published %d events; want exactly one", pub.MessageCount())
+				}
+				var payload map[string]string
+				if err := json.Unmarshal(pub.messages[0], &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload["game_id"] != constants.GameOrDefault(game) || payload["server_id"] != info.ServerID || payload["map_id"] != info.MapID {
+					t.Fatalf("server_down payload = %v; want tracked identity %+v", payload, info)
+				}
+			})
+		}
 	}
 }

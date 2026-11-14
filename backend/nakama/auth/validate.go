@@ -35,12 +35,15 @@ func ValidateEmailCredentials(email, password string, minPasswordLength int) err
 
 // BeforeAuthenticateEmail validates credentials before Nakama processes an
 // email authentication request. The email is normalised to lower case.
-func BeforeAuthenticateEmail(ctx context.Context, _ runtime.Logger, _ *sql.DB, _ runtime.NakamaModule, in *api.AuthenticateEmailRequest) (*api.AuthenticateEmailRequest, error) {
+func BeforeAuthenticateEmail(ctx context.Context, logger runtime.Logger, _ *sql.DB, _ runtime.NakamaModule, in *api.AuthenticateEmailRequest) (*api.AuthenticateEmailRequest, error) {
 	if in == nil || in.GetAccount() == nil {
 		return nil, ErrInvalidEmail
 	}
 	cfg := LoadConfig(ctx)
 	account := in.GetAccount()
+	if err := validateAuthGame(ctx, logger, account.GetVars()); err != nil {
+		return nil, err
+	}
 
 	if err := ValidateEmailCredentials(account.GetEmail(), account.GetPassword(), cfg.MinPasswordLength); err != nil {
 		return nil, err

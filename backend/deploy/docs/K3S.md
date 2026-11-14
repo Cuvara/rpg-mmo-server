@@ -149,8 +149,9 @@ Idempotent — every step is an `apply`, so re-running is a no-op plus waits.
    and applying a Fleet too early fails with *no endpoints available for service
    agones-controller-service*.
 5. **Namespaces** — `rpg-realtime`, `rpg-meta`, `rpg-data` (`k3s/namespaces.yaml`).
-6. **Dev config** — Secret `rpg-realtime-secrets` (`jwt-secret`,
-   `join-token-secret`, `redis-password`, `transport-key`, `game-db-url`)
+6. **Dev config** — Secret `rpg-realtime-secrets` (`jwt-secret`, which no
+   game-server pod mounts, `join-token-secret`, `redis-password`,
+   `transport-key`, `game-db-url`)
    **sourced from `../.env`**, and ConfigMap `gameserver-config`
    (`redis-addr`, `advertise-host`), created via
    `create --dry-run=client -o yaml | apply` so they are idempotent. Sourcing
@@ -198,6 +199,36 @@ The fleets of the **app tier** (`deploy/k8s/app/`, namespace
 since 2026-09-13 — `70-fleetautoscaler-dungeon.yaml`, the project's first
 `FleetAutoscaler`. Do not read the "no autoscaler" rule below as covering that
 file; read the section it points to.
+
+### Fleets for a non-default game, and the 63-character name budget (ADR-33 leg 5)
+
+A game other than `cuvara` runs in its own namespace, `<stack namespace>-<game>`
+(`rpg-k8s-realtime-<game>`), with a ResourceQuota and fleets
+`<game>-map-servers-dotnet-<env>` / `<game>-dungeon-servers-dotnet-<env>`,
+rendered from `deploy/k8s/app/` by `deploy/k8s/games/render.py`
+(`deploy/k8s/games/README.md`). Nothing is instantiated for a real second game,
+and neither `setup-dev.sh` nor `dev-up.sh` applies any of it.
+
+The `<game>-` prefix is load-bearing: the server id is the pod name, Agones
+names the pod after the fleet, and ADR-33 D2 S1 requires a non-default game's
+server ids to start with `<game>-`. The name budget behind the 24-character
+game-id cap, **confirmed for Agones 1.59.0** (the version this file and
+`k3s/validate-manifests.py` pin):
+
+| Step | Agones release-1.59.0 source | Name |
+|---|---|---|
+| Fleet → GameServerSet | `pkg/apis/agones/v1/fleet.go:128` | `GenerateName = fleet + "-"` |
+| GameServerSet → GameServer | `pkg/apis/agones/v1/gameserverset.go:156` | `GenerateName = gss + "-"` |
+| GameServer → Pod | `pkg/apis/agones/v1/gameserver.go:871` | pod name = GameServer name |
+| `generateName` | kube-apiserver `names.SimpleNameGenerator` | + 5 random characters, base truncated to 58 |
+
+GameServer = pod = fleet + 12 characters, so a fleet of at most **51**
+characters keeps the pod within the 63-character RFC 1123 label limit with no
+truncation. The renderer refuses a longer fleet, and an invalid, reserved
+(`gs`, `map`, `dungeon`, `other`) or default (`cuvara`) game id;
+`k3s/validate-manifests.py` with no arguments renders a sample game and the
+longest legal id in memory, validates the result and asserts those refusals.
+Re-check the four lines above when the Agones pin moves.
 
 ### Which fleet is real
 
@@ -406,7 +437,8 @@ memory:
   `gateway/registry/agones_allocator.go`). Rename it and every allocation fails
   with `no "game" port in allocation status`.
 - **Secrets come from the `rpg-realtime-secrets` Secret**, not from literals —
-  `jwt-secret` and `join-token-secret`, neither `optional`. See "Secrets" below.
+  `join-token-secret`, not `optional`. The fleet no longer mounts `jwt-secret`
+  (ADR-33 D7, owner decision 5). See "Secrets" below.
 - **`REDIS_ADDR` comes from the `gameserver-config` ConfigMap**, and is *not*
   `optional: true` either: an unset `REDIS_ADDR` is not an error in the server,
   it just runs without registering, so the pod would be Ready, the logs clean,
@@ -717,8 +749,8 @@ shape; it is a **template with published dev placeholders**, and its
 
 | Key | Env | Notes |
 |-----|-----|-------|
-| `jwt-secret` | `JWT_SECRET` | HS256, client auth tokens. Server only *warns* when unset, so a wrong value reads as "all tokens rejected" |
-| `join-token-secret` | `JOIN_TOKEN_SECRET` | HS256, gateway→gameserver join tokens. **Mandatory** — the server exits 2 without it. Never the same value as `jwt-secret`: it is on every pod, so a compromised pod must not be able to forge auth tokens. Rotate as `new,old` |
+| `jwt-secret` | — (not mounted) | HS256, client auth tokens. **No game-server pod receives it** (ADR-33 D7, owner decision 5): a compromised pod holding it could sign gateway tokens for any user and game. The key stays in the Secret only because `k3s/setup-dev.sh` still writes it |
+| `join-token-secret` | `JOIN_TOKEN_SECRET` | HS256, gateway→gameserver join tokens. **Mandatory** — the server exits 2 without it. Never the same value as `jwt-secret`: it is on every pod, so a compromised pod must not be able to forge auth tokens. The game server can no longer compare the two itself, so the comparison is a deploy-time check (`k8s/dev-up.sh` for `rpg-app-secrets`, `./stack.sh check-secrets` for the compose `.env`). Rotate as `new,old` |
 | `redis-password` | `REDIS_PASSWORD` | Empty unless redis runs `--requirepass`. `optional` in the fleet |
 | `transport-key` | `TRANSPORT_KEY` | Optional pre-shared AES-256 key for the KCP/UDP game port (gameplay is KCP only). `optional` in the fleet. 32-byte hex; clients need the same value (`-cuvara-transport-key` / `CUVARA_TRANSPORT_KEY`). Empty = plaintext datagrams + a startup WARN (dev only). The gateway does not read it |
 | `game-db-url` | `GAME_DB_URL` | DSN for the game-state postgres, *containing a password*, which is why it is here and not in the ConfigMap. Written by `setup-dev.sh` with the host translated for a pod (see [Persistence](#persistence-game-db-url)). Blank is legal and means the in-memory store; the fleet reads it `optional`. A set-but-unreachable DSN makes the server **exit 1** rather than fall back to memory |

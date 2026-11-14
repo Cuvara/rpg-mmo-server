@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/gateway/registry"
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
@@ -44,12 +46,15 @@ const (
 
 // DungeonAllocator is the half of registry.RegistryService this package needs.
 type DungeonAllocator interface {
-	AllocateDungeon(ctx context.Context, contentID string) (storage.ServerInfo, error)
+	AllocateDungeon(ctx context.Context, gameID, contentID string) (storage.ServerInfo, error)
 	GetServer(ctx context.Context, serverID string) (storage.ServerInfo, error)
 }
 
 // DungeonDeps are the collaborators AssignDungeon needs.
 type DungeonDeps struct {
+	// GameID comes from the gateway session; JoinKeys must belong to that game.
+	GameID string
+
 	Registry DungeonAllocator
 	Index    storage.DungeonIndex
 	Party    PartyMembership
@@ -97,7 +102,7 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 		return AssignResult{}, fmt.Errorf("assign dungeon: incomplete dependencies")
 	}
 
-	member, err := deps.Party.IsMember(ctx, partyID, userID)
+	member, err := deps.Party.IsMember(ctx, deps.GameID, partyID, userID)
 	if err != nil {
 		return AssignResult{}, fmt.Errorf("assign dungeon: %w", err)
 	}
@@ -120,7 +125,11 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 		case err == nil:
 			info, gerr := deps.Registry.GetServer(ctx, serverID)
 			if gerr == nil {
-				return mintForServer(info, userID, deps.CharacterID, deps.JoinKeys)
+				result, mintErr := mintForServer(info, userID, deps.CharacterID, deps.GameID, deps.JoinKeys)
+				if errors.Is(mintErr, registry.ErrFleetMapMismatch) {
+					_ = deps.Index.Release(ctx, partyID)
+				}
+				return result, mintErr
 			}
 			// The mapping outlived the pod. Drop it and let this caller
 			// allocate a fresh instance rather than handing out a dead address.
@@ -141,7 +150,7 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 		}
 
 		if won {
-			info, err := deps.Registry.AllocateDungeon(ctx, contentID)
+			info, err := deps.Registry.AllocateDungeon(ctx, deps.GameID, contentID)
 			if err != nil {
 				// Release so the next member retries instead of polling for an
 				// answer that will never come.
@@ -151,7 +160,7 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 			if err := deps.Index.Publish(ctx, partyID, info.ServerID, instanceTTL); err != nil {
 				return AssignResult{}, fmt.Errorf("assign dungeon: publish instance for party %s: %w", partyID, err)
 			}
-			return mintForServer(info, userID, deps.CharacterID, deps.JoinKeys)
+			return mintForServer(info, userID, deps.CharacterID, deps.GameID, deps.JoinKeys)
 		}
 
 		// Lost the election: wait for the winner's answer, bounded by the
@@ -165,11 +174,14 @@ func AssignDungeon(ctx context.Context, userID, partyID, contentID string, deps 
 	}
 }
 
-func mintForServer(info storage.ServerInfo, userID, characterID string, joinKeys jwt.Keyring) (AssignResult, error) {
+func mintForServer(info storage.ServerInfo, userID, characterID, gameID string, joinKeys jwt.Keyring) (AssignResult, error) {
+	if constants.GameOrDefault(info.GameID) != constants.GameOrDefault(gameID) {
+		return AssignResult{}, fmt.Errorf("assign dungeon: server %s game %q does not match requested game %q: %w", info.ServerID, constants.GameOrDefault(info.GameID), constants.GameOrDefault(gameID), registry.ErrFleetMapMismatch)
+	}
 	if err := checkGameplayTransport(info); err != nil {
 		return AssignResult{}, fmt.Errorf("assign dungeon: %w", err)
 	}
-	token, err := GenerateJoinTokenCharacter(userID, info.ServerID, characterID, joinKeys)
+	token, err := GenerateJoinTokenCharacter(userID, info.ServerID, characterID, gameID, joinKeys)
 	if err != nil {
 		return AssignResult{}, fmt.Errorf("assign dungeon: mint join token: %w", err)
 	}

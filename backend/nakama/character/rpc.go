@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/nakama/gamectx"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
@@ -88,7 +89,15 @@ func listRPC(ctx context.Context, logger runtime.Logger, nk Store) (string, erro
 	if !allowRosterRead(userID) {
 		return "", ErrRateLimited
 	}
-	cs, err := List(ctx, nk, userID)
+	game, err := gamectx.GameFromContext(ctx, "")
+	if err != nil {
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			logger.Error("%s: invalid GAMES configuration: %v", RPCCharacterList, err)
+			return "", ErrInternal
+		}
+		return "", err
+	}
+	cs, err := List(ctx, nk, game, userID)
 	if err != nil {
 		return "", clientError(logger, RPCCharacterList, userID, err)
 	}
@@ -111,6 +120,14 @@ func createRPC(ctx context.Context, logger runtime.Logger, nk Store, payload str
 	if !allowRosterWrite(userID) {
 		return "", ErrRateLimited
 	}
+	game, err := gamectx.GameFromContext(ctx, "")
+	if err != nil {
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			logger.Error("%s: invalid GAMES configuration: %v", RPCCharacterCreate, err)
+			return "", ErrInternal
+		}
+		return "", err
+	}
 	if payload == "" {
 		return "", ErrInvalidPayload
 	}
@@ -122,7 +139,7 @@ func createRPC(ctx context.Context, logger runtime.Logger, nk Store, payload str
 	if req.Slot != nil && *req.Slot >= 0 {
 		slot = *req.Slot
 	}
-	c, err := Create(ctx, nk, userID, req.Name, slot, time.Now)
+	c, err := Create(ctx, nk, game, userID, req.Name, slot, time.Now)
 	if err != nil {
 		return "", clientError(logger, RPCCharacterCreate, userID, err)
 	}
@@ -143,13 +160,21 @@ func deleteRPC(ctx context.Context, logger runtime.Logger, nk Store, payload str
 	if !allowRosterWrite(userID) {
 		return "", ErrRateLimited
 	}
+	game, err := gamectx.GameFromContext(ctx, "")
+	if err != nil {
+		if errors.Is(err, gamectx.ErrGamesConfig) {
+			logger.Error("%s: invalid GAMES configuration: %v", RPCCharacterDelete, err)
+			return "", ErrInternal
+		}
+		return "", err
+	}
 	var req DeleteRequest
 	if payload != "" {
 		if err := json.Unmarshal([]byte(payload), &req); err != nil {
 			return "", ErrInvalidPayload
 		}
 	}
-	if err := Delete(ctx, nk, userID, req.CharacterID); err != nil {
+	if err := Delete(ctx, nk, game, userID, req.CharacterID); err != nil {
 		return "", clientError(logger, RPCCharacterDelete, userID, err)
 	}
 	logger.Debug("character %s deleted for %s", req.CharacterID, userID)

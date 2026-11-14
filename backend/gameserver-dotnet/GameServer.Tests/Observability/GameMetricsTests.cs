@@ -156,6 +156,8 @@ public class GameMetricsTests
         Assert.NotNull(metric);
         Assert.Equal(1, SumLong(metric, ("status", "ok")));
         Assert.Equal(0, SumLong(metric, ("status", "error")));
+        // ADR-33 D3: the save counter carries the base labels like every other series.
+        Assert.Equal(1, SumLong(metric, ("status", "ok"), ("map_id", "map_01"), ("game", "cuvara")));
     }
 
     [Fact]
@@ -176,6 +178,7 @@ public class GameMetricsTests
         Assert.NotNull(metric);
         Assert.Equal(2, SumLong(metric, ("status", "error")));
         Assert.Equal(0, SumLong(metric, ("status", "ok")));
+        Assert.Equal(2, SumLong(metric, ("status", "error"), ("map_id", "map_01"), ("game", "cuvara")));
     }
 
     private sealed class FailingPlayerStore : IPlayerStore
@@ -201,6 +204,8 @@ public class GameMetricsTests
         var metric = Find(h.Collect(), "gameserver.events.published");
         Assert.NotNull(metric);
         Assert.Equal(1, SumLong(metric, ("type", "entity_killed")));
+        // ADR-33 D3: map_id and game next to type.
+        Assert.Equal(1, SumLong(metric, ("type", "entity_killed"), ("map_id", "map_01"), ("game", "cuvara")));
     }
 
     // ── Gauges ──
@@ -258,12 +263,16 @@ public class GameMetricsTests
         Assert.NotNull(metric);
 
         long value = 0;
+        bool labelled = false;
         foreach (ref readonly var point in metric.GetMetricPoints())
         {
             value = point.GetGaugeLastValueLong();
+            labelled = HasTags(point.Tags, [("map_id", "map_01"), ("game", "cuvara")]);
         }
 
         Assert.Equal(2, value);
+        // ADR-33 D3: the entities gauge carries the base labels (it had none before).
+        Assert.True(labelled, "gameserver.entities must carry map_id and game");
     }
 
     /// <summary>

@@ -5,7 +5,78 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Docs only: `docs/DESIGN.md` (ADR-33 registry section) and `docs/API.md` now say the registry
+  key scheme is not cluster-safe. The register script and `Deregister`'s `TxPipeline` each span
+  `servers:id:{id}` and the map index key, which hash to different slots, so the registry needs
+  a standalone Redis or a Sentinel-managed primary. No code, key or field change.
+- Docs only: `docs/API.md` lists `FindByGameAndMapID` on the `storage.ServerRegistry`
+  interface (ADR-33 leg 3 widened it) and drops the notes saying it was a concrete method only.
+
+### Added
+- **`constants.SessionKey(gameID, userID)` (ADR-33 leg 3).** The session store key:
+  `session:{user_id}` for the default game (empty or `cuvara`, unchanged from today) and
+  `session:{game}:{user_id}` for any other game. The gateway's session manager uses it.
+  Test: `TestSessionKey`.
+- Game IDs `gs`, `map` and `dungeon` are reserved to avoid default-game server ID collisions.
+- **Game identity, ADR-33 leg 1 (Terms).** No behaviour change, no wire or protocol change
+  (`proto/`, generated code and the protocol version constants are untouched).
+  - `constants.DefaultGameID = "cuvara"` and `constants.GameOrDefault(id)` (empty ->
+    `DefaultGameID`, anything else unchanged): absent means the default game. Mirrored once
+    in C# as `GameServer.Games.GameId.DefaultGameId`. Test: `TestGameOrDefault`.
+  - New package `gameid`: `ValidGameID` (`^[a-z][a-z0-9]{1,23}$`), `ValidMapID`
+    (`^[A-Za-z0-9_-]{1,64}$`, so no `:` or `/`), `IsDefaultGame` (`""` or `DefaultGameID`)
+    and `ValidServerID(game, id)` (default game: any non-empty id, preserving every id
+    accepted today; another game: a valid game id and `<game>-` followed by a non-empty
+    suffix, so `foobar-1` is not a `foo` server id). Byte-wise ASCII checks, no trailing
+    newline or non-ASCII accepted. Table-driven tests cover `-`, `_`, `:`, `/`, lengths
+    1/2/24/25 (64/65 for maps) and the shared-prefix case.
+  - `testdata/multigame/identity.json`: the single fixture of the default game id and every
+    game id, map id and server id verdict. Read by `gameid.TestIdentityFixtureParity` (Go)
+    and `GameIdTests.SharedFixture_MatchesConstantsAndValidators` (C#), so the constants and
+    the validators of the two languages cannot drift.
+  - **Optional `gid` JWT claim**: `jwt.Claims.GameID` (`json:"gid,omitempty"`, next to
+    `cid`), `Claims.Game()` (defaults an absent claim), `jwt.SignWithGame` and
+    `Keyring.SignWithGame`. An empty or default game omits the claim, so a default-game
+    token keeps today's claim set byte for byte (`TestLegacyClaimBytes`); an invalid
+    non-empty game is refused. `SignWithCharacter` delegates with an empty game, so every
+    existing signing call is unchanged; `Claims.IsZero` accounts for the field. Nothing
+    mints a non-empty `gid` yet. Tests in `jwt/gid_test.go`.
+- **Game-aware server registry, ADR-33 leg 1 part 2.** Default-game behaviour is unchanged,
+  and there is no wire or protocol change (`proto/`, generated code and the protocol version
+  constants are untouched). The C# game server changes in the same commit.
+  - `storage.ServerInfo.GameID` (`json:"game_id"`) and the eighth registry hash field
+    `game_id`. `infoFromFields` reads an absent or empty `game_id` as
+    `constants.DefaultGameID`, so a pre-ADR-33 entry belongs to the default game; `GetServer`
+    and the lookups return `GameID` filled in. The writer always writes it (explicit
+    `cuvara` for the default game).
+  - `redisstore.MapIndexKey(gameID, mapID)`: `servers:map:{map_id}` for the default game
+    (`""` or `cuvara`, the existing key), `servers:map:{game}:{map_id}` for any other game.
+    `Deregister` removes the id from the index named by the stored `game_id`.
+  - `storage.ErrGameMismatch`. `Register` (Redis) is now one check-and-set Lua script: when
+    `servers:id:{id}` exists and names another game (absent = default), it writes nothing and
+    returns an error wrapping `ErrGameMismatch`; otherwise it does `HSET` (eight fields),
+    `PEXPIRE` and `SADD` as before. Re-registering the same game, or a default-game server
+    over an entry without `game_id`, is accepted. An expired id is free. `MemoryServerRegistry`
+    applies the same rule to live entries.
+  - `FindByGameAndMapID(ctx, gameID, mapID)` on the Redis and memory registries (empty
+    `gameID` = default): reads the game's index, skips entries owned by another game and
+    prunes expired ids like `FindByMapID`. A concrete method only: the
+    `storage.ServerRegistry` interface method set is unchanged (leg 3 widens it).
+  - Fixtures `testdata/multigame/registry.json` (the ordered eight hash fields and the
+    expected map-index keys) and `testdata/multigame/register.lua` (the registration script,
+    byte for byte), pinned by `TestRegistryHashFieldsFixture`, `TestMapIndexKeyFixture`,
+    `TestRegisterScriptFixture` and the C# `RegistryContractTests`. Ownership tests against
+    miniredis in `redisstore/registry_game_test.go`, memory parity in `memory_test.go`.
+
 ### Changed
+- `gameid.ValidGameID` reserves `other` beside `gs`, `map` and `dungeon`, because the gateway metrics game label buckets unknown games as `other`; `testdata/multigame/identity.json` gains the cases (`other` and server id `other-1` refused, `others` and `other1` valid) that the Go and C# parity tests read.
+- **Game-scoped registry lookup (ADR-33 leg 3).** `storage.ServerRegistry` now exposes
+  `FindByGameAndMapID(ctx, gameID, mapID)` (empty game = `constants.DefaultGameID`).
+  `FindByMapID` keeps its signature and returns only default-game servers in both memory
+  and Redis, including when a foreign-game id appears in Redis's default-game index.
+  Table-driven memory/miniredis parity coverage registers the same `map_01` in two games
+  and checks explicit, implicit and legacy default-game lookups.
 - `EntitySnapshot.speed` is now proto3 `optional` without changing its field number or
   type: absent means unknown, and present zero means immobile. Go protobuf conversion
   encodes scalar DTO speed explicitly; decoding to the Go DTO still collapses absent and

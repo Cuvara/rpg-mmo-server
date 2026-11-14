@@ -22,7 +22,12 @@ public sealed record SessionSupersededPayload(
     [property: JsonPropertyName("server_id")] string ServerId,
     [property: JsonPropertyName("jti")] string Jti,
     [property: JsonPropertyName("old_gateway")] string? OldGateway = null,
-    [property: JsonPropertyName("new_gateway")] string? NewGateway = null);
+    [property: JsonPropertyName("new_gateway")] string? NewGateway = null,
+    [property: JsonPropertyName("game_id")] string? GameId = null)
+{
+    [JsonIgnore]
+    public string Game => global::GameServer.Games.GameId.GameOrDefault(GameId);
+}
 
 /// <summary>AOT-compatible JSON context for kick-stream payloads.</summary>
 [JsonSerializable(typeof(SessionSupersededPayload))]

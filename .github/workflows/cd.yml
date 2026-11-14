@@ -238,14 +238,31 @@ jobs:
   # Dev/staging deploys keep using host binaries from the artifact bundle, so
   # the common path stays fast and does not publish packages.
   # Image names MUST match backend/deploy/agones/fleet-{map,dungeon}.yaml.
+  #
+  # One gameserver image per game (ADR-33 leg 5): this job is a matrix over the
+  # games list below. Every game's image is tagged `<game>-<short-sha>` and
+  # `<game>-latest`; the default game, cuvara, ALSO keeps the unprefixed
+  # `:<short-sha>` and `:latest` it has always had. The gateway serves every game
+  # from one image, so it is built once, in the cuvara leg only. The same games
+  # list lives in publish-images.yml and in the "Build realtime images on the
+  # runner" step below; keep the three in step (docs/CICD.md, "Images per game").
   build-images:
-    name: Build & push container images
+    name: Build & push container images (${{ matrix.game }})
     needs: [resolve, build-gateway]
     if: needs.resolve.outputs.environment == 'production' || github.event.inputs.build_images == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      # One game's failed build must not cancel another game's push.
+      fail-fast: false
+      matrix:
+        # THE GAMES LIST. content_dir is relative to backend/ (the build context):
+        # `content` for cuvara, `content/<game>` for any other game.
+        include:
+          - game: cuvara
+            content_dir: content
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -253,9 +270,35 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Short sha
+      - name: Short sha and gameserver tags
         id: meta
-        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        env:
+          GAME: ${{ matrix.game }}
+          CONTENT_DIR: ${{ matrix.content_dir }}
+        run: |
+          set -euo pipefail
+          short=${GITHUB_SHA::7}
+          # Same rule as shared/gameid.ValidGameID and deploy/k8s/games/render.py.
+          if ! printf '%s' "$GAME" | grep -Eq '^[a-z][a-z0-9]{1,23}$'; then
+            echo "::error::games list entry '$GAME' is not a valid game id"; exit 1
+          fi
+          # The server refuses to boot without content: fail the build, not the pod.
+          if [ ! -f "backend/$CONTENT_DIR/items.json" ]; then
+            echo "::error::backend/$CONTENT_DIR/items.json missing: game '$GAME' has no content"; exit 1
+          fi
+          repo=ghcr.io/cuvara/rpg-mmo-gameserver-dotnet
+          {
+            echo "short_sha=$short"
+            echo "gameserver<<EOF"
+            echo "$repo:$GAME-$short"
+            echo "$repo:$GAME-latest"
+            # The default game keeps the unprefixed tags it has always had.
+            if [ "$GAME" = "cuvara" ]; then
+              echo "$repo:$short"
+              echo "$repo:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
@@ -265,7 +308,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Context is backend/ — both go.mod files have `replace ... => ../shared`.
+      # Game-agnostic: built once, in the default game's leg.
       - name: Build & push gateway image
+        if: matrix.game == 'cuvara'
         uses: docker/build-push-action@v6
         with:
           context: backend
@@ -284,20 +329,28 @@ jobs:
           context: backend
           file: backend/deploy/docker/Dockerfile.gameserver-dotnet
           push: true
-          build-args: GIT_REVISION=${{ github.sha }}
-          tags: |
-            ghcr.io/cuvara/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}
-            ghcr.io/cuvara/rpg-mmo-gameserver-dotnet:latest
-          cache-from: type=gha,scope=gameserver-dotnet
-          cache-to: type=gha,scope=gameserver-dotnet,mode=max
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+            CONTENT_DIR=${{ matrix.content_dir }}
+          tags: ${{ steps.meta.outputs.gameserver }}
+          # Per-game cache scope; cuvara keeps the scope it always had, so its
+          # cache stays warm and two games' content layers never evict each other.
+          cache-from: type=gha,scope=${{ matrix.game == 'cuvara' && 'gameserver-dotnet' || format('gameserver-dotnet-{0}', matrix.game) }}
+          cache-to: type=gha,scope=${{ matrix.game == 'cuvara' && 'gameserver-dotnet' || format('gameserver-dotnet-{0}', matrix.game) }},mode=max
 
       - name: Image summary
+        env:
+          GAME: ${{ matrix.game }}
+          SHORT: ${{ steps.meta.outputs.short_sha }}
+          GAMESERVER_TAGS: ${{ steps.meta.outputs.gameserver }}
         run: |
           {
-            echo "### Container images pushed"
+            echo "### Container images pushed (\`$GAME\`)"
             echo ""
-            echo "- \`ghcr.io/cuvara/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
-            echo "- \`ghcr.io/cuvara/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
+            if [ "$GAME" = "cuvara" ]; then
+              echo "- \`ghcr.io/cuvara/rpg-mmo-gateway:$SHORT\` (+ \`:latest\`)"
+            fi
+            printf '%s\n' "$GAMESERVER_TAGS" | sed 's/.*/- `&`/'
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ------------------------------------------------------------------ bundle
@@ -1135,9 +1188,23 @@ jobs:
           docker build -f deploy/docker/Dockerfile.gateway \
             --build-arg "GIT_REVISION=${GITHUB_SHA}" \
             -t "rpg-mmo/gateway:${GITHUB_SHA}" -t rpg-mmo/gateway:dev .
-          docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
-            --build-arg "GIT_REVISION=${GITHUB_SHA}" \
-            -t "rpg-mmo/gameserver-dotnet:${GITHUB_SHA}" -t rpg-mmo/gameserver-dotnet:dev .
+          # One gameserver image per game (ADR-33 leg 5). THE GAMES LIST, as
+          # "<game>:<content dir relative to backend/>" -- the same list as the
+          # build-images job and publish-images.yml. Every game is tagged
+          # <game>-<sha> and <game>-dev; cuvara also keeps the unprefixed <sha>
+          # and :dev that GAMESERVER_IMAGE and the compose/k8s manifests use.
+          for entry in cuvara:content; do
+            game=${entry%%:*}
+            content_dir=${entry#*:}
+            tags=(-t "rpg-mmo/gameserver-dotnet:${game}-${GITHUB_SHA}" -t "rpg-mmo/gameserver-dotnet:${game}-dev")
+            if [ "$game" = "cuvara" ]; then
+              tags+=(-t "rpg-mmo/gameserver-dotnet:${GITHUB_SHA}" -t rpg-mmo/gameserver-dotnet:dev)
+            fi
+            docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+              --build-arg "GIT_REVISION=${GITHUB_SHA}" \
+              --build-arg "CONTENT_DIR=${content_dir}" \
+              "${tags[@]}" .
+          done
           docker image ls --filter reference='rpg-mmo/*' \
             --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'
 

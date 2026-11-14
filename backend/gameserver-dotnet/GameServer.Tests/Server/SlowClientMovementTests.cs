@@ -42,7 +42,7 @@ namespace GameServer.Tests.Server;
 [Collection(WallClockCollection.Name)]
 public class SlowClientMovementTests
 {
-    private const string JwtSecret = "slow-client-secret-32-bytes-aaaaa";
+    private const string JoinSecret = "slow-client-secret-32-bytes-aaaaa";
     private const string ServerId = "gs-slow-client";
     private const double RunSeconds = 1.2;
 
@@ -419,7 +419,7 @@ public class SlowClientMovementTests
             await using var stream = client.GetStream();
 
             await SendAsync(stream, MsgType.JoinToken,
-                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) });
+                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) });
             var joinEnv = await WireProtocol.DecodeAsync(stream, cts.Token);
             Assert.NotNull(joinEnv);
             Assert.True(WireProtocol.GetPayload<JoinTokenResponse>(joinEnv!).Ok);
@@ -573,8 +573,7 @@ public class SlowClientMovementTests
         TickRate = rates.CriticalHz,
         SimulationRates = rates,
         Capacity = 4,
-        JwtSecret = JwtSecret,
-        JoinTokenSecret = JwtSecret,
+        JoinTokenSecret = JoinSecret,
         SaveInterval = TimeSpan.FromSeconds(30),
         PlayerStore = new MemoryPlayerStore(),
         LoggerFactory = NullLoggerFactory.Instance
@@ -605,8 +604,7 @@ public class SlowClientMovementTests
             TickRate = rates.CriticalHz,
             SimulationRates = rates,
             Capacity = 4,
-            JwtSecret = JwtSecret,
-            JoinTokenSecret = JwtSecret,
+            JoinTokenSecret = JoinSecret,
             SaveInterval = TimeSpan.FromSeconds(30),
             PlayerStore = new MemoryPlayerStore(),
             LoggerFactory = NullLoggerFactory.Instance
@@ -623,7 +621,7 @@ public class SlowClientMovementTests
             await using var stream = client.GetStream();
 
             await SendAsync(stream, MsgType.JoinToken,
-                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) });
+                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JoinSecret) });
 
             var joinEnv = await WireProtocol.DecodeAsync(stream, cts.Token);
             Assert.NotNull(joinEnv);

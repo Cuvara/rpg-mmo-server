@@ -93,6 +93,86 @@ It creates one probe account and leaves it (and 30 gold) behind. What each
 | `client record write rejected` | F02: `kills_alltime` is authoritative — Nakama refuses a client's own `WriteLeaderboardRecord` |
 | `server-side score for probe user = 3` | F02/F06: the server path did write the score, exactly once (3 kills, not 6 after the replay) |
 
+## Serve another game (ADR-33)
+
+1. Add the game id to `GAMES` in Nakama's runtime env, keeping `cuvara`:
+   `--runtime.env "GAMES=cuvara,foo"` (see `README.md` → *Configuration*).
+2. Restart Nakama and check the log for `allowed games: [cuvara foo]`. An invalid
+   entry stops start-up with `configure allowed games: …`.
+   The same start-up creates the game's leaderboard; look for
+   `Leaderboard foo.kills_alltime created (authoritative, …)` (or `ready` on
+   later restarts). See *Per-game leaderboards* below.
+3. The game's clients send `vars: {"game": "foo"}` on every authenticate call,
+   and the game's servers send `game_id: "foo"` on `reward_kills` (from
+   `GAMESERVER_GAME_ID`); the gateway sends it on `party_get`. Removing a game
+   from `GAMES` refuses its logins, refreshes and RPCs (code 3); its stored
+   `foo.*` data, its `foo.gold` balances and its `foo.kills_alltime` board are
+   left untouched.
+
+### Per-game leaderboards
+
+- `InitModule` creates `<game>.kills_alltime` for each non-default game in
+  `GAMES` at start-up; `kills_alltime` (`cuvara`) is always ensured. A Nakama
+  leaderboard must exist before a record is written, so **adding a game to
+  `GAMES` needs a Nakama restart** to create its board — the same restart that
+  makes the new `GAMES` take effect.
+- The authoritative check and `LEADERBOARD_MIGRATE=recreate` apply to **each**
+  board in turn. A non-authoritative board stops start-up naming that board
+  (`leaderboard foo.kills_alltime exists with authoritative=false`); fix it as in
+  *Migrate a non-authoritative `kills_alltime` leaderboard*, with the board's
+  own id in the `UPDATE`. `recreate` recreates every non-authoritative board and
+  discards their records, so it is dev/staging only.
+- Boards created by this plugin are authoritative from the start, so a new
+  game's board never needs the migration.
+
+### Where a game's data lives
+
+`cuvara` keeps the bare names; game `foo` uses `foo.characters`,
+`foo.reward_receipts`, `foo.party`, `foo.party_member`, `foo.player` (storage
+collections), `foo.kills_alltime` (leaderboard) and `foo.gold` (wallet key).
+The wallet is one object per user shared by every game, so the hub reads a
+player's `foo` balance as the `foo.gold` key of that wallet, and `gold` is
+`cuvara`'s only. Wallet ledger rows for `foo` carry `game_id: "foo"` in their
+metadata; `cuvara`'s rows have no `game_id`.
+
+## Session refresh keeps the game (local stack)
+
+**Status: verified 2026-11-14** against real Nakama 3.40.0 with the plugin built
+from this branch and `GAMES=cuvara,mgtest`; re-run it after a Nakama upgrade. Unit tests (`TestSessionRefresh_GameVarSeenByPlugin`,
+`TestGameFromContext_AfterSessionRefresh`, `TestBeforeSessionRefresh_Game`) only
+cover what the plugin sees; that Nakama itself copies `vars` from the refresh
+token into the new session is proven only by this test.
+
+`TestSessionRefresh_GameVarLocalStack` (`auth/refresh_localstack_test.go`, build
+tag `localstack`): device login with `vars.game` → `gateway_token` carries `gid`
+→ refresh with the `vars` field omitted → the new session's `vrs.game` and its `gateway_token`
+`gid` are still the game → a login and a refresh with a game outside `GAMES` are
+both refused (4xx, not 5xx). Omitting `vars` or sending an empty
+object keeps the token's vars (verified against real Nakama 3.40.0, 2026-11-14);
+a non-empty `vars` object is validated as a replacement. The test asserts that an
+empty-`vars` refresh keeps the authenticated game in `vrs.game` and in the
+gateway `gid`, and never switches to another game.
+
+1. Start the local stack with a plugin built from this code (repo-root
+   `./scripts/build-all.sh --skip-tests --plugin`, Nakama container stopped) and
+   Nakama started with the test game in `GAMES`, for example
+   `--runtime.env "GAMES=cuvara,mgtest"`.
+2. Run, from `backend/nakama`:
+
+   ```bash
+   NAKAMA_URL=http://127.0.0.1:7350 \
+   NAKAMA_SERVER_KEY=defaultkey \
+   MULTIGAME_TEST_GAME=mgtest \
+   go test -tags localstack ./auth/ -run Refresh -v
+   ```
+
+   `NAKAMA_URL` defaults to `http://127.0.0.1:7350` and `NAKAMA_SERVER_KEY` to
+   `defaultkey`. `MULTIGAME_TEST_GAME` is required and must be a valid
+   non-default game id that is in Nakama's `GAMES`; the test fails fast
+   otherwise. It creates throwaway device accounts (`l4refresh…`).
+3. Record the run (date, Nakama version, result) in the task evidence; until
+   then the refresh guarantee stays HUMAN_REQUIRED.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |
@@ -105,9 +185,18 @@ It creates one probe account and leaves it (and 30 gold) behind. What each
 | A client gets `403 server-only rpc` from `reward_kill`/`reward_kills`/`submit_kill` | Working as intended — these RPCs are server-only | Clients never call them; rewards are granted by the game server |
 | Kills never reach the leaderboard, no errors anywhere | The game server logs `Nakama: disabled (NAKAMA_URL unset)` at startup and silently skips the kill-reward flush (`reward_kills`) | Set `NAKAMA_URL` in the game server's environment (compose files already set it; hand-rolled launch scripts are where it goes missing) |
 | Game server logs `Nakama reward_kills timed out … will resend the same batch id` repeatedly, `gameserver` `PendingKills` climbing | Nakama slow or down; the game server holds the batches and resends them with backoff (3s doubling to 60s) under the same ids | Investigate Nakama latency/health. Nothing is lost while the game server stays up; the receipts make every resend exactly-once |
-| A player disputes a grant ("got gold twice" / "never got gold") | Every granted batch has a receipt | Look up storage collection `reward_receipts`, owner = the user, key = the `batch_id` from the game-server log line: present ⇒ granted exactly once (its `gold`, `kills`, `granted_at`, `leaderboard_done`); absent ⇒ never granted, the game server should still be resending it |
+| A player disputes a grant ("got gold twice" / "never got gold") | Every granted batch has a receipt | Look up storage collection `reward_receipts` (`<game>.reward_receipts` for a non-default game), owner = the user, key = the `batch_id` from the game-server log line: present ⇒ granted exactly once (its `gold`, `kills`, `granted_at`, `leaderboard_done`); absent ⇒ never granted, the game server should still be resending it |
 | Nakama logs `receipt update failed for batch …: a replay may double-count the score` | Score committed but the receipt could not be flipped to `leaderboard_done` | Bounded score drift, accepted (ADR-6). If it recurs, check storage/DB health; gold is never affected |
 | Gateway rejects every realtime token (`invalid signature`) | `JWT_SECRET` mismatch between Nakama and Gateway | Align the env var in both deployments and restart |
 | Gateway rejects tokens with `token expired` | Client cached a token past `expires_in` (3600s), or clock skew | Have the client re-call `gateway_token`; check NTP on both hosts |
 | `gateway_token` returns code 16 | Client called the RPC without a Nakama session | Authenticate first (device/email) and send the session token |
+| Nakama fails to start: `configure allowed games: …invalid GAMES entry` | A `GAMES` entry is not `^[a-z][a-z0-9]{1,23}$` (or the list has an empty entry, e.g. a trailing comma) | Fix the runtime env value and restart |
+| Every `cuvara` login refused with `game not allowed` after setting `GAMES` | `GAMES` is set but does not list `cuvara`; a set list is exact | Add `cuvara` to `GAMES` and restart |
+| A game's logins or `gateway_token` refused with `game not allowed` (code 3) | The client's `vars.game` is not in `GAMES` | Add the game to `GAMES`, or fix the client's `vars` |
+| `gateway_token` returns code 7 `game_id does not match the session game` | Client sent a `game_id` other than its session's `vars.game` | Drop `game_id` from the request, or log in again with the right `vars.game` |
+| `gateway_token` for a non-default game returns `character not found` for a character listed under `characters` | Non-default games check `<game>.characters` only, with no fallback; a character belongs to one game | Expected. Create the character with `character_create` from a session of that game |
+| `reward_kills` / `submit_kill` / `party_get` refused with `game not allowed` (code 3) | The payload `game_id` (the game server's `GAMESERVER_GAME_ID`, or the gateway's session `gid`) is not in Nakama's `GAMES` | Add the game to `GAMES` and restart. Nothing was granted by the refused calls |
+| A non-default game's kills reach the wallet but `reward_kills` answers `status: partial`, its `leaderboard_error` naming a missing leaderboard | `<game>.kills_alltime` does not exist: the game was added to `GAMES` without a restart, or a pre-ADR-33 plugin is loaded | Restart Nakama with the current plugin; resending the same batch id retries only the leaderboard |
+| A party lookup from the gateway returns `party not found` for a non-default game's party | `party_get` was sent without `game_id`, so it read `cuvara`'s `party` collection | Check the gateway sends the session's `gid` as `game_id` |
+| `party_join` / `party_get` from a client returns code 7 | Client sent a `game_id` other than its session's `vars.game` | Drop `game_id` from client calls; the session decides |
 | Players log in with no profile | `StorageWrite` failing (DB pressure / permissions) | Check Nakama logs for `after authenticate …: ensure profile:` errors and PostgreSQL health |

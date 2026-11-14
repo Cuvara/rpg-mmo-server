@@ -72,7 +72,7 @@ go run ./cmd/gateway/ --backend=redis --instance-id=gw-1
 | `--allocation-poll-interval` | `ALLOCATION_POLL_INTERVAL` (`250ms`) | Registry re-check interval during that wait |
 | `--allocator-kubeconfig` | in-cluster → `$KUBECONFIG` → `~/.kube/config` | Credential source for the allocation API |
 | `--tls-cert` / `--tls-key` | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` (empty) | PEM paths making the gateway **terminate TLS itself** (ADR-23). Both empty = plaintext, the default. **Exactly one set is a startup error**, never a fall back to plaintext |
-| `--join-token-secret` | `JOIN_TOKEN_SECRET` → `JWT_SECRET` | HS256 secret for gateway→gameserver join tokens. Comma-separated to rotate |
+| `--join-token-secret` | `JOIN_TOKEN_SECRET` (**required**, no fallback) | HS256 secret for gateway→gameserver join tokens (default game). Comma-separated to rotate. Unset is **fatal** at startup |
 | `--conn-rate-per-min` | `GATEWAY_CONN_RATE_PER_MIN` (`10`) | Accepted connections per minute per source IP. `0` disables |
 | `--msg-rate-per-sec` | `GATEWAY_MSG_RATE_PER_SEC` (`60`) | Inbound frames per second per connection. `0` disables |
 
@@ -102,6 +102,11 @@ token's `sid` is the allocated GameServer name, which the pod also registers as
 (`POD_NAME` → `--server-id`). An exhausted fleet answers `UnAllocated` and surfaces as
 `registry.ErrNoCapacity`. In-cluster the gateway's ServiceAccount needs
 `create` on `gameserverallocations.allocation.agones.dev` in that namespace.
+The flags above configure the default game (`cuvara`). Every other game in `GAMES`
+allocates from its own fleets in its own namespace (`ALLOCATOR_FLEET_MAP_<GAME>`,
+`ALLOCATOR_FLEET_DUNGEON_<GAME>`, `ALLOCATOR_NAMESPACE_<GAME>` defaulting to
+`<namespace>-<game>`; see Configuration), so the ServiceAccount needs the same `create`
+in each of those namespaces.
 See `docs/API.md` for the wire flow and `docs/DESIGN.md` for the rationale.
 
 ### Security
@@ -209,7 +214,11 @@ All three Redis stores share one client/pool.
 |-----|---------|----------|
 | `GATEWAY_ADDR` | `:8000` | Listen address |
 | `JWT_SECRET` | `dev-secret-change-me` | Client auth-token verification (shared with Nakama). Comma-separated list to rotate: `new,old` — first signs, all verify |
-| `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | Join-token signing (shared with gameserver-dotnet). Also rotatable. Unset logs a warning |
+| `JOIN_TOKEN_SECRET` | *(none; **required**)* | Join-token signing for the default game (shared with gameserver-dotnet). Also rotatable. There is no fallback to `JWT_SECRET`: unset (and no `--join-token-secret`) is **fatal** at startup. Equal to `JWT_SECRET` logs a warning |
+| `GAMES` | *(empty → `cuvara` only)* | Games this gateway admits (ADR-33), comma-separated, mirroring Nakama's `GAMES`. Each entry must be a valid game id (`gameid.ValidGameID`); an invalid or empty entry is **fatal** at startup. A client token whose `gid` (absent = `cuvara`) is not listed is refused at auth with `game not configured`. EnterWorld is routed per (game, map); a listed non-default game also needs `JOIN_TOKEN_SECRET_<GAME>` below, or its EnterWorld is refused with `game not routable` |
+| `JOIN_TOKEN_SECRET_<GAME>` | *(none)* | Join-token signing for non-default game `<game>` (`<GAME>` = id upper-cased), comma-separated to rotate. No fallback to `JOIN_TOKEN_SECRET` or `JWT_SECRET`; unset = that game is not routable (startup warning naming the setting). Give the same value to that game's servers. Startup also **warns** when it equals `JWT_SECRET`, or when any of its rotation keys is also a key of another game's join secret (`cuvara`'s included): a server holding a shared key could forge the other game's join tokens |
+| `ALLOCATOR_FLEET_MAP_<GAME>` / `ALLOCATOR_FLEET_DUNGEON_<GAME>` | *(none)* | Agones fleets for non-default game `<game>` (ADR-33 D7); `cuvara` keeps `ALLOCATOR_FLEET_MAP` / `ALLOCATOR_FLEET_DUNGEON`. Unset = that kind fails with `ErrKindNotConfigured` naming the game and setting. Only with `--allocator=agones` |
+| `ALLOCATOR_NAMESPACE_<GAME>` | `<ALLOCATOR_NAMESPACE>-<game>` | Namespace holding that game's fleets (ADR-33 D7). Allocated GameServer names must start with `<game>-` |
 | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` | *(empty)* | TLS on the gateway listener (ADR-23). Both empty = plaintext. Setting one is fatal |
 | `GATEWAY_CONN_RATE_PER_MIN` | `10` | Per-IP connection rate limit (`0` disables) |
 | `GATEWAY_CONN_BURST` | `10` | Per-IP burst |
@@ -296,18 +305,29 @@ curl localhost:9102/readyz      # 200 "ready", or 503 "not ready: redis"
 | Metric | Type | Labels |
 |--------|------|--------|
 | `gateway_connections_active` | gauge | — |
-| `gateway_auth_total` | counter | `result=ok\|fail` |
-| `gateway_enter_world_total` | counter | `result=ok\|fail` |
-| `gateway_allocations_total` | counter | `result=ok\|fail` |
+| `gateway_auth_total` | counter | `game`, `result=ok\|fail` |
+| `gateway_enter_world_total` | counter | `game`, `result=ok\|fail` |
+| `gateway_allocations_total` | counter | `game`, `result=ok\|fail` |
 | `gateway_relay_events_total` | counter | — |
 | `gateway_rate_limited_total` | counter | `reason=connection\|message` |
 | `gateway_transport_encrypted` | gauge | `transport`, `cipher` | 1 when packets leave the gateway as ciphertext, 0 when cleartext. **0 is the default** (the listener is `tcp`, which has no packet encryption; only TLS sets it to 1). A gauge, not a counter, so it is present when it reads 0 — a security question must never be answered by a missing field |
 | `gateway_transport_authenticated` | gauge | `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. 1 only with gateway TLS (`cipher="tls"`); plaintext TCP is 0. Separate from `transport_encrypted` so encryption cannot be read as integrity |
 | `gateway_redis_up` | gauge | — |
 | `gateway_relay_up` | gauge | — |
-| `gateway_session_checks_total` | counter | `result=ok\|expired\|store_error` |
+| `gateway_session_checks_total` | counter | `game`, `result=ok\|expired\|store_error` |
 | `gateway_stream_group_loss_total` | counter | — |
 | `gateway_kick_publish_total` | counter | `result=ok\|fail` |
+
+**The `game` label (ADR-33)** is set from the verified `gid` claim only, mapped
+through `GAMES`: a configured game reports its id, anything else reports `other`.
+`other` therefore covers both an unconfigured game and every failure that happens
+before a token verified (malformed request, protocol refusal, invalid token,
+`game_not_configured`, EnterWorld before auth); a client cannot mint label values.
+Each configured game is zero-primed for every result, `other` is not.
+`gateway_enter_world_total` and `gateway_allocations_total` record the game the
+request was routed for; `gateway_allocations_total` counts map **and** dungeon
+allocations. Queries that select on `result` alone, and
+`sum by (result)`, keep working; only an exact-label-set match needs `game`.
 
 `gateway_kick_publish_total` counts duplicate-login supersede events published to
 the `events:kick` stream (ADR-20). A `fail` is a duplicate login whose old

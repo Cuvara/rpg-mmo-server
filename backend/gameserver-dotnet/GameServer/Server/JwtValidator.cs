@@ -22,7 +22,9 @@ public static partial class JwtValidator
     /// by the gateway. Empty when the claim is absent, which means the account's default
     /// character — every token minted before protocol 3.
     /// </param>
-    public record JwtClaims(string UserId, string ServerId, long Exp, string Jti = "", string CharacterId = "");
+    /// <param name="GameId">The <c>gid</c> claim (ADR-33); empty when absent means the default game.</param>
+    public record JwtClaims(string UserId, string ServerId, long Exp, string Jti = "", string CharacterId = "",
+        string GameId = "");
 
     /// <summary>Clock skew tolerance for expiration checks (seconds).</summary>
     public const int ClockSkewSeconds = 5;
@@ -41,6 +43,9 @@ public static partial class JwtValidator
 
         [JsonPropertyName("cid")]
         public string? CharacterId { get; set; }
+
+        [JsonPropertyName("gid")]
+        public string? GameId { get; set; }
 
         [JsonPropertyName("exp")]
         public long Exp { get; set; }
@@ -138,7 +143,7 @@ public static partial class JwtValidator
 
             status = VerifyStatus.Ok;
             return new JwtClaims(claims.UserId, claims.ServerId ?? "", claims.Exp, claims.Jti ?? "",
-                claims.CharacterId ?? "");
+                claims.CharacterId ?? "", claims.GameId ?? "");
         }
         catch
         {

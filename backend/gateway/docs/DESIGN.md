@@ -1,5 +1,136 @@
 # Gateway — Design Decisions
 
+## 2026-11-13 — EnterWorld is routed per (game, map) (ADR-33 leg 3, routing)
+
+### Context
+
+The session entry below admitted configured non-default games but still routed
+EnterWorld by map id only, so a game-B player asking for `map_01` could be handed
+game A's `map_01` server, with a join token signed by the one shared join secret.
+Map ids are chosen per game, so collisions are expected, not exotic.
+
+### Decision
+
+- **The game comes from the session, never the request.** `handleEnterWorld` reads
+  user, state and game under one lock (`ClientConn.IdentityGame`). `MsgEnterWorld`
+  and `wire.proto` are unchanged (ADR-33 D1 item 3, option C).
+- **Ids are validated before anything observes them.** `MapID` (also the dungeon
+  content id when `PartyID` is set) must pass `gameid.ValidMapID`
+  (`^[A-Za-z0-9_-]{1,64}$`) before any registry read, party RPC or allocation; a
+  refusal is `invalid map id`. The id becomes part of a Redis key and an allocation
+  request, so it is checked at the boundary rather than trusted downstream.
+- **A game without a join keyring is not routable.** `transfer.JoinKeyrings` holds
+  `cuvara`'s keyring (`JOIN_TOKEN_SECRET`) and one per other game
+  (`JOIN_TOKEN_SECRET_<GAME>`). `For(game)` never falls back to `cuvara`'s keys: a
+  fallback would let every game's servers verify every other game's tokens. A
+  configured game without one is refused with `game not routable` before lookup.
+  Startup warns on a missing secret, on a game secret equal to `JWT_SECRET`, and when
+  any rotation key is shared between two games' join secrets; warnings, because a
+  dev stack legitimately reuses values.
+- **Lookup is by (game, map).** `FindServerGame` → `FindByGameAndMapID`, whose
+  non-default index is `servers:map:{game}:{map_id}` while `cuvara` keeps
+  `servers:map:{map_id}`. Next to the existing "entry serves another map" check,
+  `findServer` refuses an entry whose `game_id` differs (`ErrFleetMapMismatch`):
+  the index is keyed by game, so such an entry means the store is lying, and it is
+  refused rather than filtered, as for maps.
+- **Fleets are per (game, kind).** `cuvara` keeps `ALLOCATOR_FLEET_MAP`,
+  `ALLOCATOR_FLEET_DUNGEON` and `ALLOCATOR_NAMESPACE`, so no deployed setting
+  changes. Another game reads `ALLOCATOR_FLEET_MAP_<GAME>`,
+  `ALLOCATOR_FLEET_DUNGEON_<GAME>` and `ALLOCATOR_NAMESPACE_<GAME>`, the namespace
+  defaulting to `<ALLOCATOR_NAMESPACE>-<game>` (ADR-33 D7). An unset fleet fails with
+  `ErrKindNotConfigured` naming the game and the setting. Env only: per-game flags
+  would multiply with `GAMES`.
+- **Allocation is checked against the game twice.** The allocated GameServer name
+  must carry the `<game>-` prefix for a non-default game (`gameid.ValidServerID`),
+  and the pod's own registry entry must report the requested game. The second check
+  is the one that matters, because the pod self-registers under its fleet's game;
+  the first catches a wrong fleet before the registration wait. A map-path game
+  mismatch is remembered like a map mismatch, since a fleet's game is as fixed as
+  its map. The mismatch memory and allocation single-flight are keyed by
+  `(game, map)`.
+- **Dungeons follow the same rules.** `AllocateDungeon(game, contentID)` picks the
+  game's dungeon fleet and refuses a server of another game. A cached party →
+  server mapping whose server now belongs to another game is refused and
+  **released**, so the next member allocates afresh instead of hitting the same
+  stale mapping. `party_get` gets `game_id` so Nakama answers for that game's party.
+- **Join tokens carry `gid` only for non-default games.** `cuvara` tokens keep their
+  claim set byte for byte, so game servers and tests that predate ADR-33 are
+  unaffected.
+- **`server_down` names the game.** The watcher stores each tracked server's
+  `ServerInfo` rather than its map id, so the event still carries `game_id` after
+  the registry entry (the only other source of it) has expired. Allocated dungeon
+  servers are now tracked too.
+- **Metrics:** `gateway_enter_world_total` and `gateway_allocations_total` take the
+  routed game; dungeon allocations are now counted.
+
+### Consequences
+
+- Default-game deployments need no new settings and see no wire or token change.
+- Adding a game to `GAMES` is not enough to route it: it also needs
+  `JOIN_TOKEN_SECRET_<GAME>` on the gateway (and the same value on that game's
+  servers), plus `ALLOCATOR_FLEET_MAP_<GAME>` when allocation is on.
+- The game server compares `gid` with its own game and refuses a mismatch with
+  `Token is for a different game` (ADR-33 leg 2). The per-game join secret is defence
+  in depth on top of that check, which is why a shared key is warned about.
+- Fixed in passing: an expired session cleared the connection identity but left its
+  `(game, user)` entry in `userConns`; `checkSession` now untracks it like teardown.
+
+## 2026-11-13 — Sessions, duplicate login and kicks are scoped by game (ADR-33 leg 3)
+
+### Context
+
+ADR-33 lets one account play several games against the same backend. The gateway
+token now carries an optional `gid` claim (absent = `cuvara`), but the gateway kept
+one session per user (`session:{user_id}`) and one tracked socket per user, so a
+login to game B would have read game A's session, published a supersede for it and
+kicked the game-A socket.
+
+### Decision
+
+- **Admitted games are configuration.** `GAMES` (comma-separated, mirroring Nakama's
+  `GAMES`; absent = `cuvara` only) is parsed at startup; any invalid entry refuses to
+  start. `handleAuth` refuses a verified token whose game is not configured with
+  `game not configured` (reason `game_not_configured`) before touching the session
+  store. Routing is not game-aware yet, so admitting an unknown game would hand it a
+  map server of another game.
+- **The game is latched with the character.** `SetAuthenticatedGame` stores `gid`
+  next to `cid` under the connection lock; `ClearIdentityGame` returns and clears both
+  atomically, so teardown keeps the exactly-once property of `ClearIdentity`.
+- **Session key.** `constants.SessionKey(game, user)`: `session:{user_id}` for the
+  default game, so existing records and every default-game reader keep working, and
+  `session:{game}:{user_id}` otherwise. Creation, validation, pong refresh, the
+  EnterWorld update and destruction all use the connection's game.
+- **Duplicate login is per (game, user).** Detection reads only the same game's
+  session; `userConns`, `trackUser` / `untrackUser` / `findUserConn`, `kickLocalUser`
+  and disconnect cleanup are keyed by `(game, user)`. Logging into game B therefore
+  never reads, supersedes or kicks game A, on one gateway or across two. A socket that
+  re-authenticates into another game or account untracks its previous key first, so a
+  later login to the old game cannot find and evict it.
+- **Kicks carry the game, and the cross-gateway close is jti-guarded.** Every
+  `SessionSupersededEvent` written has `game_id`, `cuvara` included. The
+  `events:gateway_kick` consumer closes only the `(game_id, user_id)` connection whose
+  last join-token jti (recorded at EnterWorld, cleared on re-auth and teardown) equals
+  the event's. Before this the consumer closed whatever socket the user had, so a kick
+  delivered after the user's newer login on that gateway had entered a world closed
+  the new login; the jti makes it a no-op, the same guard the game server uses.
+- **Metrics take the verified game only.** The four result-labelled families gain
+  `game`, mapped through `GAMES` with everything else as `other`. Label values come
+  from configuration, never from a client, so cardinality is bounded by `GAMES` + 1.
+
+### Consequences
+
+- Default-game behaviour is unchanged apart from the explicit `game_id` in kick
+  events and the new `game` label.
+- A gateway without `cuvara` in `GAMES` refuses default-game logins. That is the
+  configuration asking for it, not a fallback.
+- A connection that never entered a world has no jti and is never closed by a
+  `gateway_kick` event. Publishers only emit for sessions with a jti, so no such
+  event exists for it.
+- ~~Until l3-routing, a configured non-default game is routed by map id only.~~
+  Resolved by the routing entry above: EnterWorld is routed per `(game, map)`, a game
+  without a join secret is refused with `game not routable`, and
+  `gateway_allocations_total` records the requested game.
+
 ## 2026-10-08 — TCP-only listener; gameplay is KCP/UDP only (ADR-32)
 
 ### Context
@@ -526,7 +657,8 @@ rather than closing the socket, so the client can re-`MsgAuth` on the same conne
 would leave a Redis-backed deployment reporting ghost-online players for up to an hour.
 `cleanupSession` takes the identity via `cc.ClearIdentity()`, which returns the user it
 cleared under the connection's lock, so a double call is a no-op and the two paths cannot
-both destroy the same session.
+both destroy the same session. *(Since ADR-33 leg 3 it uses `ClearIdentityGame`, which
+returns the game too, and destroys that game's session key; see the 2026-11-13 entry.)*
 
 **3a. Connection identity is mutex-guarded, and not by accident.**
 `ClientConn` is touched by two goroutines per connection: the read loop (`ReadLoop` →

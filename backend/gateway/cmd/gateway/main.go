@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
 	"github.com/duycuong/rpg-mmo/shared/config"
+	"github.com/duycuong/rpg-mmo/shared/constants"
+	sharedjwt "github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/storage"
@@ -65,6 +68,13 @@ func main() {
 
 	cfg := config.Load()
 	log := logger.New(cfg.LogLevel)
+
+	games, gamesErr := session.ParseGames(os.Getenv(session.EnvGames))
+	if gamesErr != nil {
+		log.Error("invalid games configuration", "err", gamesErr)
+		os.Exit(1)
+	}
+	log.Info("configured games", "games", games.IDs())
 
 	listenAddr := cfg.GatewayAddr
 	if *addr != "" {
@@ -115,6 +125,47 @@ func main() {
 	if joinSecret == cfg.JWTSecret {
 		log.Warn("JOIN_TOKEN_SECRET and JWT_SECRET are the same value -- a leak of either secret compromises both the Nakama auth hop and the game-server hop. Use distinct secrets before launch.")
 	}
+	// Compare individual rotation keys as well as complete secret settings.
+	joinSecretOwners := make(map[string]string)
+	for _, key := range strings.Split(joinSecret, ",") {
+		if key = strings.TrimSpace(key); key != "" {
+			joinSecretOwners[key] = constants.DefaultGameID
+		}
+	}
+	var gameJoinOptions []server.Option
+	for _, game := range games.IDs() {
+		if game == constants.DefaultGameID {
+			continue
+		}
+		envName := "JOIN_TOKEN_SECRET_" + strings.ToUpper(game)
+		secret := os.Getenv(envName)
+		// Parse exactly as WithGameJoinTokenSecret does, so a setting it would
+		// drop (blank, or separators only such as ",,") warns here instead of
+		// vanishing. The error is not logged: it quotes the setting's value.
+		if _, perr := sharedjwt.ParseKeyring(secret); perr != nil {
+			log.Warn("game join-token secret is missing or unparseable; EnterWorld for this game is refused",
+				"game", game, "setting", envName)
+			continue
+		}
+		if secret == cfg.JWTSecret {
+			log.Warn("game join-token secret and JWT_SECRET are the same value -- use distinct secrets before launch",
+				"game", game, "setting", envName)
+		}
+		// Same split and trim as ParseKeyring, which does not expose its keys.
+		for _, key := range strings.Split(secret, sharedjwt.KeyringSeparator) {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if owner, ok := joinSecretOwners[key]; ok && owner != game {
+				log.Warn("games share a join-token secret; a game server can forge another game's tokens",
+					"game", game, "other_game", owner, "setting", envName)
+			} else {
+				joinSecretOwners[key] = game
+			}
+		}
+		gameJoinOptions = append(gameJoinOptions, server.WithGameJoinTokenSecret(game, secret))
+	}
 	if cfg.JWTSecret == "dev-secret-change-me" {
 		log.Warn("JWT_SECRET is the built-in development default -- anyone can forge auth tokens. Set JWT_SECRET before exposing this gateway.")
 	}
@@ -141,6 +192,7 @@ func main() {
 	// Metrics listener: separate port from the realtime listener, started before
 	// anything else so a crash-looping gateway is still scrapeable/probeable.
 	met, promReg := metrics.NewDefault()
+	met.SetGames(games.IDs())
 	// Readiness checks are registered below once the backend is known — the
 	// metrics listener starts first on purpose, so probes work even if backend
 	// wiring fails.
@@ -252,6 +304,17 @@ func main() {
 			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON")),
 			Kubeconfig:   firstNonEmpty(*allocKubeconfig, os.Getenv("ALLOCATOR_KUBECONFIG")),
 		}
+		agonesCfg.Games = make(map[string]registry.GameFleets)
+		for _, game := range games.IDs() {
+			if game == constants.DefaultGameID {
+				continue
+			}
+			agonesCfg.Games[game] = registry.GameFleets{
+				Map:       os.Getenv(registry.FleetEnvName(registry.KindMap, game)),
+				Dungeon:   os.Getenv(registry.FleetEnvName(registry.KindDungeon, game)),
+				Namespace: os.Getenv("ALLOCATOR_NAMESPACE_" + strings.ToUpper(game)),
+			}
+		}
 		// An allocated pod is not dialable the moment the allocation API
 		// answers: it still has to boot, bind, report Ready and self-register.
 		// The registry waits for its own entry before a join token is minted,
@@ -334,7 +397,7 @@ func main() {
 	// on the memory backend MemoryEventStream dispatches by stream name.
 	kickConsumer := server.NewKickConsumer(
 		eventStream, gatewayID,
-		func(userID string) { gw.FindAndCloseConnection(userID) },
+		func(game, userID, jti string) { gw.FindAndCloseConnection(game, userID, jti) },
 		log,
 	)
 
@@ -366,9 +429,10 @@ func main() {
 		}
 	}
 
-	gw = server.New(sessions, reg, cfg.JWTSecret, log,
+	gwOptions := []server.Option{
 		server.WithEventRelay(relay),
 		server.WithMetrics(met),
+		server.WithGames(games),
 		// Duplicate-login supersede events publish into the SAME event stream
 		// backend the relay consumes from (events:kick vs events:game are
 		// different keys on the same store). On the memory backend the stream
@@ -388,7 +452,8 @@ func main() {
 		server.WithConnRateLimit(connRatePerMin/60, connBurst),
 		server.WithMsgRateLimit(msgRatePerSec, msgBurst),
 		server.WithMinProtocolVersion(uint32(*minProtoVersion)),
-	)
+	}
+	gw = server.New(sessions, reg, cfg.JWTSecret, log, append(gwOptions, gameJoinOptions...)...)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)

@@ -45,6 +45,11 @@ public class ServerOptions
     /// </summary>
     public KcpListenerOptions KcpLimits { get; set; } = KcpListenerOptions.Default;
     public string ServerId { get; set; } = "";
+    /// <summary>
+    /// The game this server serves, from <c>GAMESERVER_GAME_ID</c> (ADR-33).
+    /// Join tokens for another game are refused.
+    /// </summary>
+    public string GameId { get; set; } = GameServer.Games.GameId.DefaultGameId;
     public string MapId { get; set; } = "map_01";
     public string Mode { get; set; } = "map"; // "map" or "dungeon"
     /// <summary>
@@ -240,13 +245,6 @@ public class ServerOptions
     /// </para>
     /// </remarks>
     public Net.Sealed.ServerIdentity ServerIdentity { get; set; } = Net.Sealed.ServerIdentity.Generate();
-    /// <summary>
-    /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
-    /// client auth token. The game server itself never sees that token; this is
-    /// only the fallback for <see cref="JoinTokenSecret"/>.
-    /// </summary>
-    public string JwtSecret { get; set; } = "";
-
     /// <summary>
     /// HS256 secret (or comma-separated rotation list, "current,previous") that the
     /// gateway signs join tokens with — <c>JOIN_TOKEN_SECRET</c>. REQUIRED: the
@@ -510,6 +508,9 @@ public class ServerOptions
 /// </summary>
 public sealed class GameServerHost : IAsyncDisposable
 {
+    /// <summary>Join refusal when the token names another game (ADR-33).</summary>
+    public const string ReasonDifferentGame = "Token is for a different game";
+
     private readonly ServerOptions _options;
     private readonly EcsWorld _world;
 
@@ -911,7 +912,8 @@ public sealed class GameServerHost : IAsyncDisposable
                 options.NakamaUrl,
                 options.NakamaHttpKey,
                 _loggerFactory.CreateLogger<Nakama.NakamaClient>(),
-                options.NakamaHttpHandler);
+                options.NakamaHttpHandler,
+                options.GameId);
             // One reward_kills call per killer per flush, instead of two HTTP RPCs and
             // two meta-DB transactions per kill (#233).
             _killBatcher = new Nakama.KillRewardBatcher(
@@ -922,7 +924,7 @@ public sealed class GameServerHost : IAsyncDisposable
         }
 
         var eventStream = options.EventStream ?? new NoopEventStream();
-        _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>(), _metrics);
+        _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>(), _metrics, gameId: options.GameId);
 
         SimulationRates rates = options.SimulationRates ?? SimulationRates.Uniform(options.TickRate);
         _rates = rates;
@@ -1654,6 +1656,17 @@ public sealed class GameServerHost : IAsyncDisposable
                 return;
             }
 
+            // Step 3a: Check game ID before consuming the token or reserving capacity.
+            string tokenGame = Games.GameId.GameOrDefault(claims.GameId);
+            string serverGame = Games.GameId.GameOrDefault(_options.GameId);
+            if (!string.Equals(tokenGame, serverGame, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "Join rejected for {UserId}: token is for game {TokenGame}, this server serves {ServerGame}",
+                    claims.UserId, tokenGame, serverGame);
+                await SendError(tempConn, ReasonDifferentGame, handshakeToken);
+                return;
+            }
 
             // Step 3b: JTI replay protection
             if (string.IsNullOrEmpty(claims.Jti) || !_jtiTracker.TryConsume(claims.Jti))

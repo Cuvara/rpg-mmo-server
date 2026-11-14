@@ -101,7 +101,7 @@ public class KcpGameplayTests
 
         using var client = await h.ConnectAsync();
         var resp = await SendTokenAsync(client,
-            TestHelpers.CreateExpiredJwt("kcp-expired", HardeningHarness.ServerId, HardeningHarness.JwtSecret));
+            TestHelpers.CreateExpiredJwt("kcp-expired", HardeningHarness.ServerId, HardeningHarness.JoinSecret));
 
         Assert.False(resp.Ok);
         Assert.True(await HardeningHarness.ObservesEofAsync(client, TimeSpan.FromSeconds(5)));
@@ -116,7 +116,7 @@ public class KcpGameplayTests
 
         using var client = await h.ConnectAsync();
         var resp = await SendTokenAsync(client,
-            TestHelpers.CreateTestJwt("kcp-wrong-server", "gs-somewhere-else", HardeningHarness.JwtSecret));
+            TestHelpers.CreateTestJwt("kcp-wrong-server", "gs-somewhere-else", HardeningHarness.JoinSecret));
 
         Assert.False(resp.Ok);
         Assert.True(await HardeningHarness.ObservesEofAsync(client, TimeSpan.FromSeconds(5)));
@@ -276,8 +276,7 @@ public class KcpGameplayTests
             MapId = HardeningHarness.MapId,
             TickRate = 20,
             Capacity = 8,
-            JwtSecret = HardeningHarness.JwtSecret,
-            JoinTokenSecret = HardeningHarness.JwtSecret,
+            JoinTokenSecret = HardeningHarness.JoinSecret,
             SaveInterval = TimeSpan.FromHours(1),
             PlayerStore = new MemoryPlayerStore(),
             LoggerFactory = NullLoggerFactory.Instance,

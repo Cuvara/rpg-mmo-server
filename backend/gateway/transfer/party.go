@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/duycuong/rpg-mmo/shared/constants"
 )
 
 // ErrNotAPartyMember is returned when the caller named a party they are not in.
@@ -35,10 +37,10 @@ var ErrPartyUnknown = errors.New("party does not exist")
 // The cost is one internal RPC per dungeon entry -- never per tick, on a path
 // that already blocks waiting for a pod to be allocated.
 type PartyMembership interface {
-	// IsMember reports whether userID is in partyID. It returns ErrPartyUnknown
+	// IsMember reports whether userID is in partyID for gameID. It returns ErrPartyUnknown
 	// when there is no such party, and a wrapped transport error when the
 	// question could not be asked at all.
-	IsMember(ctx context.Context, partyID, userID string) (bool, error)
+	IsMember(ctx context.Context, gameID, partyID, userID string) (bool, error)
 }
 
 // NakamaParty asks Nakama's party_get RPC over the server-to-server HTTP key --
@@ -178,7 +180,7 @@ type partyGetResponse struct {
 }
 
 // IsMember implements PartyMembership.
-func (n *NakamaParty) IsMember(ctx context.Context, partyID, userID string) (bool, error) {
+func (n *NakamaParty) IsMember(ctx context.Context, gameID, partyID, userID string) (bool, error) {
 	if n == nil || n.baseURL == "" {
 		return false, fmt.Errorf("party membership: no Nakama URL configured")
 	}
@@ -186,7 +188,7 @@ func (n *NakamaParty) IsMember(ctx context.Context, partyID, userID string) (boo
 	// Nakama's RPC payload is a JSON *string* containing the JSON document, so
 	// the request body is a double-encoded object. That is an upstream API
 	// shape, not a choice made here.
-	inner, err := json.Marshal(map[string]string{"party_id": partyID})
+	inner, err := json.Marshal(map[string]string{"party_id": partyID, "game_id": constants.GameOrDefault(gameID)})
 	if err != nil {
 		return false, fmt.Errorf("party membership: marshal payload: %w", err)
 	}
