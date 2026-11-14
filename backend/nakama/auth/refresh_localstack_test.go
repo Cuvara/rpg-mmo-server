@@ -182,8 +182,10 @@ func TestSessionRefresh_GameVarLocalStack(t *testing.T) {
 	})
 	assertDenied(status, body)
 
-	// An explicit empty vars object replaces the token's vars, selecting the
-	// default game if Nakama accepts the refresh.
+	// An explicit empty vars object cannot be told apart from an omitted one over
+	// JSON/protobuf, so real Nakama keeps the refresh token's vars. The session
+	// must keep the authenticated game (or the refresh be refused); it must never
+	// switch to another game.
 	status, body = post("/v2/account/session/refresh", "", map[string]any{
 		"token": refreshed.RefreshToken, "vars": map[string]string{},
 	})
@@ -204,9 +206,13 @@ func TestSessionRefresh_GameVarLocalStack(t *testing.T) {
 			t.Fatalf("decode empty-vars refreshed session vars: %v", err)
 		}
 		t.Logf("empty-vars refresh session vrs = %v", claims.Vars)
-		if got := claims.Vars["game"]; got != "" && got != "cuvara" {
-			t.Fatalf("empty-vars refresh vrs.game = %q, want default game", got)
+		if got := claims.Vars["game"]; got != game {
+			t.Fatalf("empty-vars refresh vrs.game = %q, want the authenticated game %q", got, game)
 		}
+		if got := gatewayGame(emptyVarsSession.Token); got != game {
+			t.Fatalf("empty-vars refresh gateway gid = %q, want %q", got, game)
+		}
+		t.Logf("empty-vars refresh kept game %q (vrs.game and gateway gid)", game)
 	} else {
 		assertDenied(status, body)
 		t.Logf("empty-vars refresh refused: HTTP %d: %s", status, body)

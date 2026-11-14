@@ -4892,7 +4892,9 @@ every RPC can read.
     every handler. The client of a non-default game passes `vars: {game: <id>}` when it
     authenticates. The existing client changes nothing.
   - **Unverified.** This ADR does not assume that a Nakama session refresh keeps the vars.
-    The leg's test must cover refresh.
+    The leg's test must cover refresh. Now verified: real Nakama 3.40.0 keeps the vars
+    across a refresh, including one with an empty `vars` object
+    (`TestSessionRefresh_GameVarLocalStack`).
 - **Option C: the game is the Nakama instance.** One Nakama per game, with `GAME_ID` in
   that Nakama's runtime env and no client input. Its costs are those of D4 Option A. It is
   listed here because choosing it makes this question disappear.

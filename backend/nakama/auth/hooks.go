@@ -108,9 +108,16 @@ func BeforeAuthenticateSteam(ctx context.Context, logger runtime.Logger, _ *sql.
 	return in, nil
 }
 
-// BeforeSessionRefresh validates replacement session variables. Nakama preserves
-// the refresh token's authenticated variables only when vars is omitted. Any
-// supplied vars map, including an empty one, is validated as a replacement.
+// BeforeSessionRefresh validates replacement session variables. An omitted or
+// empty vars keeps the refresh token's authenticated variables: over JSON and
+// protobuf an empty map cannot be told apart from an absent one, and real Nakama
+// 3.40.0 keeps the token's vars for both (proven by
+// TestSessionRefresh_GameVarLocalStack, 2026-11-14). A non-empty vars map
+// replaces them and is validated like a login. A non-nil but empty map still
+// validates the default game. Whether Nakama hands the hook nil or an empty map
+// for an empty vars object is not established; either way the session keeps its
+// game, so the check can only refuse (never switch games), and only when the
+// default game is missing from GAMES.
 func BeforeSessionRefresh(ctx context.Context, logger runtime.Logger, _ *sql.DB, _ runtime.NakamaModule, in *api.SessionRefreshRequest) (*api.SessionRefreshRequest, error) {
 	if in == nil || in.Vars == nil {
 		return in, nil

@@ -445,7 +445,7 @@ The wallet is one Nakama object per user, so a player of two games holds both
 |------|------------|-----------------|
 | `BeforeAuthenticateApple`, `Custom`, `Device`, `Facebook`, `FacebookInstantGame`, `GameCenter`, `Google`, `Steam` | `account.vars.game` must be in `GAMES` (code 3) | Request passed through unchanged; a request with no `account` passes through |
 | `BeforeAuthenticateEmail` | Same, checked first | Credential validation and email normalisation (below) |
-| `BeforeSessionRefresh` | Any supplied `vars` object, even empty, is validated: `vars.game` must be in `GAMES` (code 3), absent `game` = `cuvara` | Only an omitted `vars` field passes through, so Nakama keeps the refresh token's vars and the game |
+| `BeforeSessionRefresh` | A non-empty `vars` object is validated as a replacement: `vars.game` must be in `GAMES` (code 3), absent `game` = `cuvara` | An omitted or empty `vars` keeps the refresh token's vars and the game (real Nakama 3.40.0, 2026-11-14: over JSON/protobuf an empty map cannot be told apart from an absent one) |
 | `AfterAuthenticateDevice`, `AfterAuthenticateEmail` | Re-validates `vars.game` | Creates the profile in `Scoped(game, "player")` (below) |
 
 ### `BeforeAuthenticateEmail`

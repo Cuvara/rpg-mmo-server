@@ -137,8 +137,8 @@ metadata; `cuvara`'s rows have no `game_id`.
 
 ## Session refresh keeps the game (local stack)
 
-**Status: HUMAN_REQUIRED** until someone runs it against a real Nakama with the
-local-stack gate approved. Unit tests (`TestSessionRefresh_GameVarSeenByPlugin`,
+**Status: verified 2026-11-14** against real Nakama 3.40.0 with the plugin built
+from this branch and `GAMES=cuvara,mgtest`; re-run it after a Nakama upgrade. Unit tests (`TestSessionRefresh_GameVarSeenByPlugin`,
 `TestGameFromContext_AfterSessionRefresh`, `TestBeforeSessionRefresh_Game`) only
 cover what the plugin sees; that Nakama itself copies `vars` from the refresh
 token into the new session is proven only by this test.
@@ -147,10 +147,11 @@ token into the new session is proven only by this test.
 tag `localstack`): device login with `vars.game` → `gateway_token` carries `gid`
 → refresh with the `vars` field omitted → the new session's `vrs.game` and its `gateway_token`
 `gid` are still the game → a login and a refresh with a game outside `GAMES` are
-both refused (4xx, not 5xx). Only omitting `vars` keeps the token's vars; any
-supplied `vars` object, even empty, is validated as a replacement, and an empty
-object selects the default game `cuvara`. The test also records whether an empty
-object is refused or produces a session for the default game.
+both refused (4xx, not 5xx). Omitting `vars` or sending an empty
+object keeps the token's vars (verified against real Nakama 3.40.0, 2026-11-14);
+a non-empty `vars` object is validated as a replacement. The test asserts that an
+empty-`vars` refresh keeps the authenticated game in `vrs.game` and in the
+gateway `gid`, and never switches to another game.
 
 1. Start the local stack with a plugin built from this code (repo-root
    `./scripts/build-all.sh --skip-tests --plugin`, Nakama container stopped) and
