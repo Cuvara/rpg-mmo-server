@@ -106,6 +106,11 @@ jobs:
       - name: Check cluster.log_collector verify rule
         run: bash backend/deploy/k8s/verify/tests/log_collector_test.sh
 
+      # The deploy-environment and log-collector blocks of k8s/dev-up.sh, extracted
+      # and run against a fake kubectl and docker on a nonexistent context.
+      - name: Check dev-up.sh log collector apply
+        run: bash backend/deploy/k8s/verify/tests/dev_up_logging_test.sh
+
       - name: Check per-game database provisioning
         run: bash backend/deploy/db/tests/provision_test.sh
 
