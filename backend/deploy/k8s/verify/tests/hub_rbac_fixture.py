@@ -9,7 +9,11 @@ the allow-list), so "exact" can never drift from the contract; every mutation be
 is a deliberate, named departure from it. A file that is absent is an object the
 fake kubectl answers NotFound for.
 
-Files: sa.json, role.<ns>.json, rb.<ns>.json, cr.json, crb.json, games.txt (or games.notfound / games.error)
+Files: sa.json, role.<ns>.json, rb.<ns>.json, rball.json (every RoleBinding of every namespace, what
+`get rolebindings -A` returns), cr.json, crb.json, vap.json / vapb.json (the admission policy and its
+binding as the API server returns them, defaults filled in; vap.error makes the fake answer "resource
+type not served"), secrets.tsv (name<TAB>type<TAB>sa-name of the Secrets of rpg-k8s-hub: names and
+types only), games.txt (or games.notfound / games.error)
 """
 
 import argparse
@@ -64,6 +68,16 @@ MUTATIONS = {
     "gateway-config-notfound", "gateway-config-error",
     "foreign-rb-user", "foreign-rb-group-ns", "foreign-rb-group-all",
     "foreign-crb-user", "foreign-crb-group-ns", "foreign-crb-group-all",
+    # the admission policy (F1)
+    "no-policy", "no-policy-binding", "policy-api-unserved", "policy-expression-changed",
+    "policy-expression-whitespace", "policy-validation-dropped", "policy-validation-added",
+    "policy-any-user", "policy-other-user", "policy-fail-open", "policy-wrong-operation",
+    "policy-wrong-resource", "policy-exclude-rules", "binding-warn", "binding-audit-only",
+    "binding-namespace-selector", "binding-exclude-rules", "binding-other-policy",
+    "binding-param-ref",
+    # bindings and token Secrets outside the expected set (F3)
+    "foreign-rb-kube-system", "foreign-rb-unlisted-game", "foreign-rb-hub-namespace", "foreign-rb-user-elsewhere",
+    "legacy-token-secret", "legacy-token-other-account", "rolebindings-all-error", "secrets-error",
 }
 
 # The other spellings of the hub identity (User / Group subjects), see hub_contract.names_the_hub.
@@ -74,6 +88,35 @@ ALIAS_SUBJECTS = {
                  "apiGroup": "rbac.authorization.k8s.io"},
     "group-all": {"kind": "Group", "name": "system:serviceaccounts", "apiGroup": "rbac.authorization.k8s.io"},
 }
+
+
+def api_policy():
+    """The ValidatingAdmissionPolicy as the API server returns it: the repository's spec plus the
+    defaults it fills in (empty selectors, scope "*", matchPolicy), plus metadata and status."""
+    spec = {
+        "failurePolicy": hc.POLICY_SPEC["failurePolicy"],
+        "matchConstraints": {
+            "matchPolicy": "Equivalent", "namespaceSelector": {}, "objectSelector": {},
+            "resourceRules": [{"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": ["UPDATE"],
+                               "resources": ["deployments"], "scope": "*"}],
+        },
+        "matchConditions": copy.deepcopy(hc.POLICY_SPEC["matchConditions"]),
+        "variables": copy.deepcopy(hc.POLICY_SPEC["variables"]),
+        "validations": [{"expression": v["expression"], "message": v["message"], "reason": v["reason"]}
+                        for v in hc.POLICY_SPEC["validations"]],
+    }
+    return {"apiVersion": hc.ADMISSION_API, "kind": "ValidatingAdmissionPolicy",
+            "metadata": {"name": hc.POLICY_NAME, "uid": "u-vap", "generation": 1,
+                         "managedFields": [{"manager": "kubectl-client-side-apply"}]},
+            "spec": spec,
+            "status": {"observedGeneration": 1, "typeChecking": {}}}
+
+
+def api_policy_binding():
+    return {"apiVersion": hc.ADMISSION_API, "kind": "ValidatingAdmissionPolicyBinding",
+            "metadata": {"name": hc.POLICY_BINDING_NAME, "uid": "u-vapb"},
+            "spec": {"policyName": hc.POLICY_NAME, "validationActions": ["Deny"],
+                     "matchResources": {"matchPolicy": "Equivalent", "namespaceSelector": {}, "objectSelector": {}}}}
 
 
 def main(argv):
@@ -152,6 +195,82 @@ def main(argv):
         put(f"role.{ns}.json", doc)
     for ns, items in bindings.items():
         put(f"rb.{ns}.json", listing(items))
+
+    # ---- the admission policy and its binding
+    vap, vapb = api_policy(), api_policy_binding()
+    vspec = vap["spec"]
+    if "policy-expression-changed" in mut:
+        vspec["validations"][0]["expression"] = "true"
+    if "policy-expression-whitespace" in mut:
+        vspec["validations"][3]["expression"] += " "
+    if "policy-validation-dropped" in mut:
+        vspec["validations"].pop()
+    if "policy-validation-added" in mut:
+        vspec["validations"].append({"expression": "true", "message": "x", "reason": "Forbidden"})
+    if "policy-any-user" in mut:
+        vspec["matchConditions"] = []
+    if "policy-other-user" in mut:
+        vspec["matchConditions"][0]["expression"] = "request.userInfo.username == 'system:serviceaccount:rpg-k8s-hub:other'"
+    if "policy-fail-open" in mut:
+        vspec["failurePolicy"] = "Ignore"
+    if "policy-wrong-operation" in mut:
+        vspec["matchConstraints"]["resourceRules"][0]["operations"] = ["CREATE"]
+    if "policy-wrong-resource" in mut:
+        vspec["matchConstraints"]["resourceRules"][0]["resources"] = ["statefulsets"]
+    if "policy-exclude-rules" in mut:
+        vspec["matchConstraints"]["excludeResourceRules"] = [
+            {"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": ["UPDATE"], "resources": ["deployments"]}]
+    bspec = vapb["spec"]
+    if "binding-warn" in mut:
+        bspec["validationActions"] = ["Warn", "Audit"]
+    if "binding-audit-only" in mut:
+        bspec["validationActions"] = ["Audit"]
+    if "binding-namespace-selector" in mut:
+        bspec["matchResources"]["namespaceSelector"] = {"matchLabels": {"rpg-mmo/tier": "app"}}
+    if "binding-exclude-rules" in mut:
+        bspec["matchResources"]["excludeResourceRules"] = [
+            {"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": ["*"], "resources": ["deployments"]}]
+    if "binding-other-policy" in mut:
+        bspec["policyName"] = "something-else"
+    if "binding-param-ref" in mut:
+        bspec["paramRef"] = {"name": "p", "parameterNotFoundAction": "Allow"}
+    if "policy-api-unserved" in mut:
+        (out / "vap.error").write_text("", encoding="utf-8")
+    elif "no-policy" not in mut:
+        put("vap.json", vap)
+    if "no-policy-binding" not in mut:
+        put("vapb.json", vapb)
+
+    # ---- RoleBindings of every namespace (kubectl get rolebindings -A) and the Secrets of the hub namespace
+    everywhere = []
+    for ns, items in bindings.items():
+        for item in items:
+            item = copy.deepcopy(item)
+            item["metadata"]["namespace"] = ns
+            everywhere.append(item)
+    everywhere.append(binding("system:controller:bootstrap-signer", "kube-system", "Role",
+                              "system:controller:bootstrap-signer", subjects=[
+        {"kind": "ServiceAccount", "name": "bootstrap-signer", "namespace": "kube-system"}]))
+    extras = {
+        "foreign-rb-kube-system": ("hub-view", "kube-system", [SUBJECT]),
+        "foreign-rb-unlisted-game": ("studio-hub", "rpg-k8s-realtime-zephyr", [SUBJECT]),
+        "foreign-rb-hub-namespace": ("hub-self", "rpg-k8s-hub", [SUBJECT]),
+        "foreign-rb-user-elsewhere": ("sneaky", "agones-system", [ALIAS_SUBJECTS["user"]]),
+    }
+    for name, (rb_name, ns, subjects) in extras.items():
+        if name in mut:
+            everywhere.append(binding(rb_name, ns, "ClusterRole", "edit", subjects=subjects))
+    if "rolebindings-all-error" not in mut:
+        put("rball.json", listing(everywhere))
+
+    # name<TAB>type<TAB>sa-name; the runbook's token binding Secret is Opaque and belongs to no account
+    secret_rows = ["studio-hub-token-binding\tOpaque\t"]
+    if "legacy-token-secret" in mut:
+        secret_rows.append("studio-hub-token\tkubernetes.io/service-account-token\tstudio-hub")
+    if "legacy-token-other-account" in mut:
+        secret_rows.append("builder-token\tkubernetes.io/service-account-token\tbuilder")
+    if "secrets-error" not in mut:
+        (out / "secrets.tsv").write_text("\n".join(secret_rows) + "\n", encoding="utf-8")
 
     node_role = want_node = args.node or {"node-extra-verb", "node-missing-rule", "node-role-no-binding",
                                           "node-binding-cluster-admin"} & mut

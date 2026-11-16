@@ -49,6 +49,20 @@ k() {
     "get rolebindings -n "*" -o json")
       local cmd="$*" ns; ns=${cmd#get rolebindings -n }; ns=${ns% -o json}
       from_file "rb.$ns.json" "namespace $ns" ;;
+    "get rolebindings -A -o json") from_file rball.json 'rolebindings (all namespaces)' ;;
+    "get secrets -n rpg-k8s-hub --field-selector type=kubernetes.io/service-account-token -o jsonpath="*)
+      # names and types only: the jsonpath asks for metadata.name, type and one annotation, never .data
+      from_file secrets.tsv 'secrets in rpg-k8s-hub' ;;
+    "get validatingadmissionpolicy studio-hub-restart-only -o json")
+      if [ -f "$FIX/vap.error" ]; then
+        echo 'error: the server doesn'"'"'t have a resource type "validatingadmissionpolicy"' >&2; return 1
+      fi
+      from_file vap.json 'validatingadmissionpolicies.admissionregistration.k8s.io "studio-hub-restart-only"' ;;
+    "get validatingadmissionpolicybinding studio-hub-restart-only -o json")
+      if [ -f "$FIX/vap.error" ]; then
+        echo 'error: the server doesn'"'"'t have a resource type "validatingadmissionpolicybinding"' >&2; return 1
+      fi
+      from_file vapb.json 'validatingadmissionpolicybindings.admissionregistration.k8s.io "studio-hub-restart-only"' ;;
     "get clusterrole studio-hub-nodes -o json") from_file cr.json 'clusterroles.rbac.authorization.k8s.io "studio-hub-nodes"' ;;
     "get clusterrolebindings -o json") from_file crb.json 'clusterrolebindings' ;;
     *) echo "hub_rbac_test: unexpected kubectl read: $*" >&2; echo "$*" >> "$WORK/unexpected"; return 1 ;;
@@ -89,7 +103,7 @@ echo
 VERIFY_HUB_RBAC="rpg-k8s-hub/studio-hub"
 
 # ---- PASS: exact ------------------------------------------------------------
-run_case "exact, cuvara only, no node ClusterRole"                 PASS --games cuvara -- "NOT granted (opt-in" "rpg-k8s-realtime rpg-k8s-data"
+run_case "exact, cuvara only, no node ClusterRole"                 PASS --games cuvara -- "NOT granted (opt-in" "rpg-k8s-realtime rpg-k8s-data" "admission policy studio-hub-restart-only"
 run_case "exact, gateway-config exists with an empty games value"  PASS --mutate no-gateway-games -- "rpg-k8s-realtime rpg-k8s-data"
 run_case "exact with the node ClusterRole enabled"                 PASS --games cuvara --node -- "node access ENABLED"
 run_case "exact, rendered non-default games ember and frost"       PASS --games cuvara,ember,frost -- "rpg-k8s-realtime-ember" "rpg-k8s-realtime-frost"
@@ -125,6 +139,38 @@ run_case "ClusterRoleBinding names Group system:serviceaccounts:rpg-k8s-hub" FAI
 run_case "ClusterRoleBinding names Group system:serviceaccounts"   FAIL --games cuvara --mutate foreign-crb-group-all -- "foreign: ClusterRoleBinding sneaky"
 run_case "User alias in a ClusterRoleBinding, node ClusterRole on" FAIL --games cuvara --node --mutate foreign-crb-user -- "foreign: ClusterRoleBinding sneaky"
 
+# ---- FAIL: the admission policy that makes `patch deployments` a restart (F1) -----------------
+# Every Role of the allow-list grants `patch deployments`, so the policy is always required.
+run_case "policy absent"                                           FAIL --games cuvara --mutate no-policy -- "ValidatingAdmissionPolicy studio-hub-restart-only is absent" "patch on deployments"
+run_case "policy binding absent"                                   FAIL --games cuvara --mutate no-policy-binding -- "ValidatingAdmissionPolicyBinding studio-hub-restart-only is absent"
+run_case "API does not serve ValidatingAdmissionPolicy (< 1.30)"   FAIL --games cuvara --mutate policy-api-unserved -- "could not be read" "1.30"
+run_case "a validation expression replaced by 'true'"              FAIL --games cuvara --mutate policy-expression-changed -- "ValidatingAdmissionPolicy" "differs: spec.validations[0].expression"
+run_case "an expression differs by one trailing space"             FAIL --games cuvara --mutate policy-expression-whitespace -- "differs: spec.validations[3].expression"
+run_case "a validation dropped"                                    FAIL --games cuvara --mutate policy-validation-dropped -- "differs: spec.validations: 8 entries, the repository's policy has 9"
+run_case "a validation added"                                      FAIL --games cuvara --mutate policy-validation-added -- "differs: spec.validations: 10 entries"
+run_case "matchConditions removed: the policy would hit every user" FAIL --games cuvara --mutate policy-any-user -- "differs: spec.matchConditions"
+run_case "matchCondition names another user (the hub is not matched)" FAIL --games cuvara --mutate policy-other-user -- "differs: spec.matchConditions[0].expression"
+run_case "failurePolicy Ignore (fails open)"                       FAIL --games cuvara --mutate policy-fail-open -- "differs: spec.failurePolicy: want \"Fail\", got \"Ignore\""
+run_case "policy matches CREATE instead of UPDATE"                 FAIL --games cuvara --mutate policy-wrong-operation -- "differs: spec.matchConstraints.resourceRules[0].operations"
+run_case "policy matches statefulsets instead of deployments"      FAIL --games cuvara --mutate policy-wrong-resource -- "differs: spec.matchConstraints.resourceRules[0].resources"
+run_case "policy excludes deployments through excludeResourceRules" FAIL --games cuvara --mutate policy-exclude-rules -- "differs: spec.matchConstraints.excludeResourceRules"
+run_case "binding with validationActions Warn+Audit (not Deny)"    FAIL --games cuvara --mutate binding-warn -- "ValidatingAdmissionPolicyBinding" "differs: spec.validationActions"
+run_case "binding with validationActions Audit only"               FAIL --games cuvara --mutate binding-audit-only -- "differs: spec.validationActions"
+run_case "binding narrowed by a namespaceSelector (fails open elsewhere)" FAIL --games cuvara --mutate binding-namespace-selector -- "differs: spec.matchResources.namespaceSelector"
+run_case "binding carves deployments out with excludeResourceRules" FAIL --games cuvara --mutate binding-exclude-rules -- "differs: spec.matchResources.excludeResourceRules"
+run_case "binding points at another policy"                        FAIL --games cuvara --mutate binding-other-policy -- "differs: spec.policyName"
+run_case "binding carries a paramRef"                              FAIL --games cuvara --mutate binding-param-ref -- "differs: spec.paramRef"
+
+# ---- FAIL: the hub named outside the expected set, and a legacy token Secret (F3) ---------
+run_case "a RoleBinding in kube-system names the hub"              FAIL --games cuvara --mutate foreign-rb-kube-system -- "RoleBindings (all namespaces)" "foreign: RoleBinding kube-system/hub-view"
+run_case "a RoleBinding in a game namespace gateway-config does not list" FAIL --games cuvara --mutate foreign-rb-unlisted-game -- "foreign: RoleBinding rpg-k8s-realtime-zephyr/studio-hub"
+run_case "a RoleBinding in the hub's own namespace names the hub"  FAIL --games cuvara --mutate foreign-rb-hub-namespace -- "foreign: RoleBinding rpg-k8s-hub/hub-self"
+run_case "a RoleBinding names the hub as a User, in agones-system" FAIL --games cuvara --mutate foreign-rb-user-elsewhere -- "foreign: RoleBinding agones-system/sneaky"
+run_case "RoleBindings of all namespaces cannot be read"           FAIL --games cuvara --mutate rolebindings-all-error -- "RoleBindings (all namespaces)" "could not be read"
+run_case "a legacy service-account-token Secret for the hub"       FAIL --games cuvara --mutate legacy-token-secret -- "legacy token: Secret rpg-k8s-hub/studio-hub-token" "never-expiring"
+run_case "a service-account-token Secret of ANOTHER account is not the hub's" PASS --games cuvara --mutate legacy-token-other-account -- "NOT granted (opt-in"
+run_case "the Secrets of the hub namespace cannot be listed"       FAIL --games cuvara --mutate secrets-error -- "Secrets of rpg-k8s-hub" "could not be listed"
+
 # ---- FAIL: gateway-config unreadable (the game list is unknown, not empty) --
 run_case "gateway-config NotFound"                                 FAIL --games ember --mutate gateway-config-notfound -- "gateway-config could not be read" "NotFound" "UNVERIFIED"
 run_case "gateway-config read error (Forbidden)"                   FAIL --games ember --mutate gateway-config-error -- "gateway-config could not be read" "Forbidden" "UNVERIFIED"
@@ -149,9 +195,13 @@ fi
 write_calls=$(grep -vc '^get ' "$CALLS" || true)
 printf '%-66s %s\n\n' "every kubectl call was a get (read-only)" "$([ "${write_calls:-0}" = 0 ] && echo OK || echo "NOT-READ-ONLY($write_calls)")"
 [ "${write_calls:-0}" = 0 ] || failures=$((failures+1))
-secret_reads=$(grep -ci 'secret' "$CALLS" || true)
-printf '%-66s %s\n\n' "no Secret was read" "$([ "${secret_reads:-0}" = 0 ] && echo OK || echo "READ($secret_reads)")"
-[ "${secret_reads:-0}" = 0 ] || failures=$((failures+1))
+# The one Secret call is the legacy-token listing: a jsonpath over metadata.name, type and the account
+# annotation. No other call may name a Secret, and no Secret call may ask for .data (a value) or print an object.
+secret_calls=$(grep -i 'secret' "$CALLS" | grep -v '^get secrets -n rpg-k8s-hub --field-selector type=kubernetes.io/service-account-token -o jsonpath=' || true)
+secret_data=$(grep -i 'secret' "$CALLS" | grep -Ei '\.data|-o (json|yaml)( |$)|--show-managed' || true)
+printf '%-66s %s\n\n' "no Secret VALUE was read (one names-and-types listing only)" \
+  "$([ -z "$secret_calls" ] && [ -z "$secret_data" ] && echo OK || echo "READ($secret_calls$secret_data)")"
+{ [ -z "$secret_calls" ] && [ -z "$secret_data" ]; } || failures=$((failures+1))
 
 # ---- registration and targets ------------------------------------------------
 reg_ok=OK

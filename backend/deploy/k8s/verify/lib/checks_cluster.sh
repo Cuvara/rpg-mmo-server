@@ -501,7 +501,13 @@ check_log_collector() {
 #         namespace, or has an extra verb, an extra resource, a missing triple, a
 #         resourceNames/wildcard rule; its RoleBinding is absent or has another subject
 #         or roleRef; ANY other RoleBinding in an expected namespace, or any
-#         ClusterRoleBinding, names the ServiceAccount (except studio-hub-nodes); the node
+#         ClusterRoleBinding, names the ServiceAccount (except studio-hub-nodes), nor any
+#         RoleBinding in a namespace outside the expected list; a Secret of type
+#         kubernetes.io/service-account-token for the account exists (listed by name and type
+#         only); the ValidatingAdmissionPolicy studio-hub-restart-only or its binding is absent
+#         or unreadable (API older than Kubernetes 1.30), or differs from k3s/hub_contract.py
+#         (an expression, matchConditions, failurePolicy, the resource rules, an exclusion, a
+#         namespaceSelector on the binding, validationActions other than [Deny]); the node
 #         ClusterRole differs from the node allow-list by one triple; the node ClusterRole
 #         and its binding exist without each other; gateway-config cannot be read (NotFound
 #         or any other error: the game list is then unknown, so the per-game Roles are
@@ -621,6 +627,45 @@ check_hub_rbac() {
     fi
   done
 
+  # --- the hub named OUTSIDE the expected namespaces (kube-system, agones-system, the hub's own
+  # namespace, a game gateway-config does not list): one read of every RoleBinding.
+  _hub_get rolebindings -A; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    HUB_PROBLEMS+=("RoleBindings (all namespaces) could not be read: $(printf '%s' "$_HUB_OUT" | head -1)")
+  else
+    local expected_csv=""
+    for entry in "${namespaces[@]}"; do expected_csv="${expected_csv:+$expected_csv,}${entry%%:*}"; done
+    _hub_py "RoleBindings (all namespaces)" "$_HUB_OUT" bindings --scope all-namespaces --expected "$expected_csv"
+  fi
+
+  # --- a legacy, never-expiring token Secret of the hub's ServiceAccount. NAMES AND TYPES ONLY:
+  # the jsonpath asks for metadata.name, type and the account annotation, never `.data`.
+  local secrets_rc
+  _HUB_OUT=$(k get secrets -n "$hub_ns" --field-selector type=kubernetes.io/service-account-token \
+    -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.type}{"\t"}{.metadata.annotations.kubernetes\.io/service-account\.name}{"\n"}{end}' 2>&1); secrets_rc=$?
+  if [ "$secrets_rc" -ne 0 ]; then
+    HUB_PROBLEMS+=("Secrets of $hub_ns could not be listed (names and types only): $(printf '%s' "$_HUB_OUT" | head -1)")
+  else
+    _hub_py "Secrets of $hub_ns" "$_HUB_OUT" secrets
+  fi
+
+  # --- the admission policy that makes `patch deployments` a rollout restart. Both Roles of the
+  # allow-list grant `patch` on apps/deployments, which RBAC cannot narrow, so the policy and its
+  # binding are always required and must equal the repository's (k3s/hub_contract.py POLICY_SPEC).
+  local policy_why="the hub's Roles grant patch on deployments, which is a restart only while the policy holds (without it the token can change a pod template, i.e. run a privileged pod)"
+  local kind_arg res
+  for kind_arg in "validatingadmissionpolicy:policy:ValidatingAdmissionPolicy" "validatingadmissionpolicybinding:binding:ValidatingAdmissionPolicyBinding"; do
+    res="${kind_arg%%:*}"; local mode="${kind_arg#*:}"; mode="${mode%%:*}"; local kname="${kind_arg##*:}"
+    _hub_get "$res" studio-hub-restart-only; rc=$?
+    if [ "$rc" -eq 1 ]; then
+      HUB_PROBLEMS+=("$kname studio-hub-restart-only is absent: $policy_why")
+    elif [ "$rc" -ne 0 ]; then
+      HUB_PROBLEMS+=("$kname studio-hub-restart-only could not be read (the API must serve admissionregistration.k8s.io/v1, Kubernetes 1.30 or newer): $(printf '%s' "$_HUB_OUT" | head -1)")
+    else
+      _hub_py "$kname studio-hub-restart-only" "$_HUB_OUT" policy --kind "$mode"
+    fi
+  done
+
   # --- the cluster scope: opt-in node access, and nothing else may name the account
   local node=absent
   _hub_get clusterrole studio-hub-nodes; rc=$?
@@ -646,7 +691,7 @@ check_hub_rbac() {
   fi
   local node_note="node access NOT granted (opt-in: k8s/hub/optional/node-access.yaml is not applied)"
   [ "$node" = present ] && node_note="node access ENABLED (ClusterRole studio-hub-nodes exact, bound to the hub only)"
-  pass "ServiceAccount $hub_ns/$hub_sa exists; Role studio-hub equals the allow-list in $(printf '%s ' "${namespaces[@]%%:*}")(rules compared, not names); no other binding names it; $node_note"
+  pass "ServiceAccount $hub_ns/$hub_sa exists; Role studio-hub equals the allow-list in $(printf '%s ' "${namespaces[@]%%:*}")(rules compared, not names); no other binding in any namespace names it; no legacy token Secret; admission policy studio-hub-restart-only and its binding (Deny) equal the repository's, so patch deployments is a restart only; $node_note"
 }
 
 # Secrets exist and every key holds a non-empty value. Values are never printed
@@ -737,6 +782,6 @@ register cluster.log_collector 1 "log collector Ready and attached to Loki" \
   "that a log line reached Loki. It does not query Loki, does not read Alloy's own log, and cannot see a collected namespace whose Role is missing (Alloy logs a 403 for it); the address is the one connect-loki.sh wrote, not proof that Loki answers on it. Declared per target by VERIFY_LOG_COLLECTOR; SKIPs when empty" \
   check_log_collector
 register cluster.hub_rbac 1 "Studio hub holds exactly its contracted rights" \
-  "the ServiceAccount studio-hub exists, and in rpg-k8s-realtime, rpg-k8s-data and every game namespace gateway-config lists its Role studio-hub equals the allow-list of k3s/hub_contract.py triple for triple (an extra verb, an extra resource or a missing one FAILs; rules are compared, not names), its RoleBinding has the one subject and roleRef, no other RoleBinding there and no ClusterRoleBinding names the account except studio-hub-nodes, and that opt-in node ClusterRole is either absent (PASS: node access not granted) or exact" \
-  "that the token an operator minted is valid or unexpired, that anything else in the cluster cannot reach the hub's rights (it reads only RoleBindings of the expected namespaces and every ClusterRoleBinding; a RoleBinding naming the account in another namespace is not seen), or that the API server admits it (no kubectl auth can-i, no impersonation). Games come from gateway-config's games, so a rendered game namespace left out of it is not covered. Declared per target by VERIFY_HUB_RBAC; SKIPs when empty" \
+  "the ServiceAccount studio-hub exists, and in rpg-k8s-realtime, rpg-k8s-data and every game namespace gateway-config lists its Role studio-hub equals the allow-list of k3s/hub_contract.py triple for triple (an extra verb, an extra resource or a missing one FAILs; rules are compared, not names), its RoleBinding has the one subject and roleRef, no RoleBinding in ANY namespace outside that list and no ClusterRoleBinding names the account except studio-hub-nodes, no legacy kubernetes.io/service-account-token Secret exists for it, the ValidatingAdmissionPolicy studio-hub-restart-only (what makes patch on deployments a rollout restart) and its binding (Deny, cluster-wide) equal the repository's expressions, and that opt-in node ClusterRole is either absent (PASS: node access not granted) or exact" \
+  "that the token an operator minted is valid or unexpired, that anything else in the cluster cannot reach the hub's rights (it reads every RoleBinding and ClusterRoleBinding by subject, but a binding of a broad role to Group system:authenticated is outside what it can see, because Kubernetes binds its own defaults to that group), that the policy's CEL expressions evaluate as intended (they are compared as TEXT with the repository's; whether the API server denies an image change is proved only by the live dry-run in docs/RUNBOOK.md), or that the API server admits a request (no kubectl auth can-i, no impersonation). A Secret is never read: the legacy-token listing asks for names and types only. Games come from gateway-config's games, so a rendered game namespace left out of it is not covered. Declared per target by VERIFY_HUB_RBAC; SKIPs when empty" \
   check_hub_rbac
