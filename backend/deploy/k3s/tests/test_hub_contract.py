@@ -651,6 +651,129 @@ class Compare(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
 
 
+class Bindings(unittest.TestCase):
+    """`hub_contract.py bindings` reading live RoleBinding / ClusterRoleBinding lists on stdin."""
+
+    SUBJECT = {"kind": "ServiceAccount", "name": "studio-hub", "namespace": "rpg-k8s-hub"}
+
+    def run_bindings(self, payload, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        stdin = io.StringIO(payload if isinstance(payload, str) else json.dumps(payload))
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = hc.main(["bindings", *argv], stdin=stdin)
+        return rc, out.getvalue(), err.getvalue()
+
+    def binding(self, name, ns=None, kind="Role", role=None, subjects=None, binding_kind="RoleBinding"):
+        meta = {"name": name}
+        if ns:
+            meta["namespace"] = ns
+        return {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": binding_kind, "metadata": meta,
+                "subjects": copy.deepcopy(subjects if subjects is not None else [self.SUBJECT]),
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": kind, "name": role or name}}
+
+    def listing(self, *items):
+        return {"apiVersion": "v1", "kind": "List", "items": list(items)}
+
+    def node_binding(self, **kw):
+        return self.binding("studio-hub-nodes", kind="ClusterRole", binding_kind="ClusterRoleBinding", **kw)
+
+    def test_the_exact_namespaced_binding_is_clean(self):
+        unrelated = self.binding("unrelated", "x", subjects=[
+            {"kind": "ServiceAccount", "name": "other", "namespace": "x"}])
+        rc, out, err = self.run_bindings(
+            self.listing(self.binding("studio-hub", "x"), unrelated),
+            "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual((rc, out, err), (0, "", ""))
+
+    def test_a_missing_namespaced_binding_is_reported(self):
+        rc, out, _ = self.run_bindings(self.listing(), "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual((rc, out.splitlines()), (1, ["missing: RoleBinding x/studio-hub"]))
+
+    def test_another_subject_or_another_role_is_reported(self):
+        wrong_subject = self.binding("studio-hub", "x", subjects=[
+            {"kind": "ServiceAccount", "name": "studio-hub", "namespace": "rpg-k8s-realtime"}])
+        rc, out, _ = self.run_bindings(self.listing(wrong_subject), "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("binding: RoleBinding x/studio-hub: subjects are", out)
+        cluster_admin = self.binding("studio-hub", "x", kind="ClusterRole", role="cluster-admin")
+        rc, out, _ = self.run_bindings(self.listing(cluster_admin), "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("roleRef is", out)
+
+    def test_an_extra_subject_on_the_hub_binding_is_reported(self):
+        extra = self.binding("studio-hub", "x", subjects=[
+            self.SUBJECT, {"kind": "User", "name": "mallory", "apiGroup": "rbac.authorization.k8s.io"}])
+        rc, out, _ = self.run_bindings(self.listing(extra), "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("subjects are", out)
+
+    def test_a_foreign_binding_that_names_the_account_is_reported(self):
+        foreign = self.binding("edit-for-hub", "x", kind="ClusterRole", role="edit")
+        rc, out, _ = self.run_bindings(
+            self.listing(self.binding("studio-hub", "x"), foreign), "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.splitlines(), [
+            "foreign: RoleBinding x/edit-for-hub names ServiceAccount rpg-k8s-hub/studio-hub "
+            "(roleRef ClusterRole/edit); only 'studio-hub' may"])
+
+    def test_a_subject_with_no_namespace_still_names_the_hub(self):
+        sloppy = self.binding("sloppy", "x", subjects=[{"kind": "ServiceAccount", "name": "studio-hub"}])
+        rc, out, _ = self.run_bindings(
+            self.listing(self.binding("studio-hub", "x"), sloppy), "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("foreign: RoleBinding x/sloppy", out)
+
+    def test_a_service_account_of_the_same_name_elsewhere_is_not_the_hub(self):
+        other = self.binding("elsewhere", "x", subjects=[
+            {"kind": "ServiceAccount", "name": "studio-hub", "namespace": "some-other-ns"}])
+        rc, out, _ = self.run_bindings(
+            self.listing(self.binding("studio-hub", "x"), other), "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual((rc, out), (0, ""))
+
+    def test_no_cluster_binding_is_clean_when_the_node_role_is_absent(self):
+        unrelated = self.binding("system:node", kind="ClusterRole", binding_kind="ClusterRoleBinding", subjects=[
+            {"kind": "Group", "name": "system:nodes", "apiGroup": "rbac.authorization.k8s.io"}])
+        rc, out, _ = self.run_bindings(self.listing(unrelated), "--scope", "cluster", "--node", "absent")
+        self.assertEqual((rc, out), (0, ""))
+
+    def test_the_exact_node_binding_is_clean_when_the_node_role_is_present(self):
+        rc, out, _ = self.run_bindings(self.listing(self.node_binding()), "--scope", "cluster", "--node", "present")
+        self.assertEqual((rc, out), (0, ""))
+
+    def test_the_node_binding_missing_while_the_role_exists_is_reported(self):
+        rc, out, _ = self.run_bindings(self.listing(), "--scope", "cluster", "--node", "present")
+        self.assertEqual((rc, out.splitlines()), (1, ["missing: ClusterRoleBinding studio-hub-nodes"]))
+
+    def test_the_node_binding_without_its_role_is_reported(self):
+        rc, out, _ = self.run_bindings(self.listing(self.node_binding()), "--scope", "cluster", "--node", "absent")
+        self.assertEqual(rc, 1)
+        self.assertIn("foreign: ClusterRoleBinding studio-hub-nodes exists but the ClusterRole", out)
+
+    def test_the_node_binding_pointing_at_another_role_is_reported(self):
+        admin = self.node_binding(role="cluster-admin")
+        rc, out, _ = self.run_bindings(self.listing(admin), "--scope", "cluster", "--node", "present")
+        self.assertEqual(rc, 1)
+        self.assertIn("roleRef is", out)
+
+    def test_any_other_cluster_binding_naming_the_account_is_reported(self):
+        admin = self.binding("hub-admin", kind="ClusterRole", role="cluster-admin", binding_kind="ClusterRoleBinding")
+        for node, extra in (("absent", []), ("present", [self.node_binding()])):
+            with self.subTest(node=node):
+                rc, out, _ = self.run_bindings(self.listing(*extra, admin), "--scope", "cluster", "--node", node)
+                self.assertEqual(rc, 1)
+                self.assertIn("foreign: ClusterRoleBinding hub-admin names ServiceAccount rpg-k8s-hub/studio-hub", out)
+                self.assertIn("only 'studio-hub-nodes' may", out)
+
+    def test_unreadable_input_is_exit_two(self):
+        self.assertEqual(self.run_bindings("<html>", "--scope", "cluster")[0], 2)
+        self.assertEqual(self.run_bindings({"kind": "Status"}, "--scope", "cluster")[0], 2)
+        self.assertEqual(self.run_bindings(self.listing(), "--scope", "namespaced")[0], 2)
+
+    def test_a_bare_list_is_accepted(self):
+        rc, out, _ = self.run_bindings([self.binding("studio-hub", "x")], "--scope", "namespaced", "--namespace", "x")
+        self.assertEqual((rc, out), (0, ""))
+
+
 class Cli(unittest.TestCase):
     def run_main(self, *argv):
         out = io.StringIO()

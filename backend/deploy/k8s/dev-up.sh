@@ -1476,6 +1476,58 @@ fi
 # END log collector apply
 unset game game_ns f log_ds_before log_cfg_before log_env_before log_cfg_after log_env_after log_env_yaml render_tls
 
+# ------------------------------------------------------------ Studio hub identity
+# The ServiceAccount `studio-hub` and the namespaced Roles the Studio hub (an operator
+# web tool OUTSIDE the cluster) acts through: k8s/hub/ and k3s/hub_contract.py.
+#
+# WHAT THIS APPLIES, AND WHAT IT DOES NOT.
+#   - Exactly the three files named below, by name. Never a glob and never the
+#     optional/ subdirectory: k8s/hub/optional/node-access.yaml holds the only
+#     cluster-scoped grant (ClusterRole studio-hub-nodes) and is an operator's opt-in
+#     (docs/RUNBOOK.md, "Studio hub token"), so a deploy must not be able to enable it.
+#   - No ClusterRole and no ClusterRoleBinding for the hub, ever.
+#   - No token. A token is minted by an operator with `kubectl create token`; nothing
+#     here mints, reads or prints one.
+#
+# WHERE: after the app and data namespaces exist (20-rbac.yaml binds Roles into
+# rpg-k8s-realtime and rpg-k8s-data) and after the collector. The hub is not in the
+# client path, so a failure here stops the script like any manifest that cannot be applied.
+#
+# THE PER-GAME PAIR IS NOT APPLIED HERE. Every rpg-k8s-realtime-<game> carries its own
+# Role + RoleBinding `studio-hub`, rendered by k8s/games/render.py into the same
+# manifests as the game's Namespace, quota and Fleet (checked: `render.py --print
+# manifests`, the default, emits them) and applied by the operator's
+# `render.py --game <g> --nakama-tls <on|off> | kubectl apply -f -`, the existing game
+# apply path. This script only checks that each listed game has its Role (WARN, like the
+# collector's), and verify's cluster.hub_rbac is what FAILs on a missing or widened one.
+#
+# verify/tests/dev_up_hub_test.sh extracts the span between the BEGIN and END markers
+# (each required to occur once) and runs it against a fake kubectl.
+# BEGIN studio hub rbac apply
+HUB_DIR="$HERE/hub"
+
+say "apply the Studio hub identity (rpg-k8s-hub, namespaced Roles only)"
+# In order: the namespace, the ServiceAccount, then the Roles and bindings that name it
+# in rpg-k8s-realtime and rpg-k8s-data (both exist by now).
+for f in 00-namespace.yaml 10-serviceaccount.yaml 20-rbac.yaml; do
+  $K apply -f "$HUB_DIR/$f"
+done
+
+rendered_game_namespaces
+for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+  if ! $K get role studio-hub -n "$game_ns" >/dev/null 2>&1; then
+    game=${game_ns#rpg-k8s-realtime-}
+    render_tls=off; [ -z "${nk_cert_path:-}" ] || render_tls=on
+    echo "::warning title=Studio hub has no access to a game::$game_ns has no Role studio-hub"
+    echo "WARN: $game_ns has no Role studio-hub, so the Studio hub cannot see or operate that game; verify's cluster.hub_rbac FAILs on it." >&2
+    echo "  Render it again and apply it (the Role and RoleBinding are part of the rendered manifests):" >&2
+    echo "    python backend/deploy/k8s/games/render.py --game $game --nakama-tls $render_tls | kubectl --context $CTX apply -f -" >&2
+  fi
+done
+echo "checked: the Studio hub identity (ServiceAccount studio-hub in rpg-k8s-hub) and its Roles in rpg-k8s-realtime and rpg-k8s-data are applied; no ClusterRole, no token"
+# END studio hub rbac apply
+unset game game_ns f render_tls HUB_DIR
+
 say "state"
 $K get pods -n rpg-k8s-data -n rpg-k8s-data 2>/dev/null || true
 $K get pods -A | grep -E 'rpg-k8s|rpg-realtime' || true

@@ -49,6 +49,7 @@ Usage:
     python hub_contract.py --no-game               # skip the render.py leg
     python hub_contract.py --dir DIR             # another directory (shows a mutation failing)
     python hub_contract.py compare --shape S       # compare rules read as JSON on stdin
+    python hub_contract.py bindings --scope S      # check live (Cluster)RoleBindings read as JSON on stdin
 
 `compare` is the entry point of the verify check `cluster.hub_rbac` (called through
 k8s/verify/lib/python_lf.sh): it reads the live Role or ClusterRole as JSON on
@@ -68,6 +69,21 @@ difference on stdout, in a stable sorted order:
 (`core` is the API group ""). Exit codes: 0 equal, 1 different, 2 the input is not
 readable (not JSON, not a Role/ClusterRole/list of rules, unknown shape).
 
+`bindings` is the second entry point of the same verify check. It reads the list
+`kubectl get rolebindings -n NS -o json` (`--scope namespaced --namespace NS`) or
+`kubectl get clusterrolebindings -o json` (`--scope cluster --node present|absent`)
+and prints one line per problem, exit 0 when there is none:
+
+    missing: RoleBinding NS/studio-hub        the hub's binding is not there
+    binding: RoleBinding NS/studio-hub: ...   wrong subjects or roleRef
+    foreign: RoleBinding NS/x names ...       another binding names the hub's ServiceAccount
+
+Namespaced: `studio-hub` must exist with the exact subject and roleRef, and no other
+RoleBinding may name the ServiceAccount. Cluster: no ClusterRoleBinding may name the
+ServiceAccount except `studio-hub-nodes`, which must then be exact (`--node present`)
+and must not exist at all when the node ClusterRole is absent (`--node absent`).
+Exit codes as for `compare`: 0 none, 1 problems, 2 unreadable input.
+
 Exit codes of the no-argument run: 0 no problem, 1 at least one problem, 2 an input
 could not be read.
 """
@@ -83,7 +99,9 @@ import sys
 try:
     import yaml
 except ImportError:  # pragma: no cover
-    sys.exit("PyYAML required: pip install pyyaml")
+    # Only the manifest checks need it. `compare` and `bindings` (the verify check's
+    # entry points, run on the deploy host) read JSON and must not require it.
+    yaml = None
 
 DEPLOY_DIR = pathlib.Path(__file__).resolve().parent.parent
 HUB_DIR = DEPLOY_DIR / "k8s" / "hub"
@@ -434,6 +452,42 @@ def check_game_hub(manifests: list[dict], game: str, ns: str) -> list[str]:
     return problems
 
 
+def bindings_problems(items, scope: str, namespace: str = "", node: str = "absent") -> list[str]:
+    """Problems in the live RoleBindings of one namespace (scope "namespaced") or in
+    every live ClusterRoleBinding (scope "cluster"); [] = none.
+
+    Reads subjects and roleRef, never only names: a binding called `studio-hub`
+    that points at cluster-admin is a problem, and so is one called anything else
+    that lists the hub's ServiceAccount.
+    """
+    problems: list[str] = []
+    kind = "RoleBinding" if scope == "namespaced" else "ClusterRoleBinding"
+    where = f"{namespace}/" if scope == "namespaced" else ""
+    want_name = HUB_ROLE if scope == "namespaced" else NODE_ROLE
+    role_kind = "Role" if scope == "namespaced" else "ClusterRole"
+    items = [d for d in items if isinstance(d, dict)]
+    mine = [d for d in items if _name(d) == want_name]
+    if scope == "namespaced" or node == "present":
+        if not mine:
+            problems.append(f"missing: {kind} {where}{want_name}")
+    elif mine:
+        problems.append(
+            f"foreign: {kind} {want_name} exists but the ClusterRole {NODE_ROLE} does not; "
+            f"it would bind the ServiceAccount the moment a role of that name appears"
+        )
+    for d in mine:
+        if scope == "namespaced" or node == "present":
+            problems += _binding_problems(d, role_kind, want_name, f"binding: {kind} {where}{want_name}")
+    for d in items:
+        if _name(d) != want_name and names_the_hub(d):
+            ref = d.get("roleRef") or {}
+            problems.append(
+                f"foreign: {kind} {where}{_name(d)} names ServiceAccount {HUB_NAMESPACE}/{HUB_ACCOUNT} "
+                f"(roleRef {ref.get('kind')}/{ref.get('name')}); only {want_name!r} may"
+            )
+    return problems
+
+
 def load_renderer():
     spec = importlib.util.spec_from_file_location("rpg_mmo_games_render", GAME_RENDERER)
     module = importlib.util.module_from_spec(spec)
@@ -471,19 +525,48 @@ def _compare_main(shape: str, stdin) -> int:
     return 1 if lines else 0
 
 
+def _bindings_main(args, stdin) -> int:
+    raw = stdin.read()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"cannot read JSON from stdin: {exc}", file=sys.stderr)
+        return 2
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        print("stdin is neither a list object with items nor a bare list of bindings", file=sys.stderr)
+        return 2
+    if args.scope == "namespaced" and not args.namespace:
+        print("--scope namespaced needs --namespace", file=sys.stderr)
+        return 2
+    lines = bindings_problems(items, args.scope, args.namespace or "", args.node)
+    for line in lines:
+        print(line)
+    return 1 if lines else 0
+
+
 def main(argv: list[str] | None = None, stdin=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dir", type=pathlib.Path, default=HUB_DIR,
                         help="a k8s/hub-shaped directory (its optional/ subdirectory is read too)")
     parser.add_argument("--no-game", action="store_true", help="skip rendering a sample game")
-    sub =parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(dest="command")
     cmp_parser = sub.add_parser("compare", help="compare a Role/ClusterRole (JSON on stdin) with an allow-list")
     cmp_parser.add_argument("--shape", required=True, choices=sorted(SHAPES))
+    bind_parser = sub.add_parser("bindings", help="check live RoleBindings/ClusterRoleBindings (JSON on stdin)")
+    bind_parser.add_argument("--scope", required=True, choices=("namespaced", "cluster"))
+    bind_parser.add_argument("--namespace", help="the namespace the list was read from (scope namespaced)")
+    bind_parser.add_argument("--node", choices=("present", "absent"), default="absent",
+                             help="scope cluster: whether the node ClusterRole exists (its binding must then exist, else not)")
     args = parser.parse_args(argv)
 
+    if args.command == "bindings":
+        return _bindings_main(args, stdin if stdin is not None else sys.stdin)
     if args.command == "compare":
         return _compare_main(args.shape, stdin if stdin is not None else sys.stdin)
 
+    if yaml is None:
+        sys.exit("PyYAML required: pip install pyyaml")
     docs, optional, problems = load_hub(args.dir)
     if problems:
         for p in problems:
