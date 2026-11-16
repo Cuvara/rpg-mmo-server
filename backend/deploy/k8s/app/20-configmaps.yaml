@@ -45,6 +45,10 @@ data:
   # Redis or the gateway looks up a registry nobody writes to and every
   # MsgEnterWorld fails with "no server available" while the fleet is Ready.
   redis-addr: "redis.rpg-k8s-data.svc.cluster.local:6379"
+  # LOG VERBOSITY of the gateway (env LOG_LEVEL, backend/shared/config/config.go;
+  # debug|info|warn|error, default info). The gateway already writes JSON lines
+  # on stdout, so the log collector gets a real `level` label from it.
+  log-level: "info"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -126,3 +130,15 @@ data:
   # recipe uses is /etc/nakama-tls/tls.crt. The server refuses to start if this is
   # set while nakama-url is not https.
   nakama-tls-pin: ""
+  # LOG KNOBS OF THE GAME SERVER (env GAMESERVER_LOG_LEVEL / GAMESERVER_LOG_FORMAT).
+  # level: Trace|Debug|Information|Warning|Error|Critical, default Information.
+  # format: json|text, default json; any other value makes the server exit 2.
+  # `json` (one object per line) is what the log collector needs to derive a
+  # real `level` label; `text` is the multi-line console format for reading by
+  # hand and yields no usable level.
+  # These two knobs are added to the server by the sibling task
+  # gameserver-json-logs (branch feat/server/log-shipping-gameserver-json-logs).
+  # On a build without that change the binary ignores both keys: setting them
+  # is harmless, and it logs in its old format until the image carries it.
+  log-level: "Information"
+  log-format: "json"

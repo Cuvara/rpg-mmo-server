@@ -784,6 +784,20 @@ spec:
                       name: gameserver-config
                       key: bot-speed
                       optional: true
+                # Log knobs (read by the server once gameserver-json-logs is in the
+                # image; ignored before that). json is what the log collector needs.
+                - name: GAMESERVER_LOG_LEVEL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: log-level
+                      optional: true
+                - name: GAMESERVER_LOG_FORMAT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: log-format
+                      optional: true
 
                 # ------------------------------------------------------------
                 # DUNGEON LIFETIME (ADR-26)

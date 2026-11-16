@@ -32,8 +32,9 @@ python render.py --game ember --nakama-tls off --out /tmp/ember         # all th
 | ResourceQuota | `game-quota`: `pods`, `count/gameservers.agones.dev`, `requests.cpu`, `requests.memory` | the fleets' requests (see below) |
 | LimitRange | `sidecar-default-requests`: default **requests** only (30m / 32Mi) | Agones 1.59.0 sidecar defaults |
 | ServiceAccount + RoleBinding | `agones-sdk`, `agones-sdk-access` | `app/05-agones-sdk-rbac.yaml` |
-| ConfigMap | `gameserver-config`, with `game-id: ember` added | `app/20-configmaps.yaml` |
+| ConfigMap | `gameserver-config`, with `game-id: ember` added; carries `log-level: Information` and `log-format: json` like cuvara's | `app/20-configmaps.yaml` |
 | Role + RoleBinding | `rpg-gateway-allocator`: `create` on `allocation.agones.dev/gameserverallocations` **only**, bound to ServiceAccount `rpg-gateway` of the **stack** namespace | `app/10-rbac.yaml` (rule copied) |
+| Role + RoleBinding | `rpg-log-collector`: `get`/`list`/`watch` on `pods` and `get` on `pods/log` **only** (no ClusterRole, no secrets, no configmaps), bound to ServiceAccount `rpg-log-collector` of namespace `rpg-k8s-logging` | fixed in `render.py` (`LOG_COLLECTOR_*` constants) |
 | Fleet | `ember-map-servers-dotnet-k8s` = `<game>-map-servers-dotnet-<env>` | `app/50-fleet-map.yaml` |
 | Fleet | `ember-dungeon-servers-dotnet-k8s` = `<game>-dungeon-servers-dotnet-<env>` | `app/60-fleet-dungeon.yaml` |
 | FleetAutoscaler | `ember-dungeon-servers-dotnet-k8s-buffer` | `app/70-fleetautoscaler-dungeon.yaml` |
@@ -48,6 +49,16 @@ change is `GAMESERVER_GAME_ID`: in `k8s/app` it reads `gameserver-config` key
 `game-id` with `optional: true` (absent means cuvara); here the key is set to
 the game and the reference is **required**, because a non-default game's pod
 running without its id would run as cuvara.
+
+**Logs.** The log collector (Alloy DaemonSet in `rpg-k8s-logging`) can read a
+namespace only through the `rpg-log-collector` Role above, so applying a game's
+render is what makes its pods collectable; its `game` label is the namespace
+suffix (`rpg-k8s-realtime-ember` is `ember`). Both fleets forward
+`GAMESERVER_LOG_LEVEL` / `GAMESERVER_LOG_FORMAT` from `gameserver-config`
+(`optional: true`, like the neighbouring knobs). The values and env entries come
+from `app/`; the renderer refuses a source that lost either. The server reads
+them only once the `gameserver-json-logs` change is in the image; before that
+they are ignored.
 
 No game-server pod gets `JWT_SECRET` (ADR-8, ADR-33 D7): the source fleets do
 not mount it, the renderer refuses to copy one that does, and the Secret
