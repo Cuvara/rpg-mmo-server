@@ -648,6 +648,54 @@ echo "         or with each other; each non-default game's fleet Secret holds th
 unset game game_ns gw_games checked_games KEYRING_KEYS TRIMMED
 # END app-secret and join-keyring checks
 
+# ------------------------------------------------------- Studio hub preflight
+# Two things that would otherwise fail verify's cluster.hub_rbac AFTER the stack was
+# deployed and restarted (a red run with the new images already live), so they stop the
+# script here, before the data tier and the app tier are applied:
+#   1. the API server must serve admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy
+#      (Kubernetes 1.30 or newer). k8s/hub/15-admission-policy.yaml is what narrows the
+#      hub's `patch deployments` to a rollout restart, and the Role is not applied
+#      without it (see the Studio hub block at the end).
+#   2. every non-default game listed in gateway-config must already carry its Role
+#      studio-hub. That pair is part of the manifests render.py renders for the game and
+#      is applied by `render.py | kubectl apply`, not by this script; a game rendered
+#      before the hub existed does not have it.
+# Reads only. verify/tests/dev_up_hub_test.sh extracts the span between the markers.
+# BEGIN studio hub preflight
+hub_pre_fail=0
+hub_pre_api=$($K get --raw /apis/admissionregistration.k8s.io/v1 2>/dev/null || true)
+case "$hub_pre_api" in
+  *'"validatingadmissionpolicies"'*'"validatingadmissionpolicybindings"'* | *'"validatingadmissionpolicybindings"'*'"validatingadmissionpolicies"'*) ;;
+  *)
+    echo "ERROR: the API server of context $CTX does not serve admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy." >&2
+    echo "  The Studio hub's 'patch deployments' is narrowed to a rollout restart by that policy" >&2
+    echo "  (k8s/hub/15-admission-policy.yaml), which needs Kubernetes 1.30 or newer. Nothing was changed." >&2
+    echo "  Upgrade the cluster, or remove the Studio hub from this deploy on purpose; do not apply its Role without the policy." >&2
+    hub_pre_fail=1
+    ;;
+esac
+hub_pre_tls=off
+if [ -n "$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)" ]; then
+  hub_pre_tls=on
+fi
+for game in ${GAMES_LIST[@]+"${GAMES_LIST[@]}"}; do
+  [ "$game" = cuvara ] && continue
+  game_ns="rpg-k8s-realtime-$game"
+  if ! $K get role studio-hub -n "$game_ns" >/dev/null 2>&1; then
+    echo "ERROR: game $game is listed in gateway-config's games, but $game_ns has no Role studio-hub." >&2
+    echo "  Re-render the game and apply it BEFORE this deploy (the Role and RoleBinding are part of the rendered manifests;" >&2
+    echo "  read backend/deploy/k8s/games/README.md first, the apply also re-applies the game's fleet and quota):" >&2
+    echo "    python backend/deploy/k8s/games/render.py --game $game --nakama-tls $hub_pre_tls | kubectl --context $CTX apply -f -" >&2
+    hub_pre_fail=1
+  fi
+done
+if [ "$hub_pre_fail" -ne 0 ]; then
+  exit 1
+fi
+echo "checked: the API serves ValidatingAdmissionPolicy and every listed game namespace has its Role studio-hub"
+# END studio hub preflight
+unset hub_pre_fail hub_pre_api hub_pre_tls game game_ns
+
 say "apply the data tier (rpg-k8s-data)"
 $K apply -k "$HERE/data"
 
@@ -1481,11 +1529,18 @@ unset game game_ns f log_ds_before log_cfg_before log_env_before log_cfg_after l
 # web tool OUTSIDE the cluster) acts through: k8s/hub/ and k3s/hub_contract.py.
 #
 # WHAT THIS APPLIES, AND WHAT IT DOES NOT.
-#   - Exactly the three files named below, by name. Never a glob and never the
+#   - Exactly the four files named below, by name. Never a glob and never the
 #     optional/ subdirectory: k8s/hub/optional/node-access.yaml holds the only
-#     cluster-scoped grant (ClusterRole studio-hub-nodes) and is an operator's opt-in
+#     cluster-scoped GRANT (ClusterRole studio-hub-nodes) and is an operator's opt-in
 #     (docs/RUNBOOK.md, "Studio hub token"), so a deploy must not be able to enable it.
-#   - No ClusterRole and no ClusterRoleBinding for the hub, ever.
+#   - No ClusterRole and no ClusterRoleBinding for the hub, ever. 15-admission-policy.yaml
+#     IS cluster-scoped (a ValidatingAdmissionPolicy and its binding have no namespaced
+#     form) but only RESTRICTS the hub: it is what narrows `patch deployments` to a
+#     rollout restart.
+#   - The policy is applied BEFORE the Role that grants `patch deployments`, and a failed
+#     policy apply STOPS the script (exit 1, not a warning): the Role is not applied
+#     without it. The preflight above already stopped the deploy before anything changed
+#     when the API cannot serve the policy (Kubernetes older than 1.30).
 #   - No token. A token is minted by an operator with `kubectl create token`; nothing
 #     here mints, reads or prints one.
 #
@@ -1507,10 +1562,19 @@ unset game game_ns f log_ds_before log_cfg_before log_env_before log_cfg_after l
 HUB_DIR="$HERE/hub"
 
 say "apply the Studio hub identity (rpg-k8s-hub, namespaced Roles only)"
-# In order: the namespace, the ServiceAccount, then the Roles and bindings that name it
-# in rpg-k8s-realtime and rpg-k8s-data (both exist by now).
-for f in 00-namespace.yaml 10-serviceaccount.yaml 20-rbac.yaml; do
-  $K apply -f "$HUB_DIR/$f"
+# In order: the namespace, the ServiceAccount, the admission policy, then the Roles and
+# bindings that name the account in rpg-k8s-realtime and rpg-k8s-data (both exist by now).
+for f in 00-namespace.yaml 10-serviceaccount.yaml 15-admission-policy.yaml 20-rbac.yaml; do
+  if ! $K apply -f "$HUB_DIR/$f"; then
+    echo "ERROR: could not apply k8s/hub/$f." >&2
+    if [ "$f" = 15-admission-policy.yaml ]; then
+      echo "  The Role of the Studio hub grants 'patch deployments', which is a rollout restart ONLY while the" >&2
+      echo "  policy studio-hub-restart-only is in force, so 20-rbac.yaml is NOT applied. The policy needs" >&2
+      echo "  Kubernetes 1.30 or newer (admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy)." >&2
+      echo "  A Role from an earlier run may still grant it: do not hand out a hub token until this passes." >&2
+    fi
+    exit 1
+  fi
 done
 
 rendered_game_namespaces
@@ -1524,7 +1588,7 @@ for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
     echo "    python backend/deploy/k8s/games/render.py --game $game --nakama-tls $render_tls | kubectl --context $CTX apply -f -" >&2
   fi
 done
-echo "checked: the Studio hub identity (ServiceAccount studio-hub in rpg-k8s-hub) and its Roles in rpg-k8s-realtime and rpg-k8s-data are applied; no ClusterRole, no token"
+echo "checked: the Studio hub identity (ServiceAccount studio-hub in rpg-k8s-hub), its admission policy and its Roles in rpg-k8s-realtime and rpg-k8s-data are applied; no ClusterRole, no token"
 # END studio hub rbac apply
 unset game game_ns f render_tls HUB_DIR
 
