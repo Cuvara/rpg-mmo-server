@@ -37,7 +37,7 @@ func TestRegistryService_EvictRemovesServerFromAssignment(t *testing.T) {
 		t.Fatalf("KnownCount() = %d, want 1", watcher.KnownCount())
 	}
 
-	if err := svc.Evict(ctx, "srv1"); err != nil {
+	if err := svc.Evict(ctx, "", "srv1"); err != nil {
 		t.Fatalf("Evict() error: %v", err)
 	}
 
@@ -53,7 +53,7 @@ func TestRegistryService_EvictRemovesServerFromAssignment(t *testing.T) {
 
 	// Idempotent: evicting a server that is already gone is a success. Several
 	// gateway instances consume the same server_down event.
-	if err := svc.Evict(ctx, "srv1"); err != nil {
+	if err := svc.Evict(ctx, "", "srv1"); err != nil {
 		t.Errorf("Evict() second call error: %v, want nil", err)
 	}
 
@@ -83,7 +83,7 @@ func TestRegistryService_EvictWithoutWatcher(t *testing.T) {
 	_ = svc.RegisterServer(ctx, storage.ServerInfo{
 		ServerID: "srv1", MapID: "map_01", Addr: "10.0.0.1:9000", Capacity: 100,
 	})
-	if err := svc.Evict(ctx, "srv1"); err != nil {
+	if err := svc.Evict(ctx, "", "srv1"); err != nil {
 		t.Fatalf("Evict() error: %v", err)
 	}
 	if _, err := svc.FindServer(ctx, "map_01"); !errors.Is(err, ErrNoServerAvailable) {

@@ -96,6 +96,15 @@ func (w *RegistryWatcher) UntrackServer(serverID string) {
 	delete(w.knownServers, serverID)
 }
 
+// UntrackServerForGame removes a tracked server only when its owner matches.
+func (w *RegistryWatcher) UntrackServerForGame(gameID, serverID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if info, ok := w.knownServers[serverID]; ok && constants.GameOrDefault(info.GameID) == constants.GameOrDefault(gameID) {
+		delete(w.knownServers, serverID)
+	}
+}
+
 // KnownCount returns the number of servers being tracked.
 func (w *RegistryWatcher) KnownCount() int {
 	w.mu.Lock()

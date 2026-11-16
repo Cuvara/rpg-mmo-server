@@ -105,7 +105,12 @@ type SessionStore interface {
 // only ever return live servers.
 type ServerRegistry interface {
 	Register(ctx context.Context, info ServerInfo) error
+	// Deregister is the game-blind graceful path; it removes the current owner.
 	Deregister(ctx context.Context, serverID string) error
+	// DeregisterForGame removes the hash and map index only for the owning game.
+	// Empty gameID and absent or empty stored game_id mean constants.DefaultGameID.
+	// An absent entry succeeds; a foreign owner returns an error wrapping ErrGameMismatch.
+	DeregisterForGame(ctx context.Context, gameID, serverID string) error
 	// FindByMapID returns live servers on mapID for constants.DefaultGameID only.
 	FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error)
 	// FindByGameAndMapID returns live servers owned by gameID on mapID.

@@ -6,6 +6,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Game-checked deregistration protects a replacement server owned by another game, including legacy default-game entries. Redis removes the matching hash and map index atomically.
 - Docs only: `docs/DESIGN.md` (ADR-33 registry section) and `docs/API.md` now say the registry
   key scheme is not cluster-safe. The register script and `Deregister`'s `TxPipeline` each span
   `servers:id:{id}` and the map index key, which hash to different slots, so the registry needs
