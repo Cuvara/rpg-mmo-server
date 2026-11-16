@@ -928,5 +928,406 @@ class Cli(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class AdmissionPolicy(unittest.TestCase):
+    """The ValidatingAdmissionPolicy that narrows `patch deployments` to a rollout restart.
+
+    No CEL evaluator is available to this repository's toolchain, so these tests pin the TEXT of
+    the policy and show the contract rejecting each departure from it. They do NOT prove that an
+    API server denies an image change; that is the live dry-run in docs/RUNBOOK.md.
+    """
+
+    def mutate(self, fn):
+        docs, optional = copy.deepcopy(committed())
+        fn(docs, optional)
+        return hc.check_hub(docs, optional)
+
+    def assertRejected(self, fn, needle):
+        problems = self.mutate(fn)
+        self.assertTrue(problems, "the mutation was accepted")
+        self.assertTrue(any(needle in p for p in problems), f"{needle!r} not in {problems}")
+
+    def policy(self, docs):
+        return find(docs, "ValidatingAdmissionPolicy")
+
+    def binding(self, docs):
+        return find(docs, "ValidatingAdmissionPolicyBinding")
+
+    # ---- the committed files equal the contract ----
+    def test_the_committed_policy_and_binding_equal_the_contract(self):
+        docs, _ = committed()
+        self.assertEqual(hc.policy_problems(self.policy(docs), "policy"), [])
+        self.assertEqual(hc.policy_problems(self.binding(docs), "binding"), [])
+
+    def test_the_policy_objects_are_cluster_scoped_and_named(self):
+        docs, _ = committed()
+        for d in (self.policy(docs), self.binding(docs)):
+            self.assertEqual(d["metadata"]["name"], "studio-hub-restart-only")
+            self.assertNotIn("namespace", d["metadata"])
+            self.assertEqual(d["apiVersion"], "admissionregistration.k8s.io/v1")
+
+    # ---- what the contract pins ----
+    def test_it_matches_only_the_hub_username(self):
+        self.assertEqual(hc.POLICY_SPEC["matchConditions"], [
+            {"name": "only-the-studio-hub",
+             "expression": "request.userInfo.username == 'system:serviceaccount:rpg-k8s-hub:studio-hub'"}])
+        self.assertEqual(hc.HUB_USER_NAME, "system:serviceaccount:rpg-k8s-hub:studio-hub")
+
+    def test_it_matches_update_of_deployments_only(self):
+        rules = hc.POLICY_SPEC["matchConstraints"]["resourceRules"]
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["operations"], ["UPDATE"])
+        self.assertEqual(rules[0]["apiGroups"], ["apps"])
+        self.assertEqual(rules[0]["resources"], ["deployments"])          # no deployments/scale, no /status
+        self.assertEqual(hc.POLICY_SPEC["matchConstraints"]["excludeResourceRules"], [])
+
+    def test_it_fails_closed_and_the_binding_denies_cluster_wide(self):
+        self.assertEqual(hc.POLICY_SPEC["failurePolicy"], "Fail")
+        self.assertEqual(hc.BINDING_SPEC["validationActions"], ["Deny"])
+        self.assertIsNone(hc.BINDING_SPEC["matchResources"]["namespaceSelector"])
+        self.assertIsNone(hc.BINDING_SPEC["matchResources"]["objectSelector"])
+        self.assertEqual(hc.BINDING_SPEC["matchResources"]["excludeResourceRules"], [])
+
+    def test_the_policy_is_required_because_every_shape_grants_patch_on_deployments(self):
+        for shape in ("realtime", "data"):
+            self.assertIn(("apps", "deployments", "patch"), hc.SHAPES[shape])
+        # ... and nothing narrower than a Deployment `patch` exists for a restart: not `deployments/scale`.
+        for shape, triples in hc.SHAPES.items():
+            self.assertNotIn(("apps", "deployments/scale", "update"), triples)
+            self.assertNotIn(("apps", "deployments/scale", "patch"), triples)
+            self.assertNotIn(("apps", "deployments/status", "patch"), triples)
+
+    def test_the_restart_annotation_is_what_kubectl_rollout_restart_writes(self):
+        self.assertEqual(hc.RESTART_ANNOTATION, "kubectl.kubernetes.io/restartedAt")
+        text = "\n".join(e for e, _ in hc.POLICY_VALIDATIONS)
+        self.assertIn("'kubectl.kubernetes.io/restartedAt'", text)
+        # exactly the two template-annotation expressions name it, and no other expression
+        self.assertEqual(sum(1 for e, _ in hc.POLICY_VALIDATIONS if "restartedAt" in e), 2)
+
+    # Every field of apps/v1 DeploymentSpec (Kubernetes 1.30-1.34) must be covered by an expression:
+    # the template (as the two variables) and each sibling. A field Kubernetes adds later is NOT covered
+    # until this list and the policy grow together; reviewing it is part of a Kubernetes upgrade.
+    DEPLOYMENT_SPEC_FIELDS = ("minReadySeconds", "paused", "progressDeadlineSeconds", "replicas",
+                              "revisionHistoryLimit", "selector", "strategy", "template")
+
+    def test_every_deployment_spec_field_is_covered(self):
+        text = "\n".join(e for e, _ in hc.POLICY_VALIDATIONS)
+        for field in self.DEPLOYMENT_SPEC_FIELDS:
+            with self.subTest(field=field):
+                if field == "template":
+                    self.assertIn("variables.newTemplate.spec == variables.oldTemplate.spec", text)
+                    self.assertEqual(
+                        {v["name"]: v["expression"] for v in hc.POLICY_SPEC["variables"]},
+                        {"newTemplate": "object.spec.template", "oldTemplate": "oldObject.spec.template"})
+                else:
+                    self.assertIn(f"object.spec.{field} ", text + " ")
+                    self.assertIn(f"oldObject.spec.{field}", text)
+
+    def test_every_pod_template_metadata_field_the_controller_copies_is_covered(self):
+        text = "\n".join(e for e, _ in hc.POLICY_VALIDATIONS)
+        for field in ("labels", "finalizers", "annotations"):
+            with self.subTest(field=field):
+                self.assertIn(f"variables.newTemplate.metadata.{field}", text)
+                self.assertIn(f"variables.oldTemplate.metadata.{field}", text)
+        for field in ("labels", "annotations"):
+            self.assertIn(f"object.metadata.{field}", text)
+            self.assertIn(f"oldObject.metadata.{field}", text)
+
+    def test_optional_fields_are_read_only_behind_has(self):
+        """Reading an absent field is a CEL error; each optional field's value is compared only under has()."""
+        for e, _ in hc.POLICY_VALIDATIONS:
+            for field in ("labels", "finalizers", "minReadySeconds", "paused"):
+                if f".{field}" in e:
+                    self.assertIn(f"has(", e, e)
+                    self.assertIn(f"!has(", e, e)
+        # the annotation expressions guard BOTH maps before indexing them
+        e4, e5 = hc.POLICY_VALIDATIONS[3][0], hc.POLICY_VALIDATIONS[4][0]
+        self.assertIn("has(variables.oldTemplate.metadata.annotations) && k in", e4)
+        self.assertIn("has(variables.newTemplate.metadata.annotations) && k in", e5)
+
+    def test_expressions_are_single_line_with_balanced_brackets_and_quotes(self):
+        exprs = [e for e, _ in hc.POLICY_VALIDATIONS] + [hc.POLICY_MATCH_USER_EXPRESSION]
+        exprs += [v["expression"] for v in hc.POLICY_SPEC["variables"]]
+        for e in exprs:
+            with self.subTest(expression=e[:60]):
+                self.assertNotIn("\n", e)
+                self.assertEqual(e.count("("), e.count(")"))
+                self.assertEqual(e.count("'") % 2, 0)
+
+    def test_every_validation_has_a_message_and_forbidden_reason(self):
+        for v in hc.POLICY_SPEC["validations"]:
+            self.assertTrue(v["message"].startswith("the Studio hub may only restart a Deployment"))
+            self.assertEqual(v["reason"], "Forbidden")
+
+    def test_the_cases_the_policy_must_decide_are_each_named_by_an_expression(self):
+        """The intent table (restart: allow; image, env, privileged, hostPath: pod spec;
+        replicas; label: deny). Which expression decides each case, as text; the evaluation is live-only."""
+        decides = {
+            "restartedAt added, changed or removed": (3, 4),
+            "image / env / privileged / hostPath / command (pod spec)": (0,),
+            "replicas change": (5,),
+            "template label change": (1,),
+            "Deployment label change": (7,),
+            "Deployment annotation change": (8,),
+            "paused / minReadySeconds": (6,),
+        }
+        for case, idx in decides.items():
+            for i in idx:
+                self.assertLess(i, len(hc.POLICY_VALIDATIONS), case)
+        self.assertEqual(len(hc.POLICY_VALIDATIONS), 9)
+
+    # ---- the live comparison ----
+    def api_policy(self):
+        spec = copy.deepcopy(hc.POLICY_SPEC)
+        spec["matchConstraints"]["namespaceSelector"] = {}
+        spec["matchConstraints"]["objectSelector"] = {}
+        return {"apiVersion": hc.ADMISSION_API, "kind": "ValidatingAdmissionPolicy",
+                "metadata": {"name": hc.POLICY_NAME}, "spec": spec, "status": {"observedGeneration": 1}}
+
+    def test_defaults_filled_by_the_api_server_are_not_differences(self):
+        obj = self.api_policy()
+        del obj["spec"]["failurePolicy"]                       # defaults to Fail
+        obj["spec"]["matchConstraints"]["resourceRules"][0].pop("scope")   # defaults to "*"
+        obj["spec"]["matchConstraints"]["resourceRules"][0].pop("resourceNames")
+        for v in obj["spec"]["validations"]:
+            v.pop("messageExpression")
+        self.assertEqual(hc.policy_problems(obj, "policy"), [])
+
+    def test_a_changed_expression_is_named_by_path(self):
+        obj = self.api_policy()
+        obj["spec"]["validations"][2]["expression"] = "true"
+        self.assertEqual(len(hc.policy_problems(obj, "policy")), 1)
+        self.assertIn("spec.validations[2].expression", hc.policy_problems(obj, "policy")[0])
+
+    def test_an_unexpected_field_is_a_difference(self):
+        obj = self.api_policy()
+        obj["spec"]["auditAnnotations"] = [{"key": "k", "valueExpression": "'v'"}]
+        self.assertTrue(hc.policy_problems(obj, "policy"))
+        obj = self.api_policy()
+        obj["spec"]["paramKind"] = {"apiVersion": "v1", "kind": "ConfigMap"}
+        self.assertTrue(hc.policy_problems(obj, "policy"))
+
+    def test_a_binding_that_only_warns_or_audits_differs(self):
+        for actions in (["Warn"], ["Audit"], ["Deny", "Warn"], []):
+            obj = {"kind": "ValidatingAdmissionPolicyBinding",
+                   "spec": {"policyName": hc.POLICY_NAME, "validationActions": actions}}
+            with self.subTest(actions=actions):
+                self.assertTrue(hc.policy_problems(obj, "binding"))
+        ok = {"kind": "ValidatingAdmissionPolicyBinding",
+              "spec": {"policyName": hc.POLICY_NAME, "validationActions": ["Deny"],
+                       "matchResources": {"namespaceSelector": {}, "objectSelector": {}}}}
+        self.assertEqual(hc.policy_problems(ok, "binding"), [])
+
+    def test_a_namespace_selector_on_the_binding_differs(self):
+        obj = {"spec": {"policyName": hc.POLICY_NAME, "validationActions": ["Deny"],
+                        "matchResources": {"namespaceSelector": {"matchLabels": {"a": "b"}}}}}
+        self.assertTrue(hc.policy_problems(obj, "binding"))
+
+    # ---- manifest mutations ----
+    def test_a_replaced_expression_is_rejected(self):
+        def m(docs, opt):
+            self.policy(docs)["spec"]["validations"][0]["expression"] = "true"
+        self.assertRejected(m, "differs: spec.validations[0].expression")
+
+    def test_the_policy_missing_is_rejected(self):
+        def m(docs, opt):
+            docs[:] = [(lab, d) for lab, d in docs if d["kind"] != "ValidatingAdmissionPolicy"]
+        self.assertRejected(m, "expected exactly one ValidatingAdmissionPolicy")
+
+    def test_the_binding_missing_is_rejected(self):
+        def m(docs, opt):
+            docs[:] = [(lab, d) for lab, d in docs if d["kind"] != "ValidatingAdmissionPolicyBinding"]
+        self.assertRejected(m, "expected exactly one ValidatingAdmissionPolicyBinding")
+
+    def test_two_policies_are_rejected(self):
+        def m(docs, opt):
+            docs.append(("copy", copy.deepcopy(self.policy(docs))))
+        self.assertRejected(m, "expected exactly one ValidatingAdmissionPolicy")
+
+    def test_a_binding_that_warns_is_rejected(self):
+        def m(docs, opt):
+            self.binding(docs)["spec"]["validationActions"] = ["Warn"]
+        self.assertRejected(m, "differs: spec.validationActions")
+
+    def test_a_namespace_selector_on_the_binding_is_rejected(self):
+        def m(docs, opt):
+            self.binding(docs)["spec"]["matchResources"] = {"namespaceSelector": {"matchLabels": {"a": "b"}}}
+        self.assertRejected(m, "differs: spec.matchResources.namespaceSelector")
+
+    def test_failure_policy_ignore_is_rejected(self):
+        def m(docs, opt):
+            self.policy(docs)["spec"]["failurePolicy"] = "Ignore"
+        self.assertRejected(m, "differs: spec.failurePolicy")
+
+    def test_matchconditions_removed_is_rejected(self):
+        def m(docs, opt):
+            del self.policy(docs)["spec"]["matchConditions"]
+        self.assertRejected(m, "differs: spec.matchConditions")
+
+    def test_the_policy_with_a_namespace_is_rejected(self):
+        def m(docs, opt):
+            self.policy(docs)["metadata"]["namespace"] = "rpg-k8s-realtime"
+        self.assertRejected(m, "cluster-scoped")
+
+    def test_a_wrong_api_version_is_rejected(self):
+        def m(docs, opt):
+            self.policy(docs)["apiVersion"] = "admissionregistration.k8s.io/v1beta1"
+        self.assertRejected(m, "apiVersion")
+
+    def test_a_clusterrole_is_still_rejected_next_to_the_policy(self):
+        def m(docs, opt):
+            docs.append(("x", {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+                               "metadata": {"name": "x"}, "rules": []}))
+        self.assertRejected(m, "ClusterRole is not allowed here")
+
+    def test_the_manifest_comments_state_the_property_change(self):
+        text = (hc.HUB_DIR / "15-admission-policy.yaml").read_text(encoding="utf-8")
+        for needle in ("CLUSTER-SCOPED", "NO ClusterRole and NO ClusterRoleBinding", "RESTRICT",
+                       "restart", "1.30", "NOT PROVEN OFFLINE", "FAILS CLOSED"):
+            self.assertIn(needle, text)
+
+
+class WriteSurface(unittest.TestCase):
+    """Which writes the Roles grant, and that none of them carries a pod template the hub can set
+    (other than `patch deployments`, which the admission policy narrows)."""
+
+    def writes(self, shape):
+        return {t for t in hc.SHAPES[shape] if t[2] not in ("get", "list", "watch")}
+
+    def test_the_realtime_writes_are_exactly_these(self):
+        self.assertEqual(self.writes("realtime"), {
+            ("", "pods", "delete"),
+            ("apps", "deployments", "patch"),
+            ("agones.dev", "fleets/scale", "update"),
+            ("agones.dev", "fleets/scale", "patch"),
+            ("agones.dev", "gameservers", "delete"),
+            ("autoscaling.agones.dev", "fleetautoscalers", "patch"),
+            ("autoscaling.agones.dev", "fleetautoscalers", "update"),
+            ("allocation.agones.dev", "gameserverallocations", "create"),
+        })
+
+    def test_no_pod_template_bearing_resource_is_written_but_deployments(self):
+        # Kinds that carry a pod template (or a pod spec): a write on any of them would let the hub set one.
+        carriers = {"pods", "statefulsets", "daemonsets", "replicasets", "replicationcontrollers", "jobs",
+                    "cronjobs", "fleets", "gameserversets", "gameservers"}
+        for shape in ("realtime", "data", "node"):
+            for group, resource, verb in self.writes(shape):
+                if resource in carriers:
+                    # the only allowed: delete (removes, never sets a spec)
+                    self.assertEqual(verb, "delete", (shape, group, resource, verb))
+
+    def test_no_statefulset_replicaset_or_daemonset_write(self):
+        for shape in ("realtime", "data"):
+            for group, resource, verb in hc.SHAPES[shape]:
+                if resource in ("statefulsets", "replicasets", "daemonsets", "statefulsets/scale"):
+                    self.assertIn(verb, ("get", "list", "watch"))
+
+
+class OutsideNamespaces(unittest.TestCase):
+    """RoleBindings of `kubectl get rolebindings -A` against the expected namespaces."""
+
+    EXPECTED = ["rpg-k8s-realtime", "rpg-k8s-data"]
+
+    def rb(self, ns, name, subjects):
+        return {"kind": "RoleBinding", "metadata": {"name": name, "namespace": ns}, "subjects": subjects,
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "edit"}}
+
+    def test_a_binding_elsewhere_naming_the_account_is_foreign(self):
+        for ns in ("kube-system", "rpg-k8s-hub", "agones-system", "rpg-k8s-realtime-zephyr"):
+            with self.subTest(ns=ns):
+                problems = hc.outside_namespaces_problems(
+                    [self.rb(ns, "x", hc.WANT_SUBJECTS)], self.EXPECTED)
+                self.assertEqual(len(problems), 1)
+                self.assertIn(f"foreign: RoleBinding {ns}/x", problems[0])
+
+    def test_the_other_spellings_are_foreign_too(self):
+        for subject in ({"kind": "User", "name": hc.HUB_USER_NAME},
+                        {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub"},
+                        {"kind": "Group", "name": "system:serviceaccounts"}):
+            with self.subTest(subject=subject):
+                self.assertTrue(hc.outside_namespaces_problems([self.rb("kube-system", "x", [subject])], self.EXPECTED))
+
+    def test_unrelated_bindings_and_the_expected_namespaces_are_not_reported_here(self):
+        items = [self.rb("kube-system", "other", [{"kind": "ServiceAccount", "name": "other", "namespace": "kube-system"}]),
+                 self.rb("rpg-k8s-data", "studio-hub", hc.WANT_SUBJECTS),
+                 self.rb("kube-system", "auth", [{"kind": "Group", "name": "system:authenticated"}])]
+        self.assertEqual(hc.outside_namespaces_problems(items, self.EXPECTED), [])
+
+    def test_a_game_namespace_that_is_expected_is_not_foreign(self):
+        item = self.rb("rpg-k8s-realtime-ember", "studio-hub", hc.WANT_SUBJECTS)
+        self.assertEqual(hc.outside_namespaces_problems([item], self.EXPECTED + ["rpg-k8s-realtime-ember"]), [])
+        self.assertTrue(hc.outside_namespaces_problems([item], self.EXPECTED))
+
+
+class LegacyTokenSecrets(unittest.TestCase):
+    TOKEN = "kubernetes.io/service-account-token"
+
+    def test_a_service_account_token_secret_of_the_hub_is_a_problem(self):
+        problems = hc.secrets_problems(f"studio-hub-token\t{self.TOKEN}\tstudio-hub\n")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("legacy token: Secret rpg-k8s-hub/studio-hub-token", problems[0])
+
+    def test_the_runbooks_opaque_binding_secret_and_other_accounts_are_fine(self):
+        text = f"studio-hub-token-binding\tOpaque\t\nbuilder-token\t{self.TOKEN}\tbuilder\n\n"
+        self.assertEqual(hc.secrets_problems(text), [])
+
+    def test_a_secret_of_another_type_annotated_for_the_hub_is_not_a_token(self):
+        self.assertEqual(hc.secrets_problems("x\tOpaque\tstudio-hub\n"), [])
+
+    def test_there_is_no_documented_token_secret(self):
+        self.assertEqual(hc.DOCUMENTED_TOKEN_SECRETS, ())
+
+    def test_a_documented_one_would_be_accepted(self):
+        old = hc.DOCUMENTED_TOKEN_SECRETS
+        try:
+            hc.DOCUMENTED_TOKEN_SECRETS = ("keep",)
+            self.assertEqual(hc.secrets_problems(f"keep\t{self.TOKEN}\tstudio-hub\n"), [])
+        finally:
+            hc.DOCUMENTED_TOKEN_SECRETS = old
+
+
+class NewCli(unittest.TestCase):
+    def run_main(self, text, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = hc.main(list(argv), stdin=io.StringIO(text))
+        return rc, out.getvalue()
+
+    def test_policy_equal_exits_0(self):
+        docs, _ = committed()
+        obj = copy.deepcopy(find(docs, "ValidatingAdmissionPolicy"))
+        rc, out = self.run_main(json.dumps(obj), "policy", "--kind", "policy")
+        self.assertEqual((rc, out), (0, ""))
+
+    def test_policy_different_exits_1_with_a_differs_line(self):
+        docs, _ = committed()
+        obj = copy.deepcopy(find(docs, "ValidatingAdmissionPolicy"))
+        obj["spec"]["failurePolicy"] = "Ignore"
+        rc, out = self.run_main(json.dumps(obj), "policy", "--kind", "policy")
+        self.assertEqual(rc, 1)
+        self.assertIn("differs: spec.failurePolicy", out)
+
+    def test_policy_unreadable_or_the_wrong_kind_exits_2(self):
+        self.assertEqual(self.run_main("not json", "policy", "--kind", "policy")[0], 2)
+        docs, _ = committed()
+        binding = find(docs, "ValidatingAdmissionPolicyBinding")
+        self.assertEqual(self.run_main(json.dumps(binding), "policy", "--kind", "policy")[0], 2)
+        self.assertEqual(self.run_main(json.dumps(binding), "policy", "--kind", "binding")[0], 0)
+
+    def test_secrets_exit_codes(self):
+        self.assertEqual(self.run_main("", "secrets")[0], 0)
+        rc, out = self.run_main("t\tkubernetes.io/service-account-token\tstudio-hub\n", "secrets")
+        self.assertEqual(rc, 1)
+        self.assertIn("legacy token", out)
+
+    def test_bindings_all_namespaces(self):
+        item = {"kind": "RoleBinding", "metadata": {"name": "x", "namespace": "kube-system"},
+                "subjects": hc.WANT_SUBJECTS, "roleRef": {"kind": "ClusterRole", "name": "edit"}}
+        rc, out = self.run_main(json.dumps({"items": [item]}), "bindings", "--scope", "all-namespaces",
+                                "--expected", "rpg-k8s-realtime,rpg-k8s-data")
+        self.assertEqual(rc, 1)
+        self.assertIn("foreign: RoleBinding kube-system/x", out)
+        self.assertEqual(self.run_main(json.dumps({"items": [item]}), "bindings", "--scope", "all-namespaces")[0], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

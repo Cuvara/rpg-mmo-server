@@ -32,7 +32,8 @@ Role of exactly two rules, a hardened DaemonSet, a selector-less Service `loki`)
 It also reads deploy/k8s/hub/ (and its opt-in optional/ file) and enforces the
 Studio hub's contract (hub_contract.py: the single copy of the allow-list, no
 ClusterRole outside optional/, no Secret or ConfigMap access, a ServiceAccount
-without automount); every rendered game's `studio-hub` Role + RoleBinding is held
+without automount, and the admission policy that makes `patch deployments` a restart,
+equal to POLICY_SPEC); every rendered game's `studio-hub` Role + RoleBinding is held
 to the same REALTIME allow-list (hub_contract.check_game_hub).
 Nothing is written or applied.
 The Agones install.yaml is cached in ~/.cache/rpg-mmo/agones-<version>.yaml.
@@ -109,9 +110,15 @@ REQUIRED_NATIVE_FIELDS = {
     "RoleBinding": ["metadata.name", "metadata.namespace", "subjects", "roleRef"],
     # The Studio hub's manifests (k8s/hub, incl. the opt-in optional/node-access.yaml);
     # their contract is in hub_contract.py. The only cluster-scoped kinds anywhere
-    # in the validated set, and a ClusterRole outside optional/ fails that contract.
+    # in the validated set (with the admission policy below), and a ClusterRole outside
+    # optional/ fails that contract.
     "ClusterRole": ["metadata.name", "rules"],
     "ClusterRoleBinding": ["metadata.name", "subjects", "roleRef"],
+    # The Studio hub's admission policy (k8s/hub/15-admission-policy.yaml): cluster-scoped,
+    # and what narrows `patch deployments` to a rollout restart. Its text is pinned by
+    # hub_contract.py (POLICY_SPEC / BINDING_SPEC); this is only the shape.
+    "ValidatingAdmissionPolicy": ["metadata.name", "spec.matchConstraints", "spec.validations"],
+    "ValidatingAdmissionPolicyBinding": ["metadata.name", "spec.policyName", "spec.validationActions"],
     "DaemonSet": ["metadata.name"],
     "Service": ["metadata.name"],
 }

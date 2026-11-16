@@ -22,8 +22,13 @@ The contract (each line is one rule below, each rule has a test in
 tests/test_hub_contract.py that shows it rejecting a mutation):
 
   Directory k8s/hub/ (the part dev-up.sh applies)
-    * the only kinds are Namespace, ServiceAccount, Role, RoleBinding: NO
-      ClusterRole and NO ClusterRoleBinding, no Secret, no ConfigMap, no workload
+    * the only kinds are Namespace, ServiceAccount, Role, RoleBinding and the two
+      cluster-scoped admission objects below: NO ClusterRole and NO
+      ClusterRoleBinding, no Secret, no ConfigMap, no workload
+    * exactly one ValidatingAdmissionPolicy studio-hub-restart-only and one
+      ValidatingAdmissionPolicyBinding of the same name, equal (after defaults) to
+      POLICY_SPEC / BINDING_SPEC below: the policy is what narrows `patch
+      deployments` to a rollout restart, and only for the hub's username
     * exactly one Namespace rpg-k8s-hub
     * exactly one ServiceAccount studio-hub in it, automountServiceAccountToken
       explicitly false, no `secrets` / `imagePullSecrets` on it
@@ -50,6 +55,8 @@ tests/test_hub_contract.py that shows it rejecting a mutation):
   binds its own defaults to them, e.g. system:basic-user).
 
 Usage:
+    python hub_contract.py policy --kind K         # compare a live policy / binding (JSON on stdin)
+    python hub_contract.py secrets                 # check name<TAB>type<TAB>sa-name lines of the hub namespace
     python hub_contract.py                         # the committed k8s/hub (+ optional/) plus a rendered sample game
     python hub_contract.py --no-game               # skip the render.py leg
     python hub_contract.py --dir DIR             # another directory (shows a mutation failing)
@@ -87,7 +94,21 @@ Namespaced: `studio-hub` must exist with the exact subject and roleRef, and no o
 RoleBinding may name the ServiceAccount. Cluster: no ClusterRoleBinding may name the
 ServiceAccount except `studio-hub-nodes`, which must then be exact (`--node present`)
 and must not exist at all when the node ClusterRole is absent (`--node absent`).
+All-namespaces (`--scope all-namespaces --expected NS,NS,...`, input from
+`kubectl get rolebindings -A -o json`): no RoleBinding in a namespace OUTSIDE the
+expected list may name the ServiceAccount, whatever it is called.
 Exit codes as for `compare`: 0 none, 1 problems, 2 unreadable input.
+
+`policy --kind policy|binding` reads one live ValidatingAdmissionPolicy or
+ValidatingAdmissionPolicyBinding as JSON and prints one `differs:` line per departure
+from POLICY_SPEC / BINDING_SPEC (API-server defaults filled in on both sides). Exit
+codes as for `compare`.
+
+`secrets` reads `name<TAB>type<TAB>kubernetes.io/service-account.name` lines (the
+output of a jsonpath over the Secrets of rpg-k8s-hub: names and types only, the data is
+never requested) and prints a `legacy token:` line for every Secret of type
+kubernetes.io/service-account-token that belongs to the hub ServiceAccount and is not
+in DOCUMENTED_TOKEN_SECRETS (none: the runbook mints bound tokens, never a Secret).
 
 Exit codes of the no-argument run: 0 no problem, 1 at least one problem, 2 an input
 could not be read.
@@ -316,6 +337,319 @@ def names_the_hub(binding: dict) -> bool:
 
 
 # --------------------------------------------------------------------------
+# The admission policy that makes `patch deployments` a rollout restart
+# --------------------------------------------------------------------------
+#
+# RBAC cannot narrow `patch` on a Deployment: the verb also rewrites the pod
+# template (image, env, securityContext, hostPath volumes), and a Deployment's pods
+# are created by the Deployment controller, not by the caller, so the hub would need
+# no `create pods` to run anything on a node. A ValidatingAdmissionPolicy can: it sees
+# the old and the new object. THE POLICY IS WHAT MAKES "RESTART ONLY" TRUE; without
+# it the token is node-root-equivalent in every namespace where the hub has a Role
+# and no Pod Security label stops a privileged or hostPath pod.
+#
+# The two objects are CLUSTER-SCOPED (the API has no namespaced policy). That is the
+# one exception to "no cluster-scoped object by default": no ClusterRole and no
+# ClusterRoleBinding, and one policy that can only RESTRICT the hub (it matches one
+# username and can only deny).
+#
+# The expected spec lives here, in code, like the Role allow-list: k8s/hub/
+# 15-admission-policy.yaml must equal it (check_hub_manifests) and the verify check
+# `cluster.hub_rbac` compares the LIVE objects with it (`hub_contract.py policy`).
+# Each expression is explained in the YAML, next to the expression.
+#
+# NOT PROVEN OFFLINE: no CEL evaluator is available to this repository's toolchain,
+# so what is pinned is the TEXT of the expressions (and the tests that the text
+# covers each field a restart must leave alone), not their evaluation by an API
+# server. The live check in docs/RUNBOOK.md ("Studio hub token", live check) is the
+# proof: a restart patch is allowed; image, env, privileged, hostPath, replicas and
+# label patches are denied.
+
+POLICY_NAME = "studio-hub-restart-only"
+POLICY_BINDING_NAME = POLICY_NAME
+ADMISSION_API = "admissionregistration.k8s.io/v1"
+POLICY_KIND = "ValidatingAdmissionPolicy"
+POLICY_BINDING_KIND = "ValidatingAdmissionPolicyBinding"
+RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
+# Kubernetes serves admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy (with
+# matchConditions and variables) from 1.30.
+MIN_KUBERNETES_FOR_POLICY = "1.30"
+# A Secret of type kubernetes.io/service-account-token for the hub that the runbook
+# documents. There is none: the runbook mints bound, expiring tokens with `kubectl
+# create token` and rejects the never-expiring Secret.
+DOCUMENTED_TOKEN_SECRETS: tuple = ()
+
+
+def _opt_equal_pair(new: str, old: str) -> str:
+    """CEL: the field is present on both objects with an equal value, or absent on both.
+
+    `has()` first, because reading an absent field of an object is an error in CEL and
+    an error under failurePolicy Fail denies the request (here that would deny a
+    restart, never allow a change)."""
+    return f"has({new}) == has({old}) && (!has({new}) || {new} == {old})"
+
+
+_NEW_T, _OLD_T = "variables.newTemplate", "variables.oldTemplate"
+_NEW_A, _OLD_A = f"{_NEW_T}.metadata.annotations", f"{_OLD_T}.metadata.annotations"
+
+POLICY_MATCH_USER_EXPRESSION = f"request.userInfo.username == '{HUB_USER_NAME}'"
+
+POLICY_VALIDATIONS = (
+    # 1. The whole pod spec (image, env, command, securityContext, volumes, hostPID,
+    #    hostNetwork, serviceAccountName, every container, every future field) is equal.
+    (
+        f"{_NEW_T}.spec == {_OLD_T}.spec",
+        "the Studio hub may only restart a Deployment: spec.template.spec (the pod spec) must not change",
+    ),
+    # 2. Template labels equal (they are the pod labels: selectors, Services, NetworkPolicy).
+    (
+        _opt_equal_pair(f"{_NEW_T}.metadata.labels", f"{_OLD_T}.metadata.labels"),
+        "the Studio hub may only restart a Deployment: spec.template.metadata.labels must not change",
+    ),
+    # 3. Template finalizers equal (a finalizer on every pod would make pods undeletable).
+    (
+        _opt_equal_pair(f"{_NEW_T}.metadata.finalizers", f"{_OLD_T}.metadata.finalizers"),
+        "the Studio hub may only restart a Deployment: spec.template.metadata.finalizers must not change",
+    ),
+    # 4. In the template annotations no key other than restartedAt is added or changed.
+    (
+        f"!has({_NEW_A}) || {_NEW_A}.all(k, k == '{RESTART_ANNOTATION}' || "
+        f"(has({_OLD_A}) && k in {_OLD_A} && {_OLD_A}[k] == {_NEW_A}[k]))",
+        f"the Studio hub may only restart a Deployment: the only pod template annotation it may set is {RESTART_ANNOTATION}",
+    ),
+    # 5. ... and none other is removed.
+    (
+        f"!has({_OLD_A}) || {_OLD_A}.all(k, k == '{RESTART_ANNOTATION}' || "
+        f"(has({_NEW_A}) && k in {_NEW_A}))",
+        f"the Studio hub may only restart a Deployment: it may not remove a pod template annotation other than {RESTART_ANNOTATION}",
+    ),
+    # 6. The sibling spec fields Kubernetes always defaults (so always present).
+    (
+        "object.spec.replicas == oldObject.spec.replicas && object.spec.selector == oldObject.spec.selector && "
+        "object.spec.strategy == oldObject.spec.strategy && "
+        "object.spec.revisionHistoryLimit == oldObject.spec.revisionHistoryLimit && "
+        "object.spec.progressDeadlineSeconds == oldObject.spec.progressDeadlineSeconds",
+        "the Studio hub may only restart a Deployment: replicas, selector, strategy, revisionHistoryLimit and progressDeadlineSeconds must not change",
+    ),
+    # 7. The sibling spec fields that have no default (absent when zero / false).
+    (
+        _opt_equal_pair("object.spec.minReadySeconds", "oldObject.spec.minReadySeconds")
+        + " && "
+        + _opt_equal_pair("object.spec.paused", "oldObject.spec.paused"),
+        "the Studio hub may only restart a Deployment: minReadySeconds and paused must not change",
+    ),
+    # 8. The Deployment's own labels and annotations equal.
+    (
+        _opt_equal_pair("object.metadata.labels", "oldObject.metadata.labels"),
+        "the Studio hub may only restart a Deployment: its metadata.labels must not change",
+    ),
+    (
+        _opt_equal_pair("object.metadata.annotations", "oldObject.metadata.annotations"),
+        "the Studio hub may only restart a Deployment: its metadata.annotations must not change",
+    ),
+)
+
+POLICY_SPEC = {
+    "failurePolicy": "Fail",
+    "matchConstraints": {
+        "matchPolicy": "Equivalent",
+        "namespaceSelector": None,
+        "objectSelector": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["apps"],
+                "apiVersions": ["v1"],
+                "operations": ["UPDATE"],
+                "resources": ["deployments"],
+                "resourceNames": [],
+                "scope": "*",
+            }
+        ],
+        "excludeResourceRules": [],
+    },
+    "matchConditions": [{"name": "only-the-studio-hub", "expression": POLICY_MATCH_USER_EXPRESSION}],
+    "variables": [
+        {"name": "newTemplate", "expression": "object.spec.template"},
+        {"name": "oldTemplate", "expression": "oldObject.spec.template"},
+    ],
+    "validations": [
+        {"expression": e, "message": m, "reason": "Forbidden", "messageExpression": None}
+        for e, m in POLICY_VALIDATIONS
+    ],
+    "auditAnnotations": [],
+    "paramKind": None,
+}
+
+BINDING_SPEC = {
+    "policyName": POLICY_NAME,
+    "validationActions": ["Deny"],
+    "paramRef": None,
+    "matchResources": {
+        "matchPolicy": "Equivalent",
+        "namespaceSelector": None,
+        "objectSelector": None,
+        "resourceRules": [],
+        "excludeResourceRules": [],
+    },
+}
+
+
+def _norm_selector(sel):
+    """None for a missing or empty selector ({} and {matchLabels: {}} select everything)."""
+    if not isinstance(sel, dict):
+        return sel if sel else None
+    cleaned = {k: v for k, v in sel.items() if v}
+    return cleaned or None
+
+
+def _norm_rule(rule) -> dict:
+    rule = rule if isinstance(rule, dict) else {}
+    return {
+        "apiGroups": sorted(_as_list(rule.get("apiGroups"))),
+        "apiVersions": sorted(_as_list(rule.get("apiVersions"))),
+        "operations": sorted(_as_list(rule.get("operations"))),
+        "resources": sorted(_as_list(rule.get("resources"))),
+        "resourceNames": sorted(_as_list(rule.get("resourceNames"))),
+        "scope": rule.get("scope") or "*",
+    }
+
+
+def _norm_match(match) -> dict:
+    match = match if isinstance(match, dict) else {}
+    out = {
+        "matchPolicy": match.get("matchPolicy") or "Equivalent",
+        "namespaceSelector": _norm_selector(match.get("namespaceSelector")),
+        "objectSelector": _norm_selector(match.get("objectSelector")),
+        "resourceRules": sorted((_norm_rule(r) for r in _as_list(match.get("resourceRules"))), key=json.dumps),
+        "excludeResourceRules": sorted(
+            (_norm_rule(r) for r in _as_list(match.get("excludeResourceRules"))), key=json.dumps
+        ),
+    }
+    for key in sorted(set(match) - set(out)):
+        out[key] = match[key]
+    return out
+
+
+def normalize_policy_spec(spec) -> dict:
+    """A ValidatingAdmissionPolicy spec with the API server's defaults filled in, so a
+    manifest and the object read back from a cluster compare equal when they mean the
+    same. Unknown keys are kept: an unexpected field is a difference."""
+    spec = spec if isinstance(spec, dict) else {}
+    known = {"failurePolicy", "matchConstraints", "matchConditions", "variables", "validations",
+             "auditAnnotations", "paramKind"}
+    out = {
+        "failurePolicy": spec.get("failurePolicy") or "Fail",
+        "matchConstraints": _norm_match(spec.get("matchConstraints")),
+        "matchConditions": [
+            {"name": c.get("name"), "expression": c.get("expression")}
+            for c in _as_list(spec.get("matchConditions")) if isinstance(c, dict)
+        ],
+        "variables": [
+            {"name": v.get("name"), "expression": v.get("expression")}
+            for v in _as_list(spec.get("variables")) if isinstance(v, dict)
+        ],
+        "validations": [
+            {"expression": v.get("expression"), "message": v.get("message"), "reason": v.get("reason"),
+             "messageExpression": v.get("messageExpression")}
+            for v in _as_list(spec.get("validations")) if isinstance(v, dict)
+        ],
+        "auditAnnotations": _as_list(spec.get("auditAnnotations")),
+        "paramKind": spec.get("paramKind") or None,
+    }
+    for key in sorted(set(spec) - known):
+        out[key] = spec[key]
+    return out
+
+
+def normalize_binding_spec(spec) -> dict:
+    spec = spec if isinstance(spec, dict) else {}
+    known = {"policyName", "validationActions", "paramRef", "matchResources"}
+    out = {
+        "policyName": spec.get("policyName"),
+        "validationActions": sorted(_as_list(spec.get("validationActions"))),
+        "paramRef": spec.get("paramRef") or None,
+        "matchResources": _norm_match(spec.get("matchResources")),
+    }
+    for key in sorted(set(spec) - known):
+        out[key] = spec[key]
+    return out
+
+
+def _short(value) -> str:
+    text = json.dumps(value, sort_keys=True)
+    return text if len(text) <= 140 else text[:137] + "..."
+
+
+def _diff(path: str, want, got, out: list[str]) -> None:
+    if isinstance(want, dict) and isinstance(got, dict):
+        for key in sorted(set(want) | set(got)):
+            if key not in want:
+                out.append(f"differs: {path}.{key}: not in the repository's policy, got {_short(got[key])}")
+            elif key not in got:
+                out.append(f"differs: {path}.{key}: missing, want {_short(want[key])}")
+            else:
+                _diff(f"{path}.{key}", want[key], got[key], out)
+    elif isinstance(want, list) and isinstance(got, list):
+        if len(want) != len(got):
+            out.append(f"differs: {path}: {len(got)} entries, the repository's policy has {len(want)}")
+        for i, (w, g) in enumerate(zip(want, got)):
+            _diff(f"{path}[{i}]", w, g, out)
+    elif want != got:
+        out.append(f"differs: {path}: want {_short(want)}, got {_short(got)}")
+
+
+def policy_problems(obj, kind: str = "policy") -> list[str]:
+    """How a ValidatingAdmissionPolicy (kind "policy") or its binding (kind "binding")
+    differs from POLICY_SPEC / BINDING_SPEC; [] = equal. Reads spec only (metadata,
+    status and the type-checking warnings are not part of the contract)."""
+    if not isinstance(obj, dict):
+        return ["differs: the object is not readable JSON"]
+    problems: list[str] = []
+    if kind == "policy":
+        _diff("spec", normalize_policy_spec(POLICY_SPEC), normalize_policy_spec(obj.get("spec")), problems)
+    else:
+        _diff("spec", normalize_binding_spec(BINDING_SPEC), normalize_binding_spec(obj.get("spec")), problems)
+    return problems
+
+
+def check_admission_manifests(docs: Docs) -> list[str]:
+    """The policy and its binding in k8s/hub: exactly one of each, named, cluster-scoped, equal to the contract."""
+    problems: list[str] = []
+    for kind, mode in ((POLICY_KIND, "policy"), (POLICY_BINDING_KIND, "binding")):
+        found = [(lab, d) for lab, d in docs if d.get("kind") == kind]
+        if len(found) != 1:
+            problems.append(f"expected exactly one {kind} {POLICY_NAME!r}, got {len(found)}")
+            continue
+        lab, d = found[0]
+        if d.get("apiVersion") != ADMISSION_API:
+            problems.append(f"{lab}: apiVersion is {d.get('apiVersion')!r}, expected {ADMISSION_API!r}")
+        if _name(d) != POLICY_NAME:
+            problems.append(f"{lab}: named {_name(d)!r}, expected {POLICY_NAME!r}")
+        if _ns(d):
+            problems.append(f"{lab}: has a namespace; {kind} is cluster-scoped")
+        problems += [f"{lab}: {line}" for line in policy_problems(d, mode)]
+    return problems
+
+
+def secrets_problems(text: str) -> list[str]:
+    """`name<TAB>type<TAB>service-account-name` lines (names and types only) -> a problem
+    for every legacy service-account-token Secret of the hub ServiceAccount that is not documented."""
+    problems: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        name, type_, account = (line.split("\t") + ["", "", ""])[:3]
+        if (type_ == "kubernetes.io/service-account-token" and account == HUB_ACCOUNT
+                and name not in DOCUMENTED_TOKEN_SECRETS):
+            problems.append(
+                f"legacy token: Secret {HUB_NAMESPACE}/{name} is a never-expiring "
+                f"kubernetes.io/service-account-token for {HUB_ACCOUNT}; the runbook mints bound tokens only. "
+                f"Delete it (kubectl -n {HUB_NAMESPACE} delete secret {name})"
+            )
+    return problems
+
+
+# --------------------------------------------------------------------------
 # Loading
 # --------------------------------------------------------------------------
 
@@ -349,18 +683,19 @@ def load_hub(path: pathlib.Path = HUB_DIR) -> tuple[Docs, Docs, list[str]]:
 # k8s/hub as committed
 # --------------------------------------------------------------------------
 
-DEFAULT_KINDS = ("Namespace", "ServiceAccount", "Role", "RoleBinding")
+DEFAULT_KINDS = ("Namespace", "ServiceAccount", "Role", "RoleBinding", POLICY_KIND, POLICY_BINDING_KIND)
 
 
 def check_hub_manifests(docs: Docs) -> list[str]:
     """The rules for the part of k8s/hub that dev-up.sh applies. Returns the problems."""
-    problems: list[str] = []
+    problems: list[str] = check_admission_manifests(docs)
     for lab, d in docs:
         kind = d.get("kind")
         if kind in ("ClusterRole", "ClusterRoleBinding"):
             problems.append(
                 f"{lab}: {kind} is not allowed here; the only cluster-scoped grant is "
-                f"{OPTIONAL_SUBDIR}/node-access.yaml, which dev-up.sh does not apply"
+                f"{OPTIONAL_SUBDIR}/node-access.yaml, which dev-up.sh does not apply (the admission "
+                f"policy below only RESTRICTS the hub)"
             )
         elif kind not in DEFAULT_KINDS:
             problems.append(f"{lab}: kind {kind!r} is not allowed; the hub directory holds {', '.join(DEFAULT_KINDS)} only")
@@ -522,6 +857,26 @@ def bindings_problems(items, scope: str, namespace: str = "", node: str = "absen
     return problems
 
 
+def outside_namespaces_problems(items, expected) -> list[str]:
+    """A RoleBinding naming the hub in a namespace that is NOT in `expected` (the list
+    `kubectl get rolebindings -A` is read against). The expected namespaces are checked
+    in full by bindings_problems; here only the others are looked at, and any binding
+    that names the hub there is foreign, whatever it is called."""
+    expected = set(expected)
+    problems: list[str] = []
+    for d in (d for d in items if isinstance(d, dict)):
+        ns = _ns(d)
+        if ns in expected or not names_the_hub(d):
+            continue
+        ref = d.get("roleRef") or {}
+        problems.append(
+            f"foreign: RoleBinding {ns}/{_name(d)} names ServiceAccount {HUB_NAMESPACE}/{HUB_ACCOUNT} "
+            f"in a namespace the hub is not meant to have (roleRef {ref.get('kind')}/{ref.get('name')}); "
+            f"expected namespaces are {', '.join(sorted(expected))}"
+        )
+    return problems
+
+
 def load_renderer():
     spec = importlib.util.spec_from_file_location("rpg_mmo_games_render", GAME_RENDERER)
     module = importlib.util.module_from_spec(spec)
@@ -573,7 +928,36 @@ def _bindings_main(args, stdin) -> int:
     if args.scope == "namespaced" and not args.namespace:
         print("--scope namespaced needs --namespace", file=sys.stderr)
         return 2
-    lines = bindings_problems(items, args.scope, args.namespace or "", args.node)
+    if args.scope == "all-namespaces":
+        if not args.expected:
+            print("--scope all-namespaces needs --expected", file=sys.stderr)
+            return 2
+        lines = outside_namespaces_problems(items, [n for n in args.expected.split(",") if n])
+    else:
+        lines = bindings_problems(items, args.scope, args.namespace or "", args.node)
+    for line in lines:
+        print(line)
+    return 1 if lines else 0
+
+
+def _policy_main(kind: str, stdin) -> int:
+    raw = stdin.read()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"cannot read JSON from stdin: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(data, dict) or data.get("kind") != (POLICY_KIND if kind == "policy" else POLICY_BINDING_KIND):
+        print(f"stdin is not a {POLICY_KIND if kind == 'policy' else POLICY_BINDING_KIND} object", file=sys.stderr)
+        return 2
+    lines = policy_problems(data, kind)
+    for line in lines:
+        print(line)
+    return 1 if lines else 0
+
+
+def _secrets_main(stdin) -> int:
+    lines = secrets_problems(stdin.read())
     for line in lines:
         print(line)
     return 1 if lines else 0
@@ -588,12 +972,20 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
     cmp_parser = sub.add_parser("compare", help="compare a Role/ClusterRole (JSON on stdin) with an allow-list")
     cmp_parser.add_argument("--shape", required=True, choices=sorted(SHAPES))
     bind_parser = sub.add_parser("bindings", help="check live RoleBindings/ClusterRoleBindings (JSON on stdin)")
-    bind_parser.add_argument("--scope", required=True, choices=("namespaced", "cluster"))
+    bind_parser.add_argument("--scope", required=True, choices=("namespaced", "cluster", "all-namespaces"))
+    bind_parser.add_argument("--expected", help="scope all-namespaces: comma-separated namespaces that are checked elsewhere")
     bind_parser.add_argument("--namespace", help="the namespace the list was read from (scope namespaced)")
     bind_parser.add_argument("--node", choices=("present", "absent"), default="absent",
                              help="scope cluster: whether the node ClusterRole exists (its binding must then exist, else not)")
+    pol_parser = sub.add_parser("policy", help="compare a live ValidatingAdmissionPolicy / binding (JSON on stdin)")
+    pol_parser.add_argument("--kind", required=True, choices=("policy", "binding"))
+    sub.add_parser("secrets", help="check name<TAB>type<TAB>sa lines of the hub namespace (stdin)")
     args = parser.parse_args(argv)
 
+    if args.command == "policy":
+        return _policy_main(args.kind, stdin if stdin is not None else sys.stdin)
+    if args.command == "secrets":
+        return _secrets_main(stdin if stdin is not None else sys.stdin)
     if args.command == "bindings":
         return _bindings_main(args, stdin if stdin is not None else sys.stdin)
     if args.command == "compare":
