@@ -396,12 +396,18 @@ whole range for the Agones fleet.
 | OTLP gRPC / HTTP | 4317 / 4318 | 4327 / 4328 | 4337 / 4338 |
 | Loki (loopback only) | 3100 | 3110 | 3120 |
 
-**Human step before the next staging and production deploy:** set the GitHub
-Environment variable `LOKI_PORT` to `3120` on `staging` and `3110` on
-`production`. Unset, CD falls back to `3100`, which `environments.tsv` reserves
-for dev, and the isolation preflight stops the deploy. Dev needs nothing. Loki
-has no authentication, so its port is always bound to `127.0.0.1`; there is no
+**No human step is needed for the Loki port.** `cd.yml` defaults `LOKI_PORT` per
+environment (`dev` 3100, `staging` 3120, `production` 3110: the Loki column of
+`environments.tsv`), in the isolation preflight step and in the environment file
+step, so the first deploy of an environment that never had the variable resolves its
+own reserved port and passes the preflight. An explicit `LOKI_PORT` GitHub
+Environment variable still wins, and then has to agree with the row (the
+preflight compares them), exactly like every other port. An environment name that
+is none of the three resolves `3100`, like the other ports resolve dev's value.
+Loki has no authentication, so its port is always bound to `127.0.0.1`; there is no
 `LOKI_BIND`. The log-shipping services are described in `MONITORING.md` §Logs.
+`tests/test_cd_deploy.py` pins this: it evaluates the two workflow expressions for
+the three environments and runs the real preflight on the result.
 
 `dev` keeps the unset defaults on purpose: renaming `COMPOSE_PROJECT_NAME` on a
 live stack orphans its containers **and its data volumes** (see the warning

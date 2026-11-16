@@ -619,7 +619,7 @@ jobs:
           PROMETHEUS_PORT: ${{ vars.PROMETHEUS_PORT || '9090' }}
           OTLP_GRPC_PORT: ${{ vars.OTLP_GRPC_PORT || '4317' }}
           OTLP_HTTP_PORT: ${{ vars.OTLP_HTTP_PORT || '4318' }}
-          LOKI_PORT: ${{ vars.LOKI_PORT || '3100' }}
+          LOKI_PORT: ${{ vars.LOKI_PORT || (needs.resolve.outputs.environment == 'staging' && '3120') || (needs.resolve.outputs.environment == 'production' && '3110') || '3100' }}
         run: |
           set -euo pipefail
           # Same derivation the "Write environment file" step uses, so the ports
@@ -802,10 +802,12 @@ jobs:
           OTLP_BIND: ${{ vars.OTLP_BIND || '127.0.0.1' }}
           # Loki (bundled in lgtm) is published on loopback ONLY: the compose file
           # hard-codes 127.0.0.1, there is deliberately no LOKI_BIND, because Loki
-          # has no authentication. Per-environment value lives in environments.tsv
-          # (dev 3100, staging 3120, production 3110): set the GitHub Environment
-          # variable LOKI_PORT for staging and production before their next deploy.
-          LOKI_PORT: ${{ vars.LOKI_PORT || '3100' }}
+          # has no authentication. The per-environment value is the one reserved in
+          # environments.tsv (dev 3100, staging 3120, production 3110) and is the
+          # default HERE, so no GitHub Environment variable has to be set first; an
+          # explicit vars.LOKI_PORT still wins. The same expression is in the
+          # isolation preflight step above and a test keeps both equal to the tsv.
+          LOKI_PORT: ${{ vars.LOKI_PORT || (needs.resolve.outputs.environment == 'staging' && '3120') || (needs.resolve.outputs.environment == 'production' && '3110') || '3100' }}
           OTEL_LGTM_VERSION: ${{ vars.OTEL_LGTM_VERSION || '0.11.15' }}
           # Empty = leave ALLOY_VERSION out of deploy/.env so compose's own pinned
           # default applies (single source of truth for the default).
@@ -1255,7 +1257,16 @@ jobs:
 
           # No --profile realtime and no --remove-orphans: this must not disturb a
           # gateway or game server that is already running while the schema changes.
-          docker compose "${profile_args[@]}" up -d
+          #
+          # compose_up_stack (backend/deploy/compose-stack.sh) starts everything of
+          # the profile except the log collector (alloy, docker-socket-proxy) as
+          # one fatal command, then the collector as a best-effort one: a registry
+          # outage or a missing tag for those two NEW images warns here and does not
+          # stop the data tier or the migration that follows.
+          file_args=()
+          # shellcheck source=backend/deploy/compose-stack.sh
+          source "${GITHUB_WORKSPACE}/backend/deploy/compose-stack.sh"
+          compose_up_stack
 
           # Wait for the game database specifically. Compose reporting the container as
           # started is not the same as postgres accepting connections, and on a first
@@ -1394,7 +1405,13 @@ jobs:
           # `pull` cannot fetch the locally built rpg-mmo/* tags — tolerated, the
           # images are already in the daemon's store.
           docker compose "${file_args[@]}" "${profile_args[@]}" pull --quiet || true
-          docker compose "${file_args[@]}" "${profile_args[@]}" up -d --remove-orphans
+          # Everything but the log collector is one fatal `up -d`; the collector
+          # (alloy, docker-socket-proxy: two images that are new to this stack) is
+          # a second, best-effort one that warns with the retry command and a job
+          # summary line instead of failing the deploy. See compose-stack.sh.
+          # shellcheck source=backend/deploy/compose-stack.sh
+          source "${GITHUB_WORKSPACE}/backend/deploy/compose-stack.sh"
+          compose_up_stack --remove-orphans
           # The fleet and the compose game server both register for map_01, and two
           # live servers under one map_id is ADR-2's split world — two disconnected
           # copies with no handoff. Compose merges `profiles` by union, so an overlay
@@ -1461,6 +1478,11 @@ jobs:
         if: steps.paths.outputs.deploy_mode == 'k8s'
         env:
           KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
+          # The environment this deploy is for (dev, staging, production). It
+          # becomes the `env` label of the cluster's logs, and dev-up.sh stops
+          # before its first apply on any kube context it cannot name itself
+          # (anything but k3d-rpg-dev / k3d-rpg-stg), so it is always passed.
+          DEPLOY_ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
           GIT_SHA: ${{ github.sha }}
           RPG_K8S_RUN_DIR: ${{ vars.RPG_K8S_RUN_DIR || '/tmp/claude-1000/rpg-k8s-dev' }}
           # HOST-side ports k3d publishes. Two clusters on one box cannot publish
