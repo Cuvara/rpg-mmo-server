@@ -676,15 +676,18 @@ considered:
 Why A: **no port is published anywhere.** There is no new host port, the
 loopback bind of `lgtm` is unchanged, and a Docker bridge network is not routable
 from outside the host. Production runs compose, so this concerns dev and staging
-k3d only. The set of services that become reachable is not larger than what the
-host's own processes already reach (the published ports of `lgtm`), but the set of
-callers is: from host processes to **every pod of the cluster**.
+k3d only. The attach widens two things. The callers: from host processes to
+**every pod of the cluster**. And the listeners: a pod reaches every port `lgtm`
+listens on inside the container, which includes any that are not published to the
+host (the table below says which were checked and which were not).
 
 **What the attach exposes, in plain words.** `docker network connect` attaches the
 whole `lgtm` container to the cluster's network, not only Loki. Docker has no
 per-port filter on a network, so every container on `k3d-<cluster>`, and with it
 every pod of that cluster, can open every port that `lgtm` listens on, on the
-address `connect-loki.sh` wrote. Before the attach a pod could reach none of them.
+address `connect-loki.sh` wrote. Before the attach a pod could reach only what
+`lgtm` publishes on a non-loopback host address (Grafana, when `GRAFANA_BIND` is
+left at its default), never Loki.
 
 | Listener in `lgtm` | Binds all interfaces? | How we know | What a pod can do with it |
 |---|---|---|---|
