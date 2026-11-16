@@ -5,6 +5,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **The gateway refuses to start when a key is shared across keyrings (MG-02 of
+  `backend/docs/MULTI-GAME-CROSS-REVIEW.md`).** Every keyring is split with the same
+  semantics as `sharedjwt.ParseKeyring` (one function, `keyringKeys` in
+  `cmd/gateway/keyring_separation.go`): `JWT_SECRET`, the default join keyring
+  (`JOIN_TOKEN_SECRET` / `--join-token-secret`) and each configured game's
+  `JOIN_TOKEN_SECRET_<GAME>`. Startup now exits 1 when any key appears in both
+  `JWT_SECRET` and any join keyring, or in the join keyrings of two games. Before, the
+  auth comparison was whole-string and only warned, so `JWT_SECRET=auth-new,auth-old`
+  with `JOIN_TOKEN_SECRET_EMBER=join-ember,auth-old` started cleanly and gave ember's
+  pods a key that mints auth tokens for any user and game. The error names games and
+  settings, never a key, its length or its position; the check runs before the metrics
+  listener and any backend wiring.
+
+### Changed
+- The three startup **warnings** about shared secrets (`JOIN_TOKEN_SECRET` equal to
+  `JWT_SECRET`, a game secret equal to `JWT_SECRET`, two games sharing a join key) are
+  replaced by the fatal check above. A missing or unparseable `JOIN_TOKEN_SECRET_<GAME>`
+  still only warns and leaves that game unroutable; an empty `JOIN_TOKEN_SECRET` is still
+  fatal. Token wire format, claims and `server.With*` options are unchanged.
+  **Operator impact:** a deployment that reused a key across these settings, including
+  a retired rotation entry, no longer starts; give each its own keys.
+- Tests: `cmd/gateway/keyring_separation_test.go` covers the review's exact
+  configuration, whitespace variants, default-vs-auth, join-vs-join overlap, distinct
+  keyrings, a parity table against `sharedjwt.ParseKeyring`, and re-executes the test
+  binary as the gateway to prove the process exits on the review configuration.
+
 ### Fixed
 - Docs only: `docs/API.md` and `docs/DESIGN.md` no longer say the game server ignores the join
   token's `gid`; it refuses a mismatch (`Token is for a different game`, ADR-33 leg 2) and the
