@@ -761,8 +761,8 @@ spec:
                       name: gameserver-config
                       key: bot-speed
                       optional: true
-                # Log knobs (read by the server once gameserver-json-logs is in the
-                # image; ignored before that). json is what the log collector needs.
+                # Log knobs. The server logs json lines at Information by default;
+                # json is what the log collector needs for a real `level` label.
                 - name: GAMESERVER_LOG_LEVEL
                   valueFrom:
                     configMapKeyRef:

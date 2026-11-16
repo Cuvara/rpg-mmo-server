@@ -285,13 +285,27 @@ check 'connect-loki.sh gets the context and the resolved environment' grep -Fxq 
 reset; run_col
 check 'passing connect-loki.sh prints no Loki warning' bash -c '! grep -Fq "Loki not attached" "$1"' _ "$WORK/out"
 
-# 5. a failed rollout exits non-zero
+# 5. a collector that does not become Ready warns and the script continues:
+#    logs are not in the client path, verify's cluster.log_collector is what FAILs
 reset; ROLLOUT_RC=1; export ROLLOUT_RC
-if ! run_col; then ok 'failed rollout exits non-zero'; else bad 'failed rollout exits non-zero'; fi
-check 'failed rollout: says the collector did not become Ready' grep -Fq 'ERROR: the log collector (daemonset/alloy in rpg-k8s-logging) did not become Ready within 180s' "$WORK/out"
+if run_col; then ok 'failed rollout does not stop the script (exit 0)'; else bad 'failed rollout does not stop the script (exit 0)'; cat "$WORK/out"; fi
+guard_clean 'failed rollout'
+check 'failed rollout: prints the GitHub warning annotation' \
+  grep -Fq '::warning title=Log collector not Ready::daemonset/alloy in rpg-k8s-logging did not become Ready within 180s' "$WORK/out"
+check 'failed rollout: prints a WARN naming the collector and the timeout' \
+  grep -Fq 'WARN: the log collector (daemonset/alloy in rpg-k8s-logging) did not become Ready within 180s; continuing' "$WORK/out"
+check 'failed rollout: says verify is what fails on it' grep -Fq "verify's cluster.log_collector FAILs until it is Ready" "$WORK/out"
 check 'failed rollout: shows the collector log tail' bash -c 'grep -Fxq logs "$1" && grep -Fq "alloy: fake last log line" "$2"' _ "$TEST_LOG" "$WORK/out"
-check 'failed rollout: the Ready line is not printed and the block does not finish' \
-  bash -c '! grep -Fq "checked: the log collector is Ready" "$1" && ! grep -Fxq REACHED-END "$1"' _ "$WORK/out"
+check 'failed rollout: prints the commands to look at the collector' \
+  bash -c 'grep -Fq "kubectl --context does-not-exist -n rpg-k8s-logging get pods -l app.kubernetes.io/name=alloy -o wide" "$1" \
+    && grep -Fq "kubectl --context does-not-exist -n rpg-k8s-logging describe daemonset/alloy" "$1" \
+    && grep -Fq "kubectl --context does-not-exist -n rpg-k8s-logging logs daemonset/alloy --tail=100" "$1"' _ "$WORK/out"
+check 'failed rollout: no ERROR line, the Ready line is not printed, the block finishes' \
+  bash -c '! grep -Fq "ERROR:" "$1" && ! grep -Fq "checked: the log collector is Ready" "$1" && grep -Fxq REACHED-END "$1"' _ "$WORK/out"
+check 'failed rollout: the warning goes to stderr, the annotation to stdout' \
+  bash -c 'bash "$WORK/run_col.sh" 2>&1 >/dev/null | grep -Fq "WARN: the log collector" && ! bash "$WORK/run_col.sh" 2>&1 >/dev/null | grep -Fq "::warning title=Log collector"'
+reset; run_col
+check 'ready collector: no collector warning' bash -c '! grep -Fq "Log collector not Ready" "$1"' _ "$WORK/out"
 reset; ROLLOUT_RC=1 LOG_ROLLOUT_TIMEOUT=60s; export ROLLOUT_RC LOG_ROLLOUT_TIMEOUT
 # the fake answers only the default timeout, so a changed one is refused (exit 99) and logged
 run_col || true

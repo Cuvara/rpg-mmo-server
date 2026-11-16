@@ -823,6 +823,20 @@ spec:
                       name: gameserver-config
                       key: bot-speed
                       optional: true
+                # Log knobs. The server logs json lines at Information by default;
+                # json is what the log collector needs for a real `level` label.
+                - name: GAMESERVER_LOG_LEVEL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: log-level
+                      optional: true
+                - name: GAMESERVER_LOG_FORMAT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: log-format
+                      optional: true
                 # The game server always listens KCP/UDP; there is no transport
                 # switch (GAMESERVER_TRANSPORT unset or "kcp" only — any other
                 # value is fatal at startup), so none is set here.

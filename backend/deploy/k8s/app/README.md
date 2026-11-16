@@ -27,7 +27,7 @@ Read first: ADR-16 (what shipped and how it was proven), ADR-15 decision 3
 | `00-namespace.yaml` | `rpg-k8s-realtime`. Gateway **and** fleet live here — the allocation Role is namespaced, so co-locating them is what keeps it narrow |
 | `05-agones-sdk-rbac.yaml` | `agones-sdk` SA + RoleBinding. **Required in every GameServer namespace**; Agones' Helm chart only created it in `rpg-realtime` |
 | `10-rbac.yaml` | `rpg-gateway` SA + Role + RoleBinding — `create` on `gameserverallocations`, and nothing else |
-| `20-configmaps.yaml` | Addresses (data-tier DNS, the game server's advertise host) and the log knobs: `gateway-config` `log-level` (`LOG_LEVEL`, default `info`), `gameserver-config` `log-level` (`GAMESERVER_LOG_LEVEL`, default `Information`) and `log-format` (`GAMESERVER_LOG_FORMAT`, default `json`). The workloads read them with `optional: true`; the game server ignores both until the `gameserver-json-logs` change is in its image |
+| `20-configmaps.yaml` | Addresses (data-tier DNS, the game server's advertise host) and the log knobs: `gateway-config` `log-level` (`LOG_LEVEL`, default `info`), `gameserver-config` `log-level` (`GAMESERVER_LOG_LEVEL`, default `Information`) and `log-format` (`GAMESERVER_LOG_FORMAT`, default `json`). The workloads read them with `optional: true`; the game server logs JSON by default and `text` gives level `unknown` |
 | `30-secret-template.yaml` | Template. `jwt-secret`, `join-token-secret` (**different values**), `redis-password`, `game-db-url`, `transport-key` |
 | `40-gateway.yaml` | Gateway Deployment + NodePort Service (client) + ClusterIP Service (metrics) |
 | `50-fleet-map.yaml` | `map-servers-dotnet-k8s` Fleet, `replicas: 1`, dynamic port, health on, no autoscaler |

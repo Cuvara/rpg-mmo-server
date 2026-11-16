@@ -117,11 +117,23 @@ What `dev-up.sh` does for the collector, in order:
    (Alloy does not reload a ConfigMap) and the DaemonSet already existed.
 5. Warns (and goes on) for a game namespace that has no `rpg-log-collector` Role,
    and prints the `render.py` command that applies it.
-6. Runs `logging/connect-loki.sh`. If `lgtm` is not running it warns and exits 0,
-   so a missing Loki does not fail the deploy; a non-zero exit is reported as a
-   warning.
+6. Runs `logging/connect-loki.sh`. If docker answered and `lgtm` is not running it
+   warns, deletes the EndpointSlice and exits 0, so a missing Loki does not fail
+   the deploy. If docker could not be asked at all (missing, or no output with a
+   non-zero status) it warns, leaves the existing EndpointSlice as it is and exits
+   0. A non-zero exit is reported as a warning.
 7. Waits for `daemonset/alloy` to roll out (`LOG_ROLLOUT_TIMEOUT`, default `180s`).
-   **This is the only collector failure that stops the deploy.**
+   A collector that does not become Ready **does not stop the script**: it prints a
+   GitHub `::warning::` line and a WARN on stderr with the tail of the collector's
+   log and the commands to look at it, and goes on. Logs are not in the client
+   path; `verify`'s `cluster.log_collector` FAILs on a collector that is not Ready,
+   and CD runs verify after `dev-up.sh`, so the deploy still fails there, after the
+   rest of the stack is up and verified.
+
+Offline tests of this (no cluster, fakes only): `verify/tests/dev_up_logging_test.sh`
+(the two `dev-up.sh` blocks, including the not-Ready warning),
+`logging/tests/test_connect_loki.py` (`connect-loki.sh`) and
+`verify/tests/log_collector_test.sh` (the check).
 
 Nothing of this has been run against a cluster yet; every run-time behaviour is
 not yet observed (the list of what the first live run must show is in
@@ -145,8 +157,8 @@ ConfigMap keeps working):
 | `gameserver-config` (`rpg-k8s-realtime` and every rendered game namespace) | `log-level` | `GAMESERVER_LOG_LEVEL` | `Information` |
 | `gameserver-config` (same) | `log-format` | `GAMESERVER_LOG_FORMAT` | `json` |
 
-The two game server keys take effect only once the `gameserver-json-logs` change
-is in the game server image; before that the server ignores them. Changing a
+The game server logs JSON by default; `log-format: text` gives plain lines, which
+ship with `level="unknown"`. Changing a
 value needs a restart of the workload, see
 [`../docs/RUNBOOK-local-dev.md`](../docs/RUNBOOK-local-dev.md), "Seeing logs from
 the k8s cluster".

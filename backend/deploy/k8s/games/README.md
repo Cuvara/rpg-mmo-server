@@ -59,9 +59,8 @@ suffix (`rpg-k8s-realtime-ember` is `ember`). Both fleets forward
 every game the gateway serves to the collector's `log-namespaces`, and warns (it
 does not stop) when that namespace has no `rpg-log-collector` Role yet, because
 the render has not been applied. The values and env entries come
-from `app/`; the renderer refuses a source that lost either. The server reads
-them only once the `gameserver-json-logs` change is in the image; before that
-they are ignored.
+from `app/`; the renderer refuses a source that lost either. The server logs JSON
+by default; `log-format: text` gives plain lines, which ship with `level="unknown"`.
 
 No game-server pod gets `JWT_SECRET` (ADR-8, ADR-33 D7): the source fleets do
 not mount it, the renderer refuses to copy one that does, and the Secret

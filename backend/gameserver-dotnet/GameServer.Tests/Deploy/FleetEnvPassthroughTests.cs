@@ -145,21 +145,6 @@ public class FleetEnvPassthroughTests
                 "port is declared `protocol: UDP`, which is what actually decides the wire; " +
                 "forwarding this would only offer a knob whose every other setting makes the " +
                 "pod exit at boot, so the fleets deliberately omit it.",
-
-            // ── Logging: not forwarded yet (follow-up) ───────────────────────
-            ["GAMESERVER_LOG_LEVEL"] =
-                "Not forwarded yet, on purpose. The server default (json lines, Information) " +
-                "is what every deployment gets, and that is the shape a log shipper wants, so " +
-                "nothing breaks without a passthrough line. A per-deployment override (for " +
-                "example Debug on one map) needs a line in each manifest; that is reported to " +
-                "the run lead as a follow-up of the log-shipping plan, not done here.",
-
-            ["GAMESERVER_LOG_FORMAT"] =
-                "Not forwarded yet, on purpose. The server default (json lines, Information) " +
-                "is what every deployment gets, and that is the shape a log shipper wants, so " +
-                "nothing breaks without a passthrough line. A per-deployment override (for " +
-                "example Debug on one map) needs a line in each manifest; that is reported to " +
-                "the run lead as a follow-up of the log-shipping plan, not done here.",
         };
 
     private static readonly IReadOnlyDictionary<string, string> MapFleetExclusions =

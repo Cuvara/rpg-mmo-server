@@ -277,8 +277,8 @@ subsection, "Logs on k8s", after "The check and the offline tests".
 >    (`docker run --rm --entrypoint sh grafana/otel-lgtm:0.11.15 -c 'cat
 >    /otel-lgtm/loki-config.yaml'`). Until then they are only compared with the
 >    repository file at the tag.
-> 4. A game server line carries a real `level`. This needs a build that includes
->    the `gameserver-json-logs` task; without it the check FAILs on purpose.
+> 4. A game server line carries a real `level`. The game server logs JSON by
+>    default; with `GAMESERVER_LOG_FORMAT=text` the check FAILs on purpose.
 > 5. The proxy's behaviour on `archive`, `export` and `attach/ws` (the residual
 >    risk below) is observed, not assumed.
 
@@ -407,20 +407,17 @@ Rules:
   missing field, a number, a custom word. The closed set is deliberate: an open
   one would mint a stream per distinct value. This change does not alter what the
   services print.
-- **Dependency: the game server's `level` needs the JSON-logs task.** On the
-  branch that holds this change alone, the C# game server still logs plain text
-  (the .NET simple console formatter: a header line such as `info: Category[0]`
-  followed by indented message lines). The task `gameserver-json-logs` of the
-  same plan (branch `feat/server/log-shipping-gameserver-json-logs`, integrated
-  with this one into `feat/server/log-shipping`) makes the game server log JSON
-  by default. Until it is in the build, and whenever
-  `GAMESERVER_LOG_FORMAT=text` is set to keep the plain output, **every game
-  server line ships with `level="unknown"`** (`env`, `service`, `game` and
+- **The game server's `level` needs JSON logs, which is its default.** The C#
+  game server logs one JSON object per line unless `GAMESERVER_LOG_FORMAT=text`
+  is set (the .NET simple console format: a header line such as
+  `info: Category[0]` followed by indented message lines). With `text`, **every
+  game server line ships with `level="unknown"`** (`env`, `service`, `game` and
   `server_id` are unaffected, they come from compose labels). There is no regex
   for the plain header on purpose: it would split one event over two streams, the
-  header and its indented message lines. Compose does not forward
-  `GAMESERVER_LOG_LEVEL` or `GAMESERVER_LOG_FORMAT`; that is that task's decision
-  and this one does not change it. The k8s ConfigMaps do carry them (see "Log
+  header and its indented message lines. Compose forwards both knobs to every game
+  server service, with the server's own defaults
+  (`GAMESERVER_LOG_LEVEL=Information`, `GAMESERVER_LOG_FORMAT=json`, documented in
+  `.env.example`), and so do the k8s ConfigMaps and the Agones dev fleet (see "Log
   level and format knobs on k8s").
 - **Lines are shipped as written.** Non-JSON lines are not rewritten, dropped or
   wrapped, and JSON lines are only read, never changed.
@@ -518,9 +515,9 @@ logql '{service="gameserver-dotnet"} | json | msg=~"(?i).*disconnect.*"'   # a f
 ```
 
 The `level` label is the way to filter by severity, for every service. The last
-example needs the game server to log JSON (see the dependency note above) and
+example needs the game server to log JSON (its default, see the note above) and
 uses the `msg` field of its JSON line; the pattern is only an example. On a game
-server that logs plain text, `| json` finds nothing and `level` is `unknown`;
+server set to `GAMESERVER_LOG_FORMAT=text`, `| json` finds nothing and `level` is `unknown`;
 use a text filter (`|= "..."`) there.
 
 `env` is the value of `DEPLOY_ENVIRONMENT` (`dev`, `staging`, `production`,
@@ -543,7 +540,7 @@ Label names: `curl -s $LOKI/loki/api/v1/labels`.
   its compose labels (SKIP when that profile is down). The game server stream
   must carry a **real** level, one other than `unknown`: the check FAILs for a
   game server that logs plain text, and says that the game server must log JSON
-  (`GAMESERVER_LOG_FORMAT=json`, a build that includes the JSON-logs task). Output is `PASS:`/`FAIL:`/`SKIP:` lines and the exit
+  (`GAMESERVER_LOG_FORMAT=json`, the default). Output is `PASS:`/`FAIL:`/`SKIP:` lines and the exit
   status is 1 on any FAIL. Inputs: `COMPOSE_PROJECT_NAME`, `DEPLOY_ENVIRONMENT`,
   `LOKI_PORT`, `CHECK_TIMEOUT`. **NOT_RUN**: starting the stack needs the owner's
   go-ahead.
@@ -578,8 +575,9 @@ the data tier and the game servers are pods, not compose containers.
 > in `backend/deploy/k8s/logging/` do. **Nothing was applied to a cluster and no
 > line was seen arriving in Loki**, so every run-time behaviour below is **not yet
 > observed**. The offline tests (`k8s/logging/tests/`, `k3s/tests/`,
-> `k8s/verify/tests/log_collector_test.sh`) read the manifests and run
-> `connect-loki.sh` against fakes. "First live run on k8s" at the end of this
+> `k8s/verify/tests/log_collector_test.sh`, `k8s/verify/tests/dev_up_logging_test.sh`)
+> read the manifests and run `connect-loki.sh` and the collector block of
+> `dev-up.sh` against fakes. "First live run on k8s" at the end of this
 > section lists what has to be observed.
 
 #### How a line flows on k8s
@@ -674,10 +672,20 @@ What `connect-loki.sh` does, so that its power can be judged:
   `environments.tsv` row (`rpg-lgtm`, `rpg-stg-lgtm`). `KUBE_CONTEXT`,
   `DEPLOY_ENVIRONMENT`, `LOKI_CONTAINER` and `LOKI_NETWORK` override that, and
   `--dry-run` prints the plan and changes nothing.
-- When `lgtm` is absent or not running, or has no address after the attach, it
-  prints a WARN, **deletes** the EndpointSlice so that no stale address is left,
-  and exits 0: logs are not in the client path, so this never fails a deploy. It
-  exits 1 only when the cluster API refuses the EndpointSlice.
+- When docker answered and `lgtm` is not listed as running, or has no address after
+  the attach, it prints a WARN, **deletes** the EndpointSlice so that no stale
+  address is left, and exits 0: logs are not in the client path, so this never
+  fails a deploy. When docker **could not be asked** (not installed, or `docker ps`
+  printed nothing and exited non-zero) the state of `lgtm` is unknown, not
+  "stopped": it prints a WARN, leaves the existing EndpointSlice as it is and exits
+  0. A non-empty `docker ps` listing counts as an answer whatever the exit status
+  (the WSL shim can print the list and still exit non-zero). It exits 1 only when
+  the cluster API refuses the EndpointSlice.
+- `dev-up.sh` does not stop on a collector that does not become Ready within
+  `LOG_ROLLOUT_TIMEOUT`: it prints a `::warning::` line and a WARN with the tail of
+  the collector's log and the commands to look at it. `cluster.log_collector`
+  FAILs on a collector that is not Ready and CD runs verify after `dev-up.sh`, so
+  the deploy still fails there, after the rest of the stack is up and verified.
 
 #### What the collector's RBAC allows
 
@@ -771,11 +779,9 @@ carries on, and prints the `render.py` command that applies the game.
 All three env entries are `optional: true`, so a cluster whose ConfigMap predates a
 key keeps starting. A non-default game's `gameserver-config` is rendered from the
 same source and carries the same two keys and defaults, and `render.py` refuses a
-source that lost them. **The game server reads its two knobs only once the
-`gameserver-json-logs` change is in the image**; on a build without it they are
-ignored, and the server logs its old plain format, whose lines ship with
-`level="unknown"` (see the dependency note under "Label contract"). The gateway
-already reads `LOG_LEVEL` and logs JSON. A pod reads its ConfigMap at start, so
+source that lost them. The game server logs JSON by default; `log-format: text`
+gives plain lines, which ship with `level="unknown"` (see the note under "Label
+contract"). The gateway reads `LOG_LEVEL` and logs JSON. A pod reads its ConfigMap at start, so
 changing a value needs a restart of the workload (the runbook has the commands).
 
 #### Querying on k8s

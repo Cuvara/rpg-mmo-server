@@ -1370,8 +1370,9 @@ pf postgres-game "$PG_GAME_LOCAL_PORT" rpg-k8s-data svc/postgres-game 5432
 # refused deploy leaves behind), after the app and data namespaces exist (its Roles
 # live in them) and after the compose stack is retired and the ports are checked,
 # so a collector problem can never leave both stacks serving one environment
-# (ADR-2). Logs are not in the client path: the only thing here that fails the
-# deploy is a collector that never becomes Ready.
+# (ADR-2). Logs are not in the client path, so nothing here stops this script
+# after the manifests are applied: a collector that never becomes Ready warns
+# (see the rollout wait below) and verify is what fails on it.
 #
 # Everything above the rollout wait is straight-line under `set -e`;
 # verify/tests/dev_up_logging_test.sh extracts exactly the span between the BEGIN
@@ -1454,13 +1455,24 @@ if ! KUBE_CONTEXT="$CTX" DEPLOY_ENVIRONMENT="$DEPLOY_ENV" bash "$LOG_DIR/connect
   echo "WARN: connect-loki.sh failed; re-run it: KUBE_CONTEXT=$CTX DEPLOY_ENVIRONMENT=$DEPLOY_ENV backend/deploy/k8s/logging/connect-loki.sh" >&2
 fi
 
-# The one failure that stops the deploy: a collector that does not become Ready.
-if ! $K rollout status -n "$LOG_NS" daemonset/alloy --timeout="$LOG_ROLLOUT_TIMEOUT"; then
-  echo "ERROR: the log collector (daemonset/alloy in $LOG_NS) did not become Ready within $LOG_ROLLOUT_TIMEOUT. Its last log lines:" >&2
-  $K logs -n "$LOG_NS" daemonset/alloy --tail=20 2>&1 | sed 's/^/  /' >&2 || true
-  exit 1
+# A collector that does not become Ready WARNS here and does not stop the script:
+# logs are not in the client path, so a broken collector must not keep the game
+# stack (gateway, game servers, Nakama) from being brought up and verified. The
+# failure is not swallowed, it is moved: verify's cluster.log_collector FAILs on a
+# collector that is not Ready, and CD runs verify after this script, so the deploy
+# still fails there, after the rest of the stack is up and verified.
+if $K rollout status -n "$LOG_NS" daemonset/alloy --timeout="$LOG_ROLLOUT_TIMEOUT"; then
+  echo "checked: the log collector is Ready, collecting: $LOG_NAMESPACES (env=$DEPLOY_ENV)"
+else
+  echo "::warning title=Log collector not Ready::daemonset/alloy in $LOG_NS did not become Ready within $LOG_ROLLOUT_TIMEOUT; verify (cluster.log_collector) will FAIL on it"
+  echo "WARN: the log collector (daemonset/alloy in $LOG_NS) did not become Ready within $LOG_ROLLOUT_TIMEOUT; continuing, the rest of the stack does not depend on it." >&2
+  echo "  verify's cluster.log_collector FAILs until it is Ready. Its last log lines:" >&2
+  $K logs -n "$LOG_NS" daemonset/alloy --tail=20 2>&1 | sed 's/^/    /' >&2 || true
+  echo "  Look at it with:" >&2
+  echo "    kubectl --context $CTX -n $LOG_NS get pods -l app.kubernetes.io/name=alloy -o wide" >&2
+  echo "    kubectl --context $CTX -n $LOG_NS describe daemonset/alloy" >&2
+  echo "    kubectl --context $CTX -n $LOG_NS logs daemonset/alloy --tail=100" >&2
 fi
-echo "checked: the log collector is Ready, collecting: $LOG_NAMESPACES (env=$DEPLOY_ENV)"
 # END log collector apply
 unset game game_ns f log_ds_before log_cfg_before log_env_before log_cfg_after log_env_after log_env_yaml render_tls
 

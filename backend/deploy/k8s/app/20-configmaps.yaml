@@ -136,9 +136,7 @@ data:
   # `json` (one object per line) is what the log collector needs to derive a
   # real `level` label; `text` is the multi-line console format for reading by
   # hand and yields no usable level.
-  # These two knobs are added to the server by the sibling task
-  # gameserver-json-logs (branch feat/server/log-shipping-gameserver-json-logs).
-  # On a build without that change the binary ignores both keys: setting them
-  # is harmless, and it logs in its old format until the image carries it.
+  # The server reads both (ServerEnv.LogLevel / ServerEnv.LogFormat), and the map
+  # fleet, the dungeon fleet and the Agones dev fleet forward them.
   log-level: "Information"
   log-format: "json"

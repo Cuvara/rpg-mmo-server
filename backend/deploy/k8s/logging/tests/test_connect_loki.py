@@ -8,8 +8,10 @@ on PATH; they log every call and keep their state in a temp directory:
 Covered: it attaches once, is idempotent, never runs a `docker inspect` without a
 network-settings --format (and never prints a container's environment), publishes
 no port, warns and exits 0 when `lgtm` is absent while removing a stale
-EndpointSlice, tolerates the WSL docker shim that returns non-zero after
-succeeding, resolves the container from environments.tsv, and `--dry-run`
+EndpointSlice, leaves a working EndpointSlice alone (WARN, exit 0, no kubectl)
+when `docker ps` itself could not answer (empty output, non-zero status, or
+docker missing), tolerates the WSL docker shim that returns non-zero after
+succeeding (a non-empty listing is an answer whatever the status), resolves the container from environments.tsv, and `--dry-run`
 changes nothing.
 """
 
@@ -29,10 +31,15 @@ FAKE_DOCKER = r"""#!/usr/bin/env bash
 echo "docker $*" >> "$FAKE_STATE/calls.log"
 case "$1" in
   ps)
+    # docker could not answer: no output at all, non-zero status (daemon down,
+    # or 127 as when the binary is missing)
+    if [ -f "$FAKE_STATE/ps_fails" ]; then exit "$(cat "$FAKE_STATE/ps_fails")"; fi
     if [ -f "$FAKE_STATE/running" ]; then
       echo "$(cat "$FAKE_STATE/running")"
     fi
     echo "some-other-container"
+    # the WSL shim: the listing was printed, the status is still non-zero
+    if [ -f "$FAKE_STATE/ps_shim_nonzero" ]; then exit 1; fi
     ;;
   inspect)
     case "$*" in
@@ -211,6 +218,53 @@ class ConnectLokiTests(unittest.TestCase):
         self.assertFalse(self.slice.exists(), "a stale EndpointSlice was left behind")
         self.assertEqual(self.connect_calls(), [])
         self.assertTrue(any("delete endpointslice loki-lgtm" in c for c in self.calls()))
+
+    def assert_slice_left_alone(self, proc):
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("WARN", proc.stderr)
+        self.assertIn("docker could not be asked", proc.stderr)
+        self.assertIn("EndpointSlice", proc.stderr)
+        self.assertIn("left as it is", proc.stderr)
+        self.assertTrue(self.slice.exists(), "a working EndpointSlice was deleted")
+        self.assertEqual(self.slice.read_text(encoding="utf-8"), "working: 172.18.0.5\n")
+        self.assertEqual(self.connect_calls(), [])
+        self.assertEqual([c for c in self.calls() if c.startswith("kubectl")], [],
+                         "kubectl must not be called when docker could not be asked")
+
+    def test_docker_ps_failing_without_output_leaves_the_slice_alone(self):
+        (self.state / "ps_fails").write_text("1", encoding="utf-8")
+        self.slice.write_text("working: 172.18.0.5\n", encoding="utf-8")
+        self.assert_slice_left_alone(self.run_script())
+
+    def test_docker_missing_leaves_the_slice_alone(self):
+        # a missing binary answers 127 with nothing on stdout
+        (self.state / "ps_fails").write_text("127", encoding="utf-8")
+        self.slice.write_text("working: 172.18.0.5\n", encoding="utf-8")
+        self.assert_slice_left_alone(self.run_script())
+
+    def test_docker_ps_failing_in_dry_run_changes_and_deletes_nothing(self):
+        (self.state / "ps_fails").write_text("1", encoding="utf-8")
+        self.slice.write_text("working: 172.18.0.5\n", encoding="utf-8")
+        proc = self.run_script("--dry-run")
+        self.assert_slice_left_alone(proc)
+
+    def test_a_nonempty_listing_with_a_nonzero_status_is_an_answer(self):
+        # the WSL shim printed the list and still exited non-zero: lgtm is listed,
+        # so it is running and the slice is written
+        (self.state / "ps_shim_nonzero").write_text("", encoding="utf-8")
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("could not be asked", proc.stderr)
+        self.assertIn('"172.18.0.5"', self.slice.read_text(encoding="utf-8"))
+
+    def test_a_nonempty_listing_without_lgtm_and_a_nonzero_status_still_deletes_the_slice(self):
+        # docker answered (the list is there), lgtm is not in it: that is "stopped"
+        (self.state / "ps_shim_nonzero").write_text("", encoding="utf-8")
+        self.slice.write_text("stale: 10.0.0.9\n", encoding="utf-8")
+        proc = self.run_script(running=None)
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("could not be asked", proc.stderr)
+        self.assertFalse(self.slice.exists())
 
     def test_lgtm_with_a_different_name_counts_as_absent(self):
         proc = self.run_script(running="someone-elses-lgtm")

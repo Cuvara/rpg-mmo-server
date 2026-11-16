@@ -25,14 +25,20 @@
 # Idempotent: run it as often as you like. Re-run it whenever `lgtm` is recreated
 # (a recreated container loses the attachment and gets a new address).
 #
-# When `lgtm` is absent or not running it prints a WARN on stderr, DELETES the
-# EndpointSlice (so nothing points at a stale address) and exits 0: logs are not
-# in the client path, so this never fails a deploy. It exits 1 only when the
-# cluster API refuses the EndpointSlice it wanted to write.
+# When docker answered and `lgtm` is not listed (or has no address after the
+# attach) it prints a WARN on stderr, DELETES the EndpointSlice (so nothing
+# points at a stale address) and exits 0: logs are not in the client path, so
+# this never fails a deploy. When docker could NOT be asked (missing, or no
+# output at all with a non-zero status) the state of `lgtm` is unknown, not
+# "stopped": it prints a WARN, leaves the existing EndpointSlice as it is and
+# exits 0. It exits 1 only when the cluster API refuses the EndpointSlice it
+# wanted to write.
 #
 # Docker under WSL is a slow shim that can return non-zero after succeeding, so
 # nothing here asserts on a docker exit status: it asserts on state (is the
-# container listed, does it have an address on the network now).
+# container listed, does it have an address on the network now). A non-empty
+# `docker ps` listing counts as an answer whatever the status; only an empty
+# output with a non-zero status is "could not ask".
 #
 # Inputs (environment):
 #   KUBE_CONTEXT         default k3d-rpg-dev
@@ -114,9 +120,21 @@ esac
 
 # ---- helpers (state, not exit status) -----------------------------------------
 
+# Three answers, by return status:
+#   0  docker answered and the container is listed (running)
+#   1  docker answered and the container is not listed (stopped or absent)
+#   2  docker could not be asked (missing, or no output at all with a non-zero
+#      status): the state of the container is unknown, NOT "stopped".
+# A non-empty listing is an answer whatever the exit status (the WSL shim can
+# print the list and still exit non-zero); only empty output plus a non-zero
+# status means "could not ask".
 lgtm_running() {
-  local names
-  names="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+  local names rc
+  names="$(docker ps --format '{{.Names}}' 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ -z "$(printf '%s' "$names" | tr -d '[:space:]')" ]; then
+    return 2
+  fi
   printf '%s\n' "$names" | grep -Fqx -- "$container"
 }
 
@@ -170,12 +188,19 @@ YAML
 
 # ---- main ---------------------------------------------------------------------
 
-if ! lgtm_running; then
-  warn "Loki container '$container' is not running; the cluster collector cannot reach Loki."
-  warn "Start the monitoring stack, then re-run: $RERUN"
-  remove_slice
-  exit 0
-fi
+lgtm_running
+case $? in
+  0) ;;
+  1)
+    warn "Loki container '$container' is not running; the cluster collector cannot reach Loki."
+    warn "Start the monitoring stack, then re-run: $RERUN"
+    remove_slice
+    exit 0 ;;
+  *)
+    warn "docker could not be asked whether '$container' is running (is docker installed and its daemon up?)."
+    warn "The existing EndpointSlice $NAMESPACE/$SLICE was left as it is. Re-run when docker answers: $RERUN"
+    exit 0 ;;
+esac
 
 addr="$(lgtm_address)"
 if [ -z "$addr" ]; then

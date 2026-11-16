@@ -95,13 +95,12 @@ loki.process "level" {
   //   Nakama      zap            info warn error debug dpanic panic fatal
   //   gameserver  JSON logger    TRACE DEBUG INFO WARN ERROR CRITICAL
   //               (one object per line: ts level category msg ...; it is the
-  //               default of the gameserver-json-logs task of the same plan)
+  //               server's default, GAMESERVER_LOG_FORMAT=json)
   //
   // `level` is read ONLY from JSON. There is deliberately no regex for the
   // plain .NET console format (a header line `info: Category[0]` plus indented
   // message lines): it would put one event on two streams. A game server that
-  // logs text (GAMESERVER_LOG_FORMAT=text), or a build without the JSON-logs
-  // task, therefore ships with level="unknown".
+  // logs text (GAMESERVER_LOG_FORMAT=text) therefore ships with level="unknown".
   stage.match {
     selector = `{service=~".+"} |~ "^\\s*\\{"`
 

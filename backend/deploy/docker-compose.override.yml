@@ -128,6 +128,9 @@ services:
       GAMESERVER_MAX_INPUTS_PER_TICK: ${GAMESERVER_MAX_INPUTS_PER_TICK:-}
       GAMESERVER_MAX_PENDING_INPUTS: ${GAMESERVER_MAX_PENDING_INPUTS:-}
       GAMESERVER_GATHER_WORKERS: ${GAMESERVER_GATHER_WORKERS:-}
+      # Log knobs, forwarded with the server's own defaults (json lines, Information).
+      GAMESERVER_LOG_LEVEL: ${GAMESERVER_LOG_LEVEL:-Information}
+      GAMESERVER_LOG_FORMAT: ${GAMESERVER_LOG_FORMAT:-json}
       # GAMESERVER_TRANSPORT is NOT forwarded: realtime gameplay is KCP/UDP only and
       # the server refuses to start with any value other than "kcp". The optional
       # KCP datagram pre-shared key (32-byte hex; empty = plaintext + WARN, dev only)

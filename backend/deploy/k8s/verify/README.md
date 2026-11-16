@@ -372,7 +372,10 @@ A missing address is a **WARN**, not a PASS and not a FAIL: the collector is
 healthy and the logs are going nowhere, which is true after `lgtm` has been
 recreated until `k8s/logging/connect-loki.sh` runs again, and which must not fail
 a deploy because logs are not in the client path. The message names that script.
-Not-ready and absent collectors FAIL.
+Not-ready and absent collectors FAIL. This is where a collector that never becomes
+Ready fails the deploy: `k8s/dev-up.sh` only warns about it (logs are not in the
+client path, so the rest of the stack is brought up first), and CD runs this suite
+after `dev-up.sh`.
 
 The decision is shown **offline** with fixtures, without a cluster:
 
@@ -385,6 +388,10 @@ three reads, for an absent namespace, an absent DaemonSet, desired 0, a status t
 is not filled in yet, ready below desired, no address, a healthy collector and a
 target that declares no collector, and compares each verdict. It has
 not been run against a live cluster: no cluster was touched.
+
+`bash backend/deploy/k8s/verify/tests/dev_up_logging_test.sh` is the offline test of
+the two log-shipping blocks of `dev-up.sh` (fake `kubectl`, no cluster), including
+that a collector that does not become Ready warns and does not stop the script.
 
 ## Adding a target
 
