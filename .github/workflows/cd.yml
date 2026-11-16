@@ -1251,6 +1251,24 @@ jobs:
             sleep 2
           done
 
+          # Detached up returns before the role provisioner exits. Include stopped
+          # containers: a successful one-shot may already have finished by now.
+          role_container=$(docker compose ps --all --quiet postgres-game-roles)
+          if [ -z "$role_container" ]; then
+            echo "::error::postgres-game-roles container is missing; refusing to migrate"
+            exit 1
+          fi
+          if ! role_exit=$(docker wait "$role_container"); then
+            echo "::error::Could not wait for postgres-game-roles; refusing to migrate"
+            exit 1
+          fi
+          # docker wait prints the container exit code; its own success does not
+          # mean provisioning succeeded. Require the role job's exit code to be 0.
+          if [ "$role_exit" != 0 ]; then
+            echo "::error::postgres-game-roles failed (exit $role_exit); refusing to migrate"
+            exit 1
+          fi
+
       - name: Apply pending migrations
         # k8s mode owns its own data tier inside the cluster; these compose
         # steps would bring the OLD dev stack back up alongside it, and both

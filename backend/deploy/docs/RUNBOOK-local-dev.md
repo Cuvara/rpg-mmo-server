@@ -154,7 +154,7 @@ absent by default, which means exactly that. Nothing needs setting for cuvara.
   the variable and refuses `EnterWorld` for that game only. `./stack.sh
   check-secrets` checks every set `JOIN_TOKEN_SECRET_<GAME>` against `JWT_SECRET`.
   The k8s names are printed by
-  `python deploy/k8s/games/render.py --game <game> --print gateway-env`.
+  `python deploy/k8s/games/render.py --game <game> --nakama-tls off --print gateway-env`.
 - **Restart Nakama after changing `GAMES`.** The plugin creates each game's
   leaderboards when it loads, so a newly listed game has no leaderboard (and is
   not yet allowed) until `docker compose up -d nakama` recreates the container.

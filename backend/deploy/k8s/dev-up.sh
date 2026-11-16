@@ -594,7 +594,7 @@ for game in "${GAMES_LIST[@]}"; do
   if ! $K get secret rpg-app-secrets -n "$game_ns" >/dev/null 2>&1; then
     echo "ERROR: game $game is listed in gateway-config's games, but secret $game_ns/rpg-app-secrets is absent." >&2
     echo "  The game's Secret must be applied first: render it with" >&2
-    echo "    python deploy/k8s/games/render.py --game $game --print secret-template" >&2
+    echo "    python deploy/k8s/games/render.py --game $game --nakama-tls off --print secret-template" >&2
     echo "  fill a copy OUTSIDE the repo (its join-token-secret = rpg-k8s-realtime/rpg-app-secrets'" >&2
     echo "  join-token-secret-$game) and apply it." >&2
     exit 1
@@ -756,7 +756,8 @@ for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
   if ! $K get configmap gameserver-config -n "$game_ns" >/dev/null 2>&1; then
     game=${game_ns#rpg-k8s-realtime-}
     echo "ERROR: $game_ns/gameserver-config is absent; render it with" >&2
-    echo "  python deploy/k8s/games/render.py --game $game --nakama-tls on|off" >&2
+    render_tls=off; [ -z "$nk_on" ] || render_tls=on
+    echo "  python deploy/k8s/games/render.py --game $game --nakama-tls $render_tls" >&2
     exit 1
   fi
 done
@@ -767,8 +768,9 @@ if [ -n "$nk_on" ]; then
   fi
   if ! source_pin=$($K get secret nakama-tls-pin -n rpg-k8s-realtime -o 'jsonpath={.data.tls\.crt}' \
     | base64 -d) || [ -z "$source_pin" ] \
-    || ! grep -Eq '^-----BEGIN CERTIFICATE-----[[:space:]]*$' <<< "$source_pin"; then
-    echo "ERROR: source nakama-tls-pin tls.crt is empty, unreadable, or not a PEM certificate." >&2
+    || ! grep -Eq '^-----BEGIN CERTIFICATE-----[[:space:]]*$' <<< "$source_pin" \
+    || grep -Eq -- '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' <<< "$source_pin"; then
+    echo "ERROR: source nakama-tls-pin tls.crt must be a readable, nonempty PEM certificate without a private key." >&2
     exit 1
   fi
   for game_ns in rpg-k8s-realtime ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
@@ -1007,7 +1009,8 @@ for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
   if ! $K get configmap gameserver-config -n "$game_ns" >/dev/null 2>&1; then
     game=${game_ns#rpg-k8s-realtime-}
     echo "ERROR: $game_ns/gameserver-config is absent; render it with" >&2
-    echo "  python deploy/k8s/games/render.py --game $game --nakama-tls on|off" >&2
+    render_tls=off; [ -z "$nk_cert_path" ] || render_tls=on
+    echo "  python deploy/k8s/games/render.py --game $game --nakama-tls $render_tls" >&2
     exit 1
   fi
   game_url=$($K get configmap gameserver-config -n "$game_ns" -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)

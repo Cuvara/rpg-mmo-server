@@ -29,7 +29,7 @@ case "${PROVISION_STUB_MODE:-ok}" in
 esac
 STUB
 export PSQL_CMD="bash $WORK/psql-stub.sh" PROVISION_RECORD="$WORK"
-unset GAMESTATE_ROLE_PASSWORD PROVISION_STUB_MODE
+unset GAMESTATE_ROLE_PASSWORD PROVISION_STUB_MODE POSTGRES_GAME_DB
 run() {
 	rm -f "$WORK/argv" "$WORK/stdin"
 	STATUS=0
@@ -56,14 +56,14 @@ check 'dry run creates a restricted default login' grep -Fq 'CREATE ROLE gamesta
 check 'role creation is conditional' grep -Fq "WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gamestate')" "$WORK/stdout"
 check 'bootstrap login cannot be the application role being altered' grep -Fq "current_user <> 'gamestate' AND session_user <> 'gamestate' AS separate_admin" "$WORK/stdout"
 check 'existing role attributes converge' grep -Fq 'ALTER ROLE gamestate WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT NOBYPASSRLS CONNECTION LIMIT 20' "$WORK/stdout"
-check 'default database ownership transfers in place' grep -Fq 'ALTER DATABASE gamestate OWNER TO gamestate;' "$WORK/stdout"
-check 'database gets default connection budget' grep -Fq 'ALTER DATABASE gamestate CONNECTION LIMIT 20;' "$WORK/stdout"
-check 'PUBLIC loses CONNECT and TEMPORARY on default database' grep -Fq 'REVOKE CONNECT, TEMPORARY ON DATABASE gamestate FROM PUBLIC;' "$WORK/stdout"
-check 'default login gets CONNECT on default database' grep -Fq 'GRANT CONNECT ON DATABASE gamestate TO gamestate;' "$WORK/stdout"
+check 'default database ownership transfers in place' grep -Fq 'ALTER DATABASE "gamestate" OWNER TO gamestate;' "$WORK/stdout"
+check 'database gets default connection budget' grep -Fq 'ALTER DATABASE "gamestate" CONNECTION LIMIT 20;' "$WORK/stdout"
+check 'PUBLIC loses CONNECT and TEMPORARY on default database' grep -Fq 'REVOKE CONNECT, TEMPORARY ON DATABASE "gamestate" FROM PUBLIC;' "$WORK/stdout"
+check 'default login gets CONNECT on default database' grep -Fq 'GRANT CONNECT ON DATABASE "gamestate" TO gamestate;' "$WORK/stdout"
 check 'other reachable databases lose PUBLIC CONNECT unconditionally' grep -Fq "SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', datname)" "$WORK/stdout"
 check 'revocation and isolation inspect effective database privileges' grep -Fq "has_database_privilege('gamestate', datname, 'CONNECT')" "$WORK/stdout"
 check 'other-database query excludes own and template databases' grep -Fq "NOT datistemplate AND datname <> 'gamestate'" "$WORK/stdout"
-check 'owner transfer connects only to gamestate' grep -Fxq '\connect gamestate' "$WORK/stdout"
+check 'owner transfer connects only to gamestate' grep -Fxq '\connect "gamestate"' "$WORK/stdout"
 check 'schemas are transferred with quoted identifiers' grep -Fq "format('ALTER SCHEMA %I OWNER TO gamestate', nspname)" "$WORK/stdout"
 check 'system schemas are excluded' grep -Fq "nspname !~ '^pg_' AND nspname <> 'information_schema'" "$WORK/stdout"
 check 'table and sequence owner transfers are included' grep -Fq "AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')" "$WORK/stdout"
@@ -101,12 +101,12 @@ export GAMESTATE_ROLE_PASSWORD="test-pw-xyz ' \$(ignored)"
 run --dry-run --connection-limit 7
 check 'custom budget dry run succeeds with password set' test "$STATUS" -eq 0
 check 'custom role budget is emitted' grep -Fq 'NOBYPASSRLS CONNECTION LIMIT 7' "$WORK/stdout"
-check 'custom database budget is emitted' grep -Fq 'ALTER DATABASE gamestate CONNECTION LIMIT 7;' "$WORK/stdout"
+check 'custom database budget is emitted' grep -Fq 'ALTER DATABASE "gamestate" CONNECTION LIMIT 7;' "$WORK/stdout"
 check 'password never appears in dry run output' not_contains "$GAMESTATE_ROLE_PASSWORD" "$WORK/stdout" "$WORK/stderr"
 
 run --connection-limit 7
 check 'stub psql execution succeeds' test "$STATUS" -eq 0
-check 'SQL reaches psql on stdin' grep -Fq 'ALTER DATABASE gamestate OWNER TO gamestate;' "$WORK/stdin"
+check 'SQL reaches psql on stdin' grep -Fq 'ALTER DATABASE "gamestate" OWNER TO gamestate;' "$WORK/stdin"
 check 'password is read inside psql from the environment' grep -Fq '\getenv role_password GAMESTATE_ROLE_PASSWORD' "$WORK/stdin"
 check 'password interpolation is performed only by psql' grep -Fq "PASSWORD :'role_password'" "$WORK/stdin"
 check 'password variable is cleared' grep -Fxq '\unset role_password' "$WORK/stdin"
@@ -139,5 +139,28 @@ export PROVISION_STUB_MODE=membership-error
 run
 check 'membership isolation failure exits 1' test "$STATUS" -eq 1
 check 'membership failure names the offending role' grep -Fq 'is a member of role unsafe_role' "$WORK/stdout"
+
+unset PROVISION_STUB_MODE
+export POSTGRES_GAME_DB=Archive_2026
+run --dry-run
+check 'custom database dry run succeeds' test "$STATUS" -eq 0
+check 'custom database owns the same restricted role' grep -Fq 'ALTER DATABASE "Archive_2026" OWNER TO gamestate;' "$WORK/stdout"
+check 'custom database gets the connection budget' grep -Fq 'ALTER DATABASE "Archive_2026" CONNECTION LIMIT 20;' "$WORK/stdout"
+check 'custom database gets its own PUBLIC revocation and app grant' grep -Fq 'GRANT CONNECT ON DATABASE "Archive_2026" TO gamestate;' "$WORK/stdout"
+check 'custom database is excluded from isolation checks' grep -Fq "datname <> 'Archive_2026'" "$WORK/stdout"
+check 'object ownership transfer connects to the custom database' grep -Fxq '\connect "Archive_2026"' "$WORK/stdout"
+check 'custom DSN retains the fixed role and configured database' grep -Fq 'postgres://gamestate:<password>@<host>:5432/Archive_2026?sslmode=...' "$WORK/stdout"
+export POSTGRES_GAME_DB=select
+run --dry-run
+check 'SQL keyword database names are quoted' grep -Fq 'ALTER DATABASE "select" OWNER TO gamestate;' "$WORK/stdout"
+for db in 'bad-name' '1bad' 'bad/name' 'bad name' 'bad;SELECT 1' 'bad"name' "bad'name" $'bad\nname' "a$(printf '%063d' 0)"; do
+  export POSTGRES_GAME_DB="$db"
+  run --dry-run
+  check 'invalid database identifier is refused before psql or SQL output' refused
+  check 'invalid database identifier emits no SQL' test ! -s "$WORK/stdout"
+done
+export POSTGRES_GAME_DB=''
+run --dry-run
+check 'empty database setting uses the compose default' grep -Fq 'ALTER DATABASE "gamestate" OWNER TO gamestate;' "$WORK/stdout"
 printf '\npassed: %s failed: %s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

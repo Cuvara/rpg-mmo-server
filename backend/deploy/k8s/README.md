@@ -48,7 +48,7 @@ means cuvara only; an invalid entry is refused), and refuses to continue when:
 - a listed non-default game has no `join-token-secret-<game>`, or one with no
   non-empty key (it is listed, so the deploy must serve it);
 - `rpg-k8s-realtime-<game>/rpg-app-secrets` is absent (apply the game's Secret
-  first: `games/render.py --game <game> --print secret-template`), or its
+  first: `games/render.py --game <game> --nakama-tls off --print secret-template`), or its
   `join-token-secret` is not the same ordered key list as the gateway's
   `join-token-secret-<game>`.
 

@@ -6,6 +6,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Pin the shared JWT golden-vector fixture to LF in root `.gitattributes`, so
+  deterministic byte comparisons pass on Windows checkouts with `core.autocrlf`.
+- Correct the `Claims.GameID` comment: issuers populate `gid` for non-default games;
+  default-game tokens omit it.
 - Harden JWT verification to match the C# parser: require canonical unpadded
   base64url, a 32-byte HS256 signature, exact `alg:"HS256"` and `typ:"JWT"`,
   UTF-8 JSON objects without duplicate members, typed case-sensitive claims,

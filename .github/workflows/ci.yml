@@ -4,6 +4,7 @@ name: CI — Backend
 # workflow (.github/workflows/_go-module.yml); deploy contracts run offline.
 #
 # Graph:
+#   test-deploy-offline (independent; no services or secrets)
 #   test-shared
 #     ├─► test-gateway ────┐
 #     ├─► test-nakama ─────┤

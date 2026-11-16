@@ -89,6 +89,7 @@ services:
       PGUSER: ${POSTGRES_GAME_USER:-game}
       PGPASSWORD: ${POSTGRES_GAME_PASSWORD:-localdev}
       PGDATABASE: ${POSTGRES_GAME_DB:-gamestate}
+      POSTGRES_GAME_DB: ${POSTGRES_GAME_DB:-gamestate}
       GAMESTATE_ROLE_PASSWORD: ${POSTGRES_GAME_APP_PASSWORD:-localdev-app}
     volumes:
       - ./db/provision-default-role.sh:/mnt/provision-default-role.sh:ro

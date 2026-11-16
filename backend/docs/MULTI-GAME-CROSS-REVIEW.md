@@ -13,6 +13,20 @@ credentials, a missing per-game secret check, delayed registry eviction, and
 onboarding into a stack with Nakama TLS enabled. These are source-traced
 failure scenarios; no exploit, deployment, or test suite was executed.
 
+## Resolution status after integration
+
+The original review below describes revision `30464b3`. The integration fixes
+have since closed MG-01 through MG-04 in code; rollout to an actual stack
+remains an operator step. The follow-up QA checked integration HEAD `1694014`;
+this round corrects its remaining deployment ordering, CLI and Windows issues.
+
+| Finding | Implemented resolution | Evidence and remaining scope |
+| --- | --- | --- |
+| MG-01 | Dedicated `gamestate` role; in-place ownership and database isolation; compose/k8s wiring | Prior QA: 24 live isolation checks passed; this round covers configurable database names and waits for provisioning before CD migrations. Default app-password hardening remains follow-up F7. |
+| MG-02 | Per-key auth/join and cross-game separation before workloads, with Go-compatible trimming | Offline compose and k8s secret harness; runtime gateway checks remain in place. |
+| MG-03 | Game-aware atomic registry eviction and matching watcher cleanup | Shared storage tests; stale events within the same game's incarnation remain outside this change. |
+| MG-04 | Explicit TLS decision for rendered manifests; repair/check each game namespace and copy public pins | Renderer and offline TLS harness; this round also rejects certificate bundles containing private keys. |
+
 ## Findings
 
 | ID | Severity | File:line at 30464b3 | Concrete failure scenario: inputs/state -> wrong outcome | Suggested fix |
@@ -294,8 +308,8 @@ portion is stated separately; it is not a blanket pass for that area.
 
 - Coverage: **9/9 requested areas**, **4/4 findings** with severity,
   revision-specific file:line, failure scenario, and fix; **5 owner questions**.
-- Only `backend/docs/MULTI-GAME-CROSS-REVIEW.md` was added. No code, index,
-  commit, branch, worktree, deployment, or external service was changed.
+- The original review at `30464b3` only added this document and made no code or
+  deployment changes. Subsequent integration commits implement the resolutions above.
 - Edited-file checks: Markdown structure **PASS** (4 finding rows with 5
   columns each, 9 coverage sections, 5 numbered owner questions); whitespace
   **PASS** (0 errors), using `git -c core.autocrlf=false diff --no-index --check

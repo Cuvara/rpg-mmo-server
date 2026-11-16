@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import pathlib
+import shlex
 import unittest
 
 path = pathlib.Path(__file__).resolve().parent / "render.py"
@@ -16,6 +17,24 @@ def config(result):
 
 
 class RenderTlsTests(unittest.TestCase):
+    def test_dev_up_secret_template_command_runs(self):
+        dev_up = (path.parent.parent / "dev-up.sh").read_text(encoding="utf-8")
+        commands = [line.strip().removeprefix('echo "').removesuffix('" >&2')
+                    for line in dev_up.splitlines()
+                    if "render.py --game" in line and "--print secret-template" in line]
+        self.assertEqual(len(commands), 1)
+        args = shlex.split(commands[0].replace("$game", "ember"))[2:]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(renderer.main(args), 0)
+        self.assertIn("kind: Secret", output.getvalue())
+
+    def test_cli_snippets_do_not_require_tls_decision(self):
+        for part in ("secret-template", "gateway-env"):
+            with self.subTest(part=part), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(renderer.main(["--game", "ember", "--print", part]), 0)
+                self.assertIn("ember", output.getvalue())
+
     def test_tls_on_and_off_preserve_other_config(self):
         source = renderer._one(renderer._load("20-configmaps.yaml"), "ConfigMap", "gameserver-config")["data"]
         for enabled, scheme, pin in ((True, "https", "/etc/nakama-tls/tls.crt"), (False, "http", "")):
@@ -48,6 +67,9 @@ class RenderTlsTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as exc:
                 renderer.main(["--game", "ember"])
+            self.assertNotEqual(exc.exception.code, 0)
+            with self.assertRaises(SystemExit) as exc:
+                renderer.main(["--game", "ember", "--print", "secret-template", "--out", "unused-output"])
             self.assertNotEqual(exc.exception.code, 0)
             self.assertEqual(renderer.main(["--game", "ember", "--nakama-tls", "on", "--nakama-url", "http://nakama"]), 2)
 

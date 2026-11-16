@@ -11,6 +11,10 @@ Read first: ADR-33 D2 (option S1, game-qualified server ids), D3, D6 and D7 in
 
 ## What a render gives you
 
+`--nakama-tls` is required when rendering manifests or using `--out` (which writes
+all three outputs). Standalone `--print secret-template` and `--print gateway-env`
+do not contain Nakama settings, so they can omit the flag.
+
 ```bash
 cd backend/deploy/k8s/games
 python render.py --game ember --nakama-tls off                          # manifests on stdout

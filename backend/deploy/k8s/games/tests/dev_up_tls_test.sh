@@ -112,6 +112,17 @@ for source in empty non-PEM; do
     bad "$source source certificate refused without provisioning or value output"
   fi
 done
+for key_type in '' 'RSA ' 'ENCRYPTED '; do
+  setup
+  printf '%s\n' "-----BEGIN ${key_type}PRIVATE KEY-----" 'fake-private-key-value' "-----END ${key_type}PRIVATE KEY-----" >> "$FIXTURE/source.crt"
+  if ! (run_blocks) > "$WORK/out" 2>&1 && grep -q 'ERROR:.*source.*tls.crt' "$WORK/out" \
+    && ! grep -Eq '^(create|apply) ' "$LOG" \
+    && ! grep -Eq 'fake-private-key-value|BEGIN .*PRIVATE KEY' "$WORK/out"; then
+    ok "${key_type}private key bundled with source certificate refused without provisioning or value output"
+  else
+    bad "${key_type}private key bundled with source certificate refused without provisioning or value output"
+  fi
+done
 setup; rm "$FIXTURE/rpg-k8s-realtime-ember.url"
 if ! (run_blocks) > "$WORK/out" 2>&1 && grep -q 'render.py --game ember --nakama-tls' "$WORK/out"; then ok 'missing game config refused'; else bad 'missing game config refused'; fi
 echo "passed: $PASS failed: $FAIL"

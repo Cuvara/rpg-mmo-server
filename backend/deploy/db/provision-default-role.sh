@@ -9,7 +9,8 @@
 # GAMESTATE_ROLE_PASSWORD is read by psql 15+ with \getenv, never passed in argv.
 # PSQL_CMD is a whitespace-separated command, default psql; use a wrapper script
 # for arguments needing shell quoting. Do not put passwords in PSQL_CMD.
-# The restricted login gamestate owns only the existing gamestate database and
+# POSTGRES_GAME_DB selects the existing database (default gamestate), as in compose.
+# The restricted login gamestate owns only that database and
 # its non-system objects. No database is dropped, recreated, or copied. The
 # bootstrap superuser is unchanged and remains for provisioning and migrations.
 # PUBLIC CONNECT is revoked on every other reachable non-template database;
@@ -23,6 +24,9 @@ set -euo pipefail
 export LC_ALL=C
 
 usage_error() { printf 'provision-default-role: %s\n' "$1" >&2; exit 2; }
+database_name=${POSTGRES_GAME_DB:-gamestate}
+[[ "$database_name" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] ||
+	usage_error 'POSTGRES_GAME_DB must be a PostgreSQL identifier (ASCII letters, digits, underscores; at most 63 bytes; no leading digit)'
 connection_limit=20
 dry_run=0
 while [[ $# -gt 0 ]]; do
@@ -70,19 +74,19 @@ ALTER ROLE gamestate WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATIO
 \getenv role_password GAMESTATE_ROLE_PASSWORD
 ALTER ROLE gamestate PASSWORD :'role_password';
 \unset role_password
--- An absent gamestate is an operator error: this upgrades an existing volume.
-ALTER DATABASE gamestate OWNER TO gamestate;
-ALTER DATABASE gamestate CONNECTION LIMIT $connection_limit;
-REVOKE CONNECT, TEMPORARY ON DATABASE gamestate FROM PUBLIC;
-GRANT CONNECT ON DATABASE gamestate TO gamestate;
+-- An absent target database is an operator error: this upgrades an existing volume.
+ALTER DATABASE "$database_name" OWNER TO gamestate;
+ALTER DATABASE "$database_name" CONNECTION LIMIT $connection_limit;
+REVOKE CONNECT, TEMPORARY ON DATABASE "$database_name" FROM PUBLIC;
+GRANT CONNECT ON DATABASE "$database_name" TO gamestate;
 -- Unconditional instance-wide hardening: affects roles relying on PUBLIC.
 SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', datname)
 FROM pg_database
-WHERE NOT datistemplate AND datname <> 'gamestate'
+WHERE NOT datistemplate AND datname <> '$database_name'
   AND has_database_privilege('gamestate', datname, 'CONNECT')
 \gexec
-\connect gamestate
--- Work only inside gamestate. Quote identifiers from catalogs, including
+\connect "$database_name"
+-- Work only inside the selected database. Quote identifiers from catalogs, including
 -- legacy schemas/object names; skip PostgreSQL's reserved system schemas.
 SELECT format('ALTER SCHEMA %I OWNER TO gamestate', nspname)
 FROM pg_namespace
@@ -135,7 +139,7 @@ SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT ALL O
 -- Check effective privileges, including explicit grants and memberships.
 SELECT NOT EXISTS (
   SELECT FROM pg_database
-  WHERE NOT datistemplate AND datname <> 'gamestate'
+  WHERE NOT datistemplate AND datname <> '$database_name'
     AND has_database_privilege('gamestate', datname, 'CONNECT')
 ) AND NOT EXISTS (
   SELECT FROM pg_auth_members WHERE member = 'gamestate'::regrole
@@ -145,7 +149,7 @@ SELECT NOT EXISTS (
 \else
 SELECT format('Isolation failed: role gamestate can CONNECT to database %I', datname)
 FROM pg_database
-WHERE NOT datistemplate AND datname <> 'gamestate'
+WHERE NOT datistemplate AND datname <> '$database_name'
   AND has_database_privilege('gamestate', datname, 'CONNECT')
 ORDER BY datname;
 SELECT format('Isolation failed: role gamestate is a member of role %I', r.rolname)
@@ -159,7 +163,7 @@ SQL
 }
 
 dsn_shape() {
-	printf 'DSN shape: postgres://gamestate:<password>@<host>:5432/gamestate?sslmode=...\n'
+	printf 'DSN shape: postgres://gamestate:<password>@<host>:5432/%s?sslmode=...\n' "$database_name"
 	printf "Store the completed DSN in cuvara's game-db-url Secret; never commit it.\n"
 }
 if [[ "$dry_run" -eq 1 ]]; then

@@ -3,6 +3,13 @@
 
 k() { kubectl --context "$KUBE_CONTEXT" "$@"; }
 
+# Native Windows Python emits CRLF. Shell fields and verdict tags need LF;
+# remove only the line-ending CR and preserve Python failures through the pipe.
+cluster_python_lf() (
+  set -o pipefail
+  python3 "$@" | sed 's/\r$//'
+)
+
 check_cluster_reachable() {
   local out
   if ! out=$(k version -o json 2>&1); then
@@ -12,7 +19,7 @@ check_cluster_reachable() {
       "kubectl config get-contexts; k3d cluster list"
     return
   fi
-  pass "context=$KUBE_CONTEXT server=$(k version -o json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("serverVersion",{}).get("gitVersion","?"))' 2>/dev/null)"
+  pass "context=$KUBE_CONTEXT server=$(k version -o json 2>/dev/null | cluster_python_lf -c 'import json,sys;print(json.load(sys.stdin).get("serverVersion",{}).get("gitVersion","?"))' 2>/dev/null)"
 }
 
 check_namespaces() {
@@ -37,7 +44,7 @@ check_workloads_ready() {
     while read -r line; do
       [ -z "$line" ] && continue
       bad+=("$line")
-    done < <(k get deploy,statefulset,daemonset -n "$ns" -o json 2>/dev/null | python3 -c '
+    done < <(k get deploy,statefulset,daemonset -n "$ns" -o json 2>/dev/null | cluster_python_lf -c '
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(0)
@@ -97,7 +104,7 @@ check_pvcs_bound() {
 # stricter checks stand down rather than guess.
 fleet_wide_map_id() {
   local ns="$1" name="$2"
-  k get fleet "$name" -n "$ns" -o json 2>/dev/null | python3 -c '
+  k get fleet "$name" -n "$ns" -o json 2>/dev/null | cluster_python_lf -c '
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(0)
@@ -130,7 +137,7 @@ for c in spec.get("containers",[]) or []:
 #
 # Only a literal `value:` counts as a pinned map id -- see fleet_wide_map_id.
 classify_fleets() {
-  python3 -c '
+  cluster_python_lf -c '
 import json,os,sys
 want=set(sys.argv[1].split())
 def load(name):
@@ -255,7 +262,7 @@ check_fleet_replicas() {
     return
   fi
   local nums
-  nums=$(echo "$json" | python3 -c '
+  nums=$(echo "$json" | cluster_python_lf -c '
 import json,sys
 d=json.load(sys.stdin); st=d.get("status",{})
 print(d.get("spec",{}).get("replicas",0), st.get("replicas",0), st.get("readyReplicas",0), st.get("allocatedReplicas",0))
@@ -386,7 +393,7 @@ check_no_restarts() {
         "OLD "*)    old+=("${line#OLD }") ;;
       esac
     done < <(k get pods -n "$ns" -o json 2>/dev/null \
-      | RESTART_WINDOW="$window" python3 -c "$_RESTART_CLASSIFY_PY")
+      | RESTART_WINDOW="$window" cluster_python_lf -c "$_RESTART_CLASSIFY_PY")
   done
 
   # One entry per line, continuation lines indented under "observed:".
@@ -448,7 +455,7 @@ check_secrets() {
       [ "${a%%:*}" = "$ref" ] && allowed="${allowed:+$allowed,}${a#*:}"
     done
     local res
-    res=$(echo "$out" | ALLOW_EMPTY="$allowed" python3 -c '
+    res=$(echo "$out" | ALLOW_EMPTY="$allowed" cluster_python_lf -c '
 import base64,json,os,sys
 d=json.load(sys.stdin); data=d.get("data",{}) or {}
 allow={k for k in os.environ.get("ALLOW_EMPTY","").split(",") if k}

@@ -513,8 +513,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--stack-namespace", default=DEFAULT_STACK_NAMESPACE,
                    help=f"the DEFAULT game's namespace (default {DEFAULT_STACK_NAMESPACE})")
     p.add_argument("--image", default=None, help=f"default {IMAGE_REPO}:<game>-develop")
-    p.add_argument("--nakama-tls", required=True, choices=("on", "off"),
-                   help="stack TLS decision: read rpg-k8s-data/nakama-config key tls-cert-path; set means on")
+    p.add_argument("--nakama-tls", choices=("on", "off"),
+                   help="required for manifests/--out: read rpg-k8s-data/nakama-config key tls-cert-path; set means on")
     p.add_argument("--nakama-url", default=None, help="Nakama URL override; default uses the source host and TLS decision's scheme")
     p.add_argument("--nakama-tls-pin", default=None, help="certificate path override; default /etc/nakama-tls/tls.crt when on, empty when off")
     p.add_argument("--print", dest="part", default="manifests",
@@ -523,6 +523,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="write <game>.yaml, <game>.secret-template.yaml and "
                         "<game>.gateway-env.yaml here instead of printing (keep it out of git)")
     args = p.parse_args(argv)
+    if args.nakama_tls is None:
+        if args.part == "manifests" or args.out is not None:
+            p.error("--nakama-tls is required for manifests and --out")
+        # These snippets contain no Nakama settings. The renderer still builds
+        # all parts in memory, so use its plaintext default for the unused parts.
+        args.nakama_tls = "off"
 
     try:
         out = render(args.game, args.env, args.stack_namespace, args.image,

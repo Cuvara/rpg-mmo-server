@@ -34,6 +34,8 @@ spec:
               valueFrom: { secretKeyRef: { name: postgres-game, key: POSTGRES_PASSWORD } }
             - name: PGDATABASE
               valueFrom: { secretKeyRef: { name: postgres-game, key: POSTGRES_DB } }
+            - name: POSTGRES_GAME_DB
+              valueFrom: { secretKeyRef: { name: postgres-game, key: POSTGRES_DB } }
           command:
             - /bin/sh
             - -ec

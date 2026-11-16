@@ -41,7 +41,7 @@ type Claims struct {
 	// token minted before protocol 3 carries, so readers must tolerate absence.
 	CharacterID string `json:"cid,omitempty"`
 	// GameID is the `gid` claim (ADR-33). Absence means constants.DefaultGameID;
-	// readers must tolerate absence. Issuers do not populate it before leg 4.
+	// readers must tolerate absence. Issuers populate it for non-default games.
 	GameID   string `json:"gid,omitempty"`
 	IssuedAt int64  `json:"iat"`
 	ExpireAt int64  `json:"exp"`

@@ -94,7 +94,10 @@ persistentvolumeclaim/data-redis-0           Bound   1Gi   RWO   local-path
 PVCs. Set the `postgres-game` Secret's `GAMESTATE_ROLE_PASSWORD` to the same
 password used in the app tier's `game-db-url`; `GAMESTATE_APP_USER` must be
 `gamestate`. The Job uses `POSTGRES_USER` and `POSTGRES_PASSWORD` as bootstrap
-admin credentials. It transfers existing database objects without recreating the
+admin credentials, and passes `POSTGRES_DB` as `POSTGRES_GAME_DB` to the
+provisioner (default `gamestate` for a manual invocation). The database name must
+be an ASCII identifier of at most 63 characters, starting with a letter or underscore.
+It transfers existing database objects without recreating the
 database and revokes PUBLIC CONNECT on other databases, which affects other roles
 that rely on that grant. Review those access requirements before running it.
 

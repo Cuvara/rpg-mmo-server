@@ -281,7 +281,7 @@ spec:
                   optional: true
             # PER NON-DEFAULT GAME, none today. `<GAME>` is the game id
             # uppercased, `<game>` as-is. The exact block for a game is printed by
-            #   python deploy/k8s/games/render.py --game <game> --print gateway-env
+            #   python deploy/k8s/games/render.py --game <game> --nakama-tls off --print gateway-env
             # and its names are these. The snippet has no GAMES entry: GAMES comes
             # only from the ConfigMap key above, and the snippet's header prints
             # the `kubectl patch configmap` that sets it.
