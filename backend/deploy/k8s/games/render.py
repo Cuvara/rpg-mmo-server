@@ -25,6 +25,14 @@ gets its own namespace, `<stack namespace>-<game>` (ADR-33 D7), holding:
     (get/list/watch on pods, get on pods/log, nothing else) bound to ServiceAccount
     `rpg-log-collector` of namespace `rpg-k8s-logging`, where the collector
     DaemonSet runs. No ClusterRole, no secrets;
+  * the Studio hub's grant in THIS namespace: Role `studio-hub` (the REALTIME
+    shape of k3s/hub_contract.py: read pods, logs, events, services, deployments,
+    statefulsets, replicasets and the Agones fleets, gameservers, gameserversets,
+    fleetautoscalers; delete pods and gameservers; patch deployments; scale a
+    Fleet through fleets/scale; patch/update fleetautoscalers; create
+    gameserverallocations; no secrets, no configmaps) and a RoleBinding to
+    ServiceAccount `studio-hub` of namespace `rpg-k8s-hub`, where no workload
+    runs. No ClusterRole;
   * the log knobs: `gameserver-config` carries `log-level` and `log-format` and the
     fleets read them as GAMESERVER_LOG_LEVEL / GAMESERVER_LOG_FORMAT. All of it is
     copied from k8s/app/, so the defaults cannot drift from cuvara's;
@@ -132,6 +140,37 @@ LOG_KNOB_ENV = ("GAMESERVER_LOG_LEVEL", "GAMESERVER_LOG_FORMAT")
 LOG_COLLECTOR_RULES = (
     {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]},
     {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+)
+
+# Studio hub side (an operator tool outside the cluster; k8s/hub/). Every game
+# namespace carries the hub's Role + RoleBinding `studio-hub`, bound to
+# ServiceAccount `studio-hub` of its OWN namespace `rpg-k8s-hub` (nothing runs
+# there, so the only way to act as the hub is a token an operator minted). The
+# rules are the REALTIME shape of k3s/hub_contract.py, which is THE single copy
+# of the allow-list; render.py cannot import it (it sits in another directory
+# and this file stays standalone), so it keeps this literal copy and
+# k8s/games/test_render.py proves it equals hub_contract.REALTIME_RULES triple
+# for triple AND the static Role in k8s/hub/20-rbac.yaml. Widening the hub is
+# therefore a change in hub_contract.py first; this tuple then fails the test
+# until it follows. Namespaced Role, never a ClusterRole; no secrets, no
+# configmaps, no resourceNames, no wildcard.
+HUB_NAMESPACE = "rpg-k8s-hub"
+HUB_SERVICE_ACCOUNT = "studio-hub"
+HUB_ROLE = "studio-hub"
+HUB_RULES = (
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "delete"]},
+    {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+    {"apiGroups": [""], "resources": ["events", "services"], "verbs": ["get", "list", "watch"]},
+    {"apiGroups": ["events.k8s.io"], "resources": ["events"], "verbs": ["get", "list", "watch"]},
+    {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get", "list", "watch", "patch"]},
+    {"apiGroups": ["apps"], "resources": ["statefulsets", "replicasets"], "verbs": ["get", "list", "watch"]},
+    {"apiGroups": ["agones.dev"], "resources": ["fleets", "gameserversets"], "verbs": ["get", "list", "watch"]},
+    # Fleet scale is the `fleets/scale` subresource, NOT `patch fleets`.
+    {"apiGroups": ["agones.dev"], "resources": ["fleets/scale"], "verbs": ["get", "update", "patch"]},
+    {"apiGroups": ["agones.dev"], "resources": ["gameservers"], "verbs": ["get", "list", "watch", "delete"]},
+    {"apiGroups": ["autoscaling.agones.dev"], "resources": ["fleetautoscalers"],
+     "verbs": ["get", "list", "watch", "patch", "update"]},
+    {"apiGroups": ["allocation.agones.dev"], "resources": ["gameserverallocations"], "verbs": ["create"]},
 )
 
 PART_OF = {"app.kubernetes.io/part-of": "rpg-mmo"}
@@ -456,9 +495,30 @@ def render(
         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": LOG_COLLECTOR_ROLE},
     }
 
+    # --- Studio hub grant -----------------------------------------------------
+    # Namespaced Role, not a ClusterRole, REALTIME shape (a game namespace holds
+    # the Agones objects). Fixed content, built here like the collector's Role.
+    hub_labels = {"app.kubernetes.io/name": "studio-hub"}
+    hub_role = {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "Role",
+        "metadata": meta(HUB_ROLE, hub_labels),
+        "rules": [copy.deepcopy(dict(rule)) for rule in HUB_RULES],
+    }
+    hub_role_binding = {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "metadata": meta(HUB_ROLE, hub_labels),
+        "subjects": [
+            {"kind": "ServiceAccount", "name": HUB_SERVICE_ACCOUNT, "namespace": HUB_NAMESPACE}
+        ],
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": HUB_ROLE},
+    }
+
     manifests = [
         namespace_doc, quota, limit_range, sdk_sa, sdk_rb, gs_cm, role, role_binding,
         log_role, log_role_binding,
+        hub_role, hub_role_binding,
         *fleets, fas,
     ]
 

@@ -1,0 +1,226 @@
+# The admission policy that makes `patch deployments` a rollout restart, for the
+# Studio hub and for nobody else.
+#
+# WHY THIS EXISTS. RBAC cannot narrow `patch` on a Deployment to one annotation: the
+# same verb rewrites the pod template (image, env, command, securityContext, hostPath
+# volumes), and the pods are created by the Deployment controller, not by the caller,
+# so a hub holding only `patch deployments` could run an arbitrary privileged pod on
+# the node in any namespace that carries no Pod Security label (none of ours do). The
+# Role in 20-rbac.yaml keeps `patch deployments` because a rollout restart needs it;
+# THIS POLICY IS WHAT MAKES "RESTART ONLY" TRUE. Delete it and the hub token is
+# node-root-equivalent again.
+#
+# WHAT IT DOES. For an UPDATE (a patch is an UPDATE at admission) of a Deployment
+# made by the user `system:serviceaccount:rpg-k8s-hub:studio-hub` it allows the
+# request only when nothing changed except the pod template annotation
+# `kubectl.kubernetes.io/restartedAt` (exactly what `kubectl rollout restart` writes).
+# Anything else is denied with a message. "Nothing changed" includes the Deployment's own
+# metadata: labels, annotations, ownerReferences (a reference to an owner that does not
+# exist makes the garbage collector delete the Deployment), finalizers (a finalizer makes
+# every delete, and its namespace's deletion, wait) and name, namespace, generateName.
+# Every other user is not matched (the
+# matchCondition below) and is not affected; so are creates, deletes and the
+# `deployments/scale` and `deployments/status` subresources, none of which the Role
+# grants.
+#
+# CLUSTER-SCOPED, ON PURPOSE. ValidatingAdmissionPolicy has no namespaced form. It is
+# the one cluster-scoped object of this directory besides the opt-in node ClusterRole:
+# there is still NO ClusterRole and NO ClusterRoleBinding by default, and this policy
+# can only RESTRICT the hub (it matches one username and can only deny).
+#
+# WHY THE BINDING IS NOT LIMITED BY A NAMESPACE SELECTOR. The hub has a Role in
+# rpg-k8s-realtime, rpg-k8s-data and every rpg-k8s-realtime-<game> that render.py
+# creates later. No label is common to exactly those namespaces, and a selector that
+# misses a new game namespace would FAIL OPEN there. The policy is keyed on the
+# username, so a cluster-wide binding changes nothing for anyone else.
+#
+# FAILS CLOSED. failurePolicy Fail and validationActions [Deny]: if the expressions
+# cannot be evaluated the hub's patch is refused, never let through.
+#
+# KUBERNETES 1.30 OR NEWER (admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy
+# with matchConditions and variables is GA from 1.30). The clusters this repository
+# documents run k3s v1.31.5 (k3d) and v1.34.1 (docker-desktop); k3s on a VPS is
+# installed unpinned. dev-up.sh stops, naming this version, if the API refuses these
+# objects.
+#
+# The expected text of every field is in k3s/hub_contract.py (POLICY_SPEC,
+# BINDING_SPEC): this file must equal it, and `cluster.hub_rbac` compares the live
+# objects with it.
+#
+# NOT PROVEN OFFLINE: no CEL evaluator is available to the repository's toolchain, so
+# the expressions are pinned as text and covered field by field by tests, not
+# evaluated. docs/RUNBOOK.md ("Studio hub token", the live check) is the proof.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: studio-hub-restart-only
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: studio-hub
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["deployments"]
+        scope: "*"
+  matchConditions:
+    # Only the hub: the policy does nothing for any other username. The username of a
+    # ServiceAccount token is system:serviceaccount:<namespace>:<name>.
+    - name: only-the-studio-hub
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:rpg-k8s-hub:studio-hub'
+  variables:
+    # Shorthands for the two pod templates; evaluated only where used.
+    - name: newTemplate
+      expression: object.spec.template
+    - name: oldTemplate
+      expression: oldObject.spec.template
+  validations:
+    # 1. THE POD SPEC. Equality of the whole pod spec (every container, image, env,
+    #    command, securityContext, volume incl. hostPath, hostPID/hostNetwork,
+    #    serviceAccountName, and any field a later Kubernetes adds). `==` on two typed
+    #    objects is a deep comparison. This is the rule that stops "privileged + hostPath".
+    - expression: >-
+        variables.newTemplate.spec == variables.oldTemplate.spec
+      message: "the Studio hub may only restart a Deployment: spec.template.spec (the pod spec) must not change"
+      reason: Forbidden
+    # 2. TEMPLATE LABELS. They become the pods' labels (selectors, Services, quota).
+    #    `has(a) == has(b)` is "present on both or absent on both"; reading an absent
+    #    field is a CEL error, so the value is compared only when it is there.
+    - expression: >-
+        has(variables.newTemplate.metadata.labels) ==
+        has(variables.oldTemplate.metadata.labels) &&
+        (!has(variables.newTemplate.metadata.labels) ||
+        variables.newTemplate.metadata.labels == variables.oldTemplate.metadata.labels)
+      message: "the Studio hub may only restart a Deployment: spec.template.metadata.labels must not change"
+      reason: Forbidden
+    # 3. TEMPLATE FINALIZERS. A finalizer in the template lands on every pod and would
+    #    make each of them undeletable until something removes it. Same shape as 2.
+    - expression: >-
+        has(variables.newTemplate.metadata.finalizers) ==
+        has(variables.oldTemplate.metadata.finalizers) &&
+        (!has(variables.newTemplate.metadata.finalizers) ||
+        variables.newTemplate.metadata.finalizers ==
+        variables.oldTemplate.metadata.finalizers)
+      message: "the Studio hub may only restart a Deployment: spec.template.metadata.finalizers must not change"
+      reason: Forbidden
+    # 4. TEMPLATE ANNOTATIONS, part one: every key of the NEW map except restartedAt is
+    #    in the OLD map with the same value. `!has(new)` = no annotations at all: nothing
+    #    to check. `.all(k, ...)` runs over the keys of the map. `k in old` is only read
+    #    after `has(old)`, so a Deployment with no annotations yet (the first restart
+    #    adds the only one) does not raise.
+    - expression: >-
+        !has(variables.newTemplate.metadata.annotations) ||
+        variables.newTemplate.metadata.annotations.all(k, k ==
+        'kubectl.kubernetes.io/restartedAt' ||
+        (has(variables.oldTemplate.metadata.annotations) && k in
+        variables.oldTemplate.metadata.annotations &&
+        variables.oldTemplate.metadata.annotations[k] ==
+        variables.newTemplate.metadata.annotations[k]))
+      message: "the Studio hub may only restart a Deployment: the only pod template annotation it may set is kubectl.kubernetes.io/restartedAt"
+      reason: Forbidden
+    # 5. TEMPLATE ANNOTATIONS, part two: every key of the OLD map except restartedAt is
+    #    still in the NEW map. Parts one and two together say: the two maps are equal
+    #    apart from the restartedAt key, which may be added, changed or removed.
+    - expression: >-
+        !has(variables.oldTemplate.metadata.annotations) ||
+        variables.oldTemplate.metadata.annotations.all(k, k ==
+        'kubectl.kubernetes.io/restartedAt' ||
+        (has(variables.newTemplate.metadata.annotations) && k in
+        variables.newTemplate.metadata.annotations))
+      message: "the Studio hub may only restart a Deployment: it may not remove a pod template annotation other than kubectl.kubernetes.io/restartedAt"
+      reason: Forbidden
+    # 6. THE SIBLINGS OF `template` that Kubernetes always defaults, so they are present
+    #    on both objects and can be compared directly: replicas (a patch that scales
+    #    is not a restart), selector, strategy, revisionHistoryLimit,
+    #    progressDeadlineSeconds. Together with 7 these are every other field of
+    #    DeploymentSpec in apps/v1 (a contract test pins this list). A field a later
+    #    Kubernetes adds to DeploymentSpec is NOT covered until it is added here: review
+    #    this list on every Kubernetes upgrade.
+    - expression: >-
+        object.spec.replicas == oldObject.spec.replicas && object.spec.selector ==
+        oldObject.spec.selector && object.spec.strategy == oldObject.spec.strategy &&
+        object.spec.revisionHistoryLimit == oldObject.spec.revisionHistoryLimit &&
+        object.spec.progressDeadlineSeconds == oldObject.spec.progressDeadlineSeconds
+      message: "the Studio hub may only restart a Deployment: replicas, selector, strategy, revisionHistoryLimit and progressDeadlineSeconds must not change"
+      reason: Forbidden
+    # 7. THE SIBLINGS WITHOUT A DEFAULT: minReadySeconds and paused are left out of the
+    #    object when zero / false, so each is compared with the present-on-both-or-absent
+    #    pattern of 2.
+    - expression: >-
+        has(object.spec.minReadySeconds) == has(oldObject.spec.minReadySeconds) &&
+        (!has(object.spec.minReadySeconds) || object.spec.minReadySeconds ==
+        oldObject.spec.minReadySeconds) && has(object.spec.paused) ==
+        has(oldObject.spec.paused) && (!has(object.spec.paused) || object.spec.paused ==
+        oldObject.spec.paused)
+      message: "the Studio hub may only restart a Deployment: minReadySeconds and paused must not change"
+      reason: Forbidden
+    # 8. THE DEPLOYMENT'S OWN LABELS, then its ANNOTATIONS, equal to the old ones. The
+    #    API server does not change them on an update; the Deployment controller records
+    #    its revision in an annotation through ITS OWN request (another username, so this
+    #    policy does not see it). generation and resourceVersion are not compared: they are
+    #    the metadata fields the API server itself manages. managedFields is NOT compared
+    #    either, on purpose: the field manager rewrites it on every patch, the legitimate
+    #    restart included, so an equality check would deny the restart; it is bookkeeping
+    #    of field ownership and carries no owner, finalizer or pod field. Nine to eleven
+    #    below close the metadata the first eight left open.
+    - expression: >-
+        has(object.metadata.labels) == has(oldObject.metadata.labels) &&
+        (!has(object.metadata.labels) || object.metadata.labels ==
+        oldObject.metadata.labels)
+      message: "the Studio hub may only restart a Deployment: its metadata.labels must not change"
+      reason: Forbidden
+    - expression: >-
+        has(object.metadata.annotations) == has(oldObject.metadata.annotations) &&
+        (!has(object.metadata.annotations) || object.metadata.annotations ==
+        oldObject.metadata.annotations)
+      message: "the Studio hub may only restart a Deployment: its metadata.annotations must not change"
+      reason: Forbidden
+    # 9. THE DEPLOYMENT'S OWN ownerReferences. Without this the hub could add a reference
+    #    to an owner that does not exist (any apiVersion/kind, a made-up uid): the garbage
+    #    collector then deletes the Deployment, a delete the Role does not grant. Found by
+    #    the live QA, because 1-8 compared the pod template and the labels and annotations
+    #    but not this field. Same present-on-both-or-absent shape as 2.
+    - expression: >-
+        has(object.metadata.ownerReferences) ==
+        has(oldObject.metadata.ownerReferences) &&
+        (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences ==
+        oldObject.metadata.ownerReferences)
+      message: "the Studio hub may only restart a Deployment: its metadata.ownerReferences must not change"
+      reason: Forbidden
+    # 10. THE DEPLOYMENT'S OWN finalizers (3 is the template's). A finalizer on the
+    #     Deployment makes every delete of it, and the deletion of its namespace, wait until
+    #     an admin removes the entry.
+    - expression: >-
+        has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) &&
+        (!has(object.metadata.finalizers) || object.metadata.finalizers ==
+        oldObject.metadata.finalizers)
+      message: "the Studio hub may only restart a Deployment: its metadata.finalizers must not change"
+      reason: Forbidden
+    # 11. NAME, NAMESPACE, generateName. The API server already refuses a change of the
+    #     first two on update and does not validate the third; compared here so the policy
+    #     does not depend on that.
+    - expression: >-
+        object.metadata.name == oldObject.metadata.name && object.metadata.namespace ==
+        oldObject.metadata.namespace && has(object.metadata.generateName) ==
+        has(oldObject.metadata.generateName) && (!has(object.metadata.generateName) ||
+        object.metadata.generateName == oldObject.metadata.generateName)
+      message: "the Studio hub may only restart a Deployment: its metadata.name, namespace and generateName must not change"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: studio-hub-restart-only
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: studio-hub
+spec:
+  policyName: studio-hub-restart-only
+  # Deny, not Warn or Audit: a violation is refused. No matchResources: the policy's
+  # own matchConstraints and matchCondition decide, cluster-wide (see the header).
+  validationActions: ["Deny"]

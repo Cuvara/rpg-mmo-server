@@ -111,6 +111,30 @@ jobs:
       - name: Check dev-up.sh log collector apply
         run: bash backend/deploy/k8s/verify/tests/dev_up_logging_test.sh
 
+      # The Studio hub's identity (k8s/hub: ServiceAccount, namespaced Roles, the opt-in
+      # node ClusterRole) against k3s/hub_contract.py, the single copy of its allow-list:
+      # the committed manifests plus a rendered sample game (no-argument run). The
+      # contract's unit tests run in the k3s/tests discovery above. PyYAML only.
+      - name: Test Studio hub contract
+        run: python backend/deploy/k3s/hub_contract.py
+
+      # cluster.hub_rbac FAILs on an extra verb, an extra resource, a missing rule, a
+      # missing ServiceAccount, a missing game Role, a foreign binding (by subject: the hub
+      # as ServiceAccount, User or hub-namespace Group; a group of every ServiceAccount does
+      # not count), a missing, edited or weakened admission policy, a legacy token Secret and
+      # a widened node role (fixtures through a fake kubectl, including a rendered
+      # non-default game and a stock cluster's default bindings, which PASS).
+      - name: Check cluster.hub_rbac verify rule
+        run: bash backend/deploy/k8s/verify/tests/hub_rbac_test.sh
+
+      # The Studio hub blocks of k8s/dev-up.sh: the preflight (reads only: the API serves
+      # ValidatingAdmissionPolicy, asked without an argument that Git Bash rewrites; each
+      # listed game has its Role) and the apply of exactly four files by name (namespace,
+      # ServiceAccount, admission policy, then the Roles), never optional/, no
+      # ClusterRole, no token.
+      - name: Check dev-up.sh Studio hub apply
+        run: bash backend/deploy/k8s/verify/tests/dev_up_hub_test.sh
+
       - name: Check per-game database provisioning
         run: bash backend/deploy/db/tests/provision_test.sh
 
