@@ -815,16 +815,12 @@ Verification cost is O(keys) HMAC-SHA256 computations in the worst case, which i
 why a keyring is meant to hold two secrets during a rotation window, not an
 archive of every secret ever used.
 
-### Known behavioural difference from the Go verifier
+### JWT parser parity
 
-One drift predates this change and is **not** rotation-related, but it is worth
-recording: Go's `jwt.Verify` rejects a token whose `exp` claim is absent (its
-zero value is in the past), and it additionally requires the header's `typ` to be
-`JWT`; the C# validator only enforces `exp` when it is greater than zero, and
-checks only `alg`. Both only ever *accept more* than the Go side, and the gateway
-always emits `exp` and `typ`, so no gateway-produced token is affected. Tightening
-it would change nothing for real traffic and is left alone rather than risking a
-behaviour change on the join path.
+Go and C# enforce the same JWT contract using shared golden vectors; see
+`docs/API.md`, "Join-token JWT validation". Both accept explicit empty `gid` and
+`gid: "cuvara"` for existing tokens in `JwtCharacterClaimTests` and
+`JoinGameIdTests.MatchingGame_Joins`, respectively, retaining the claim value.
 
 Coverage: `GameServer.Tests/Server/JwtKeyringTests.cs` (keyring semantics) and
 `GameServer.Tests/Server/JoinTokenSecretTests.cs` (the real handshake for

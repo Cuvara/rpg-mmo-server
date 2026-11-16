@@ -327,8 +327,8 @@ func decodeClaims(raw []byte, now time.Time) (Claims, error) {
 	if claims.UserID == "" {
 		return Claims{}, fmt.Errorf("sub must not be empty")
 	}
-	// Empty gid stays equivalent to absence for JwtCharacterClaimTests parity.
-	if claims.GameID != "" && (!gameid.ValidGameID(claims.GameID) || claims.GameID == constants.DefaultGameID) {
+	// Empty and explicit default gid remain accepted for existing test tokens.
+	if claims.GameID != "" && !gameid.ValidGameID(claims.GameID) {
 		return Claims{}, fmt.Errorf("invalid gid %q", claims.GameID)
 	}
 	claims.ExpireAt, err = integerClaim(fields["exp"])

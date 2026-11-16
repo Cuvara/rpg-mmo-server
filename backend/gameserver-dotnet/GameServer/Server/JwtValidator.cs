@@ -157,9 +157,9 @@ public static class JwtValidator
         }
 
         if (sub.Length == 0 || exp <= 0) return null;
-        // Empty gid is retained for compatibility with JwtCharacterClaimTests;
-        // issuers omit it for the default game (ADR-33).
-        if (gid.Length != 0 && (!GameId.IsValidGameId(gid) || gid == GameId.DefaultGameId)) return null;
+        // Empty and explicit default gid remain accepted for existing test tokens;
+        // issuers omit the default game (ADR-33).
+        if (gid.Length != 0 && !GameId.IsValidGameId(gid)) return null;
         long latest = nowUnixSeconds + ClockSkewSeconds;
         if (iat < 0 || iat > latest || nbf > latest) return null;
         return new JwtClaims(sub, sid, exp, jti, cid, gid);

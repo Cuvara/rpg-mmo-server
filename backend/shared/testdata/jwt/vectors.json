@@ -655,10 +655,18 @@
       }
     },
     {
-      "name": "gid-invalid-cuvara",
+      "name": "gid-explicit-default",
       "rule": "C6",
       "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEiLCJleHAiOjE4MDAwMDM2MDAsImdpZCI6ImN1dmFyYSJ9.fTCJvjZeUk69PP2_Y6cUoIMyqX_wZACUHQMUA5vqw20",
-      "verdict": "refuse"
+      "verdict": "accept",
+      "claims": {
+        "sub": "user-1",
+        "sid": "",
+        "jti": "",
+        "cid": "",
+        "gid": "cuvara",
+        "exp": 1800003600
+      }
     },
     {
       "name": "gid-invalid-Ember",

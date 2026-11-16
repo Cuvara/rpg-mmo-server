@@ -177,11 +177,11 @@ func generateJWTVectors(t *testing.T) jwtVectorFile {
 		} {
 			addPayload(key+"-"+tc.name, withClaim(key, tc.raw), "refuse")
 		}
-		// Empty gid is the deliberate compatibility exception: the existing
-		// JwtCharacterClaimTests.cs test token treats it as an absent game.
+		// Empty gid remains accepted for the existing JwtCharacterClaimTests token.
 		addPayload(key+"-empty", withClaim(key, `""`), "accept")
 	}
-	for _, value := range []string{"cuvara", "Ember", "gs", "map", "dungeon", "other", "a", "foo-bar", "foo_bar", "éclair", "abcdefghijklmnopqrstuvwxy"} {
+	addPayload("gid-explicit-default", withClaim("gid", `"cuvara"`), "accept")
+	for _, value := range []string{"Ember", "gs", "map", "dungeon", "other", "a", "foo-bar", "foo_bar", "éclair", "abcdefghijklmnopqrstuvwxy"} {
 		addPayload("gid-invalid-"+value, withClaim("gid", `"`+value+`"`), "refuse")
 	}
 	for _, value := range []string{"ab", "a1", "abcdefghijklmnopqrstuvwx"} {

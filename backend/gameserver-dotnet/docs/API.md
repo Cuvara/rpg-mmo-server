@@ -224,12 +224,13 @@ fixed Unix time; accepted vectors also pin `sub`, `sid`, `jti`, `cid`, `gid` and
 - `sub` is a required non-empty string. Optional `sid`, `jti` and `cid` must be
   strings when present; empty strings are accepted, while `null` is refused.
   Optional `gid` follows the same type rule. Absent or empty `gid` means the
-  default game; a non-empty value must pass `GameId.IsValidGameId` and must not
-  equal `cuvara`. Thus game ids are 2–24 lowercase ASCII letters/digits, start
+  default game; a non-empty value must pass `GameId.IsValidGameId`, including
+  `cuvara`. Thus game ids are 2–24 lowercase ASCII letters/digits, start
   with a letter, and exclude reserved `gs`, `map`, `dungeon` and `other`.
-  Explicit `gid: ""` stays accepted for compatibility with
-  `JwtCharacterClaimTests.Verify_ReadsGidAlongsideCid_AndToleratesAbsence`;
-  issuers omit `gid` for the default game (ADR-33).
+  Explicit `gid: ""` and `gid: "cuvara"` stay accepted for existing tokens in
+  `JwtCharacterClaimTests.Verify_ReadsGidAlongsideCid_AndToleratesAbsence` and
+  `JoinGameIdTests.MatchingGame_Joins`, respectively; the claim value is retained.
+  Issuers omit `gid` for the default game (ADR-33).
 - `exp` is required, a signed 64-bit JSON integer, and strictly positive.
   Optional `iat` is a signed 64-bit JSON integer in `[0, now + 5]`;
   optional `nbf` is a signed 64-bit JSON integer at most `now + 5` (negative
