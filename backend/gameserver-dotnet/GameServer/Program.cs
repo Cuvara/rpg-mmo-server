@@ -7,6 +7,7 @@ using GameServer.Content;
 using GameServer.Events;
 using GameServer.Games;
 using GameServer.Observability;
+using GameServer.Observability.Logging;
 using GameServer.Scaffolding;
 using GameServer.Persistence;
 using GameServer.Net.Transport;
@@ -230,12 +231,23 @@ TimeSpan joinDeadline =
 
 // ── Logging ──
 
-using var loggerFactory = LoggerFactory.Create(builder =>
-{
-    builder.AddConsole();
-    builder.SetMinimumLevel(LogLevel.Information);
-});
+// GAMESERVER_LOG_LEVEL / GAMESERVER_LOG_FORMAT (flags --log-level / --log-format win). Strict
+// like every knob below: a refused value is fatal, and since the logger it would be reported
+// through is the one being configured, the Critical line is written with the defaults
+// (json, Information) -- the same line a shipper would otherwise never see.
+bool logSettingsOk = LogSettings.TryParse(
+    GetArg(args, "--log-level") ?? Env(ServerEnv.LogLevel),
+    GetArg(args, "--log-format") ?? Env(ServerEnv.LogFormat),
+    out LogSettings logSettings, out string? logSettingsError);
+
+using var loggerFactory = ServerLogging.CreateFactory(logSettings, gameId, mapId, serverId);
 var logger = loggerFactory.CreateLogger("Program");
+
+if (!logSettingsOk)
+{
+    logger.LogCritical("{Error}", logSettingsError);
+    return 2;
+}
 
 // Reject invalid game identity before migrations, registration or any connections.
 if (!gameOk)
