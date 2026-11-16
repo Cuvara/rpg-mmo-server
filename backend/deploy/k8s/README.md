@@ -30,6 +30,25 @@ the gateway's allocate Role there — all rendered from `app/` by
 because Agones 1.59.0 names pods fleet + 12. Nothing is instantiated for a real
 second game and `dev-up.sh` applies none of it. Read `games/README.md`.
 
+`dev-up.sh` does **check** every game the gateway serves before it applies any
+workload (MULTI-GAME-CROSS-REVIEW MG-02). It reads `gateway-config`'s `games`
+key, parsed like the gateway's `GAMES` (blank means cuvara only, an invalid
+entry is refused), and refuses to continue when:
+
+- any key of any game's join keyring (`join-token-secret` for cuvara, which is
+  always checked, and `join-token-secret-<game>` in `rpg-k8s-realtime`'s
+  `rpg-app-secrets` for every other game) equals any `jwt-secret` key;
+- two games' join keyrings share a key;
+- a listed non-default game has no `join-token-secret-<game>`, or one with no
+  non-empty key (it is listed, so the deploy must serve it);
+- `rpg-k8s-realtime-<game>/rpg-app-secrets` is absent (apply the game's Secret
+  first: `games/render.py --game <game> --print secret-template`), or its
+  `join-token-secret` is not the same ordered key list as the gateway's
+  `join-token-secret-<game>`.
+
+Keyrings are compared key by key after the gateway's parsing (split on `,`,
+trim, drop empty entries). Messages name games and Secret keys, never a value.
+
 ## Bring dev up
 
 ```bash
@@ -43,7 +62,9 @@ pins the image tags, retires the legacy fleet and the compose stack, and starts
 the published host ports.
 
 The Secret is **not** in the repo. `app/30-secret-template.yaml` is a template;
-fill a copy outside the tree and apply it before the first run.
+fill a copy outside the tree and apply it before the first run. Its
+`join-token-secret` must share no key with its `jwt-secret`; with more than one
+game, see the per-game join keyring checks under "Other games" above.
 
 ### Ports
 
