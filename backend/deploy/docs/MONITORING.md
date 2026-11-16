@@ -373,10 +373,48 @@ exactly these, enforced by a final `stage.label_keep`:
 | Label | On | Source |
 |---|---|---|
 | `env` | every stream | `DEPLOY_ENVIRONMENT`, the identity in `environments.tsv` (`local` on a bare local stack) |
-| `service` | every stream | the compose service name (`com.docker.compose.service`): `gateway`, `nakama`, `gameserver-dotnet`, `gameserver-dotnet-map02`, `lgtm`, `alloy`, … |
+| `service` | every stream | one of the canonical values below. On compose it is the compose service name (`com.docker.compose.service`), except that every game server service (`gameserver-dotnet`, `gameserver-dotnet-map02`) is relabelled to `gameserver` |
 | `level` | every stream | parsed from the line, see below |
 | `game` | game server streams only | compose label `cuvara.log.game` = `${GAMESERVER_GAME_ID:-cuvara}`: the default game is `cuvara`, also when the variable is set but empty |
 | `server_id` | game server streams only | compose label `cuvara.log.server_id` = the service's own server id (`${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}`; the override's second server is the literal `gs-dotnet-map_02`) |
+
+#### Canonical `service` values
+
+`service` is what the Studio hub filters by, so a role has **one** value whichever
+collector shipped the line. This table is the contract: both collectors produce
+exactly these values, and offline tests on both sides parse this table and fail
+when a collector, a compose service or a k8s container disagrees with it
+(`backend/deploy/tests/test_service_labels.py` for compose,
+`backend/deploy/k8s/logging/tests/test_collector_manifests.py` for k8s). Compose
+service names and container names are **not** renamed; the collector relabels
+where the two differ.
+
+| Role | `service` | Compose service(s) | k8s container (StatefulSet) |
+|---|---|---|---|
+| Game server | `gameserver` | `gameserver-dotnet`, `gameserver-dotnet-map02` | `gameserver` |
+| Gateway | `gateway` | `gateway` | `gateway` |
+| Nakama | `nakama` | `nakama` | `nakama` |
+| Redis | `redis` | `redis` | `redis` |
+| Postgres, meta database | `postgres` | `postgres` | `postgres` (`postgres-meta`) |
+| Postgres, game database | `postgres-game` | `postgres-game` | `postgres` (`postgres-game`) |
+| Monitoring: Grafana, Prometheus, Loki | `lgtm` | `lgtm` | none (runs on the host, under compose) |
+| Monitoring: Docker socket proxy | `docker-socket-proxy` | `docker-socket-proxy` | none |
+| Monitoring: the collector | `alloy` | `alloy` | `alloy` |
+| Game database role provisioning (one-off, compose only) | `postgres-game-roles` | `postgres-game-roles` | none |
+| Nakama migration (init container, k8s only) | `migrate` | none | `migrate` |
+| Agones SDK sidecar (added by Agones to every game server pod, k8s only) | `agones-gameserver-sidecar` | none | `agones-gameserver-sidecar` |
+| Default game role Job (k8s only) | `provision` | none | `provision` |
+| Game database init Job (k8s only) | `psql` | none | `psql` |
+
+- Several game server instances share the value `gameserver`. They are told apart
+  by `server_id` (compose: `gs-dotnet-map_01`, `gs-dotnet-map_02`; k8s: the pod
+  name) and by `game`, never by `service`.
+- A new workload adds a row here, in the same change as its compose service or
+  container; the tests fail until it does. A role that exists on only one platform
+  says so in its name column.
+- The relabel rules live in `monitoring/alloy/config.alloy` (the game server
+  services) and `k8s/logging/config-k8s.alloy` (the game database); every other
+  value is the compose service name or the container name unchanged.
 
 Rules:
 
@@ -479,17 +517,20 @@ no setting can widen it, and the override file keeps it that way. The offline
 tests assert the literal in the base file and with the override; the live check
 asserts it with `docker port`.
 
-The k8s collector does not change this: it reaches the same Loki over the
-cluster's Docker network and publishes no port (see "Decision: how the DaemonSet
-reaches Loki"), at the price of the residual risk recorded there.
+The k8s collector does not change the loopback bind: it reaches the same Loki over
+the cluster's Docker network and publishes no port (see "Decision: how the
+DaemonSet reaches Loki"). The price is that the whole `lgtm` container, not only
+Loki, becomes reachable from every pod of that cluster; the residual risk recorded
+there says what that includes.
 
 `LOKI_PORT` differs per environment so that stacks sharing a host do not
 collide, and `environments.tsv` reserves it like the other ports (the isolation
-preflight checks it):
+preflight checks it). `cd.yml` carries the same per-environment default, so no
+GitHub Environment variable has to be set:
 
 | Environment | `LOKI_PORT` |
 |---|---|
-| dev (variable unset) | 3100 |
+| dev | 3100 |
 | production | 3110 |
 | staging | 3120 |
 | scratch stack (`stack.sh up --scratch`) | 4100 |
@@ -510,8 +551,8 @@ logql '{game="cuvara"}'                                        # every game serv
 logql '{game="cuvara", server_id="gs-dotnet-map_02"}'          # one game server
 logql '{env="local", game=""}'                                 # stack-wide streams only (no game label)
 logql '{env="local", service="gateway"} |= "timeout"'          # text filter inside the lines
-logql '{service="gameserver-dotnet", level="warn"}'            # game server warnings: filter on the level label
-logql '{service="gameserver-dotnet"} | json | msg=~"(?i).*disconnect.*"'   # a field inside the JSON body
+logql '{service="gameserver", level="warn"}'                   # game server warnings: filter on the level label
+logql '{service="gameserver"} | json | msg=~"(?i).*disconnect.*"'   # a field inside the JSON body
 ```
 
 The `level` label is the way to filter by severity, for every service. The last
@@ -628,24 +669,46 @@ considered:
 
 | Option | What it does | Verdict |
 |---|---|---|
-| **A. Attach `lgtm` to the cluster's Docker network** | `connect-loki.sh` runs `docker network connect k3d-<cluster> <prefix>-lgtm` when it is not connected yet, reads the container's address on that network, and writes it into an EndpointSlice of the selector-less Service `loki`. Alloy pushes to `http://loki.rpg-k8s-logging.svc.cluster.local:3100/loki/api/v1/push`. | **Chosen** by the run lead. |
+| **A. Attach `lgtm` to the cluster's Docker network** | `connect-loki.sh` runs `docker network connect k3d-<cluster> <prefix>-lgtm` when it is not connected yet, reads the container's address on that network, and writes it into an EndpointSlice of the selector-less Service `loki`. Alloy pushes to `http://loki.rpg-k8s-logging.svc.cluster.local:3100/loki/api/v1/push`. The **whole container** joins the network, so every listener in it (Grafana, Prometheus, OTLP as well as Loki) is reachable from every pod. | **Chosen** by the run lead. |
 | A + NetworkPolicy | A, plus an egress policy in every `rpg-k8s-*` namespace that blocks the Loki address for everything except the collector. | Considered, **not done**: it would put the egress of every app pod under policy for the first time, on a path (Agones, hostPort, KCP/UDP) that nobody could test live, and the address in the policy changes whenever `lgtm` is recreated. |
-| B. Authenticated push-only proxy | A small reverse proxy in compose in front of Loki that accepts only `POST /loki/api/v1/push` with a bearer token and joins the k3d network instead of `lgtm`. | **Recorded follow-up**, not built: it needs a new image and service in `docker-compose.yml`, a new secret on both sides and `cd.yml` changes. |
+| B. Authenticated push-only proxy | A small reverse proxy in compose in front of Loki that accepts only `POST /loki/api/v1/push` with a bearer token and joins the k3d network instead of `lgtm`. Pods reach only that proxy: push only, nothing else of `lgtm`. | **Recorded follow-up**, not built: it needs a new image and service in `docker-compose.yml`, a new secret on both sides and `cd.yml` changes. |
 
 Why A: **no port is published anywhere.** There is no new host port, the
 loopback bind of `lgtm` is unchanged, and a Docker bridge network is not routable
 from outside the host. Production runs compose, so this concerns dev and staging
-k3d only. The residual risk is not wider than what the host has today, where any
-process on the host can already reach Loki on loopback.
+k3d only. The set of services that become reachable is not larger than what the
+host's own processes already reach (the published ports of `lgtm`), but the set of
+callers is: from host processes to **every pod of the cluster**.
+
+**What the attach exposes, in plain words.** `docker network connect` attaches the
+whole `lgtm` container to the cluster's network, not only Loki. Docker has no
+per-port filter on a network, so every container on `k3d-<cluster>`, and with it
+every pod of that cluster, can open every port that `lgtm` listens on, on the
+address `connect-loki.sh` wrote. Before the attach a pod could reach none of them.
+
+| Listener in `lgtm` | Binds all interfaces? | How we know | What a pod can do with it |
+|---|---|---|---|
+| Loki `:3100` | **Yes** | `monitoring/loki-config.yaml` sets only `http_listen_port` (no `http_listen_address`, whose default is all interfaces), and Alloy already reaches it from another container as `lgtm:3100` | Read and write every log line of the stack, no authentication |
+| Grafana `:3000` | **Yes** | published to the host, which Docker serves through the container's bridge address, so it cannot be bound to the container's loopback only | The login page. Anonymous access is off (`GRAFANA_ANONYMOUS`, default `false`); the admin password is `GRAFANA_ADMIN_PASSWORD`, and where that is unset the compose default `localdev` applies |
+| Prometheus `:9090` | **Yes** | published, same reasoning | The query API and UI, no authentication: every metric of the stack |
+| OTLP gRPC `:4317` and HTTP `:4318` | **Yes** | published, same reasoning | Send traces, metrics and logs into the stack, no authentication (write only) |
+| Tempo, Pyroscope (`:4040`), the OTel Collector's internal endpoints, anything else in the image | **Not observed** | the image was not started; nothing in our files pins their bind address | Assume reachable |
+
+"Yes" for the four published listeners is an inference from how Docker publishes a
+port (it connects to the container's bridge address, so a listener bound to the
+container's `127.0.0.1` could not be published at all), and for Loki also from our
+own config. It was not observed on a running container; the first live run below
+has to check it (`docker exec <prefix>-lgtm ss -ltn`, or the equivalent).
 
 **Residual risk, stated plainly.**
 
-- **Loki stays unauthenticated.** After the attach, every container on the Docker
-  network `k3d-<cluster>` can reach it, and that includes **every pod of that
-  cluster**. A pod can both read and write that environment's logs.
+- **Loki stays unauthenticated, and so do Prometheus and OTLP.** After the attach,
+  every pod of that cluster can read and write that environment's logs, read its
+  metrics and write telemetry into it, and can try the Grafana login.
 - So **a compromised pod of one game could read another game's logs** on that
   cluster, and the gateway's, Nakama's and the databases' logs too. The logs are
-  as exposed as the least trusted pod of the cluster.
+  as exposed as the least trusted pod of the cluster. (Not just the logs: its
+  metrics are as well.)
 - Nothing is published beyond the host, and the loopback bind is unchanged. The
   attach is per cluster: it joins the `lgtm` of one environment to the network of
   one cluster.
@@ -655,9 +718,14 @@ process on the host can already reach Loki on loopback.
   eventually dropped. `cluster.log_collector` WARNs when the address is missing.
 - The durable form of the attachment is an external network in
   `docker-compose.yml`, which this change does not own.
-- **Option B is the recorded follow-up** (the collector would hold a push-only
-  credential, and no pod could read logs). A NetworkPolicy was considered and not
-  done (table above).
+- **Option B is the recorded follow-up.** It would change the exposure from
+  "everything `lgtm` listens on" to "one push endpoint": the container attached to
+  the cluster network would be a small proxy that accepts only
+  `POST /loki/api/v1/push` with a bearer token, and `lgtm` would no longer join the
+  cluster's network at all. A pod could then push log lines (with the collector's
+  token) and could not read logs, query Prometheus, send OTLP or reach Grafana.
+  What it costs is listed in the table above. A NetworkPolicy was considered and
+  not done (table above).
 
 What `connect-loki.sh` does, so that its power can be judged:
 
@@ -740,7 +808,7 @@ final `stage.label_keep`: exactly `env`, `service`, `level`, plus `game` and
 | Label | On | Source on k8s |
 |---|---|---|
 | `env` | every stream | `deploy-environment` in ConfigMap `alloy-env`. `dev-up.sh` sets it to `DEPLOY_ENVIRONMENT`, or `dev` for context `k3d-rpg-dev` and `staging` for `k3d-rpg-stg`; any other context must set `DEPLOY_ENVIRONMENT`, or `dev-up.sh` stops before it applies anything. The bare default in the repository file is `local`. |
-| `service` | every stream | the **container name**, with the real values of the manifests: `gateway`, `gameserver` (every fleet, every game), `agones-gameserver-sidecar` (the SDK sidecar that Agones adds to every game server pod), `nakama`, `migrate` (init container of Nakama), `postgres` (both StatefulSets), `redis`, `provision` and `psql` (the one-off Jobs), `alloy`. |
+| `service` | every stream | the **container name**, which is the canonical value (table under "Label contract"), with one relabel: the container `postgres` of the StatefulSet `postgres-game` is `postgres-game`, so the two databases are told apart. Values: `gateway`, `gameserver` (every fleet, every game), `agones-gameserver-sidecar` (the SDK sidecar that Agones adds to every game server pod), `nakama`, `migrate` (init container of Nakama), `postgres` (meta), `postgres-game`, `redis`, `provision` and `psql` (the one-off Jobs), `alloy`. |
 | `level` | every stream | the shared pipeline: read from JSON lines only, see "Label contract" above. |
 | `game` | game server pods only (Agones label `agones.dev/role=gameserver`, both containers) | the **namespace**: `rpg-k8s-realtime` gives `cuvara` (the default game), `rpg-k8s-realtime-<game>` gives `<game>`. |
 | `server_id` | game server pods only | the **pod name**. The fleets set `POD_NAME` from `metadata.name` and the server resolves its id from `POD_NAME` (a fleet has no `GAMESERVER_ID`), so the pod name is the id the Redis registry uses. |
@@ -757,9 +825,11 @@ final `stage.label_keep`: exactly `env`, `service`, `level`, plus `game` and
   an IP.
 - Pods outside `rpg-k8s-*` are never shipped, whatever `log-namespaces` lists: a
   `keep` rule on the namespace backs the list.
-- `service` is a container name here and a compose service name there
-  (`gameserver` against `gameserver-dotnet`, `gameserver-dotnet-map02`), so a
-  query that has to cover both writes `service=~"gameserver.*"`.
+- `service` is the same value on both collectors for the same role (table under
+  "Label contract"): a query on `service="gameserver"` covers the compose game
+  servers and the k8s ones, and `server_id` tells the instances apart. (Before
+  this table the compose value was `gameserver-dotnet`; a saved query on that
+  value finds nothing from the next deploy on.)
 
 The collected namespaces are the fixed three plus every game namespace.
 `dev-up.sh` builds the list (`log-namespaces` in `alloy-env`) from the games the
@@ -830,6 +900,9 @@ owner's go-ahead) has to show, and record, that:
 3. **A pod reaches a sibling container's address on the k3d network**, here `lgtm`
    at the address `connect-loki.sh` wrote, on port 3100. This is the main
    unverified assumption of option A.
+   Also list what `lgtm` listens on (`docker exec <prefix>-lgtm ss -ltn`) and
+   check it against the exposure table above: which listeners bind all
+   interfaces, and what Tempo, Pyroscope and the OTel Collector add.
 4. A gateway line reaches Loki with `env`, `service="gateway"` and `level`.
 5. A game server line carries `game="cuvara"` and a `server_id` equal to its pod
    name, which is the id in the Redis registry, and a pod of a rendered
@@ -865,8 +938,29 @@ hand on the box.
 3. The env-file step writes the `GRAFANA_*` / `PROMETHEUS_*` / `OTLP_*` /
    `LOKI_PORT` values (and `ALLOY_VERSION` when set) into
    `$RPG_DEPLOY_DIR/deploy/.env` (mode 0600).
-4. The compose step runs `docker compose --profile monitoring up -d
-   --remove-orphans`.
+4. The data-tier step and the compose step bring the stack up through
+   `backend/deploy/compose-stack.sh`, in **two commands**: every service of the
+   active profiles except the log collector as one fatal `up -d` (`lgtm`, the data
+   tier and, in `containers` mode, the game stack: a failure fails the step as it
+   always did), then `up -d alloy docker-socket-proxy`. The collector is **best
+   effort**: if its images cannot be pulled (registry outage, a tag that does not
+   exist) or it cannot start, the step prints `::warning title=Log collector not
+   started::` with the command to retry, adds a line to the job summary and
+   carries on, so the game stack is deployed and its checks run; logs are simply
+   not shipped until the retry works. With `MONITORING_ENABLED=false` the collector
+   is not attempted.
+
+What a deploy does with the collector, per `DEPLOY_MODE`:
+
+| Mode | Collector | Image pull or start fails |
+|---|---|---|
+| `host` | `alloy` and `docker-socket-proxy` come up with the `monitoring` profile; the gateway and game server are host processes, so their logs are not collected | warning and job summary line, deploy continues |
+| `containers` | same, and the gateway and game server containers are collected | warning and job summary line, deploy continues |
+| `k8s` | the compose steps are skipped, so the compose collector is neither started nor updated; the cluster collector is applied by `dev-up.sh` | `dev-up.sh` warns (`::warning::`) and carries on, then `verify`'s `cluster.log_collector` FAILs on a collector that is not Ready, after the game stack is up and verified (unchanged: this branch did not soften it) |
+
+`lgtm` is not best effort in any mode: it was fatal before log shipping and
+still is. Not run live: a failing pull was shown only against a stub `docker`
+(`tests/test_cd_deploy.py`), never against a registry.
 
 Getting monitoring on **staging or production is therefore just setting the
 environment secret** — no new workflow, no manual `make monitoring-up`.
@@ -883,7 +977,7 @@ environment secret** — no new workflow, no manual `make monitoring-up`.
 | var | `GRAFANA_BIND` | `0.0.0.0` | Host interface for the published Grafana port. See firewall guidance below. |
 | var | `PROMETHEUS_PORT` / `PROMETHEUS_BIND` | `9090` / `127.0.0.1` | Loopback-only: the bundled Prometheus has no auth at all. |
 | var | `OTLP_GRPC_PORT` / `OTLP_HTTP_PORT` / `OTLP_BIND` | `4317` / `4318` / `127.0.0.1` | Loopback-only — nothing off-box pushes OTLP yet. Widen `OTLP_BIND` only when a remote collector needs it, and put TLS + auth in front first. |
-| var | `LOKI_PORT` | `3100` | Host port of Loki, always on `127.0.0.1` (no `LOKI_BIND` exists). **Set it per environment before its next deploy**: staging `3120`, production `3110` (the dev value is the default). The isolation preflight compares it with `environments.tsv`. |
+| var | `LOKI_PORT` | per environment: dev `3100`, staging `3120`, production `3110` | Host port of Loki, always on `127.0.0.1` (no `LOKI_BIND` exists). Optional: when unset, `cd.yml` resolves the value from the environment (the rows of `environments.tsv`), so nothing has to be set before a first deploy. The isolation preflight compares the resolved value with `environments.tsv`. |
 | var | `OTEL_LGTM_VERSION` | `0.11.15` | Re-copy the `otlp:`/`storage:` blocks into `prometheus.yaml` and the copied blocks of `loki-config.yaml` when bumping. |
 | var | `ALLOY_VERSION` | *(empty: compose's default, `v1.11.3`)* | Image tag of `grafana/alloy`. Empty keeps the variable out of `deploy/.env`, so the default in `docker-compose.yml` is the single source. |
 

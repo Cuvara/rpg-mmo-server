@@ -18,9 +18,20 @@
 # it runs has a --format over .NetworkSettings.Networks and prints one IPv4
 # address; there is no plain `docker inspect` anywhere in this file.
 #
-# Residual risk, stated plainly: Loki stays unauthenticated, and once attached
-# every container on the cluster's Docker network (every pod of that cluster
-# included) can reach it. See docs/MONITORING.md.
+# Residual risk, stated plainly: `docker network connect` attaches the WHOLE
+# `lgtm` container, not only Loki, and Docker has no per-port filter on a
+# network. Once attached, every container on the cluster's Docker network, every
+# pod of that cluster included, can reach every port `lgtm` listens on:
+#   - Loki 3100        read and write all logs, no authentication
+#   - Grafana 3000     the login page (admin password GRAFANA_ADMIN_PASSWORD)
+#   - Prometheus 9090  query API and UI, no authentication
+#   - OTLP 4317/4318   send telemetry in, no authentication
+#   - anything else in the image (Tempo, Pyroscope, ...): bind address not observed
+# The four published ones bind all interfaces (Docker publishes through the
+# container's bridge address); that is inferred, not observed on a running
+# container. Nothing is published beyond the host. Option B (docs/MONITORING.md,
+# "Decision: how the DaemonSet reaches Loki") would attach a push-only proxy
+# instead of `lgtm`, so a pod could push logs and nothing else.
 #
 # Idempotent: run it as often as you like. Re-run it whenever `lgtm` is recreated
 # (a recreated container loses the attachment and gets a new address).

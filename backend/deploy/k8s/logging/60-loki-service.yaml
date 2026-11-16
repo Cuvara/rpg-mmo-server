@@ -6,7 +6,10 @@
 # authentication"). A pod cannot reach the host's loopback, and that bind is not
 # widened. Instead, k8s/logging/connect-loki.sh attaches the `lgtm` container to
 # the cluster's Docker network (k3d-<cluster>) and writes its address there into
-# an EndpointSlice named `loki-lgtm` that belongs to THIS Service.
+# an EndpointSlice named `loki-lgtm` that belongs to THIS Service. Note that the
+# attach joins the WHOLE `lgtm` container to that network, so from every pod of
+# the cluster Grafana, Prometheus and the OTLP ports of that container are
+# reachable too, not only Loki (docs/MONITORING.md, "What the attach exposes").
 #
 # This Service therefore has NO selector (so no controller manages its
 # endpoints) and the EndpointSlice is deliberately not in this directory: it
