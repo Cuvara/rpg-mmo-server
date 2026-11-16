@@ -78,6 +78,9 @@ jobs:
       - name: Test game manifest rendering
         run: python -m unittest discover -s backend/deploy/k8s/games -p "test_*.py"
 
+      - name: Test compose log shipping config
+        run: python -m unittest discover -s backend/deploy/tests -p "test_*.py"
+
       - name: Check per-game database provisioning
         run: bash backend/deploy/db/tests/provision_test.sh
 
