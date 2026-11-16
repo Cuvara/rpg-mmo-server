@@ -1,0 +1,34 @@
+# The name Alloy pushes to: http://loki.rpg-k8s-logging.svc.cluster.local:3100.
+#
+# Loki is NOT in the cluster. In k8s mode the monitoring stack still runs under
+# compose on the host, and Loki is the one inside the `lgtm` container, published
+# only on 127.0.0.1 (docs/MONITORING.md, "Loki is loopback only, without
+# authentication"). A pod cannot reach the host's loopback, and that bind is not
+# widened. Instead, k8s/logging/connect-loki.sh attaches the `lgtm` container to
+# the cluster's Docker network (k3d-<cluster>) and writes its address there into
+# an EndpointSlice named `loki-lgtm` that belongs to THIS Service. Note that the
+# attach joins the WHOLE `lgtm` container to that network, so from every pod of
+# the cluster Grafana, Prometheus and the OTLP ports of that container are
+# reachable too, not only Loki (docs/MONITORING.md, "What the attach exposes").
+#
+# This Service therefore has NO selector (so no controller manages its
+# endpoints) and the EndpointSlice is deliberately not in this directory: it
+# holds an address that exists only after the attach, and only the script writes
+# or deletes it. Until it has run, the Service has no endpoints and Alloy's
+# pushes fail and retry (logs buffered in Alloy, then dropped), which is visible
+# on Alloy's own log and in `verify`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: rpg-k8s-logging
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: loki
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+      protocol: TCP

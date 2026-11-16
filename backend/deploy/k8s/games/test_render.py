@@ -66,6 +66,46 @@ class RenderTlsTests(unittest.TestCase):
                     self.assertTrue(any(v.get("secret", {}).get("secretName") == "nakama-tls-pin" for v in pod["volumes"]))
                     self.assertTrue(any(m["name"] == "nakama-tls-pin" for c in pod["containers"] for m in c.get("volumeMounts", [])))
 
+    def test_log_knobs_follow_app_defaults(self):
+        source = renderer._one(renderer._load("20-configmaps.yaml"), "ConfigMap", "gameserver-config")["data"]
+        self.assertEqual(source["log-level"], "Information")
+        self.assertEqual(source["log-format"], "json")
+        result = renderer.render("ember")
+        data = config(result)
+        self.assertEqual(data["log-level"], source["log-level"])
+        self.assertEqual(data["log-format"], source["log-format"])
+        fleets = [d for d in result["manifests"] if d["kind"] == "Fleet"]
+        self.assertEqual(len(fleets), 2)
+        for fleet in fleets:
+            env = {e["name"]: e for c in fleet["spec"]["template"]["spec"]["template"]["spec"]["containers"]
+                   for e in c.get("env", [])}
+            for name, key in (("GAMESERVER_LOG_LEVEL", "log-level"), ("GAMESERVER_LOG_FORMAT", "log-format")):
+                with self.subTest(fleet=fleet["metadata"]["name"], env=name):
+                    self.assertEqual(env[name]["valueFrom"]["configMapKeyRef"],
+                                     {"name": "gameserver-config", "key": key, "optional": True})
+
+    def test_log_collector_grant_is_exactly_read_pods_and_logs(self):
+        result = renderer.render("ember")
+        ns = "rpg-k8s-realtime-ember"
+        roles = [d for d in result["manifests"]
+                 if d["kind"] == "Role" and d["metadata"]["name"] == "rpg-log-collector"]
+        bindings = [d for d in result["manifests"]
+                    if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "rpg-log-collector"]
+        self.assertEqual(len(roles), 1)
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual(roles[0]["metadata"]["namespace"], ns)
+        self.assertEqual(roles[0]["rules"], [
+            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]},
+            {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+        ])
+        self.assertEqual(bindings[0]["metadata"]["namespace"], ns)
+        self.assertEqual(bindings[0]["subjects"], [
+            {"kind": "ServiceAccount", "name": "rpg-log-collector", "namespace": "rpg-k8s-logging"}])
+        self.assertEqual(bindings[0]["roleRef"],
+                         {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "rpg-log-collector"})
+        # Nothing cluster-wide is rendered for the collector.
+        self.assertFalse([d for d in result["manifests"] if d["kind"] in ("ClusterRole", "ClusterRoleBinding")])
+
     def test_mismatches_are_refused(self):
         cases = [
             (True, "http://nakama:7350", None), (True, None, ""),

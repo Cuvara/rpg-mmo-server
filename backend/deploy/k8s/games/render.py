@@ -20,7 +20,14 @@ gets its own namespace, `<stack namespace>-<game>` (ADR-33 D7), holding:
   * the gateway's allocate grant in THIS namespace: a Role with `create` on
     allocation.agones.dev/gameserverallocations only (the rule from
     k8s/app/10-rbac.yaml) bound to ServiceAccount `rpg-gateway` of the STACK
-    namespace.
+    namespace;
+  * the log collector's read grant in THIS namespace: Role `rpg-log-collector`
+    (get/list/watch on pods, get on pods/log, nothing else) bound to ServiceAccount
+    `rpg-log-collector` of namespace `rpg-k8s-logging`, where the collector
+    DaemonSet runs. No ClusterRole, no secrets;
+  * the log knobs: `gameserver-config` carries `log-level` and `log-format` and the
+    fleets read them as GAMESERVER_LOG_LEVEL / GAMESERVER_LOG_FORMAT. All of it is
+    copied from k8s/app/, so the defaults cannot drift from cuvara's;
 
 and, as separate outputs that are never part of the manifests stream:
 
@@ -112,6 +119,20 @@ QUOTA_HEADROOM = 2
 GATEWAY_SERVICE_ACCOUNT = "rpg-gateway"
 GATEWAY_SECRET = "rpg-app-secrets"
 ALLOCATOR_ROLE = "rpg-gateway-allocator"
+
+# Log collector side (the Alloy DaemonSet in its own namespace). Every game
+# namespace grants it read access to pods and their logs, and nothing else:
+# no ClusterRole, no secrets, no configmaps. Rendered here, never hand-copied,
+# so a new game is collected as soon as its namespace is applied.
+LOG_COLLECTOR_NAMESPACE = "rpg-k8s-logging"
+LOG_COLLECTOR_SERVICE_ACCOUNT = "rpg-log-collector"
+LOG_COLLECTOR_ROLE = "rpg-log-collector"
+LOG_KNOB_KEYS = ("log-level", "log-format")  # gameserver-config keys (values live in k8s/app)
+LOG_KNOB_ENV = ("GAMESERVER_LOG_LEVEL", "GAMESERVER_LOG_FORMAT")
+LOG_COLLECTOR_RULES = (
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]},
+    {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+)
 
 PART_OF = {"app.kubernetes.io/part-of": "rpg-mmo"}
 
@@ -287,6 +308,14 @@ def render(
                 raise RenderError(
                     f"source fleet {src['metadata']['name']} must set GAMESERVER_GAME_ID exactly once"
                 )
+            # The log knobs are copied with the rest of the env, never written
+            # here. Refuse a source that lost them rather than render a game whose
+            # logs silently fall back to the old format.
+            for knob in LOG_KNOB_ENV:
+                if sum(1 for e in env_list if e.get("name") == knob) != 1:
+                    raise RenderError(
+                        f"source fleet {src['metadata']['name']} must set {knob} exactly once"
+                    )
             # REQUIRED here (optional in k8s/app, where absent means cuvara): a
             # non-default game's pod without its game id would run as cuvara.
             gid[0]["valueFrom"] = {
@@ -379,6 +408,9 @@ def render(
         raise RenderError("Nakama TLS on requires a non-empty absolute nakama-tls-pin path")
     if not nakama_tls and nakama_tls_pin:
         raise RenderError("Nakama TLS off requires an empty nakama-tls-pin")
+    for key in LOG_KNOB_KEYS:
+        if key not in gs_cm["data"]:
+            raise RenderError(f"k8s/app gameserver-config lost the {key!r} key; update render.py")
     gs_cm["data"]["nakama-url"] = nakama_url
     gs_cm["data"]["nakama-tls-pin"] = nakama_tls_pin
     gs_cm["data"] = {"game-id": game, **{k: v for k, v in gs_cm["data"].items() if k != "game-id"}}
@@ -400,8 +432,33 @@ def render(
         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": ALLOCATOR_ROLE},
     }
 
+    # --- log collector read grant -------------------------------------------
+    # Namespaced Role, not a ClusterRole: the collector reads exactly the
+    # namespaces that carry this grant. Fixed content, built here like the
+    # allocator Role above.
+    log_role = {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "Role",
+        "metadata": meta(LOG_COLLECTOR_ROLE),
+        "rules": [copy.deepcopy(dict(rule)) for rule in LOG_COLLECTOR_RULES],
+    }
+    log_role_binding = {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "metadata": meta(LOG_COLLECTOR_ROLE),
+        "subjects": [
+            {
+                "kind": "ServiceAccount",
+                "name": LOG_COLLECTOR_SERVICE_ACCOUNT,
+                "namespace": LOG_COLLECTOR_NAMESPACE,
+            }
+        ],
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": LOG_COLLECTOR_ROLE},
+    }
+
     manifests = [
         namespace_doc, quota, limit_range, sdk_sa, sdk_rb, gs_cm, role, role_binding,
+        log_role, log_role_binding,
         *fleets, fas,
     ]
 

@@ -423,6 +423,64 @@ check_no_restarts() {
   pass "no container restart in $VERIFY_NAMESPACES within the last ${window}s, and every container is Running"
 }
 
+# The log collector (k8s/logging: Alloy DaemonSet, namespace rpg-k8s-logging) is
+# there, Ready on every node it is scheduled to, and attached to Loki.
+#
+# Opt-in per target, because the same layer-1 checks run against targets that
+# predate the collector (dev-agones): VERIFY_LOG_COLLECTOR="<namespace>/<daemonset>"
+# declares it, empty means this target has none and the check SKIPs saying so.
+#
+#   FAIL  the namespace or the DaemonSet is absent, or desired != ready, or desired
+#         is 0 (a collector that runs on no node ships nothing)
+#   WARN  Ready, but the Service `loki` in that namespace has no EndpointSlice
+#         address: Loki is not attached, so Alloy's pushes fail and its buffer
+#         drops. Re-run k8s/logging/connect-loki.sh. (A WARN, not a PASS: the
+#         collector is healthy and the logs are still going nowhere.)
+#   PASS  Ready and the Service has an address
+check_log_collector() {
+  if [ -z "${VERIFY_LOG_COLLECTOR:-}" ]; then
+    skip "no log collector declared for this target (VERIFY_LOG_COLLECTOR empty) -- log shipping UNVERIFIED. NOT a statement that logs flow."
+    return
+  fi
+  local ns="${VERIFY_LOG_COLLECTOR%%/*}" ds="${VERIFY_LOG_COLLECTOR##*/}" svc="${VERIFY_LOG_SERVICE:-loki}"
+  local look="kubectl --context $KUBE_CONTEXT -n $ns get ds,pods; backend/deploy/k8s/dev-up.sh applies k8s/logging"
+  if ! k get ns "$ns" >/dev/null 2>&1; then
+    fail "log collector namespace is absent" "namespace $ns with daemonset/$ds" "namespace $ns not found" "$look"
+    return
+  fi
+  local counts desired ready
+  if ! counts=$(k get daemonset "$ds" -n "$ns" -o 'jsonpath={.status.desiredNumberScheduled} {.status.numberReady}' 2>/dev/null); then
+    fail "log collector DaemonSet is absent" "daemonset/$ds in $ns" "daemonset/$ds not found in $ns" "$look"
+    return
+  fi
+  # An empty field (a status not filled in yet) reads as 0.
+  set -- $counts
+  desired="${1:-0}"; ready="${2:-0}"
+  case "$desired$ready" in
+    *[!0-9]*)
+      fail "log collector DaemonSet status is unreadable" "numeric desired/ready counts" "desired='$desired' ready='$ready'" "$look"
+      return
+      ;;
+  esac
+  if [ "$desired" -eq 0 ]; then
+    fail "log collector is scheduled on no node" "daemonset/$ds desired >= 1 and ready == desired" "desired=0 ready=$ready" "$look"
+    return
+  fi
+  if [ "$desired" -ne "$ready" ]; then
+    fail "log collector is not fully Ready" "daemonset/$ds ready == desired" "desired=$desired ready=$ready" \
+      "kubectl --context $KUBE_CONTEXT -n $ns describe ds/$ds; kubectl --context $KUBE_CONTEXT -n $ns logs ds/$ds"
+    return
+  fi
+  local addrs
+  addrs=$(k get endpointslices -n "$ns" -l "kubernetes.io/service-name=$svc" \
+    -o 'jsonpath={range .items[*]}{range .endpoints[*]}{.addresses[*]}{"\n"}{end}{end}' 2>/dev/null | tr -d '[:space:]')
+  if [ -z "$addrs" ]; then
+    warn "collector daemonset/$ds is Ready ($ready/$desired) but Service $svc in $ns has no EndpointSlice address: Loki is not attached, so no log line leaves the cluster. Start the monitoring stack (lgtm), then run: KUBE_CONTEXT=$KUBE_CONTEXT backend/deploy/k8s/logging/connect-loki.sh"
+    return
+  fi
+  pass "collector daemonset/$ds Ready ($ready/$desired) in $ns; Service $svc has an address (not asserted: that a line reached Loki)"
+}
+
 # Secrets exist and every key holds a non-empty value. Values are never printed
 # or logged -- only key names and byte lengths.
 check_secrets() {
@@ -506,3 +564,7 @@ register cluster.secrets    1 "declared Secrets present and non-empty" \
   "each declared Secret exists and every key decodes to a non-empty value" \
   "nothing about whether the value is CORRECT -- data.nakama_plugin and flow.smoke prove that end to end. Keys listed in VERIFY_SECRETS_ALLOW_EMPTY are exempted from the non-empty rule and say so in the output" \
   check_secrets
+register cluster.log_collector 1 "log collector Ready and attached to Loki" \
+  "the Alloy DaemonSet in the logging namespace exists with desired >= 1 and every desired pod Ready, and the Service loki has an EndpointSlice address (Loki attached). FAIL when the namespace or DaemonSet is absent or not ready; WARN when ready but Loki is not attached" \
+  "that a log line reached Loki. It does not query Loki, does not read Alloy's own log, and cannot see a collected namespace whose Role is missing (Alloy logs a 403 for it); the address is the one connect-loki.sh wrote, not proof that Loki answers on it. Declared per target by VERIFY_LOG_COLLECTOR; SKIPs when empty" \
+  check_log_collector

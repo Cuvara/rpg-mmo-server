@@ -28,7 +28,7 @@ namespace GameServer.Tests.Deploy;
 ///
 /// <para><b>What this gate does NOT cover, stated because a partial gate that reads as a
 /// total one is worse than none.</b> It checks variable names the assembly declares as
-/// <c>const string</c> — 56 of them today, up from 31 before #404. It does not check:</para>
+/// <c>const string</c> — 58 of them today (56 before the two logging knobs, 31 before #404). It does not check:</para>
 /// <list type="bullet">
 ///   <item><description><b>Names built by concatenation at runtime</b>, which neither
 ///     reflection nor a grep can enumerate — they exist nowhere as a whole string. That was

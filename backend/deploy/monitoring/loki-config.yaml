@@ -1,0 +1,79 @@
+# Loki config for the Loki bundled in grafana/otel-lgtm.
+#
+# The image starts Loki as `./loki/loki --config.file=./loki-config.yaml` from
+# /otel-lgtm and offers no extra-args hook for it, so this file REPLACES the
+# image's /otel-lgtm/loki-config.yaml (same pattern as prometheus.yaml). The
+# only way to get a retention period out of the bundled Loki is to own this file.
+#
+# COPIED VERBATIM from grafana/docker-otel-lgtm v0.11.15 (docker/loki-config.yaml),
+# the tag that matches OTEL_LGTM_VERSION: every block below EXCEPT the two marked
+# "OURS". Compared with the repository file at that tag (fetched 2026-11-16;
+# upstream has no compactor and no limits_config block), NOT with the file inside
+# the image: that comparison is on the first-live-run list in docs/MONITORING.md.
+# Re-copy them when OTEL_LGTM_VERSION is bumped:
+#   docker run --rm --entrypoint sh grafana/otel-lgtm:<tag> -c 'cat /otel-lgtm/loki-config.yaml'
+# (or https://raw.githubusercontent.com/grafana/docker-otel-lgtm/<tag>/docker/loki-config.yaml)
+#
+# OURS: `compactor` and `limits_config`. Retention in Loki is deleted by the
+# compactor, so BOTH are needed: limits_config says how long to keep, the
+# compactor with retention_enabled does the deleting. With retention_enabled
+# left off, retention_period is accepted and silently never applied.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /data/loki
+  storage:
+    filesystem:
+      chunks_directory: /data/loki/chunks
+      rules_directory: /data/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+ruler:
+  alertmanager_url: http://127.0.0.1:9093
+
+pattern_ingester:
+  lifecycler:
+    min_ready_duration: 1s
+
+ingester:
+  lifecycler:
+    min_ready_duration: 1s
+
+frontend:
+  scheduler_dns_lookup_period: 1s
+  address: 127.0.0.1
+
+query_scheduler:
+  use_scheduler_ring: false
+
+# OURS: retention enforcement. Working directory sits under /data/loki, which is
+# the lgtm-data volume, so a restart keeps the compactor's marker files.
+# delete_request_store is mandatory once retention_enabled is true (Loki refuses
+# to start without it). Deletion lags the cut-off by retention_delete_delay (2h
+# default) plus one compaction pass, so expect data slightly older than 7 days.
+compactor:
+  working_directory: /data/loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+# OURS: keep 7 days of logs. 168h = 7 x 24h.
+limits_config:
+  retention_period: 168h

@@ -348,6 +348,15 @@ spec:
                   name: gameserver-config
                   key: nakama-tls-pin
                   optional: true
+            # Verbosity of the gateway's JSON log lines. Optional: absent = the
+            # compiled default `info`, so a cluster whose gateway-config predates
+            # this key keeps starting.
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: gateway-config
+                  key: log-level
+                  optional: true
             # ALLOCATOR_TRANSPORT was REMOVED: the fleet is always KCP/UDP and the
             # gateway announces "kcp" unconditionally. Setting it now only logs a
             # WARN ("ignored, removed"). The gateway's own client listener stays

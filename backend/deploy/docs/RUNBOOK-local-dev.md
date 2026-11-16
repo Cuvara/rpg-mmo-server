@@ -427,6 +427,7 @@ docker compose exec -T postgres psql -U nakama -d nakama -t \
 | 7350 | nakama | HTTP API + client socket, `/healthcheck` |
 | 7351 | nakama | Console web UI |
 | 9100 | nakama | Prometheus metrics |
+| 3100 | lgtm (Loki) | Log query API, `127.0.0.1` only, `monitoring` profile (`LOKI_PORT` override) |
 
 ## 5. Debug
 
@@ -463,6 +464,137 @@ Common failures:
 
 Nakama logs at `DEBUG` level in this stack (`--logger.level DEBUG`); lower it in
 `docker-compose.yml` if the output is too noisy.
+
+### Seeing logs in Grafana / Loki
+
+With the `monitoring` profile up (`make monitoring-up`), Grafana Alloy ships the
+stdout of every container of this compose project to Loki, kept for 7 days. Open
+Grafana (http://localhost:3000, or your `GRAFANA_PORT`), **Explore**, pick the
+Loki datasource and query by label, for example `{service="gateway"}`,
+`{level="error"}` or `{game="cuvara", server_id="gs-dotnet-map_01"}`. From the
+shell:
+
+```bash
+curl -s -G "http://127.0.0.1:${LOKI_PORT:-3100}/loki/api/v1/query_range" \
+  --data-urlencode 'query={service="gateway"}' --data-urlencode limit=20
+```
+
+Labels are `env` (`local` here), `service`, `level`, and on game servers `game`
+and `server_id`; a line that is not JSON has `level="unknown"` (so does every
+game server line when `GAMESERVER_LOG_FORMAT=text`; the default is `json`). Full contract,
+retention and the decision to read logs through a read-only socket proxy:
+`MONITORING.md` §Logs. `docker compose logs` keeps working and shows the raw lines.
+
+To check that shipping works end to end (needs the stack running; `--profile
+realtime` too for the gateway and game server assertions):
+
+```bash
+bash monitoring/check-log-shipping.sh      # PASS/FAIL/SKIP lines, exit 1 on a FAIL
+```
+
+When a line is missing in Loki:
+
+| Symptom | Check |
+|---------|-------|
+| Nothing at all | `docker compose ps alloy docker-socket-proxy lgtm` — all three must be running; `docker compose logs alloy` shows discovery or push errors |
+| Alloy cannot reach Docker | `docker compose logs docker-socket-proxy`: a `403` in the access log means the request is outside the read-only allow-list, which is by design |
+| Other stack's lines or none of yours | Alloy keeps only its own compose project: `COMPOSE_PROJECT_NAME` in `.env` must equal this stack's project (`./stack.sh up --scratch` writes it for you) |
+| A line arrives seconds late, or the first lines of a new container are missing | Alloy refreshes discovery every 10 s and tails a container from when it first sees it |
+| Present, but under `level="unknown"` | The line is not a JSON object, or its `level` is not a known spelling (`MONITORING.md` §Logs). A **game server** is `unknown` when it logs plain text, i.e. `GAMESERVER_LOG_FORMAT=text` (it logs JSON by default; compose forwards the knob, see `.env.example`); there is no regex for the plain format on purpose |
+| Game server line without `game` / `server_id` | The service lacks the `cuvara.log.game` / `cuvara.log.server_id` compose labels |
+| `connection refused` on 3100 | `LOKI_PORT` remapped, or `lgtm` not up; Loki is published on `127.0.0.1` only |
+
+Alloy was never run against this stack while this was written: expect to learn
+from `docker compose logs alloy` on the first start.
+
+### Seeing logs from the k8s cluster
+
+When the stack runs in the k3d cluster (`k8s/dev-up.sh`, `DEPLOY_MODE=k8s`), the
+compose `alloy` has nothing to collect. An Alloy DaemonSet in the namespace
+`rpg-k8s-logging` ships the pod logs of every `rpg-k8s-*` namespace to the **same
+Loki**, so Grafana and the queries above work unchanged, with `env="dev"` (or
+`staging`) and `service` set to the container name (`gateway`, `nakama`,
+`gameserver`, ...). Design, RBAC, labels and the residual risk of how it reaches
+Loki: `MONITORING.md`, "Logs on k8s". **None of this has been run against a
+cluster yet**; expect to learn from the collector's own log on the first run.
+
+**Check the collector.** Use the dev context `k3d-rpg-dev` (staging:
+`k3d-rpg-stg`):
+
+```bash
+kubectl --context k3d-rpg-dev -n rpg-k8s-logging get ds,pods        # DESIRED must equal READY
+kubectl --context k3d-rpg-dev -n rpg-k8s-logging logs ds/alloy --tail=50
+kubectl --context k3d-rpg-dev -n rpg-k8s-logging get endpointslices # loki-lgtm must exist, with an address
+
+# the same, as a verdict (layer 1; the suite needs JWT_SECRET set even for one layer)
+cd backend/deploy/k8s/verify
+./verify.sh --target k8s-dev --layer 1      # cluster.log_collector: FAIL / WARN / PASS
+```
+
+When the DaemonSet does not become Ready (`LOG_ROLLOUT_TIMEOUT`, default `180s`),
+`dev-up.sh` does **not** stop: it prints a `::warning::` line and a WARN with the
+last lines of the collector's log and the commands above, and carries on. Logs are
+not in the client path, so the rest of the stack is brought up; the check above
+FAILs on a collector that is not Ready, and CD runs it after `dev-up.sh`, so the
+deploy still fails there. The offline tests of all this need no cluster:
+`k8s/verify/tests/dev_up_logging_test.sh`, `k8s/logging/tests/test_connect_loki.py`
+and `k8s/verify/tests/log_collector_test.sh`.
+
+**Re-attach Loki.** The collector reaches Loki through the compose `lgtm`
+container, attached to the cluster's Docker network. A recreated `lgtm`
+(`docker compose up --force-recreate`, a monitoring config change, a host
+restart) loses the attachment, and the check above WARNs with "Loki is not
+attached". Run the script again, or `dev-up.sh`, which runs it:
+
+```bash
+KUBE_CONTEXT=k3d-rpg-dev backend/deploy/k8s/logging/connect-loki.sh --dry-run   # prints the plan, changes nothing
+KUBE_CONTEXT=k3d-rpg-dev backend/deploy/k8s/logging/connect-loki.sh
+```
+
+It exits 0 with a WARN when `lgtm` is not running (start it with `make
+monitoring-up`, then run it again) and deletes the EndpointSlice then. When docker
+itself could not be asked (not installed, daemon down: no output and a non-zero
+status) it also warns and exits 0, but leaves the existing EndpointSlice as it
+is. Other contexts must set `LOKI_NETWORK` and
+`LOKI_CONTAINER`.
+
+**When a line is missing in Loki on k8s:**
+
+| Symptom | Check |
+|---------|-------|
+| Nothing at all | `get ds,pods` above: is the collector Ready? Then `logs ds/alloy` for push errors (`connection refused`, `no such host`, timeouts mean Loki is not attached: re-attach) |
+| `403` / `forbidden` in Alloy's log for a namespace | That namespace is in `log-namespaces` but has no Role `rpg-log-collector`. For a game namespace, apply its render (`python backend/deploy/k8s/games/render.py --game <game> --nakama-tls off \| kubectl --context k3d-rpg-dev apply -f -`; use `on` instead of `off` when meta-hop TLS is on, as `dev-up.sh` prints it) |
+| A new game's logs are missing | Its namespace is added to `log-namespaces` by `dev-up.sh` from the games the gateway serves: run `dev-up.sh` after listing the game, and apply its render |
+| Lines of the wrong `env` | The `env` label is `deploy-environment` of ConfigMap `alloy-env`; `dev-up.sh` sets it from the context or `DEPLOY_ENVIRONMENT` |
+| Game server lines under `level="unknown"` | Same as compose: the game server logs plain text (`log-format: text`; the default is `json`) |
+| A game server stream has no `game` | It is not a pod with the Agones label `agones.dev/role=gameserver`; only those get `game` and `server_id` |
+
+**Change a log level.** The knobs live in ConfigMaps (all optional in the
+workloads): `gateway-config` key `log-level` (`debug|info|warn|error`, default
+`info`), `gameserver-config` keys `log-level`
+(`Trace|Debug|Information|Warning|Error|Critical`, default `Information`) and
+`log-format` (`json|text`, default `json`), in `rpg-k8s-realtime` and in every
+rendered game namespace. A container reads its ConfigMap only when it starts, so
+a change takes effect after a restart of the pods:
+
+- To keep it, edit the key in `k8s/app/20-configmaps.yaml` (for another game it is
+  copied from there by `games/render.py`: render and apply again) and run
+  `dev-up.sh`. A change made only with `kubectl edit` is overwritten by the next
+  `dev-up.sh`.
+- **Gateway:** `kubectl --context k3d-rpg-dev -n rpg-k8s-realtime rollout restart
+  deployment/gateway`. **This is a full realtime-join outage while it rolls**
+  (`strategy: Recreate`, see `k8s/README.md`, "Availability posture").
+- **Game servers:** the Fleet's pod template does not change when a ConfigMap
+  changes, so running game server pods keep the value they started with, and a new
+  pod (a dungeon pod the autoscaler adds, or a replaced one) reads the current
+  one. Replacing a running map server pod drops everyone on that map. All three
+  fleets (map, dungeon and the Agones dev fleet) read both keys.
+- **The collector:** changing `alloy-env` or `alloy-config` needs
+  `kubectl --context k3d-rpg-dev -n rpg-k8s-logging rollout restart ds/alloy`,
+  because Alloy does not reload a ConfigMap. `dev-up.sh` does that by itself when
+  either ConfigMap changed. If you change `config-k8s.alloy` or the shared `level`
+  block of `monitoring/alloy/config.alloy`, regenerate `40-alloy-config.yaml`
+  first (`python3 backend/deploy/k8s/logging/generate-config.py`).
 
 ## 6. Reset the database
 

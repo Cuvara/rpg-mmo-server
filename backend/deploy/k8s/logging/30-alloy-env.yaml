@@ -1,0 +1,23 @@
+# Per-environment settings of the collector, read as environment variables by the
+# DaemonSet (50-daemonset.yaml) and, through sys.env, by the Alloy config.
+#
+# These are the defaults for a bare local cluster. dev-up.sh overwrites this
+# ConfigMap for the environment it deploys: `deploy-environment` becomes the
+# identity from environments.tsv (the `env` label), and `log-namespaces` gets
+# every game namespace (rpg-k8s-realtime-<game>) added, each of which needs its
+# own Role from render.py. A namespace listed here without a Role is not
+# collected and makes Alloy's pod list for it fail loudly (403 in its own log).
+#
+# Alloy does not reload on a ConfigMap change: restart the DaemonSet after
+# changing a value (`kubectl -n rpg-k8s-logging rollout restart ds/alloy`).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-env
+  namespace: rpg-k8s-logging
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+data:
+  deploy-environment: "local"
+  log-namespaces: "rpg-k8s-realtime,rpg-k8s-data,rpg-k8s-logging"

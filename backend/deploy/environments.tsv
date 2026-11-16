@@ -23,6 +23,6 @@
 # back to the live checks only.
 #
 environment	deploy_dir	compose_project	name_prefix	ports
-dev	/mnt/e/rpg-mmo-deploy	rpg-mmo-meta	rpg	8000,9102,9200,9101,5432,5433,6379,7349,7350,7351,9100,3001,9090,4317,4318
-staging	/mnt/e/rpg-mmo-deploy-staging	rpg-mmo-staging	rpg-stg	8020,9122,9220,9121,5452,5453,6399,7369,7370,7371,9120,3003,9092,4337,4338
-production	/mnt/e/rpg-mmo-deploy-prod	rpg-mmo-prod	rpg-prod	8010,9112,9210,9111,5442,5443,6389,7359,7360,7361,9110,3002,9091,4327,4328
+dev	/mnt/e/rpg-mmo-deploy	rpg-mmo-meta	rpg	8000,9102,9200,9101,5432,5433,6379,7349,7350,7351,9100,3001,9090,4317,4318,3100
+staging	/mnt/e/rpg-mmo-deploy-staging	rpg-mmo-staging	rpg-stg	8020,9122,9220,9121,5452,5453,6399,7369,7370,7371,9120,3003,9092,4337,4338,3120
+production	/mnt/e/rpg-mmo-deploy-prod	rpg-mmo-prod	rpg-prod	8010,9112,9210,9111,5442,5443,6389,7359,7360,7361,9110,3002,9091,4327,4328,3110

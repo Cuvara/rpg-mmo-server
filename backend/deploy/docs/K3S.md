@@ -11,7 +11,8 @@ plus the path from a laptop cluster to a real k3s VPS.
 > **This file covers the cluster/Agones bootstrap and the earlier hybrid stack**
 > (fleet in `rpg-realtime`, everything else in compose, reached as
 > `host.k3d.internal`). Dev has since moved **entirely** into the cluster —
-> namespaces `rpg-k8s-data` and `rpg-k8s-realtime`, manifests in
+> namespaces `rpg-k8s-data`, `rpg-k8s-realtime` and the log collector's
+> `rpg-k8s-logging`, manifests in
 > `backend/deploy/k8s/`, brought up by `k8s/dev-up.sh`; the `rpg-realtime` fleet is
 > scaled to 0 and kept only as the rollback target. For that stack read
 > [`../k8s/README.md`](../k8s/README.md), and in particular its **Availability
@@ -192,6 +193,7 @@ there rather than as rows for files that do not exist.
 | `agones/secret-example.yaml` | Template for the `rpg-realtime-secrets` Secret. Dev placeholders only; not the real object |
 | `agones/allocation-dev.yaml` | `GameServerAllocation` — `kubectl create`, never `apply`. Hand allocation, off the deploy path |
 | `k3s/namespaces.yaml` | `rpg-realtime` / `rpg-meta` / `rpg-data` |
+| `k8s/logging/` | **Not in `agones/` and not part of the bootstrap.** The log collector of the k8s stack: namespace `rpg-k8s-logging`, an Alloy DaemonSet that ships pod logs to the compose Loki, a namespaced `rpg-log-collector` Role per collected namespace (no ClusterRole, no hostPath), and the selector-less Service `loki`. Applied by `k8s/dev-up.sh`; see `k8s/README.md` §Logs and `MONITORING.md` §Logs on k8s |
 
 The fleets of the **app tier** (`deploy/k8s/app/`, namespace
 `rpg-k8s-realtime`) are a different set and are documented in
@@ -1046,9 +1048,10 @@ script also asserts the **project contracts** no schema knows about:
 | `replicas > 1` with a fixed `GAMESERVER_MAP_ID` | every replica registers the same map id — ADR-2 |
 | autoscaler policy is `Buffer`; `fleetName` / allocation selectors name a real fleet | ADR-14 decision 5, and a dangling `fleetName` survives every schema check |
 | the gateway's `DefaultFleetMap` / `DefaultNamespace` / `gamePortName` name something real | `[warn]`, not a failure — the env overrides exist |
+| the log collector (`k8s/logging/`, checked by `k3s/logging_contract.py`): no `ClusterRole` or `ClusterRoleBinding`; every `Role` is `rpg-log-collector` in an `rpg-k8s-*` namespace with exactly two rules (`pods` get/list/watch, `pods/log` get) and a RoleBinding to ServiceAccount `rpg-log-collector` of `rpg-k8s-logging`; the DaemonSet `alloy` has no hostPath, hostNetwork, hostPID, hostPort or privileged container, a read-only root filesystem and runs non-root; the Service `loki` has no selector; every rendered game namespace carries the same Role and the log keys | the collector's grant is the narrowest that works, and a game's namespace is collectable without a hand-copied manifest |
 
 ```bash
-python3 k3s/validate-manifests.py                      # all agones/ + k3s/ manifests
+python3 k3s/validate-manifests.py                      # all agones/ + k3s/ manifests, the rendered game, and the k8s/logging contract
 python3 k3s/validate-manifests.py --agones-version 1.58.0 agones/fleet-map-dotnet-dev.yaml
 
 # Is the local image actually built from the code under test?

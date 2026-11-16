@@ -189,4 +189,23 @@ internal static class ServerEnv
     /// <c>3</c> (see <c>ServerDefaults.SpawnScatter</c>). Decimal, 0..50, strict.
     /// </summary>
     public const string SpawnScatter = "GAMESERVER_SPAWN_SCATTER";
+
+    // ── Logging ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Minimum level written to stdout: <c>Trace</c>, <c>Debug</c>, <c>Information</c>,
+    /// <c>Warning</c>, <c>Error</c> or <c>Critical</c> (ASCII case-insensitive; no numbers, no
+    /// <c>None</c>). Unset or empty = <c>Information</c>, which logs exactly the events the
+    /// server logged before this knob existed. Any other value exits 2.
+    /// Also <c>--log-level</c>, which wins over the variable.
+    /// </summary>
+    public const string LogLevel = "GAMESERVER_LOG_LEVEL";
+
+    /// <summary>
+    /// Shape of each stdout log line: <c>json</c> (one JSON object per line, for a log shipper)
+    /// or <c>text</c> (the console logger's default multi-line output, for reading locally).
+    /// Unset or empty = <c>json</c>. Any other value exits 2.
+    /// Also <c>--log-format</c>, which wins over the variable.
+    /// </summary>
+    public const string LogFormat = "GAMESERVER_LOG_FORMAT";
 }

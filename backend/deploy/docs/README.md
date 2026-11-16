@@ -16,9 +16,11 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Gateway / gameserver images | `docker/Dockerfile.gateway`, `docker/Dockerfile.gameserver-dotnet` | ✅ Built + smoke-tested |
 | k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |
 | Full k8s dev stack (Nakama, gateway, Redis, both PostgreSQL, Agones fleet) | `k8s/data/`, `k8s/app/`, `k8s/dev-up.sh`, `k8s/rollback-to-compose.sh`, `k8s/verify/` | ✅ Dev runs on it. **One replica of everything and `Recreate` on the two `hostPort` workloads — see `k8s/README.md` §Availability posture and ADR-17** |
+| Log collector of the k8s stack (pod logs → the compose Loki) | `k8s/logging/` (namespace `rpg-k8s-logging`, Alloy DaemonSet, Roles, `connect-loki.sh`, `generate-config.py`), applied by `k8s/dev-up.sh`; check `cluster.log_collector` in `k8s/verify/`; contract `k3s/logging_contract.py` | Authored and covered by offline tests that run in CI. **Nothing was applied to a cluster, so no line has been seen arriving in Loki** (`docs/MONITORING.md` §Logs on k8s lists what the first live run must observe). the attach joins the whole `lgtm` container to the cluster's Docker network, so Loki (unauthenticated), Prometheus, OTLP and the Grafana login are reachable from every pod of that cluster (`docs/MONITORING.md`, "What the attach exposes"); known gap: in `DEPLOY_MODE=k8s`, `cd.yml` does not start or update `lgtm` |
 | Per-game app tier for a non-default game (ADR-33 leg 5) | `k8s/games/render.py`, `k8s/games/README.md` | Authored + rendered in memory by `k3s/validate-manifests.py`. **No second game is instantiated**; nothing applies it |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
 | Dev observability (Grafana + Prometheus + Loki + Tempo) | `docker-compose.yml` profile `monitoring`, `monitoring/` | ✅ Usable (`make monitoring-up`) |
+| Compose log shipping (container logs → Loki, 7-day retention) | `docker-compose.yml` services `alloy` and `docker-socket-proxy` (profile `monitoring`), `monitoring/alloy/config.alloy`, `monitoring/loki-config.yaml`, `monitoring/check-log-shipping.sh`, `tests/` | Authored and covered by offline tests that run in CI. **The live check has not been run yet** (`docs/MONITORING.md` §Logs). Needs the GitHub Environment variable `LOKI_PORT` set to `3120` (staging) and `3110` (production) before their next deploy |
 
 Docs:
 - `RUNBOOK-local-dev.md` — start/stop/debug/reset the local stack, verification steps, REDIS_ADDR wiring.
@@ -34,7 +36,10 @@ Docs:
   the open code gaps that make Redis data loss an unbounded outage, and the
   Sentinel upgrade path.
 - `MONITORING.md` — `make monitoring-up` (one `grafana/otel-lgtm` container), scrape
-  targets, the "RPG Gameplay" dashboard, metric contracts, Grafana Cloud / k3s paths.
+  targets, the "RPG Gameplay" dashboard, metric contracts, log shipping (Alloy →
+  Loki: socket-proxy decision, label contract, 7-day retention, LogQL; and on k8s
+  the Alloy DaemonSet, how it reaches Loki and the residual risk, its RBAC, labels
+  and log knobs), Grafana Cloud / k3s paths.
 - `REALTIME-FLOW.md` — what happens hop by hop when a player enters a map: the
   compose flow that runs today (deploy → `.env` → handshake → direct gameplay
   connection), the Agones flow as it stands (fleets Ready, `ALLOCATED 0`, and the
@@ -43,13 +48,13 @@ Docs:
   are looking at.
 - `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,
   cluster options on WSL2, offline manifest validation, graduation to a real k3s VPS.
-- `../k8s/README.md` — the k8s dev stack that actually runs (namespaces `rpg-k8s-data`
-  and `rpg-k8s-realtime`): bring-up, ports, verification, rollback, and the
+- `../k8s/README.md` — the k8s dev stack that actually runs (namespaces `rpg-k8s-data`,
+  `rpg-k8s-realtime` and the log collector's `rpg-k8s-logging`): bring-up, ports, logs, verification, rollback, and the
   **availability posture** — one replica everywhere, why `Recreate` is required on the
   `hostPort` workloads, and what a gateway rollout costs (ADR-17).
 - `../k8s/games/README.md` — a non-default game's namespace, quota, `<game>-` fleets,
-  Secret template and gateway env, rendered from `k8s/app/` by `render.py`
-  (ADR-33 leg 5).
+  Secret template, gateway env and the log collector's read Role, rendered from
+  `k8s/app/` by `render.py` (ADR-33 leg 5).
 
 ## Local dev backing stack
 

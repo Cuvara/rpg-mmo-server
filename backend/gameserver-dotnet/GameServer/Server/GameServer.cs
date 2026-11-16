@@ -864,8 +864,8 @@ public sealed class GameServerHost : IAsyncDisposable
     {
         _options = options;
         _isDungeon = IsDungeonMode(options.Mode);
-        _loggerFactory = options.LoggerFactory ?? Microsoft.Extensions.Logging.LoggerFactory.Create(b =>
-            b.AddConsole().SetMinimumLevel(LogLevel.Information));
+        _loggerFactory = options.LoggerFactory ?? GameServer.Observability.Logging.ServerLogging.CreateFactory(
+            GameServer.Observability.Logging.LogSettings.Default, options.GameId, options.MapId, options.ServerId);
         _logger = _loggerFactory.CreateLogger<GameServerHost>();
 
         // Join tokens are verified against JOIN_TOKEN_SECRET (required, enforced
