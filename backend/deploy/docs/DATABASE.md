@@ -6,7 +6,7 @@ instances.
 | Instance | Container | Default port | Owner | Who manages the schema |
 |----------|-----------|--------------|-------|------------------------|
 | Meta | `rpg-postgres` | 5432 | `nakama` / `nakama` | **Nakama** — it runs `nakama migrate up` at container start. Never hand-edit it. |
-| Game state | `rpg-postgres-game` | 5433 | `game` / `gamestate` | **Us** — numbered migrations in this repo. |
+| Game state | `rpg-postgres-game` | 5433 | bootstrap `game` (admin); app login `gamestate`; database `gamestate` | **Us** — numbered migrations in this repo. |
 
 Everything below is about the game-state instance. The meta instance is only
 ever backed up and restored, never migrated by us.
@@ -24,8 +24,9 @@ them on first server start, using this role as their owner.
 
 Game ids must match exactly `^[a-z][a-z0-9]{1,23}$`. The ids `gs`, `map` and
 `dungeon` are reserved. The default game, `cuvara`, is refused because it keeps
-the existing `gamestate` database and its existing user (`game` by default).
-Invalid input exits 2 before invoking psql.
+the existing `gamestate` database; its restricted login is provisioned by
+`db/provision-default-role.sh` instead (see "Default game's restricted login
+(MG-01)" below). Invalid input exits 2 before invoking psql.
 
 Both the role and database default to **20 connections**; override with
 `--connection-limit N` (positive integer, at most PostgreSQL's 2147483647).
@@ -50,7 +51,7 @@ check.
 revoking CONNECT from PUBLIC before the check, quoting identifiers with
 `format('%I')`. **Other roles that depended on PUBLIC lose the ability to open
 new connections there.** Owners and superusers keep access; the default game's
-user owns `gamestate`. Existing connections are not terminated. Review other
+`gamestate` login owns `gamestate`. Existing connections are not terminated. Review other
 service accounts before choosing this flag. The script grants nothing on the
 default game's database. Explicit grants and role memberships can still allow
 access after PUBLIC is revoked; the check catches effective CONNECT privileges
@@ -129,6 +130,99 @@ the target host and TLS policy, and store it in **that game's fleet Secret,
 key `game-db-url`**. Never commit the completed DSN or password. No database
 provisioning, Secret creation, Docker startup, or cluster operation is performed
 by the offline test `db/tests/provision_test.sh`, which uses a fake psql only.
+
+### Default game's restricted login (MG-01)
+
+The default game `cuvara` no longer connects with the PostgreSQL bootstrap
+superuser. Its game servers use the non-superuser login **`gamestate`**, which
+owns only the database `gamestate`. The bootstrap user (`POSTGRES_GAME_USER`,
+`game` by default) is for provisioning, backups/restores and administrative
+migrations only; it appears in no game server DSN. The role name is fixed:
+`POSTGRES_GAME_APP_USER` must be `gamestate`.
+
+`db/provision-default-role.sh` converges an **existing** `gamestate` database
+in place. It needs an administrative (superuser) connection, creates the role
+if absent and reapplies its attributes on every run (LOGIN, NOSUPERUSER,
+NOCREATEDB, NOCREATEROLE, NOREPLICATION, NOINHERIT, NOBYPASSRLS, 20
+connections; `--connection-limit N` overrides, also applied to the database),
+and sets its password from exported `GAMESTATE_ROLE_PASSWORD` (read by psql
+with `\getenv`, never in argv). It then:
+
+- runs `ALTER DATABASE gamestate OWNER TO gamestate`, revokes CONNECT and
+  TEMPORARY from PUBLIC on it and grants CONNECT to the role;
+- inside `gamestate`, transfers the owner of every non-system schema,
+  relation, standalone type/domain and routine from the bootstrap user to the
+  role. No database is dropped, recreated or copied and `REASSIGN OWNED` is not
+  used, so existing data stays in place;
+- revokes PUBLIC CONNECT on every other non-template database the role could
+  reach, as `provision-gamestate.sh --revoke-public-connect` does. **Other
+  roles relying on PUBLIC lose new connections there;** existing connections
+  are not terminated;
+- sets default privileges so tables and sequences the **bootstrap user** later
+  creates in `public` (an admin-run migration) grant ALL to `gamestate`;
+- fails (exit 1) if the role can still CONNECT to any other database or is a
+  member of any role. A missing `gamestate` database is an error: this upgrades
+  an existing volume, it does not create one. `--dry-run` prints the SQL and
+  needs no password or psql. It refuses to run if the admin login is itself
+  `gamestate`.
+
+Because the script is idempotent, it can run on every deploy.
+
+**How an existing volume upgrades**
+
+- *Compose:* the one-shot `postgres-game-roles` service runs the script as the
+  bootstrap user on every `up`, and the game servers wait for it to complete.
+  Set `POSTGRES_GAME_APP_PASSWORD` in `.env` (see `.env.example`).
+- *Kubernetes:* run the manual Job `default-role`
+  (`k8s/data/job-default-role.yaml`) before starting game servers, on fresh and
+  reused PVCs. `k8s/data/apply.sh` generates its script ConfigMap
+  `gamestate-default-role` from the original script. Put the password in the
+  `postgres-game` Secret as `GAMESTATE_ROLE_PASSWORD` (and `GAMESTATE_APP_USER:
+  gamestate`); use the same password in the app tier's `game-db-url`. See
+  `k8s/data/README.md`.
+- *Bare host:* run `provision-default-role.sh` yourself under the
+  db-schema-write gate, with `GAMESTATE_ROLE_PASSWORD` exported and `PSQL_CMD`
+  pointing at an administrative connection, as for `provision-gamestate.sh`
+  above. The script never runs from server startup.
+
+Then point `GAME_DB_URL` at `postgres://gamestate:<password>@<host>:5432/gamestate?sslmode=...`.
+
+**Migrations.** The game server's own `Migrator` runs as `gamestate`, so its
+objects are owned by it. A migration run as the bootstrap user (for example
+`--migrate-only` with the bootstrap DSN) leaves new objects owned by the
+bootstrap user; the default privileges above give `gamestate` ALL on new
+`public` tables and sequences, but other object kinds need a rerun of the
+script. The DSN that CD's `--migrate-only` step uses is an operator setting
+this change does not alter.
+
+**Isolation, both directions.** From the `gamestate` login, connecting to
+`postgres` or to any `gamestate_<game>` database is refused, and the role
+holds no SELECT privilege on a per-game table (asserted without the connection gate). From a `gamestate_<game>` login, connecting to
+`gamestate` is refused. The bootstrap superuser and the other databases'
+owners are unchanged.
+
+**Tests.** The offline test uses a fake psql; the live test runs a private
+PostgreSQL 16 only, never the shared stack. Both print `passed: N failed: M`:
+
+```bash
+export RPG_FACTORY_WORKSPACE=C:/Workspaces/UnityIndie
+bash backend/deploy/db/tests/default_role_test.sh        # offline, fake psql
+# live: a private cluster from PG_BIN_DIR (PostgreSQL 16 tools), otherwise a
+# throwaway postgres:16.4-alpine container on its own port; exit 77 = skipped
+# because neither PG_BIN_DIR nor a reachable Docker daemon exists
+PG_BIN_DIR=/usr/lib/postgresql/16/bin bash backend/deploy/db/tests/default_role_live_test.sh
+bash backend/deploy/db/tests/default_role_live_test.sh   # Docker
+```
+
+The live test builds a populated `gamestate` owned by the bootstrap user (with
+per-game `gamestate_ember` data), converges it, checks data survives and the
+role can read, write and create tables, checks ownership of every object kind,
+the isolation above, and that a rerun changes nothing. It fails on the
+pre-MG-01 scripts.
+
+**Rollback.** Point `GAME_DB_URL` back at the bootstrap user and restart the
+game servers. Ownership can stay with `gamestate`: the bootstrap superuser
+retains access, and the PUBLIC CONNECT revocations are not undone.
 
 ## 0. Pull request restore rehearsal
 
@@ -230,7 +324,8 @@ already run. Add a new one.
 ### Running by hand
 
 ```bash
-# apply pending migrations and exit (this is what CD runs)
+# apply pending migrations and exit (this is what CD runs). Administrative
+# migrations may use the bootstrap user; see "Default game's restricted login".
 gameserver-dotnet --migrate-only --game-db-url 'postgres://game:...@host:5433/gamestate?sslmode=disable'
 
 # from source

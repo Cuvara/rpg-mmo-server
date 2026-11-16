@@ -5,6 +5,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- MG-01: the default game `cuvara` no longer connects as the PostgreSQL bootstrap superuser. New `db/provision-default-role.sh` (idempotent, superuser connection) creates the restricted login `gamestate` (NOSUPERUSER, NOINHERIT, 20 connections), moves ownership of the existing `gamestate` database and its non-system objects to it in place (no copy, no `REASSIGN OWNED`), revokes PUBLIC CONNECT on the other databases and fails if the role can reach another database or has role memberships. Compose and k8s game DSNs, `.env.example`, `stack.sh`, `k3s/setup-dev.sh` and the Agones secret example now use it; the bootstrap user stays for provisioning, backups/restores and administrative migrations. Upgrade: compose runs the one-shot `postgres-game-roles` on every `up`; k8s runs the manual `default-role` Job (ConfigMap `gamestate-default-role` from `k8s/data/apply.sh`, `GAMESTATE_ROLE_PASSWORD` in Secret `postgres-game`); a bare host runs the script with `PSQL_CMD`. Roles relying on PUBLIC CONNECT lose new connections to other databases. Rollback: point `GAME_DB_URL` back at the bootstrap user. Tests: `provision_test.sh` 59/0, `default_role_test.sh` 91/0, `default_role_live_test.sh` 24/0/0 (a throwaway postgres:16.4-alpine container; shows in-place upgrade with data present and isolation in both directions). Unverified: nothing was applied to a cluster or host, and CD's `--migrate-only` DSN is an operator setting this change does not alter. See `docs/DATABASE.md`.
+
 ### Fixed
 - Comments only: `k8s/data/secrets.example.yaml` no longer names the game server as a reader of
   `JWT_SECRET` (only the gateway and Nakama read it), and `k8s/app/40-gateway.yaml` no longer
