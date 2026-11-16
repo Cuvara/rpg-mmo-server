@@ -106,7 +106,9 @@ data:
   #
   # The scheme follows ADR-24's meta-hop TLS decision. It is http:// here
   # because this cluster's Nakama terminates no TLS; move BOTH together, or the
-  # server speaks plaintext to a listener that no longer answers it.
+  # server speaks plaintext to a listener that no longer answers it. For game
+  # namespaces render.py derives this and the pin from --nakama-tls; dev-up.sh
+  # also repairs both there from the stack TLS decision.
   nakama-url: "http://nakama.rpg-k8s-data.svc.cluster.local:7350"
   # THE GAME SERVER'S END OF THE SAME DECISION (ADR-24), and the third of the
   # four things that have to move together when the meta hop's TLS goes on.

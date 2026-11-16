@@ -553,3 +553,11 @@ docker build -f deploy/docker/Dockerfile.nakama \
 The `data/nakama.yaml` Deployment references `rpg-mmo/nakama:3.40.0` with
 `imagePullPolicy: IfNotPresent`. For k3d, import the image after building.
 For a real registry, push with `registry/push.sh`.
+
+### Game namespace meta-hop TLS
+
+`dev-up.sh` derives meta-hop TLS from `nakama-config` and repairs the URL and
+pin in the default namespace and every rendered game namespace listed by the
+gateway. When TLS is on it copies the public pin certificate into each game
+namespace; its ADR-24 check verifies every game namespace against the same
+TLS decision. Render each listed game before running the script.

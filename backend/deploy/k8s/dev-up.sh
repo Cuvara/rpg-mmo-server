@@ -609,7 +609,7 @@ for game in "${GAMES_LIST[@]}"; do
 done
 echo "checked: the join keyrings of $checked_games each have a key and share none with jwt-secret"
 echo "         or with each other; each non-default game's fleet Secret holds the gateway's keyring"
-unset game game_ns gw_games checked_games GAMES_LIST KEYRING_KEYS TRIMMED
+unset game game_ns gw_games checked_games KEYRING_KEYS TRIMMED
 # END app-secret and join-keyring checks
 
 say "apply the data tier (rpg-k8s-data)"
@@ -734,18 +734,58 @@ done
 #
 # So `nakama-config` is the ONE source of truth, and the game server's half is
 # derived from it here rather than maintained in parallel and checked later.
+# BEGIN game TLS repair
+# Pure mapping; parse_games already validates ids, but fold duplicates here too.
+rendered_game_namespaces() {
+  local game ns existing seen
+  GAME_NAMESPACES=()
+  for game in ${GAMES_LIST[@]+"${GAMES_LIST[@]}"}; do
+    [ "$game" = cuvara ] && continue
+    ns="rpg-k8s-realtime-$game"
+    seen=0
+    for existing in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+      [ "$existing" = "$ns" ] && seen=1
+    done
+    [ "$seen" -eq 1 ] || GAME_NAMESPACES+=("$ns")
+  done
+}
+rendered_game_namespaces
 nk_on=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+# A listed game must have been rendered even when TLS is off.
+for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+  if ! $K get configmap gameserver-config -n "$game_ns" >/dev/null 2>&1; then
+    game=${game_ns#rpg-k8s-realtime-}
+    echo "ERROR: $game_ns/gameserver-config is absent; render it with" >&2
+    echo "  python deploy/k8s/games/render.py --game $game --nakama-tls on|off" >&2
+    exit 1
+  fi
+done
 if [ -n "$nk_on" ]; then
-  cur_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
-  # Swap the scheme rather than hardcode a host: the host belongs to the manifest
-  # and must keep coming from there.
-  https_url="https://${cur_url#http://}"
-  case "$cur_url" in https://*) https_url="$cur_url" ;; esac
-  $K patch configmap gameserver-config -n rpg-k8s-realtime --type=merge \
-    -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
-  echo "restored: the meta hop is on in this cluster, so gameserver-config was moved back to"
-  echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
+  if ! $K get secret nakama-tls-pin -n rpg-k8s-realtime >/dev/null 2>&1; then
+    echo "ERROR: nakama-tls-pin Secret is absent in rpg-k8s-realtime." >&2
+    exit 1
+  fi
+  for game_ns in rpg-k8s-realtime ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+    cur_url=$($K get configmap gameserver-config -n "$game_ns" -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+    https_url="https://${cur_url#http://}"
+    case "$cur_url" in https://*) https_url="$cur_url" ;; esac
+    $K patch configmap gameserver-config -n "$game_ns" --type=merge \
+      -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
+    if [ "$game_ns" != rpg-k8s-realtime ]; then
+      # Stream only the public certificate; never put its contents in output or argv.
+      if ! $K get secret nakama-tls-pin -n rpg-k8s-realtime -o 'jsonpath={.data.tls\.crt}' \
+        | base64 -d | $K create secret generic nakama-tls-pin -n "$game_ns" \
+          --from-file=tls.crt=/dev/stdin --dry-run=client -o yaml | $K apply -f - >/dev/null; then
+        echo "ERROR: could not provision $game_ns/nakama-tls-pin from the source certificate." >&2
+        exit 1
+      fi
+    else
+      echo "restored: the meta hop is on in this cluster, so gameserver-config was moved back to"
+      echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
+    fi
+  done
 fi
+# END game TLS repair
 
 # The two STATIC Nakama keys, asserted for the same reason as the JWT above: this
 # Secret is applied out-of-band, so nothing else looks at it, and a value left at
@@ -894,6 +934,7 @@ fi
 # `BadRequest code=-1 Client sent an HTTP request to an HTTPS server`, logged as a
 # warning, with no counter and no alert. Nobody notices until a player asks where
 # their gold went.
+# BEGIN game TLS check
 nk_cert_path=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
 nk_key_path=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-key-path}' 2>/dev/null || true)
 nk_secret=$($K get secret nakama-tls -n rpg-k8s-data -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
@@ -945,8 +986,41 @@ else
     echo "  a pin on a plaintext hop protects nothing while reading as though it does." >&2
     exit 1
   fi
+  case "$nk_url" in
+    https://*)
+      echo "ERROR: gameserver-config uses https but Nakama terminates no TLS." >&2
+      exit 1
+      ;;
+  esac
   echo "checked: the meta hop is plaintext (no TLS paths in nakama-config) -- ADR-24's default"
 fi
+
+
+# Check every rendered game, including plaintext mismatches the repair must not hide.
+for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+  if ! $K get configmap gameserver-config -n "$game_ns" >/dev/null 2>&1; then
+    game=${game_ns#rpg-k8s-realtime-}
+    echo "ERROR: $game_ns/gameserver-config is absent; render it with" >&2
+    echo "  python deploy/k8s/games/render.py --game $game --nakama-tls on|off" >&2
+    exit 1
+  fi
+  game_url=$($K get configmap gameserver-config -n "$game_ns" -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+  game_pin=$($K get configmap gameserver-config -n "$game_ns" -o 'jsonpath={.data.nakama-tls-pin}' 2>/dev/null || true)
+  if [ -n "$nk_cert_path" ]; then
+    case "$game_url" in https://*) ;; *) echo "ERROR: $game_ns has a non-https nakama-url while Nakama uses TLS." >&2; exit 1 ;; esac
+    if [ -z "$game_pin" ] || ! $K get secret nakama-tls-pin -n "$game_ns" >/dev/null 2>&1; then
+      echo "ERROR: $game_ns needs a nakama-tls-pin and its Secret when Nakama uses TLS." >&2
+      exit 1
+    fi
+  else
+    case "$game_url" in https://*) echo "ERROR: $game_ns uses https while Nakama has no TLS." >&2; exit 1 ;; esac
+    if [ -n "$game_pin" ]; then
+      echo "ERROR: $game_ns sets nakama-tls-pin while Nakama has no TLS." >&2
+      exit 1
+    fi
+  fi
+done
+# END game TLS check
 
 render_image "$HERE/app/40-gateway.yaml" "rpg-mmo/gateway:develop" "${pre_gw:-$GATEWAY_IMAGE}" \
   | $K apply -f -

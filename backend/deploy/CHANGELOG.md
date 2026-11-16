@@ -6,6 +6,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- MG-04: rendering a non-default game no longer puts it on plaintext Nakama when the stack's
+  Nakama terminates TLS. `k8s/games/render.py` takes a required `--nakama-tls on|off` (the stack's
+  decision: `rpg-k8s-data/nakama-config` key `tls-cert-path` set means on) and optional
+  `--nakama-url` / `--nakama-tls-pin`. With TLS on it writes an `https://` URL and the pin
+  `/etc/nakama-tls/tls.crt` into the game's `gameserver-config`, and the manifests header names
+  the `nakama-tls-pin` Secret the game namespace needs. With TLS off it writes `http://` and an
+  empty pin. Any mismatch (TLS on with http or without an absolute pin, TLS off with https or a
+  pin, another scheme, no host, whitespace) is refused with exit 2. `render()` keeps a Python
+  default of off, so `k3s/validate-manifests.py` is unchanged. New test:
+  `k8s/games/test_render.py`.
+- MG-04: `k8s/dev-up.sh` repairs and checks the meta-hop TLS settings in every rendered game
+  namespace (`rpg-k8s-realtime-<game>` for each non-default game in `gateway-config` `games`), not
+  only `rpg-k8s-realtime`. With TLS on it patches each namespace's `gameserver-config` to https plus
+  the pin and copies the public certificate in `rpg-k8s-realtime/nakama-tls-pin` into each game
+  namespace without printing it. It refuses a listed game whose `gameserver-config` is absent, a
+  missing source pin Secret, and (TLS off) any https URL or pin in any namespace. New offline test
+  with a fake kubectl: `k8s/games/tests/dev_up_tls_test.sh`. `k8s/games/README.md` also documents
+  the per-game join keyring onboarding step from MG-02.
 - Comments only: `k8s/data/secrets.example.yaml` no longer names the game server as a reader of
   `JWT_SECRET` (only the gateway and Nakama read it), and `k8s/app/40-gateway.yaml` no longer
   refers to a literal `GAMES` entry in the `render.py` gateway-env snippet, which it does not emit.
