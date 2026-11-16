@@ -86,6 +86,27 @@ persistentvolumeclaim/data-redis-0           Bound   1Gi   RWO   local-path
 
 ---
 
+## Default game database role
+
+`apply.sh` generates the `gamestate-default-role` ConfigMap from the original
+`../../db/provision-default-role.sh`. After the database is ready, run the manual
+`job-default-role.yaml` Job before starting game servers, on both fresh and reused
+PVCs. Set the `postgres-game` Secret's `GAMESTATE_ROLE_PASSWORD` to the same
+password used in the app tier's `game-db-url`; `GAMESTATE_APP_USER` must be
+`gamestate`. The Job uses `POSTGRES_USER` and `POSTGRES_PASSWORD` as bootstrap
+admin credentials. It transfers existing database objects without recreating the
+database and revokes PUBLIC CONNECT on other databases, which affects other roles
+that rely on that grant. Review those access requirements before running it.
+
+```bash
+kubectl --context k3d-rpg-dev -n rpg-k8s-data apply -f job-default-role.yaml
+kubectl --context k3d-rpg-dev -n rpg-k8s-data wait --for=condition=complete job/default-role --timeout=120s
+kubectl --context k3d-rpg-dev -n rpg-k8s-data logs job/default-role
+kubectl --context k3d-rpg-dev -n rpg-k8s-data delete job default-role
+```
+
+Recreate the Job to rerun the idempotent upgrade after changing the app password.
+
 ## The initdb ConfigMap, and what a reused PVC means
 
 `postgres-game` mounts `db/init-gamestate.sql` into
@@ -204,7 +225,7 @@ Same namespace, short name is enough; the FQDN is what to use across namespaces.
 | Service | In-cluster address | Notes |
 |---|---|---|
 | PostgreSQL meta | `postgres-meta:5432` | `postgres-meta.rpg-k8s-data.svc.cluster.local` |
-| PostgreSQL gamestate | `postgres-game:5432` | `GAME_DB_URL=postgres://game:localdev@postgres-game:5432/gamestate?sslmode=disable` |
+| PostgreSQL gamestate | `postgres-game:5432` | `GAME_DB_URL=postgres://gamestate:localdev-app@postgres-game:5432/gamestate?sslmode=disable` |
 | Redis | `redis:6379` | `REDIS_ADDR=redis:6379` — same value as compose, so app env ports over unchanged |
 | Nakama HTTP | `nakama:7350` | `NAKAMA_URL=http://nakama:7350` — also unchanged from compose |
 | Nakama gRPC / console / metrics | `nakama:7349` / `:7351` / `:9100` | metrics for a future Prometheus scrape |
