@@ -73,6 +73,8 @@ check 'preflight is read-only: no apply, create, delete, patch, label or annotat
   bash -c '! grep -Eq "apply|create|delete|patch|label|annotate|replace" "$1"' _ "$WORK/pre.code"
 
 # ------------------------------------------------------------------ static rules
+check 'dev-up.sh has no kubectl call with a leading-slash argument (get --raw /apis/... is rewritten by Git Bash)' \
+  bash -c '! grep -v "^[[:space:]]*#" "$1" | grep -Eq -- "--raw[ =]/|get[[:space:]]+/"' _ "$DEVUP"
 check 'the block names exactly the four files, in order, the policy before the Role' \
   grep -Fxq 'for f in 00-namespace.yaml 10-serviceaccount.yaml 15-admission-policy.yaml 20-rbac.yaml; do' "$WORK/block.code"
 check 'the block never names optional/ or node-access (code, not comments)' \
@@ -106,13 +108,26 @@ done
 # Answers only what the hub block asks:
 #   apply -f <path>                      logged; exit APPLY_RC for the file named APPLY_FAILS
 #   get role studio-hub -n <ns>          exit 1 for a namespace in ROLES_ABSENT, else 0
-#   get --raw /apis/admissionregistration.k8s.io/v1   the resource list, or exit 1 when NO_VAP_API is set
+#   api-resources --api-group=admissionregistration.k8s.io -o name   the two resource names, or nothing when NO_VAP_API is set
+#   ANY argument that starts with "/" and is not a file that exists: answered the way kubectl.exe answers
+#       it under Git Bash on Windows, where MSYS rewrites such an argument into "C:/Program Files/Git/..."
+#       (NotFound, exit 1) and the call is logged as "mangled". `kubectl get --raw /apis/...` is that call.
 #   get configmap nakama-config ...      NK_CERT (the tls-cert-path value)
 cat > "$WORK/bin/kubectl" <<'FAKE'
 #!/usr/bin/env bash
 unexpected() { printf 'unexpected kubectl %s\n' "$*" >> "$GUARD"; exit 99; }
 [ "${1-}" = --context ] && [ "${2-}" = does-not-exist ] || unexpected "$@"
 shift 2
+# MSYS path conversion (Git Bash on Windows): an argument that starts with "/" and is not an existing file is
+# rewritten into a Windows path before kubectl.exe sees it, so the API answers NotFound for it. Model that, so a
+# probe written as `get --raw /apis/...` is a false "the API does not serve it" here, as it was on the live QA.
+for a in "$@"; do
+  case "$a" in
+  /*) [ -e "$a" ] || { echo "mangled $a" >> "$TEST_LOG"
+        echo "Error from server (NotFound): the server could not find the requested resource (path C:/Program Files/Git$a)" >&2
+        exit 1; } ;;
+  esac
+done
 cmd="$*"
 case "$cmd" in
 "apply -f "*)
@@ -120,10 +135,14 @@ case "$cmd" in
   echo "apply $path" >> "$TEST_LOG"
   [ "$(basename "$path")" = "${APPLY_FAILS:-}" ] && exit 1
   exit 0 ;;
-"get --raw /apis/admissionregistration.k8s.io/v1")
-  echo "get-raw-vap" >> "$TEST_LOG"
-  [ -n "${NO_VAP_API:-}" ] && { echo 'Error from server (NotFound): the server could not find the requested resource' >&2; exit 1; }
-  echo '{"kind":"APIResourceList","groupVersion":"admissionregistration.k8s.io/v1","resources":[{"name":"validatingadmissionpolicies","kind":"ValidatingAdmissionPolicy"},{"name":"validatingadmissionpolicybindings","kind":"ValidatingAdmissionPolicyBinding"}]}'
+"api-resources --api-group=admissionregistration.k8s.io -o name")
+  echo "api-resources-vap" >> "$TEST_LOG"
+  # what a 1.35 cluster prints for this group (the live QA): the webhook kinds, then both policy kinds
+  [ -z "${NO_VAP_API:-}" ] && printf '%s\n' mutatingwebhookconfigurations.admissionregistration.k8s.io \
+    validatingadmissionpolicies.admissionregistration.k8s.io validatingadmissionpolicybindings.admissionregistration.k8s.io \
+    validatingwebhookconfigurations.admissionregistration.k8s.io
+  # a cluster that does not serve the group prints nothing and still exits 0
+  [ -n "${NO_VAP_API:-}" ] && [ -n "${ONLY_VAP_KIND:-}" ] && printf '%s\n' "$ONLY_VAP_KIND"
   exit 0 ;;
 "get configmap nakama-config -n rpg-k8s-data -o jsonpath={.data.tls-cert-path}")
   echo "get-nakama-config" >> "$TEST_LOG"
@@ -152,7 +171,7 @@ source "$WORK/block"
 echo "REACHED-END"
 EOF
 export REAL_HERE="$HERE"
-reset() { : > "$TEST_LOG"; : > "$GUARD"; unset GAMES NK_CERT ROLES_ABSENT APPLY_FAILS NO_VAP_API; }
+reset() { : > "$TEST_LOG"; : > "$GUARD"; unset GAMES NK_CERT ROLES_ABSENT APPLY_FAILS NO_VAP_API ONLY_VAP_KIND; }
 run_block() { bash "$WORK/run_block.sh" > "$WORK/out" 2>&1; }
 sed -e 's|source "$WORK/block"|source "$WORK/pre"|' "$WORK/run_block.sh" | grep -v rendered_game_namespaces > "$WORK/run_pre.sh"
 run_pre() { bash "$WORK/run_pre.sh" > "$WORK/out" 2>&1; }
@@ -213,7 +232,9 @@ reset
 if run_pre; then ok 'preflight, cuvara alone: passes'; else bad 'preflight, cuvara alone: passes'; cat "$WORK/out"; fi
 guard_clean 'preflight, cuvara alone'
 check 'preflight, cuvara alone: reads the API resource list and Nakama TLS, applies nothing, reads no Role' \
-  bash -c '[ "$(tr "\n" " " < "$1")" = "get-raw-vap get-nakama-config " ]' _ "$TEST_LOG"
+  bash -c '[ "$(tr "\n" " " < "$1")" = "api-resources-vap get-nakama-config " ]' _ "$TEST_LOG"
+check 'preflight, cuvara alone: no kubectl argument is a path that Git Bash would rewrite (the "mangled" log is empty)' \
+  bash -c '! grep -q "^mangled" "$1"' _ "$TEST_LOG"
 check 'preflight, cuvara alone: reaches the end' grep -Fxq REACHED-END "$WORK/out"
 
 reset; GAMES='cuvara ember frost'; export GAMES
@@ -229,6 +250,13 @@ check 'preflight, no policy API: names the API, Kubernetes 1.30 and that nothing
 check 'preflight, no policy API: it is an ERROR and nothing was applied' \
   bash -c 'grep -Fq "ERROR:" "$1" && ! grep -Fq apply "$2" && ! grep -Fxq REACHED-END "$1"' _ "$WORK/out" "$TEST_LOG"
 guard_clean 'preflight, no policy API'
+
+# 7b. the group is served but only ONE of the two kinds: still a stop (both are needed)
+reset; NO_VAP_API=1 ONLY_VAP_KIND=validatingadmissionpolicies.admissionregistration.k8s.io; export NO_VAP_API ONLY_VAP_KIND
+if ! run_pre; then ok 'preflight, only the policy kind served (no binding kind): the script stops'; else bad 'preflight, only the policy kind served (no binding kind): the script stops'; fi
+# 7c. a similar name is not the kind: matched whole-line, not as a substring
+reset; NO_VAP_API=1 ONLY_VAP_KIND=xvalidatingadmissionpolicies.admissionregistration.k8s.io; export NO_VAP_API ONLY_VAP_KIND
+if ! run_pre; then ok 'preflight, a resource that merely contains the name: the script stops'; else bad 'preflight, a resource that merely contains the name: the script stops'; fi
 
 # 8. preflight: a game rendered before the hub existed has no Role: stop, name each game, give the command
 reset; GAMES='cuvara ember frost' ROLES_ABSENT='rpg-k8s-realtime-ember rpg-k8s-realtime-frost'; export GAMES ROLES_ABSENT

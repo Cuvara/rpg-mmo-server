@@ -663,9 +663,21 @@ unset game game_ns gw_games checked_games KEYRING_KEYS TRIMMED
 # Reads only. verify/tests/dev_up_hub_test.sh extracts the span between the markers.
 # BEGIN studio hub preflight
 hub_pre_fail=0
-hub_pre_api=$($K get --raw /apis/admissionregistration.k8s.io/v1 2>/dev/null || true)
-case "$hub_pre_api" in
-  *'"validatingadmissionpolicies"'*'"validatingadmissionpolicybindings"'* | *'"validatingadmissionpolicybindings"'*'"validatingadmissionpolicies"'*) ;;
+# Asked as `api-resources --api-group=...` and NOT as `get --raw /apis/...`: Git Bash on Windows rewrites an argument
+# that starts with "/" into a Windows path ("C:/Program Files/Git/apis/..."), the API answers NotFound, and this
+# preflight then reported "the API does not serve ValidatingAdmissionPolicy" on a 1.35 cluster that does (the live QA,
+# round 2). No argument here starts with "/", so no MSYS variable has to be set (and MSYS_NO_PATHCONV=1 for the whole
+# script would break the Docker context path of the image rebuild). Whole-line match: a name that merely contains
+# the resource name is not the resource.
+hub_pre_api=$($K api-resources --api-group=admissionregistration.k8s.io -o name 2>/dev/null || true)
+hub_pre_served=0
+for hub_pre_res in validatingadmissionpolicies validatingadmissionpolicybindings; do
+  if grep -Fxq "$hub_pre_res.admissionregistration.k8s.io" <<<"$hub_pre_api"; then
+    hub_pre_served=$((hub_pre_served + 1))
+  fi
+done
+case "$hub_pre_served" in
+  2) ;;
   *)
     echo "ERROR: the API server of context $CTX does not serve admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy." >&2
     echo "  The Studio hub's 'patch deployments' is narrowed to a rollout restart by that policy" >&2
@@ -694,7 +706,7 @@ if [ "$hub_pre_fail" -ne 0 ]; then
 fi
 echo "checked: the API serves ValidatingAdmissionPolicy and every listed game namespace has its Role studio-hub"
 # END studio hub preflight
-unset hub_pre_fail hub_pre_api hub_pre_tls game game_ns
+unset hub_pre_fail hub_pre_api hub_pre_served hub_pre_res hub_pre_tls game game_ns
 
 say "apply the data tier (rpg-k8s-data)"
 $K apply -k "$HERE/data"
