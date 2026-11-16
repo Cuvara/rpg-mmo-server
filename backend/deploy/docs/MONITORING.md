@@ -367,8 +367,13 @@ the project is shipped, including Alloy's own and the proxy's.
 
 ### Label contract
 
-This is the contract with the Studio hub's log view. The stream labels are
-exactly these, enforced by a final `stage.label_keep`:
+This is the contract with the Studio hub's log view. The stream labels **Alloy
+sends** are exactly these, enforced by a final `stage.label_keep`. (Observed live:
+Loki itself adds one more index label on ingest, `service_name`, always equal to
+`service` here, because its default `limits_config.discover_service_name` derives
+it from `service`. It is not built from anything else, so it adds no streams;
+filter on `service`. `detected_level` is structured metadata, not a label, and
+does not appear in `/labels`.)
 
 | Label | On | Source |
 |---|---|---|
