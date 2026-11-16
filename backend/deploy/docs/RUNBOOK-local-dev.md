@@ -427,6 +427,7 @@ docker compose exec -T postgres psql -U nakama -d nakama -t \
 | 7350 | nakama | HTTP API + client socket, `/healthcheck` |
 | 7351 | nakama | Console web UI |
 | 9100 | nakama | Prometheus metrics |
+| 3100 | lgtm (Loki) | Log query API, `127.0.0.1` only, `monitoring` profile (`LOKI_PORT` override) |
 
 ## 5. Debug
 
@@ -463,6 +464,48 @@ Common failures:
 
 Nakama logs at `DEBUG` level in this stack (`--logger.level DEBUG`); lower it in
 `docker-compose.yml` if the output is too noisy.
+
+### Seeing logs in Grafana / Loki
+
+With the `monitoring` profile up (`make monitoring-up`), Grafana Alloy ships the
+stdout of every container of this compose project to Loki, kept for 7 days. Open
+Grafana (http://localhost:3000, or your `GRAFANA_PORT`), **Explore**, pick the
+Loki datasource and query by label, for example `{service="gateway"}`,
+`{level="error"}` or `{game="cuvara", server_id="gs-dotnet-map_01"}`. From the
+shell:
+
+```bash
+curl -s -G "http://127.0.0.1:${LOKI_PORT:-3100}/loki/api/v1/query_range" \
+  --data-urlencode 'query={service="gateway"}' --data-urlencode limit=20
+```
+
+Labels are `env` (`local` here), `service`, `level`, and on game servers `game`
+and `server_id`; a line that is not JSON has `level="unknown"` (so does every
+game server line while the game server logs plain text). Full contract,
+retention and the decision to read logs through a read-only socket proxy:
+`MONITORING.md` §Logs. `docker compose logs` keeps working and shows the raw lines.
+
+To check that shipping works end to end (needs the stack running; `--profile
+realtime` too for the gateway and game server assertions):
+
+```bash
+bash monitoring/check-log-shipping.sh      # PASS/FAIL/SKIP lines, exit 1 on a FAIL
+```
+
+When a line is missing in Loki:
+
+| Symptom | Check |
+|---------|-------|
+| Nothing at all | `docker compose ps alloy docker-socket-proxy lgtm` — all three must be running; `docker compose logs alloy` shows discovery or push errors |
+| Alloy cannot reach Docker | `docker compose logs docker-socket-proxy`: a `403` in the access log means the request is outside the read-only allow-list, which is by design |
+| Other stack's lines or none of yours | Alloy keeps only its own compose project: `COMPOSE_PROJECT_NAME` in `.env` must equal this stack's project (`./stack.sh up --scratch` writes it for you) |
+| A line arrives seconds late, or the first lines of a new container are missing | Alloy refreshes discovery every 10 s and tails a container from when it first sees it |
+| Present, but under `level="unknown"` | The line is not a JSON object, or its `level` is not a known spelling (`MONITORING.md` §Logs). A **game server** is `unknown` when it logs plain text: `GAMESERVER_LOG_FORMAT=text`, or a build without the `gameserver-json-logs` task (JSON by default); there is no regex for the plain format on purpose |
+| Game server line without `game` / `server_id` | The service lacks the `cuvara.log.game` / `cuvara.log.server_id` compose labels |
+| `connection refused` on 3100 | `LOKI_PORT` remapped, or `lgtm` not up; Loki is published on `127.0.0.1` only |
+
+Alloy was never run against this stack while this was written: expect to learn
+from `docker compose logs alloy` on the first start.
 
 ## 6. Reset the database
 

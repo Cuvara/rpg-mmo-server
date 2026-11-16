@@ -12,6 +12,7 @@ make monitoring-up          # docker compose --profile monitoring up -d
 | http://localhost:3000 | Grafana (`admin` / `localdev`, override with `GRAFANA_USER` / `GRAFANA_ADMIN_PASSWORD`) |
 | http://localhost:9090/targets | Bundled Prometheus — scrape health |
 | `localhost:4317` / `localhost:4318` | OTLP gRPC / HTTP ingest (traces, logs, metrics — for later) |
+| `127.0.0.1:3100` | Bundled Loki query API (`LOKI_PORT`), loopback only, no authentication. Container logs are shipped here by Alloy — see "Logs" below |
 
 `make monitoring-down` stops it, `make monitoring-logs` tails it, `make monitoring-targets` prints target health from the CLI.
 
@@ -32,7 +33,7 @@ files, and that was the first attempt. It was dropped in favour of the official
   Pyroscope and an OpenTelemetry Collector, already wired to each other
   (datasources provisioned, exemplars linked Prometheus→Tempo→Loki).
 - **Nothing to maintain.** Datasource UIDs, versions and cross-links are the
-  image's problem. We own exactly three small files (see below).
+  image's problem. We own a handful of small files (see below).
 - **OTLP is already listening.** The moment the C# game server or the gateway
   emits traces or structured logs, `:4317`/`:4318` accept them — no second
   round of infrastructure work. A hand-rolled Prometheus would have needed
@@ -40,19 +41,28 @@ files, and that was the first attempt. It was dropped in favour of the official
 - **It is Grafana's own dev-stack image**, so the graduation path to Grafana
   Cloud (below) is the documented one.
 
-Trade-off: it is a *dev* stack. Single binary set, single node, no HA, no
-retention policy tuning. Production goes to Grafana Cloud or
+Trade-off: it is a *dev* stack. Single binary set, single node, no HA. Loki's
+retention is the one policy we did tune (7 days, see "Logs"); Prometheus, Tempo
+and Pyroscope keep the image's defaults. Production goes to Grafana Cloud or
 kube-prometheus-stack — see the graduation paths at the bottom.
 
 ## What we own
 
-Three files under `backend/deploy/monitoring/`, mounted into the image:
+Files under `backend/deploy/monitoring/`. Four are mounted into the `lgtm` image
+and one into the `alloy` container; two more are the check and its helper:
 
 | File | Mounted at | Purpose |
 |------|-----------|---------|
 | `prometheus.yaml` | `/otel-lgtm/prometheus.yaml` | Scrape config (the documented override point of the image) |
 | `grafana-dashboards.yaml` | `/otel-lgtm/grafana/conf/provisioning/dashboards/rpg-dashboards.yaml` | Extra dashboard provider, added *alongside* the image's own |
 | `dashboards/rpg-gameplay.json` | `/otel-lgtm/dashboards-rpg/` | The "RPG Gameplay" dashboard |
+| `loki-config.yaml` | `/otel-lgtm/loki-config.yaml` | Replaces the image's Loki config to turn on 7-day retention (see "Logs") |
+| `alloy/config.alloy` | `/etc/alloy/config.alloy` (in `alloy`) | Log collector: discovery, labels, push to Loki (see "Logs") |
+| `check-log-shipping.sh` | not mounted | Live check of log shipping against a running stack |
+
+The `alloy` and `docker-socket-proxy` services in `docker-compose.yml`
+(profile `monitoring`) are ours too, and `tests/test_log_shipping.py` holds the
+offline tests for all of the above.
 
 Plus the `lgtm-data` volume on `/data` — every bundled component persists there,
 so restarts keep the TSDB, Grafana state and Loki chunks.
@@ -234,6 +244,319 @@ they are not vendored. Once the matching exporter exists, import in Grafana via
 | 9628 | PostgreSQL Database | `postgres_exporter` |
 | 12740 | Kubernetes / Agones-friendly cluster view | kube-state-metrics (k3s tier) |
 
+## Logs — container stdout to Loki
+
+The `monitoring` profile also ships the container logs of the compose stack to
+the Loki bundled in `lgtm`, where Grafana's Loki datasource (provisioned by the
+image) reads them. This section says how a line gets there, what was decided and
+why, and how to query it.
+
+> **Status of verification.** Everything below describes what the files in this
+> directory do. The offline tests (`tests/test_log_shipping.py`) check the
+> compose file, the Alloy config, `loki-config.yaml`, `environments.tsv` and the
+> CD file list without Docker. **The live check
+> (`monitoring/check-log-shipping.sh`) has not been run**: no stack was started
+> while this was written, so no line has been seen arriving in Loki, the bundled
+> Loki (v3.5.7 in `grafana/otel-lgtm` 0.11.15) has not been observed loading our
+> `loki-config.yaml`, and Alloy v1.11.3 has not been observed loading
+> `config.alloy`. Run the check on a real stack before relying on any of it (see
+> "The check and the offline tests").
+>
+> **First live run: what has to be observed.**
+>
+> 1. Alloy v1.11.3 loads `config.alloy` and a gateway line reaches Loki with
+>    `env`, `service` and `level`.
+> 2. The bundled Loki loads `loki-config.yaml` and `GET /config` shows
+>    `retention_period` 1w and `retention_enabled: true`.
+> 3. The copied blocks of `loki-config.yaml` are identical to
+>    `/otel-lgtm/loki-config.yaml` inside the image `grafana/otel-lgtm:0.11.15`
+>    (`docker run --rm --entrypoint sh grafana/otel-lgtm:0.11.15 -c 'cat
+>    /otel-lgtm/loki-config.yaml'`). Until then they are only compared with the
+>    repository file at the tag.
+> 4. A game server line carries a real `level`. This needs a build that includes
+>    the `gameserver-json-logs` task; without it the check FAILs on purpose.
+> 5. The proxy's behaviour on `archive`, `export` and `attach/ws` (the residual
+>    risk below) is observed, not assumed.
+
+### How a line flows
+
+```
+container stdout/stderr
+  -> Docker engine (json-file logs)
+  -> docker-socket-proxy   read-only filter on the Docker API (GET only)
+  -> alloy                 discovery.docker + loki.source.docker + loki.process
+  -> lgtm : Loki :3100     /loki/api/v1/push, inside the compose network
+  -> Grafana (Explore, Loki datasource)   or   curl 127.0.0.1:${LOKI_PORT}
+```
+
+- **`docker-socket-proxy`** (`tecnativa/docker-socket-proxy`, version in
+  `DOCKER_SOCKET_PROXY_VERSION`, default `0.3.0`) is the only container that
+  mounts `/var/run/docker.sock`. It publishes no port and sits on the
+  `log-collector` network, which is `internal: true` and joined only by the proxy
+  and `alloy`.
+- **`alloy`** (`grafana/alloy`, version in `ALLOY_VERSION`, default `v1.11.3`)
+  mounts **no** Docker socket. It reads `monitoring/alloy/config.alloy`
+  (bind-mounted read-only), keeps its read positions in the `alloy-data` volume
+  so a restart continues instead of re-shipping, publishes no port (its UI on
+  `:12345` stays inside the network), and starts after `lgtm` is healthy.
+- **Loki** is the one inside `lgtm`. Alloy pushes to `http://lgtm:3100` on the
+  compose network; the host port exists only for queries from the host.
+
+### Decision: a socket proxy, not the log files
+
+Two ways to give a collector the logs were considered. The collector must not
+hold a writable Docker socket: anything that can `POST` to the socket can start a
+privileged container, which is root on the host.
+
+| | Read the log files | Read-only socket proxy (chosen) |
+|---|---|---|
+| Mechanism | bind-mount `/var/lib/docker/containers` read-only into Alloy | the proxy mounts the socket; Alloy speaks to the proxy over TCP |
+| Consequence | The hosts here run Docker Desktop through WSL. The engine's container directory lives in the engine's VM and cannot be bind-mounted from the deploy directory, so this would work on a plain Linux VPS and not on the dev box. The files also carry no compose labels, so `service`, `game` and `server_id` would have to be guessed from container ids. | Works the same on Docker Desktop/WSL and on a Linux VPS. Discovery returns the compose labels, which is where `service`, `game` and `server_id` come from. |
+
+**What the proxy allows.** `POST=0`, so no write verb passes whatever the path.
+Of the read sections only `CONTAINERS`, `NETWORKS`, `PING` and `VERSION` are on:
+container list, inspect and logs (what `discovery.docker` and
+`loki.source.docker` call), the network list (discovery resolves addresses
+through it), and the ping and version calls the Docker client makes to negotiate
+an API version. `EVENTS` is off because Alloy polls (`refresh_interval =
+"10s"`). Every other section (`INFO`, `AUTH`, `BUILD`, `COMMIT`, `CONFIGS`,
+`DISTRIBUTION`, `EXEC`, `GRPC`, `IMAGES`, `PLUGINS`, `SECRETS`, `SERVICES`,
+`SESSION`, `SWARM`, `SYSTEM`, `TASKS`, `VOLUMES`, `ALLOW_START`, `ALLOW_STOP`,
+`ALLOW_RESTARTS`) is set to `0` explicitly, so a default that changes in a later
+image tag cannot widen the surface silently. The `:ro` on the socket mount is
+**not** the protection (a read-only mount of a socket can still be written to);
+the proxy's method and path filter is. The offline tests assert these settings,
+that the proxy publishes no port, and that its network is internal.
+
+**Residual risk, stated plainly.**
+
+- **Container inspect exposes each container's environment to the collector,
+  secrets included** (database passwords, the JWT and join-token secrets, the
+  Grafana admin password). Alloy's config does not use them and drops the
+  discovery meta labels, but a compromised Alloy could read them.
+- The proxy filters by method and path section, so with `CONTAINERS=1` every
+  `GET` under `/containers/` passes, not only list, inspect and logs. By the
+  proxy's design that includes endpoints that read a container's filesystem
+  (`archive`, `export`) and `GET /containers/{id}/attach/ws`, the websocket
+  attach, which can carry stdin. Both are properties of the image that were not
+  tested here (the attach endpoint stays untested); treat the collector as able
+  to read everything about the stack's containers.
+- What limits it: the proxy has no published port and sits on an internal network
+  that only it and Alloy join, and Alloy has no published port, so nothing outside
+  the compose project can reach the proxy. Anything that can run a container on
+  that network already has the Docker daemon.
+- What the proxy buys: a compromised Alloy cannot start, stop or create
+  containers, and cannot talk to the socket directly.
+
+### Which containers are collected
+
+Only the containers of **this compose project**. Several stacks (dev, staging,
+production, scratch) can share one Docker daemon, so discovery is filtered on
+`com.docker.compose.project=$COMPOSE_PROJECT_NAME`, and a relabel `keep` on the
+same label backs it up. `COMPOSE_PROJECT_NAME` (default `rpg-mmo-meta`) and
+`DEPLOY_ENVIRONMENT` (default `local`) are passed into the Alloy container from
+`deploy/.env`: CD writes both, and `./stack.sh up --scratch` writes the scratch
+values (`COMPOSE_PROJECT_NAME=<scratch project>`, `DEPLOY_ENVIRONMENT=scratch`,
+`LOKI_PORT=4100`). The project name has to be written into the env file because
+the project is set with `-p`, which a container cannot see. Every container of
+the project is shipped, including Alloy's own and the proxy's.
+
+### Label contract
+
+This is the contract with the Studio hub's log view. The stream labels are
+exactly these, enforced by a final `stage.label_keep`:
+
+| Label | On | Source |
+|---|---|---|
+| `env` | every stream | `DEPLOY_ENVIRONMENT`, the identity in `environments.tsv` (`local` on a bare local stack) |
+| `service` | every stream | the compose service name (`com.docker.compose.service`): `gateway`, `nakama`, `gameserver-dotnet`, `gameserver-dotnet-map02`, `lgtm`, `alloy`, … |
+| `level` | every stream | parsed from the line, see below |
+| `game` | game server streams only | compose label `cuvara.log.game` = `${GAMESERVER_GAME_ID:-cuvara}`: the default game is `cuvara`, also when the variable is set but empty |
+| `server_id` | game server streams only | compose label `cuvara.log.server_id` = the service's own server id (`${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}`; the override's second server is the literal `gs-dotnet-map_02`) |
+
+Rules:
+
+- **A stream without `game` is stack-wide** (gateway, Nakama, Redis, Postgres,
+  lgtm, Alloy). Only game servers carry `game` and `server_id`. Every game server
+  service in `docker-compose.yml` and `docker-compose.override.yml` must carry
+  both compose labels; the offline tests fail when one is missing or disagrees
+  with the service's `GAMESERVER_GAME_ID` / `GAMESERVER_ID`.
+- **Never a high-cardinality label.** Every distinct label set is a Loki stream.
+  Nothing is built from a container id or name, a user id, a connection id or a
+  player. Discovery's `__meta_docker_*` labels are dropped and `label_keep`
+  removes anything else (`container`, `filename`, …). Put per-request detail in
+  the line and filter it with LogQL (`|= "..."`, `| json`), not in a label.
+- **`level`** is read only from a line that looks like a JSON object (first
+  non-space character `{`), from its `level` field, and normalised to one
+  spelling per level: `trace` (trace, trc), `debug` (debug, dbg), `info` (info,
+  inf), `warn` (warn, wrn), `error` (error, err), `fatal` (fatal, critical, crit,
+  panic, dpanic). `information` and `warning` are also accepted, as harmless
+  aliases: no service here prints them. What the services really write:
+
+  | Service | Format | `level` spellings written |
+  |---|---|---|
+  | `gateway` | Go slog, JSON | `INFO` `WARN` `ERROR` `DEBUG` |
+  | `nakama` | zap, JSON | `info` `warn` `error` `debug` `dpanic` `panic` `fatal` |
+  | `gameserver-dotnet*` | one JSON object per line: `ts`, `level`, `category`, `msg`, optional `exception`, `game`, `map_id`, `server_id` | `TRACE` `DEBUG` `INFO` `WARN` `ERROR` `CRITICAL` (`NONE` exists but is never a logged level) |
+
+  **Anything else is `unknown`**: a plain line, a line that does not parse, a
+  missing field, a number, a custom word. The closed set is deliberate: an open
+  one would mint a stream per distinct value. This change does not alter what the
+  services print.
+- **Dependency: the game server's `level` needs the JSON-logs task.** On the
+  branch that holds this change alone, the C# game server still logs plain text
+  (the .NET simple console formatter: a header line such as `info: Category[0]`
+  followed by indented message lines). The task `gameserver-json-logs` of the
+  same plan (branch `feat/server/log-shipping-gameserver-json-logs`, integrated
+  with this one into `feat/server/log-shipping`) makes the game server log JSON
+  by default. Until it is in the build, and whenever
+  `GAMESERVER_LOG_FORMAT=text` is set to keep the plain output, **every game
+  server line ships with `level="unknown"`** (`env`, `service`, `game` and
+  `server_id` are unaffected, they come from compose labels). There is no regex
+  for the plain header on purpose: it would split one event over two streams, the
+  header and its indented message lines. Compose does not forward
+  `GAMESERVER_LOG_LEVEL` or `GAMESERVER_LOG_FORMAT`; that is that task's decision
+  and this one does not change it.
+- **Lines are shipped as written.** Non-JSON lines are not rewritten, dropped or
+  wrapped, and JSON lines are only read, never changed.
+
+### Retention: 7 days, enforced
+
+The image starts Loki as `./loki/loki --config.file=./loki-config.yaml` from
+`/otel-lgtm` and has no extra-args hook for Loki (Prometheus and the collector
+have one), so no flag or variable sets retention. The only way to get a retention
+period out of the bundled Loki is to own its config file: `lgtm` mounts our
+`monitoring/loki-config.yaml` read-only over `/otel-lgtm/loki-config.yaml`, the
+same pattern as `prometheus.yaml`.
+
+- **Copied verbatim** from `grafana/docker-otel-lgtm` v0.11.15
+  (`docker/loki-config.yaml`), the tag that matches `OTEL_LGTM_VERSION`:
+  `auth_enabled`, `server`, `common`, `schema_config`, `ruler`,
+  `pattern_ingester`, `ingester`, `frontend`, `query_scheduler`. The copy was
+  compared with the repository file at that tag (fetched from
+  `raw.githubusercontent.com` on 2026-11-16, and the copied blocks match it;
+  upstream has no `compactor` and no `limits_config` block, so nothing of
+  upstream is replaced by ours). It was **not** compared with the file inside the
+  image `grafana/otel-lgtm:0.11.15`; that comparison is on the first-live-run
+  list below.
+- **Ours**, marked `OURS` in the file: `compactor` (`retention_enabled: true`,
+  `delete_request_store: filesystem`, working directory under `/data/loki`, i.e.
+  the `lgtm-data` volume) and `limits_config.retention_period: 168h`. Loki deletes
+  through the compactor, so both are needed; `retention_period` alone is accepted
+  and silently never applied.
+- **On an `OTEL_LGTM_VERSION` bump, re-copy the copied blocks**, like
+  `prometheus.yaml`, then re-apply the two `OURS` blocks. Otherwise Loki runs a
+  config written for an older image:
+
+  ```bash
+  docker run --rm --entrypoint sh grafana/otel-lgtm:<tag> -c 'cat /otel-lgtm/loki-config.yaml'
+  ```
+
+- Deletion lags the cut-off by `retention_delete_delay` (Loki's default is 2h)
+  plus one compaction pass, so expect data slightly older than 7 days.
+
+**How to check it on a running stack.** Loki prints its effective configuration:
+
+```bash
+curl -s http://127.0.0.1:${LOKI_PORT:-3100}/config | grep -A3 -E '^(compactor|limits_config):'
+# want  limits_config -> retention_period: 1w   (Loki may print 168h as 1w)
+#       compactor     -> retention_enabled: true
+```
+
+`check-log-shipping.sh` does the same and accepts `168h`, `1w` or `7d`. The
+offline tests only prove that the file says 168h and enables the compactor; they
+do not prove that the running Loki loaded it, and that has not been observed yet
+(see the status note above).
+
+### Loki is loopback only, without authentication
+
+Loki has no authentication in this stack and none is added, so nothing may
+listen beyond loopback. The `lgtm` port mapping is `127.0.0.1:${LOKI_PORT}:3100`
+with a **literal** `127.0.0.1`: there is deliberately no `LOKI_BIND` variable, so
+no setting can widen it, and the override file keeps it that way. The offline
+tests assert the literal in the base file and with the override; the live check
+asserts it with `docker port`.
+
+`LOKI_PORT` differs per environment so that stacks sharing a host do not
+collide, and `environments.tsv` reserves it like the other ports (the isolation
+preflight checks it):
+
+| Environment | `LOKI_PORT` |
+|---|---|
+| dev (variable unset) | 3100 |
+| production | 3110 |
+| staging | 3120 |
+| scratch stack (`stack.sh up --scratch`) | 4100 |
+
+### How to query
+
+In Grafana: **Explore**, choose the Loki datasource, pick labels or paste LogQL.
+From the host, against the loopback port:
+
+```bash
+LOKI=http://127.0.0.1:${LOKI_PORT:-3100}
+logql() { curl -s -G "$LOKI/loki/api/v1/query_range" --data-urlencode "query=$1" --data-urlencode limit=20; }
+
+logql '{env="local", service="gateway"}'                       # one service
+logql '{env="local", level="error"}'                           # errors anywhere in the stack
+logql '{env="local", service="nakama", level=~"warn|error"}'   # a severity range
+logql '{game="cuvara"}'                                        # every game server of a game
+logql '{game="cuvara", server_id="gs-dotnet-map_02"}'          # one game server
+logql '{env="local", game=""}'                                 # stack-wide streams only (no game label)
+logql '{env="local", service="gateway"} |= "timeout"'          # text filter inside the lines
+logql '{service="gameserver-dotnet", level="warn"}'            # game server warnings: filter on the level label
+logql '{service="gameserver-dotnet"} | json | msg=~"(?i).*disconnect.*"'   # a field inside the JSON body
+```
+
+The `level` label is the way to filter by severity, for every service. The last
+example needs the game server to log JSON (see the dependency note above) and
+uses the `msg` field of its JSON line; the pattern is only an example. On a game
+server that logs plain text, `| json` finds nothing and `level` is `unknown`;
+use a text filter (`|= "..."`) there.
+
+`env` is the value of `DEPLOY_ENVIRONMENT` (`dev`, `staging`, `production`,
+`local`, `scratch`). Without `start`/`end`, `query_range` looks at the last hour.
+Label names: `curl -s $LOKI/loki/api/v1/labels`.
+
+### The check and the offline tests
+
+- **`monitoring/check-log-shipping.sh`** travels to hosts with `monitoring/` and
+  needs bash, curl and docker only. Against a **running** `monitoring` profile it
+  checks that Loki's host port is bound to `127.0.0.1` only; that Loki reports
+  retention of 168h and the compactor enabled; that a marker line written by a
+  short-lived container (started from the host's Docker CLI with the compose
+  project and a service label set by hand, so no stack container needs a socket)
+  reaches Loki with `env`, `service` and `level` and no id-like label, once as a
+  JSON line (`{"level":"WARN",...}`, expected `level="warn"`, body unchanged) and
+  once as a plain line (`level="unknown"`); and, when the `realtime` profile is
+  up, that a gateway stream and a game server stream exist with `env`,
+  `service`, `level` and, for the game server, `game` and `server_id` matching
+  its compose labels (SKIP when that profile is down). The game server stream
+  must carry a **real** level, one other than `unknown`: the check FAILs for a
+  game server that logs plain text, and says that the game server must log JSON
+  (`GAMESERVER_LOG_FORMAT=json`, a build that includes the JSON-logs task). Output is `PASS:`/`FAIL:`/`SKIP:` lines and the exit
+  status is 1 on any FAIL. Inputs: `COMPOSE_PROJECT_NAME`, `DEPLOY_ENVIRONMENT`,
+  `LOKI_PORT`, `CHECK_TIMEOUT`. **NOT_RUN**: starting the stack needs the owner's
+  go-ahead.
+
+  ```bash
+  cd backend/deploy
+  docker compose --profile monitoring --profile realtime up -d
+  bash monitoring/check-log-shipping.sh
+  ```
+
+- **`tests/test_log_shipping.py`** (Python unittest with PyYAML; no Docker, no
+  Alloy binary; CI runs it in the `test-deploy-offline` job):
+  `python -m unittest discover -s backend/deploy/tests -p "test_*.py"`. It covers
+  pinned images, no Docker socket on `alloy`, a read-only proxy with writes off,
+  an internal proxy network and no published port, the Loki port on a literal
+  `127.0.0.1` with and without the override, every monitoring bind mount existing
+  and listed in `cd.yml`'s required files, the Alloy config's structure and label
+  rules, the game server compose labels, the 168h retention and compactor, and one
+  distinct Loki port per row of `environments.tsv`. Alloy's syntax is checked only
+  structurally (balanced braces and quotes, resolvable component references);
+  Alloy itself is not run.
+
 ## Deploying to a VPS
 
 The monitoring stack is **not** a localhost-only convenience — `cd.yml` deploys
@@ -249,8 +572,9 @@ hand on the box.
    defaults instead of failing loudly.
 2. **deploy** installs them into `$RPG_DEPLOY_DIR/deploy/` (replacing the
    previous copies wholesale, so a file deleted in git disappears on the host).
-3. The env-file step writes the `GRAFANA_*` / `PROMETHEUS_*` / `OTLP_*` values
-   into `$RPG_DEPLOY_DIR/deploy/.env` (mode 0600).
+3. The env-file step writes the `GRAFANA_*` / `PROMETHEUS_*` / `OTLP_*` /
+   `LOKI_PORT` values (and `ALLOY_VERSION` when set) into
+   `$RPG_DEPLOY_DIR/deploy/.env` (mode 0600).
 4. The compose step runs `docker compose --profile monitoring up -d
    --remove-orphans`.
 
@@ -269,7 +593,14 @@ environment secret** — no new workflow, no manual `make monitoring-up`.
 | var | `GRAFANA_BIND` | `0.0.0.0` | Host interface for the published Grafana port. See firewall guidance below. |
 | var | `PROMETHEUS_PORT` / `PROMETHEUS_BIND` | `9090` / `127.0.0.1` | Loopback-only: the bundled Prometheus has no auth at all. |
 | var | `OTLP_GRPC_PORT` / `OTLP_HTTP_PORT` / `OTLP_BIND` | `4317` / `4318` / `127.0.0.1` | Loopback-only — nothing off-box pushes OTLP yet. Widen `OTLP_BIND` only when a remote collector needs it, and put TLS + auth in front first. |
-| var | `OTEL_LGTM_VERSION` | `0.11.15` | Re-copy the `otlp:`/`storage:` blocks into `prometheus.yaml` when bumping. |
+| var | `LOKI_PORT` | `3100` | Host port of Loki, always on `127.0.0.1` (no `LOKI_BIND` exists). **Set it per environment before its next deploy**: staging `3120`, production `3110` (the dev value is the default). The isolation preflight compares it with `environments.tsv`. |
+| var | `OTEL_LGTM_VERSION` | `0.11.15` | Re-copy the `otlp:`/`storage:` blocks into `prometheus.yaml` and the copied blocks of `loki-config.yaml` when bumping. |
+| var | `ALLOY_VERSION` | *(empty: compose's default, `v1.11.3`)* | Image tag of `grafana/alloy`. Empty keeps the variable out of `deploy/.env`, so the default in `docker-compose.yml` is the single source. |
+
+CD also writes `DEPLOY_ENVIRONMENT` and `COMPOSE_PROJECT_NAME` into
+`deploy/.env`; Alloy reads them to scope and label what it ships. The socket
+proxy's tag (`DOCKER_SOCKET_PROXY_VERSION`, default `0.3.0`) is not passed through
+by CD, so a deploy always uses the compose default.
 
 The healthcheck in `scripts/deploy-local.sh` curls Grafana's `/api/health` and
 is **warn-only by design**: observability is not on the gameplay critical path,
@@ -358,16 +689,19 @@ first non-dev deploy — in rough order of preference:
    ```
 
 Whatever the exposure, `GRAFANA_ADMIN_PASSWORD` must be a real generated secret
-per environment — never the `localdev` compose default. Prometheus (`:9090`) and
-OTLP (`:4317`/`:4318`) have **no authentication whatsoever**; leave them on
-loopback.
+per environment — never the `localdev` compose default. Prometheus (`:9090`),
+OTLP (`:4317`/`:4318`) and Loki (`:3100`) have **no authentication whatsoever**;
+leave them on loopback. Loki cannot be widened by a setting: its bind address is
+a literal in the compose file.
 
 ## Graduation paths
 
 **Grafana Cloud free tier (VPS / soft-launch).** Keep the exact same exporters;
 replace the local stack with **Grafana Alloy** on the host: Alloy scrapes
 `:9100/:9101/:9102`, remote-writes to Grafana Cloud Prometheus, ships logs to
-Loki. The dashboard JSON imports unchanged (datasource is a `prometheus` uid).
+Loki. The compose stack already runs an Alloy for logs only ("Logs" above); the
+move would point its `loki.write` at Grafana Cloud's Loki endpoint (with
+credentials) and keep the label contract unchanged. The dashboard JSON imports unchanged (datasource is a `prometheus` uid).
 Free tier covers ~10k series / 50GB logs — enough through soft launch.
 
 **k3s + Agones (growth).** Install `kube-prometheus-stack` (Prometheus Operator

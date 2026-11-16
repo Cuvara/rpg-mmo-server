@@ -19,6 +19,7 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Per-game app tier for a non-default game (ADR-33 leg 5) | `k8s/games/render.py`, `k8s/games/README.md` | Authored + rendered in memory by `k3s/validate-manifests.py`. **No second game is instantiated**; nothing applies it |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
 | Dev observability (Grafana + Prometheus + Loki + Tempo) | `docker-compose.yml` profile `monitoring`, `monitoring/` | ✅ Usable (`make monitoring-up`) |
+| Compose log shipping (container logs → Loki, 7-day retention) | `docker-compose.yml` services `alloy` and `docker-socket-proxy` (profile `monitoring`), `monitoring/alloy/config.alloy`, `monitoring/loki-config.yaml`, `monitoring/check-log-shipping.sh`, `tests/` | Authored and covered by offline tests that run in CI. **The live check has not been run yet** (`docs/MONITORING.md` §Logs). Needs the GitHub Environment variable `LOKI_PORT` set to `3120` (staging) and `3110` (production) before their next deploy |
 
 Docs:
 - `RUNBOOK-local-dev.md` — start/stop/debug/reset the local stack, verification steps, REDIS_ADDR wiring.
@@ -34,7 +35,9 @@ Docs:
   the open code gaps that make Redis data loss an unbounded outage, and the
   Sentinel upgrade path.
 - `MONITORING.md` — `make monitoring-up` (one `grafana/otel-lgtm` container), scrape
-  targets, the "RPG Gameplay" dashboard, metric contracts, Grafana Cloud / k3s paths.
+  targets, the "RPG Gameplay" dashboard, metric contracts, log shipping (Alloy →
+  Loki: socket-proxy decision, label contract, 7-day retention, LogQL), Grafana
+  Cloud / k3s paths.
 - `REALTIME-FLOW.md` — what happens hop by hop when a player enters a map: the
   compose flow that runs today (deploy → `.env` → handshake → direct gameplay
   connection), the Agones flow as it stands (fleets Ready, `ALLOCATED 0`, and the

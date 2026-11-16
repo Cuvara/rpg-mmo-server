@@ -404,7 +404,9 @@ jobs:
           # Everything docker-compose.yml bind-mounts must travel with it, or
           # `compose up` on a fresh host fails (or, worse, docker creates an
           # empty DIRECTORY where a config file was expected):
-          #   monitoring/  -> lgtm (prometheus.yaml, dashboards provider + JSON)
+          #   monitoring/  -> lgtm (prometheus.yaml, dashboards provider + JSON,
+          #                   loki-config.yaml for the bundled Loki) and alloy
+          #                   (alloy/config.alloy, the log collector)
           #   db/          -> postgres-game init SQL
           cp -r backend/deploy/monitoring dist/deploy/monitoring
           cp -r backend/deploy/db         dist/deploy/db
@@ -413,8 +415,11 @@ jobs:
           for f in bin/gateway bin/smoketest bin/verify-probe bin/gameserver-dotnet deploy/nakama.so \
                    scripts/deploy-local.sh \
                    deploy/monitoring/prometheus.yaml \
+                   deploy/monitoring/alerts.yaml \
                    deploy/monitoring/grafana-dashboards.yaml \
                    deploy/monitoring/dashboards/rpg-gameplay.json \
+                   deploy/monitoring/alloy/config.alloy \
+                   deploy/monitoring/loki-config.yaml \
                    deploy/db/init-gamestate.sql \
                    deploy/db/migrations/gamestate/001_init.sql \
                    deploy/db/backup.sh \
@@ -614,6 +619,7 @@ jobs:
           PROMETHEUS_PORT: ${{ vars.PROMETHEUS_PORT || '9090' }}
           OTLP_GRPC_PORT: ${{ vars.OTLP_GRPC_PORT || '4317' }}
           OTLP_HTTP_PORT: ${{ vars.OTLP_HTTP_PORT || '4318' }}
+          LOKI_PORT: ${{ vars.LOKI_PORT || '3100' }}
         run: |
           set -euo pipefail
           # Same derivation the "Write environment file" step uses, so the ports
@@ -637,6 +643,7 @@ jobs:
             ports="${ports} prometheus:${PROMETHEUS_PORT}"
             ports="${ports} otlp-grpc:${OTLP_GRPC_PORT}"
             ports="${ports} otlp-http:${OTLP_HTTP_PORT}"
+            ports="${ports} loki:${LOKI_PORT}"
           fi
           export ISOLATION_PORTS="${ports}"
           bash backend/deploy/preflight-isolation.sh
@@ -793,7 +800,16 @@ jobs:
           OTLP_GRPC_PORT: ${{ vars.OTLP_GRPC_PORT || '4317' }}
           OTLP_HTTP_PORT: ${{ vars.OTLP_HTTP_PORT || '4318' }}
           OTLP_BIND: ${{ vars.OTLP_BIND || '127.0.0.1' }}
+          # Loki (bundled in lgtm) is published on loopback ONLY: the compose file
+          # hard-codes 127.0.0.1, there is deliberately no LOKI_BIND, because Loki
+          # has no authentication. Per-environment value lives in environments.tsv
+          # (dev 3100, staging 3120, production 3110): set the GitHub Environment
+          # variable LOKI_PORT for staging and production before their next deploy.
+          LOKI_PORT: ${{ vars.LOKI_PORT || '3100' }}
           OTEL_LGTM_VERSION: ${{ vars.OTEL_LGTM_VERSION || '0.11.15' }}
+          # Empty = leave ALLOY_VERSION out of deploy/.env so compose's own pinned
+          # default applies (single source of truth for the default).
+          ALLOY_VERSION: ${{ vars.ALLOY_VERSION || '' }}
         run: |
           set -euo pipefail
           for required in JWT_SECRET JOIN_TOKEN_SECRET POSTGRES_PASSWORD NAKAMA_CONSOLE_PASSWORD; do
@@ -1101,6 +1117,8 @@ jobs:
             echo "OTLP_GRPC_PORT=${OTLP_GRPC_PORT}"
             echo "OTLP_HTTP_PORT=${OTLP_HTTP_PORT}"
             echo "OTLP_BIND=${OTLP_BIND}"
+            echo "LOKI_PORT=${LOKI_PORT}"
+            if [ -n "${ALLOY_VERSION}" ]; then echo "ALLOY_VERSION=${ALLOY_VERSION}"; fi
           } > "$envfile"
           chmod 600 "$envfile"
           echo "wrote $envfile ($(wc -l < "$envfile") vars, values redacted)"
@@ -1411,6 +1429,11 @@ jobs:
           if [ "${MONITORING_ENABLED}" != "false" ] && [ "${MONITORING_CONFIG_CHANGED:-0}" = "1" ]; then
             echo "restarting lgtm to pick up the new monitoring config"
             docker compose "${profile_args[@]}" restart lgtm
+            # alloy bind-mounts alloy/config.alloy and reads it once at start.
+            # Tolerate its absence (older deploy, or a compose file without it).
+            echo "restarting alloy to pick up the new collector config"
+            docker compose "${profile_args[@]}" restart alloy \
+              || echo "::warning::alloy not restarted (service absent or not running)"
           fi
           docker compose "${profile_args[@]}" ps
           # The gameserver opens GAME_DB_URL at boot and exits(1) if postgres-game

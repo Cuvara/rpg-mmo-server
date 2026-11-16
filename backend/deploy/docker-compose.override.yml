@@ -43,6 +43,12 @@ services:
         condition: service_healthy
       postgres-game-roles:
         condition: service_completed_successfully
+    # Log-shipping identity (Loki labels `game` and `server_id`); same namespace
+    # and rule as on the map_01 service in docker-compose.yml. The server id is
+    # the literal GAMESERVER_ID this service sets below.
+    labels:
+      cuvara.log.game: ${GAMESERVER_GAME_ID:-cuvara}
+      cuvara.log.server_id: gs-dotnet-map_02
     environment:
       # The game server holds only JOIN_TOKEN_SECRET. It must match the gateway's
       # value or every join fails, and must differ from JWT_SECRET; stack.sh

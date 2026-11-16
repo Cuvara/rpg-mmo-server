@@ -135,7 +135,7 @@ fi
 # containers as dev's.
 # --------------------------------------------------------------------------
 if command -v docker >/dev/null 2>&1; then
-	for svc in postgres postgres-game nakama redis gateway gameserver lgtm; do
+	for svc in postgres postgres-game nakama redis gateway gameserver lgtm alloy docker-proxy; do
 		cname="${COMPOSE_NAME_PREFIX}-${svc}"
 		[ -n "$(docker ps -aq --filter "name=^${cname}$" 2>/dev/null || true)" ] || continue
 		owner="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' \
