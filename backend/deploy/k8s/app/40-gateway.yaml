@@ -296,8 +296,12 @@ spec:
             #     value: "rpg-k8s-realtime-<game>"
             #   # Same value as `join-token-secret` in the game's namespace and
             #   # distinct from JWT_SECRET and from every other game's join key
-            #   # (ADR-33 D7). Missing or unparseable: the gateway starts and
-            #   # refuses EnterWorld for that game only, with a WARN naming it.
+            #   # (ADR-33 D7). Missing or unparseable: the gateway starts, WARNs
+            #   # naming the game and refuses EnterWorld for that game only. A
+            #   # key shared with JWT_SECRET or with any other game's join
+            #   # keyring is different: the gateway refuses to START, naming the
+            #   # settings and games, never a key (MULTI-GAME-CROSS-REVIEW MG-02), and
+            #   # dev-up.sh refuses the deploy before it applies any workload.
             #   - name: JOIN_TOKEN_SECRET_<GAME>
             #     valueFrom:
             #       secretKeyRef:

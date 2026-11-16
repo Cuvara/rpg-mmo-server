@@ -347,141 +347,21 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-say "apply the data tier (rpg-k8s-data)"
-$K apply -k "$HERE/data"
-
-say "wait for the data tier"
-$K rollout status -n rpg-k8s-data statefulset/postgres-meta --timeout=180s
-$K rollout status -n rpg-k8s-data statefulset/postgres-game --timeout=180s
-$K rollout status -n rpg-k8s-data statefulset/redis         --timeout=180s
-# A rebuilt image reuses the tag, so `apply` above saw no diff and the old pod is
-# still running the old plugin. Replace it explicitly, or the import was pointless.
-if [ "${nk_rebuilt:-0}" = "1" ]; then
-  say "restarting nakama to pick up the rebuilt plugin"
-  $K rollout restart -n rpg-k8s-data deploy/nakama
-fi
-# PREFLIGHT: the leaderboard the plugin refuses to boot against.
+# The app tier's Secret and every game's join keyring are checked HERE, before the
+# first workload is applied (MULTI-GAME-CROSS-REVIEW MG-02): a deploy that shares a
+# key between jwt-secret and a join keyring, or between two games' join keyrings,
+# must be refused before any pod that would hold that key exists. Everything
+# between the BEGIN and END markers is read-only; verify/tests/secret_check_test.sh
+# extracts exactly that span and runs it against a fake kubectl.
 #
-# `kills_alltime` must be authoritative -- a client-writable kill leaderboard is a
-# client that can write its own kill count -- and the Go plugin FAILS INIT rather
-# than accept one. The failure is invisible where it is read: Nakama crash-loops,
-# `rollout status` times out 300s later, and CD prints
-# `error: timed out waiting for the condition` with nothing about leaderboards.
-# The cause is only in the pod log, one `kubectl logs` away from a reader who does
-# not yet know to look.
-#
-# This defect lives in each ENVIRONMENT'S DATABASE, not in the image, so a green
-# dev deploy predicts nothing: dev was fixed by hand on 2026-09-10 and staging
-# failed the identical way on 2026-09-12. Production has never been deployed and
-# will hit it on its first run unless this gate is here.
-#
-# Skipped, not failed, when the table does not exist yet: a first-ever deploy runs
-# the Nakama migration in an init container, so there is nothing to inspect and
-# nothing wrong.
-lb_auth=$($K exec -n rpg-k8s-data postgres-meta-0 -- \
-  psql -U nakama -d nakama -tAc \
-  "SELECT authoritative FROM leaderboard WHERE id = 'kills_alltime';" 2>/dev/null | tr -d '[:space:]' || true)
-if [ "$lb_auth" = "f" ]; then
-  echo "ERROR: leaderboard kills_alltime has authoritative=false on this cluster." >&2
-  echo "  The Nakama Go plugin refuses to start against it, so Nakama will crash-loop" >&2
-  echo "  and the rollout below would time out after 300s naming only a timeout." >&2
-  echo "  Fix, keeping every existing record:" >&2
-  echo "    kubectl --context $KUBE_CONTEXT -n rpg-k8s-data exec postgres-meta-0 -- \\" >&2
-  echo "      psql -U nakama -d nakama -c \"UPDATE leaderboard SET authoritative = true WHERE id = 'kills_alltime';\"" >&2
-  echo "  Then re-run this deploy. To discard the records instead, set LEADERBOARD_MIGRATE=recreate." >&2
-  exit 1
-fi
-if [ -n "$lb_auth" ]; then
-  echo "checked: leaderboard kills_alltime is authoritative (clients cannot write their own scores)"
-fi
-
-# If the rollout fails anyway, say WHY. Without this the operator sees only
-# `timed out waiting for the condition`; the actual reason is a fatal line in the
-# pod log, and it is worth the four lines here to put it in the same output.
-if ! $K rollout status -n rpg-k8s-data deploy/nakama --timeout=300s; then
-  echo "ERROR: nakama did not become Ready. Its last log lines:" >&2
-  $K logs -n rpg-k8s-data deploy/nakama --tail=20 2>&1 | sed 's/^/  /' >&2 || true
-  exit 1
-fi
-
-# Read the images the cluster is ALREADY running, before `apply` overwrites the
-# specs with whatever tag the manifests carry. Comparing after the apply always
-# reports a change -- the manifest tag is `:develop` and the deploy pins a
-# commit -- so the fleet was drained and map_01 taken down on every run,
-# including a no-op one.
-pre_gs=$($K get fleet "$K8S_FLEET" -n rpg-k8s-realtime \
-  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
-pre_dungeon=$($K get fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime \
-  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
-pre_gw=$($K get deploy gateway -n rpg-k8s-realtime \
-  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
-
-# Render a manifest with its moving `:develop` image replaced by the image the cluster
-# is ALREADY running (or the pinned one, on a first deploy), so `apply` is image-neutral.
-#
-# Applying the raw manifests wrote `:develop` into the LIVE objects on every re-deploy,
-# and `:develop` is a hand-retagged image that lags the branch -- in the node it was
-# 307f1e8, 2026-08-17, five weeks old and older than dungeon-mode registration. The
-# dungeon manifest's `replicas: 0` only guards a FIRST deploy: once the fleet and its
-# Buffer autoscaler exist, the autoscaler holds the floor, so Agones rolled real pods
-# onto that image before the pin below. A five-week-old dungeon pod registers map_01
-# like a map server, and its registry entry outlives the pod until the heartbeat
-# expires -- a split world during every deploy. CD caught it once: the smoke test was
-# routed to dungeon-servers-...-7vh8n on map_01 and its join died with EOF, three
-# seconds before that entry expired. The gateway had the same shape.
-#
-# The pin logic below is unchanged and still owns every image CHANGE; this only stops
-# `apply` from making one of its own.
-render_image() {  # render_image <manifest> <moving-image> <image-to-use>
-  local out
-  out=$(sed "s|image: $2\$|image: $3|" "$1")
-  if ! grep -q "image: $3\$" <<<"$out"; then
-    echo "ERROR: $1 has no 'image: $2' line to pin; refusing to apply it unpinned." >&2
-    return 1
-  fi
-  if [ "$2" != "$3" ] && grep -q "image: $2\$" <<<"$out"; then
-    echo "ERROR: $1 still names $2 after pinning; refusing to apply a second moving image." >&2
-    return 1
-  fi
-  printf '%s\n' "$out"
-}
-
-say "apply the app tier (rpg-k8s-realtime)"
-# The Secret is NOT in the repo. It must already exist, or be applied from a
-# filled copy of 30-secret-template.yaml kept outside the tree.
-for f in 00-namespace.yaml 05-agones-sdk-rbac.yaml 10-rbac.yaml 20-configmaps.yaml; do
-  [ -f "$HERE/app/$f" ] && $K apply -f "$HERE/app/$f"
-done
-# --- the meta hop's opt-in has to SURVIVE this apply ------------------------
-# `20-configmaps.yaml` above is repo state and carries the plaintext defaults, so
-# every deploy resets `nakama-url` and `nakama-tls-pin` -- while `nakama-config`
-# in rpg-k8s-data is cluster-only and survives untouched. That asymmetry silently
-# half-disables the flag: Nakama keeps terminating TLS and the game server is told
-# to speak plaintext to it.
-#
-# It is worse than it looks, because it does not show up until something unrelated
-# happens. Environment variables are fixed at pod creation, so the RUNNING game
-# servers keep the values they started with and everything keeps working -- until
-# the next pod is created, whenever that is, by a crash or a scale or a rollout
-# nobody connected to this. Measured 2026-09-13: a CD run reset the ConfigMap, a
-# probe still reported REWARDED off the stale pods, and the cluster was one pod
-# replacement away from every reward RPC failing.
-#
-# So `nakama-config` is the ONE source of truth, and the game server's half is
-# derived from it here rather than maintained in parallel and checked later.
-nk_on=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
-if [ -n "$nk_on" ]; then
-  cur_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
-  # Swap the scheme rather than hardcode a host: the host belongs to the manifest
-  # and must keep coming from there.
-  https_url="https://${cur_url#http://}"
-  case "$cur_url" in https://*) https_url="$cur_url" ;; esac
-  $K patch configmap gameserver-config -n rpg-k8s-realtime --type=merge \
-    -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
-  echo "restored: the meta hop is on in this cluster, so gameserver-config was moved back to"
-  echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
-fi
-
+# rpg-app-secrets lives in rpg-k8s-realtime, which on a first deploy would only be
+# created by the app-tier apply below. So the namespace (not a workload) goes first,
+# as the data namespace does above, and gives the operator somewhere to put the
+# Secret. gateway-config may not exist yet either: an absent ConfigMap or `games`
+# key means cuvara only, the gateway's own default.
+say "apply the app namespace, then check its secrets and the join keyrings"
+$K apply -f "$HERE/app/00-namespace.yaml"
+# BEGIN app-secret and join-keyring checks (read-only)
 if ! $K get secret rpg-app-secrets -n rpg-k8s-realtime >/dev/null 2>&1; then
   echo "ERROR: secret rpg-k8s-realtime/rpg-app-secrets is absent." >&2
   echo "Fill a copy of app/30-secret-template.yaml OUTSIDE the repo and apply it first." >&2
@@ -697,6 +577,142 @@ done
 echo "checked: the join keyrings of $checked_games each have a key and share none with jwt-secret"
 echo "         or with each other; each non-default game's fleet Secret holds the gateway's keyring"
 unset game game_ns gw_games checked_games GAMES_LIST KEYRING_KEYS
+# END app-secret and join-keyring checks
+
+say "apply the data tier (rpg-k8s-data)"
+$K apply -k "$HERE/data"
+
+say "wait for the data tier"
+$K rollout status -n rpg-k8s-data statefulset/postgres-meta --timeout=180s
+$K rollout status -n rpg-k8s-data statefulset/postgres-game --timeout=180s
+$K rollout status -n rpg-k8s-data statefulset/redis         --timeout=180s
+# A rebuilt image reuses the tag, so `apply` above saw no diff and the old pod is
+# still running the old plugin. Replace it explicitly, or the import was pointless.
+if [ "${nk_rebuilt:-0}" = "1" ]; then
+  say "restarting nakama to pick up the rebuilt plugin"
+  $K rollout restart -n rpg-k8s-data deploy/nakama
+fi
+# PREFLIGHT: the leaderboard the plugin refuses to boot against.
+#
+# `kills_alltime` must be authoritative -- a client-writable kill leaderboard is a
+# client that can write its own kill count -- and the Go plugin FAILS INIT rather
+# than accept one. The failure is invisible where it is read: Nakama crash-loops,
+# `rollout status` times out 300s later, and CD prints
+# `error: timed out waiting for the condition` with nothing about leaderboards.
+# The cause is only in the pod log, one `kubectl logs` away from a reader who does
+# not yet know to look.
+#
+# This defect lives in each ENVIRONMENT'S DATABASE, not in the image, so a green
+# dev deploy predicts nothing: dev was fixed by hand on 2026-09-10 and staging
+# failed the identical way on 2026-09-12. Production has never been deployed and
+# will hit it on its first run unless this gate is here.
+#
+# Skipped, not failed, when the table does not exist yet: a first-ever deploy runs
+# the Nakama migration in an init container, so there is nothing to inspect and
+# nothing wrong.
+lb_auth=$($K exec -n rpg-k8s-data postgres-meta-0 -- \
+  psql -U nakama -d nakama -tAc \
+  "SELECT authoritative FROM leaderboard WHERE id = 'kills_alltime';" 2>/dev/null | tr -d '[:space:]' || true)
+if [ "$lb_auth" = "f" ]; then
+  echo "ERROR: leaderboard kills_alltime has authoritative=false on this cluster." >&2
+  echo "  The Nakama Go plugin refuses to start against it, so Nakama will crash-loop" >&2
+  echo "  and the rollout below would time out after 300s naming only a timeout." >&2
+  echo "  Fix, keeping every existing record:" >&2
+  echo "    kubectl --context $KUBE_CONTEXT -n rpg-k8s-data exec postgres-meta-0 -- \\" >&2
+  echo "      psql -U nakama -d nakama -c \"UPDATE leaderboard SET authoritative = true WHERE id = 'kills_alltime';\"" >&2
+  echo "  Then re-run this deploy. To discard the records instead, set LEADERBOARD_MIGRATE=recreate." >&2
+  exit 1
+fi
+if [ -n "$lb_auth" ]; then
+  echo "checked: leaderboard kills_alltime is authoritative (clients cannot write their own scores)"
+fi
+
+# If the rollout fails anyway, say WHY. Without this the operator sees only
+# `timed out waiting for the condition`; the actual reason is a fatal line in the
+# pod log, and it is worth the four lines here to put it in the same output.
+if ! $K rollout status -n rpg-k8s-data deploy/nakama --timeout=300s; then
+  echo "ERROR: nakama did not become Ready. Its last log lines:" >&2
+  $K logs -n rpg-k8s-data deploy/nakama --tail=20 2>&1 | sed 's/^/  /' >&2 || true
+  exit 1
+fi
+
+# Read the images the cluster is ALREADY running, before `apply` overwrites the
+# specs with whatever tag the manifests carry. Comparing after the apply always
+# reports a change -- the manifest tag is `:develop` and the deploy pins a
+# commit -- so the fleet was drained and map_01 taken down on every run,
+# including a no-op one.
+pre_gs=$($K get fleet "$K8S_FLEET" -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+pre_dungeon=$($K get fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+pre_gw=$($K get deploy gateway -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+
+# Render a manifest with its moving `:develop` image replaced by the image the cluster
+# is ALREADY running (or the pinned one, on a first deploy), so `apply` is image-neutral.
+#
+# Applying the raw manifests wrote `:develop` into the LIVE objects on every re-deploy,
+# and `:develop` is a hand-retagged image that lags the branch -- in the node it was
+# 307f1e8, 2026-08-17, five weeks old and older than dungeon-mode registration. The
+# dungeon manifest's `replicas: 0` only guards a FIRST deploy: once the fleet and its
+# Buffer autoscaler exist, the autoscaler holds the floor, so Agones rolled real pods
+# onto that image before the pin below. A five-week-old dungeon pod registers map_01
+# like a map server, and its registry entry outlives the pod until the heartbeat
+# expires -- a split world during every deploy. CD caught it once: the smoke test was
+# routed to dungeon-servers-...-7vh8n on map_01 and its join died with EOF, three
+# seconds before that entry expired. The gateway had the same shape.
+#
+# The pin logic below is unchanged and still owns every image CHANGE; this only stops
+# `apply` from making one of its own.
+render_image() {  # render_image <manifest> <moving-image> <image-to-use>
+  local out
+  out=$(sed "s|image: $2\$|image: $3|" "$1")
+  if ! grep -q "image: $3\$" <<<"$out"; then
+    echo "ERROR: $1 has no 'image: $2' line to pin; refusing to apply it unpinned." >&2
+    return 1
+  fi
+  if [ "$2" != "$3" ] && grep -q "image: $2\$" <<<"$out"; then
+    echo "ERROR: $1 still names $2 after pinning; refusing to apply a second moving image." >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+say "apply the app tier (rpg-k8s-realtime)"
+# The Secret is NOT in the repo. It must already exist, or be applied from a
+# filled copy of 30-secret-template.yaml kept outside the tree.
+for f in 00-namespace.yaml 05-agones-sdk-rbac.yaml 10-rbac.yaml 20-configmaps.yaml; do
+  [ -f "$HERE/app/$f" ] && $K apply -f "$HERE/app/$f"
+done
+# --- the meta hop's opt-in has to SURVIVE this apply ------------------------
+# `20-configmaps.yaml` above is repo state and carries the plaintext defaults, so
+# every deploy resets `nakama-url` and `nakama-tls-pin` -- while `nakama-config`
+# in rpg-k8s-data is cluster-only and survives untouched. That asymmetry silently
+# half-disables the flag: Nakama keeps terminating TLS and the game server is told
+# to speak plaintext to it.
+#
+# It is worse than it looks, because it does not show up until something unrelated
+# happens. Environment variables are fixed at pod creation, so the RUNNING game
+# servers keep the values they started with and everything keeps working -- until
+# the next pod is created, whenever that is, by a crash or a scale or a rollout
+# nobody connected to this. Measured 2026-09-13: a CD run reset the ConfigMap, a
+# probe still reported REWARDED off the stale pods, and the cluster was one pod
+# replacement away from every reward RPC failing.
+#
+# So `nakama-config` is the ONE source of truth, and the game server's half is
+# derived from it here rather than maintained in parallel and checked later.
+nk_on=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+if [ -n "$nk_on" ]; then
+  cur_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+  # Swap the scheme rather than hardcode a host: the host belongs to the manifest
+  # and must keep coming from there.
+  https_url="https://${cur_url#http://}"
+  case "$cur_url" in https://*) https_url="$cur_url" ;; esac
+  $K patch configmap gameserver-config -n rpg-k8s-realtime --type=merge \
+    -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
+  echo "restored: the meta hop is on in this cluster, so gameserver-config was moved back to"
+  echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
+fi
 
 # The two STATIC Nakama keys, asserted for the same reason as the JWT above: this
 # Secret is applied out-of-band, so nothing else looks at it, and a value left at

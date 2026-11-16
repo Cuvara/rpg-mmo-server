@@ -31,10 +31,16 @@ because Agones 1.59.0 names pods fleet + 12. Nothing is instantiated for a real
 second game and `dev-up.sh` applies none of it. Read `games/README.md`.
 
 `dev-up.sh` does **check** every game the gateway serves before it applies any
-workload (MULTI-GAME-CROSS-REVIEW MG-02). It reads `gateway-config`'s `games`
-key, parsed like the gateway's `GAMES` (blank means cuvara only, an invalid
-entry is refused), and refuses to continue when:
+workload (MULTI-GAME-CROSS-REVIEW MG-02). Only the two namespaces
+(`data/namespace.yaml`, `app/00-namespace.yaml`) are applied first, so the
+Secrets have somewhere to live on a first deploy; the checks then run, read-only,
+before the data tier, the app tier or any fleet is applied, so a refused deploy
+leaves no new pod holding a shared key. It reads `gateway-config`'s `games` key,
+parsed like the gateway's `GAMES` (blank, or a ConfigMap that does not exist yet,
+means cuvara only; an invalid entry is refused), and refuses to continue when:
 
+- `rpg-k8s-realtime/rpg-app-secrets` is absent, or its `jwt-secret` differs from
+  `rpg-k8s-data/nakama`'s `JWT_SECRET`;
 - any key of any game's join keyring (`join-token-secret` for cuvara, which is
   always checked, and `join-token-secret-<game>` in `rpg-k8s-realtime`'s
   `rpg-app-secrets` for every other game) equals any `jwt-secret` key;
@@ -48,6 +54,11 @@ entry is refused), and refuses to continue when:
 
 Keyrings are compared key by key after the gateway's parsing (split on `,`,
 trim, drop empty entries). Messages name games and Secret keys, never a value.
+The block sits between the `# BEGIN app-secret and join-keyring checks` and
+`# END app-secret and join-keyring checks` lines of `dev-up.sh`;
+`verify/tests/secret_check_test.sh` extracts exactly that span, runs it against
+a fake `kubectl` on a nonexistent context, and fails if the block ever moves
+below the first workload apply.
 
 ## Bring dev up
 
@@ -62,9 +73,11 @@ pins the image tags, retires the legacy fleet and the compose stack, and starts
 the published host ports.
 
 The Secret is **not** in the repo. `app/30-secret-template.yaml` is a template;
-fill a copy outside the tree and apply it before the first run. Its
-`join-token-secret` must share no key with its `jwt-secret`; with more than one
-game, see the per-game join keyring checks under "Other games" above.
+fill a copy outside the tree and apply it before the first run (on a fresh
+cluster, `kubectl apply -f app/00-namespace.yaml` first, or let `dev-up.sh`
+create the namespace and stop at the check). Its `join-token-secret` must share
+no key with its `jwt-secret`; with more than one game, see the per-game join
+keyring checks under "Other games" above.
 
 ### Ports
 
