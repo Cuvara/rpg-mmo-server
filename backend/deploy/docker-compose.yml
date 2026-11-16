@@ -50,7 +50,7 @@ services:
   # separate from the Nakama meta DB above — see root CLAUDE.md ("PostgreSQL:
   # 2 instances"). Host port defaults to 5433 so both can run side by side.
   # Host-run gameserver connects with:
-  #   GAME_DB_URL=postgres://game:localdev@localhost:5433/gamestate?sslmode=disable
+  #   GAME_DB_URL=postgres://gamestate:localdev-app@localhost:5433/gamestate?sslmode=disable
   postgres-game:
     image: postgres:16.4-alpine
     container_name: ${COMPOSE_NAME_PREFIX:-rpg}-postgres-game
@@ -75,6 +75,25 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+
+  # The script creates the fixed role gamestate; POSTGRES_GAME_APP_USER must match it.
+  postgres-game-roles:
+    image: postgres:16.4-alpine
+    restart: "no"
+    depends_on:
+      postgres-game:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres-game
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_GAME_USER:-game}
+      PGPASSWORD: ${POSTGRES_GAME_PASSWORD:-localdev}
+      PGDATABASE: ${POSTGRES_GAME_DB:-gamestate}
+      GAMESTATE_ROLE_PASSWORD: ${POSTGRES_GAME_APP_PASSWORD:-localdev-app}
+    volumes:
+      - ./db/provision-default-role.sh:/mnt/provision-default-role.sh:ro
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ['tr -d "\r" < /mnt/provision-default-role.sh > /tmp/provision-default-role.sh && bash /tmp/provision-default-role.sh']
 
   nakama:
     image: heroiclabs/nakama:${NAKAMA_VERSION:-3.40.0}
@@ -394,8 +413,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      postgres-game:
-        condition: service_healthy
+      postgres-game-roles:
+        condition: service_completed_successfully
     # NOTE: configuration is done through the environment below, not through
     # args. (A previous version of this comment claimed the C# arg parser only
     # matches space-separated flags — it does not: GameServer/Program.cs GetArg
@@ -655,7 +674,7 @@ services:
       # .NET's own validation, which refuses a self-signed Nakama -- correctly.
       # Set together with an https URL or the server refuses to start.
       NAKAMA_TLS_PIN: ${NAKAMA_TLS_PIN:-}
-      GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
+      GAME_DB_URL: postgres://${POSTGRES_GAME_APP_USER:-gamestate}:${POSTGRES_GAME_APP_PASSWORD:-localdev-app}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     # Meta-hop TLS (ADR-24): the file NAKAMA_TLS_PIN names. Uncomment with that
     # variable. The certificate is PUBLIC and the key is not needed here -- do not
     # mount the pair into a service that terminates no TLS.

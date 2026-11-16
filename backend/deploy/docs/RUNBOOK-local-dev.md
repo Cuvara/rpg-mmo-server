@@ -508,7 +508,9 @@ export REDIS_ADDR=localhost:6379            # match REDIS_PORT if you changed it
 export REDIS_PASSWORD=                      # must equal .env REDIS_PASSWORD
 export META_DB_URL='postgres://nakama:localdev@localhost:5432/nakama?sslmode=disable'
 # Game state DB — omit to keep the in-memory player store (state lost on restart).
-export GAME_DB_URL='postgres://game:localdev@localhost:5433/gamestate?sslmode=disable'
+# The restricted app login (MG-01), not the bootstrap user `game`; compose creates it
+# via the postgres-game-roles one-shot service (see docs/DATABASE.md).
+export GAME_DB_URL='postgres://gamestate:localdev-app@localhost:5433/gamestate?sslmode=disable'
 
 cd backend/gameserver-dotnet && dotnet run --project GameServer -- --addr=:9000 --map-id=map_01
 cd backend/gateway           && go run ./cmd/gateway/ --addr=:8000

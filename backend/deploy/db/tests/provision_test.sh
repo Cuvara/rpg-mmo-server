@@ -46,8 +46,8 @@ for game in Foo 1foo abcdefghijklmnopqrstuvwxy foo-bar foo_bar '' gs map dungeon
 		gs|map|dungeon) check "reserved id [$game] has a named reason" grep -q "reserved game id: $game" "$WORK/stderr" ;;
 	esac
 done
-check 'default game refusal names its existing database and user' \
-	grep -q 'keeps the existing gamestate database and its existing user' "$WORK/stderr"
+check 'default game refusal names its converger and existing database' \
+	grep -q 'use provision-default-role.sh for its existing gamestate database' "$WORK/stderr"
 run
 check 'missing game id is refused without psql' refused
 for limit in 0 -1 1.5 abc '' 01 2147483648 99999999999999999999; do

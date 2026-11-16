@@ -125,7 +125,7 @@ if [ "$SCRATCH" -eq 1 ]; then
 		# ADVERTISED to clients in MsgEnterWorldResp.ServerAddr — must be the
 		# PUBLISHED port, not the in-container listen port.
 		echo "GAMESERVER_PUBLIC_ADDR=:9300"
-		echo "GAME_DB_URL=postgres://\${POSTGRES_GAME_USER:-game}:\${POSTGRES_GAME_PASSWORD:-localdev}@localhost:6433/\${POSTGRES_GAME_DB:-gamestate}?sslmode=disable"
+		echo "GAME_DB_URL=postgres://\${POSTGRES_GAME_APP_USER:-gamestate}:\${POSTGRES_GAME_APP_PASSWORD:-localdev-app}@localhost:6433/\${POSTGRES_GAME_DB:-gamestate}?sslmode=disable"
 		# Own image tags, so building a scratch stack from a branch never retags the
 		# images the default stack recreates from (`:dev`).
 		echo "GATEWAY_IMAGE=${GATEWAY_IMAGE:-rpg-mmo/gateway:scratch}"
