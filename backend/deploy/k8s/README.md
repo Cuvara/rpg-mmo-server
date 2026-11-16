@@ -53,7 +53,11 @@ means cuvara only; an invalid entry is refused), and refuses to continue when:
   `join-token-secret-<game>`.
 
 Keyrings are compared key by key after the gateway's parsing (split on `,`,
-trim, drop empty entries). Messages name games and Secret keys, never a value.
+trim, drop empty entries). The trim is Go's `strings.TrimSpace` reproduced byte
+for byte in any locale: ASCII whitespace plus U+0085, U+00A0, U+1680,
+U+2000-U+200A, U+2028, U+2029, U+202F, U+205F and U+3000 at either end of an
+entry, never inside one. `gateway-config`'s `games` entries are trimmed the same
+way. Messages name games and Secret keys, never a value.
 The block sits between the `# BEGIN app-secret and join-keyring checks` and
 `# END app-secret and join-keyring checks` lines of `dev-up.sh`;
 `verify/tests/secret_check_test.sh` extracts exactly that span, runs it against

@@ -385,7 +385,7 @@ echo "checked: nakama's JWT_SECRET matches the gateway's jwt-secret"
 # Game-server pods hold only their game's join secret (ADR-33), so these
 # comparisons must happen at deploy time, where every key is available. Every
 # one is a comma-separated rotation keyring at the gateway (shared/jwt
-# ParseKeyring: split on ',', trim whitespace, drop empty entries), so compare
+# ParseKeyring: split on ',', strings.TrimSpace, drop empty entries), so compare
 # them key by key, for EVERY game the gateway serves, not only cuvara
 # (MULTI-GAME-CROSS-REVIEW MG-02):
 #   - a join key equal to ANY jwt key lets that game's pods mint gateway tokens
@@ -394,19 +394,51 @@ echo "checked: nakama's JWT_SECRET matches the gateway's jwt-secret"
 #     the other game's servers verify (ADR-33 D7).
 # Messages name games and Secret key names only. Never log a value, its length
 # or its position in the list.
+#
+# Go's strings.TrimSpace, byte for byte and in any locale. [[:space:]] is not:
+# its members depend on the locale, so under LC_ALL=C a leading U+00A0 survived
+# here while the gateway trimmed it, and a key shared with jwt-secret passed this
+# check and then stopped the gateway after workloads were applied. The list is
+# exactly what Go's unicode.IsSpace accepts (ASCII \t \n \v \f \r and space;
+# U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F,
+# U+3000), as UTF-8 bytes, stripped from both ends until none is left. Only
+# whole sequences match, as Go decodes them; inner whitespace is kept. CR goes
+# in through a variable and a plain array assignment: Cygwin/MSYS bash drops a CR
+# written as a $'\r' word in any array assignment, and any CR at all in a
+# `local -a name=(...)` one, which would silently stop CR from being trimmed (the
+# parity test caught it).
+go_trim_space() { # string -> TRIMMED
+  local LC_ALL=C s="$1" prev w cr
+  local -a ws
+  cr=$'\r'
+  ws=($'\t' $'\n' $'\v' $'\f' "$cr" ' '
+    $'\xc2\x85' $'\xc2\xa0' $'\xe1\x9a\x80'
+    $'\xe2\x80\x80' $'\xe2\x80\x81' $'\xe2\x80\x82' $'\xe2\x80\x83' $'\xe2\x80\x84'
+    $'\xe2\x80\x85' $'\xe2\x80\x86' $'\xe2\x80\x87' $'\xe2\x80\x88' $'\xe2\x80\x89'
+    $'\xe2\x80\x8a' $'\xe2\x80\xa8' $'\xe2\x80\xa9' $'\xe2\x80\xaf' $'\xe2\x81\x9f'
+    $'\xe3\x80\x80')
+  while :; do
+    prev=$s
+    for w in "${ws[@]}"; do
+      s=${s#"$w"}
+      s=${s%"$w"}
+    done
+    [ "$s" != "$prev" ] || break
+  done
+  TRIMMED=$s
+}
 keyring_keys() { # spec -> KEYRING_KEYS (trimmed, non-empty entries)
-  local remaining="$1" key
+  local LC_ALL=C remaining="$1"
   KEYRING_KEYS=()
   while :; do
-    key=${remaining%%,*}
-    key="${key#"${key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-    [ -z "$key" ] || KEYRING_KEYS+=("$key")
+    go_trim_space "${remaining%%,*}"
+    [ -z "$TRIMMED" ] || KEYRING_KEYS+=("$TRIMMED")
     case "$remaining" in
       *,*) remaining=${remaining#*,} ;;
       *) break ;;
     esac
   done
+  TRIMMED=
 }
 # gameid.ValidGameID: ^[a-z][a-z0-9]{1,23}$ in ASCII, minus the reserved ids.
 # Spelled as explicit character lists so no locale can widen [a-z].
@@ -422,20 +454,21 @@ valid_game_id() { # id -> 0 when valid
   [ "${#1}" -ge 2 ] && [ "${#1}" -le 24 ]
 }
 # The gateway's session.ParseGames, so this check covers exactly the games the
-# gateway will serve: blank = cuvara only; otherwise split on ',', trim, fold
-# duplicates, and refuse any entry that is not a valid game id -- an empty entry
-# included, because the gateway refuses to start on one too.
+# gateway will serve: blank (after strings.TrimSpace) = cuvara only; otherwise
+# split on ',', trim each entry the same way, fold duplicates, and refuse any
+# entry that is not a valid game id -- an empty entry included, because the
+# gateway refuses to start on one too.
 parse_games() { # raw -> GAMES_LIST; 1 on an invalid entry
-  local remaining="$1" game seen other
+  local LC_ALL=C remaining="$1" game seen other
   GAMES_LIST=()
-  if [ -z "${remaining//[[:space:]]/}" ]; then
+  go_trim_space "$remaining"
+  if [ -z "$TRIMMED" ]; then
     GAMES_LIST=(cuvara)
     return 0
   fi
   while :; do
-    game=${remaining%%,*}
-    game="${game#"${game%%[![:space:]]*}"}"
-    game="${game%"${game##*[![:space:]]}"}"
+    go_trim_space "${remaining%%,*}"
+    game=$TRIMMED
     if ! valid_game_id "$game"; then
       echo "ERROR: gateway-config's games has an invalid entry '$game'; the gateway refuses to start on it." >&2
       return 1
@@ -576,7 +609,7 @@ for game in "${GAMES_LIST[@]}"; do
 done
 echo "checked: the join keyrings of $checked_games each have a key and share none with jwt-secret"
 echo "         or with each other; each non-default game's fleet Secret holds the gateway's keyring"
-unset game game_ns gw_games checked_games GAMES_LIST KEYRING_KEYS
+unset game game_ns gw_games checked_games GAMES_LIST KEYRING_KEYS TRIMMED
 # END app-secret and join-keyring checks
 
 say "apply the data tier (rpg-k8s-data)"

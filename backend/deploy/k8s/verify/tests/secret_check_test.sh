@@ -185,22 +185,31 @@ FAKE
 chmod +x "$WORK/k8s-bin/kubectl"
 
 run_k8s_case() { # name expected-status expected-output-substring-or-'' FAKE_*=value...
+	# CASE_LC_ALL, when set, is the LC_ALL the check block runs under.
 	local name="k8s $1" want="$2" expect="$3" rc=0 kv key
-	local -a leak=(-e test-jwt-a -e test-join-a -e test-join-b -e test-jwt-new -e test-jwt-old)
+	local -a leak=(-e test-jwt-a -e test-join-a -e test-join-b -e test-jwt-new -e test-jwt-old) lc=()
 	shift 3
+	if [ -n "${CASE_LC_ALL:-}" ]; then
+		name="$name [LC_ALL=$CASE_LC_ALL]"
+		lc=(LC_ALL="$CASE_LC_ALL")
+	fi
 	# Every key of every fake keyring this case passes must stay out of the output.
+	# Each fake key has an ASCII core of 4+ characters, so every such run is a leak
+	# pattern: a key printed with its Unicode edge whitespace trimmed (or not) still
+	# contains it.
 	for kv in "$@"; do
 		case "$kv" in
 		FAKE_GAMES=* | FAKE_APP_SECRET_ABSENT=*) ;;
 		FAKE_*=*)
-			for key in $(printf '%s' "${kv#*=}" | tr ',' ' '); do leak+=(-e "$key"); done ;;
+			while IFS= read -r key; do leak+=(-e "$key"); done \
+				< <(printf '%s' "${kv#*=}" | LC_ALL=C grep -oE '[A-Za-z0-9_-]{4,}') ;;
 		esac
 	done
 	: > "$WORK/guard.log"
 	env -i PATH="$WORK/k8s-bin:$WORK/bin:$PATH" \
 		SECRET_CHECK_GUARD_LOG="$WORK/guard.log" \
 		K='kubectl --context k3d-rpg-secret-check-does-not-exist' \
-		"$@" \
+		${lc[@]+"${lc[@]}"} "$@" \
 		bash -euo pipefail "$WORK/check.sh" > "$WORK/output" 2>&1 || rc=$?
 	if [ "$rc" -eq "$want" ]; then
 		ok "$name: status"
@@ -270,6 +279,172 @@ run_k8s_case games-configmap-absent 0 'join keyrings of cuvara each' \
 	FAKE_JWT='test-jwt-a' FAKE_JOIN='join-cuvara' FAKE_JOIN_EMBER='test-jwt-a'
 run_k8s_case games-key-empty 0 'join keyrings of cuvara each' \
 	FAKE_JWT='test-jwt-a' FAKE_JOIN='join-cuvara' FAKE_GAMES=''
+
+# Unicode whitespace (MG-02 verify on 2a9dbec): the gateway trims keyring entries
+# and games entries with Go's strings.TrimSpace (unicode.IsSpace), whatever the
+# locale. A check that trims less passes a shared key that the gateway then
+# refuses, after workloads were applied; one that trims more refuses keys the
+# gateway keeps distinct. Each case runs under LC_ALL=C and, when the host has
+# one, under a UTF-8 locale.
+UTF8_LOCALE=
+for loc in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do
+	# The locale exists when bash starts under it without a warning and counts a
+	# two-byte character as one.
+	if [ "$(env LC_ALL="$loc" PROBE=$'\xc3\xa9' bash -c 'printf %s "${#PROBE}"' 2>&1)" = 1 ]; then
+		UTF8_LOCALE=$loc
+		break
+	fi
+done
+run_k8s_case_locales() { # run_k8s_case arguments, once per locale
+	CASE_LC_ALL=C run_k8s_case "$@"
+	if [ -n "$UTF8_LOCALE" ]; then
+		CASE_LC_ALL=$UTF8_LOCALE run_k8s_case "$@"
+	else
+		echo "skip - k8s $1 under a UTF-8 locale: none of C.UTF-8, C.utf8, en_US.UTF-8, en_US.utf8 exists"
+	fi
+}
+NBSP=$'\xc2\xa0'          # U+00A0
+IDEO_SPACE=$'\xe3\x80\x80' # U+3000
+EM_SPACE=$'\xe2\x80\x83'   # U+2003
+LINE_SEP=$'\xe2\x80\xa8'   # U+2028
+NEL=$'\xc2\x85'            # U+0085
+# Cygwin/MSYS bash drops a CR written as a $'\r' word in an array assignment, so
+# CR enters the parity table below through this variable.
+CR=$'\r'
+# The review's configuration with the retiring auth key behind a U+00A0: the
+# gateway sees auth-old and refuses to start, so the check must refuse too.
+run_k8s_case_locales unicode-nbsp-join-key-is-auth-key 1 'game ember' \
+	FAKE_JWT='auth-new,auth-old' FAKE_JOIN='join-cuvara' FAKE_GAMES='cuvara,ember' \
+	FAKE_JOIN_EMBER="join-ember,${NBSP}auth-old" FAKE_NS_JOIN_EMBER="join-ember,${NBSP}auth-old"
+run_k8s_case_locales unicode-ideographic-suffix-shared-by-games 1 'games cuvara and ember share a join key' \
+	FAKE_JWT='test-jwt-a' FAKE_JOIN="join-shared${IDEO_SPACE}" FAKE_GAMES='cuvara,ember' \
+	FAKE_JOIN_EMBER='join-ember,join-shared' FAKE_NS_JOIN_EMBER='join-ember,join-shared'
+# Inner whitespace is part of the key, as at the gateway: these three keys are
+# distinct, and a check that dropped inner U+2003 or space would call them equal.
+run_k8s_case_locales unicode-inner-em-space-kept 0 'cuvara, ember' \
+	FAKE_JWT='mid-alphamid-beta' FAKE_JOIN="mid-alpha${EM_SPACE}mid-beta" FAKE_GAMES='cuvara,ember' \
+	FAKE_JOIN_EMBER='mid-alpha mid-beta' FAKE_NS_JOIN_EMBER='mid-alpha mid-beta'
+# The ember namespace copy differs from the gateway's only by edge Unicode
+# whitespace, which both parse away: the same ordered key list.
+run_k8s_case_locales unicode-ns-secret-edge-whitespace-equal 0 'cuvara, ember' \
+	FAKE_JWT='test-jwt-a' FAKE_JOIN='join-cuvara' FAKE_GAMES='cuvara,ember' \
+	FAKE_JOIN_EMBER='join-ember-new,join-ember' \
+	FAKE_NS_JOIN_EMBER="${IDEO_SPACE}join-ember-new${NBSP},${LINE_SEP}join-ember${NEL}"
+# games entries: trimmed the same way, blank after trimming = cuvara only, and an
+# inner U+00A0 leaves an invalid id that the gateway refuses.
+run_k8s_case_locales unicode-games-entry-trimmed 0 'cuvara, ember' \
+	FAKE_JWT='test-jwt-a' FAKE_JOIN='join-cuvara' FAKE_GAMES="cuvara,${NBSP}ember${IDEO_SPACE}" \
+	FAKE_JOIN_EMBER='join-ember' FAKE_NS_JOIN_EMBER='join-ember'
+run_k8s_case_locales unicode-games-blank 0 'join keyrings of cuvara each' \
+	FAKE_JWT='test-jwt-a' FAKE_JOIN='join-cuvara' FAKE_GAMES="${IDEO_SPACE}${NBSP}"
+run_k8s_case_locales unicode-games-inner-nbsp-invalid 1 'games has an invalid entry' \
+	FAKE_JWT='test-jwt-a' FAKE_JOIN='join-cuvara' FAKE_GAMES="cuvara,em${NBSP}ber"
+
+# Parity: keyring_keys, extracted from the check block, against Go's own
+# split + strings.TrimSpace + drop-empty (shared/jwt ParseKeyring) over a table of
+# inputs, plus, generated by Go itself, every rune unicode.IsSpace accepts and a
+# few near misses at an edge, inside and alone. Only the input count is printed.
+PARITY="$WORK/parity"
+mkdir -p "$PARITY"
+awk '/^go_trim_space\(\) \{/, /^}/ { print } /^keyring_keys\(\) \{/, /^}/ { print }' \
+	"$WORK/check.sh" > "$PARITY/funcs.sh"
+if grep -q '^go_trim_space() {' "$PARITY/funcs.sh" && grep -q '^keyring_keys() {' "$PARITY/funcs.sh"; then
+	ok "k8s parity: go_trim_space and keyring_keys extracted from the check block"
+else
+	bad "k8s parity: go_trim_space and keyring_keys extracted from the check block"
+fi
+parity_inputs=(
+	'' ',' ' , ' 'a' 'a,b' ' a , b ' $'\ta\n,'"${CR}b"$'\v\f' "${CR}${CR}" "k${CR}k" 'a,,b' 'a b' ' a b '
+	"${NBSP}auth-old" "join-ember,${NBSP}auth-old" "k${IDEO_SPACE}" "${IDEO_SPACE}"
+	"${IDEO_SPACE}${EM_SPACE} "$'\t'"k"$'\n'"${NEL}" "mid${EM_SPACE}inner" "${NBSP}${NBSP},${NBSP}"
+	$'\xe1\x9a\x80x\xe2\x81\x9f' $'\xe2\x80\xafx\xe2\x80\xa9' $'\xe2\x80\x8bx\xe2\x80\x8b'
+	$'\xef\xbb\xbfx\xef\xbb\xbf' $'\x1cx\x1f' $'\xc2\xadx'
+	# Invalid UTF-8 at the edges: lone continuation bytes, truncated sequences, a
+	# stray lead byte before a valid U+00A0.
+	$'\x85x\xa0' $'\xc2x\xc2' $'\xe3\x80x\xe3\x80' $'\xe0\xc2\xa0x\xc2\xa0\xe0' $'x\xe0\xc2\xa0'
+	$'\xff\xc2\xa0x' $'\x80\x80\x80x'
+)
+printf '%s\0' "${parity_inputs[@]}" > "$PARITY/base.bin"
+cat > "$PARITY/main.go" <<'GO'
+// Usage: go run main.go base.bin inputs.bin go.out
+// Writes inputs.bin (base.bin plus generated cases, NUL-separated) and, for each
+// input, the keys of split(",") + strings.TrimSpace + drop-empty, each followed by
+// 0x1f, the input closed by 0x1e.
+package main
+
+import (
+	"bytes"
+	"os"
+	"strings"
+	"unicode"
+)
+
+func main() {
+	base, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		os.Exit(2)
+	}
+	inputs := bytes.Split(base, []byte{0})
+	inputs = inputs[:len(inputs)-1]
+	var runes []rune
+	for r := rune(1); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) {
+			runes = append(runes, r)
+		}
+	}
+	runes = append(runes, 0x1c, 0x1d, 0x1e, 0x1f, 0xad, 0x180e, 0x200b, 0x2060, 0xfeff, 0x3164)
+	for _, r := range runes {
+		s := string(r)
+		for _, in := range []string{s, s + "k" + s, "k" + s + "k", s + s + ",k" + s, "a" + s + ",b"} {
+			inputs = append(inputs, []byte(in))
+		}
+	}
+	var all, out bytes.Buffer
+	for _, in := range inputs {
+		all.Write(in)
+		all.WriteByte(0)
+		for _, part := range strings.Split(string(in), ",") {
+			if k := strings.TrimSpace(part); k != "" {
+				out.WriteString(k)
+				out.WriteByte(0x1f)
+			}
+		}
+		out.WriteByte(0x1e)
+	}
+	if os.WriteFile(os.Args[2], all.Bytes(), 0o600) != nil || os.WriteFile(os.Args[3], out.Bytes(), 0o600) != nil {
+		os.Exit(2)
+	}
+}
+GO
+cat > "$PARITY/driver.sh" <<'DRIVER'
+# Usage: bash driver.sh funcs.sh inputs.bin; same output format as main.go.
+source "$1"
+while IFS= read -r -d '' in; do
+	keyring_keys "$in"
+	for k in ${KEYRING_KEYS[@]+"${KEYRING_KEYS[@]}"}; do printf '%s\037' "$k"; done
+	printf '\036'
+done < "$2"
+DRIVER
+if ! command -v go >/dev/null 2>&1; then
+	echo "skip - k8s parity with Go strings.TrimSpace: go is not on PATH"
+elif ! (cd "$PARITY" && go run main.go base.bin inputs.bin go.out) > "$PARITY/go.log" 2>&1; then
+	bad "k8s parity: go run of the reference parser"
+	sed 's/^/    | /' "$PARITY/go.log"
+else
+	# Counted from the NUL-separated inputs: generated near misses include 0x1e and
+	# 0x1f, so the output separators are not countable (both sides write them alike).
+	parity_count=$(tr -cd '\000' < "$PARITY/inputs.bin" | wc -c | tr -d ' ')
+	for loc in C ${UTF8_LOCALE:+"$UTF8_LOCALE"}; do
+		if (cd "$PARITY" && env -i PATH="$PATH" LC_ALL="$loc" bash driver.sh funcs.sh inputs.bin) \
+			> "$PARITY/bash.out" 2> "$PARITY/bash.err" \
+			&& [ ! -s "$PARITY/bash.err" ] && cmp -s "$PARITY/go.out" "$PARITY/bash.out"; then
+			ok "k8s parity: keyring_keys equals Go split + strings.TrimSpace over $parity_count inputs [LC_ALL=$loc]"
+		else
+			bad "k8s parity: keyring_keys equals Go split + strings.TrimSpace over $parity_count inputs [LC_ALL=$loc]"
+		fi
+	done
+	[ -n "$UTF8_LOCALE" ] || echo "skip - k8s parity under a UTF-8 locale: none exists"
+fi
 
 echo
 echo "passed: $PASS failed: $FAIL"
