@@ -33,6 +33,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   binary as the gateway to prove the process exits on the review configuration.
 
 ### Fixed
+- **A stale `server_down` no longer evicts another game's live server (MG-03).**
+  `handleServerDown` passes the event's normalised `game_id` (absent = `cuvara`) to
+  `RegistryService.Evict(ctx, gameID, serverID)`, which now calls the game-checked
+  `storage.ServerRegistry.DeregisterForGame`: the hash and its map-index member are
+  removed only when the stored owner matches. An event for a server id now registered
+  by another game is a logged no-op, and `RegistryWatcher.UntrackServerForGame` keeps
+  that game's watcher entry. Matching events still evict as before.
 - Docs only: `docs/API.md` and `docs/DESIGN.md` no longer say the game server ignores the join
   token's `gid`; it refuses a mismatch (`Token is for a different game`, ADR-33 leg 2) and the
   per-game join secret is defence in depth. `docs/README.md` now says `JOIN_TOKEN_SECRET` is

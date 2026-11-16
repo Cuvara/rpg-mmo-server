@@ -184,9 +184,13 @@ connect timeout per attempt. Detection without consumption bought nothing.
 ### Decision — evict on consumption, and fix the watcher's error split first
 
 `Gateway.OnEvent` now recognises `Type == registry.ServerDownChannel` and calls
-`RegistryService.Evict(ctx, serverID)`: untrack in the watcher, `Deregister`
-from the store (which removes the entry and its map-index membership), with a
-wrapped `storage.ErrNotFound` treated as success. Eviction is **idempotent** —
+`RegistryService.Evict(ctx, gameID, serverID)` with the event's normalised `game_id`
+(absent = `cuvara`). Evict calls `DeregisterForGame` on the store, which atomically
+removes the entry and its map-index membership only when the stored owning game
+matches (ADR-33; MG-03 in `backend/docs/MULTI-GAME-CROSS-REVIEW.md`), and untracks
+the watcher entry only for that game (`UntrackServerForGame`). An absent entry is
+success; an entry now owned by another game is left untouched and logged, so a stale
+`server_down` of game A can never delete game B's registration of the same server id. Eviction is **idempotent** —
 duplicate events and multiple consuming gateway instances are harmless — and it
 is deliberately **not a deny-list**: a server that re-registers or resumes
 heartbeating afterwards is alive by definition and becomes assignable again
