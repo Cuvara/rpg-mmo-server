@@ -16,19 +16,22 @@ nowhere else.
 | `rpg-k8s-data` | `postgres-meta`, `postgres-game`, `redis` (StatefulSets, one PVC each), `nakama` |
 | `rpg-k8s-realtime` | `gateway` Deployment (1 replica, `hostPort` 7000, `strategy: Recreate`) + two ClusterIP Services, `map-servers-dotnet-k8s` Fleet |
 | `rpg-k8s-logging` | The log collector: the `alloy` DaemonSet, its ServiceAccount `rpg-log-collector`, the ConfigMaps `alloy-config` and `alloy-env`, and the selector-less Service `loki` that leads to the compose Loki (see [Logs](#logs)) |
+| `rpg-k8s-hub` | The Studio hub's identity: the ServiceAccount `studio-hub` and nothing else. **No workload ever runs here.** Its rights are Roles in the other namespaces (see "The Studio hub identity") |
 | `rpg-realtime` | The **pre-cutover** fleet. Scaled to 0. Kept as the rollback target |
 
-Manifests: `data/` (kustomize), `app/` (numbered, applied in order) and
-`logging/` (numbered, applied in order). Read `app/README.md` for the app tier's
-own design notes.
+Manifests: `data/` (kustomize), `app/` (numbered, applied in order),
+`logging/` (numbered, applied in order) and `hub/` (three numbered files applied in
+order, plus the opt-in `hub/optional/node-access.yaml`). Read `app/README.md` for the
+app tier's own design notes.
 
 **Other games (ADR-33 leg 5).** `app/` is the default game, `cuvara`, and stays
 as it is. A non-default game gets its own namespace `rpg-k8s-realtime-<game>`
 with a ResourceQuota, fleets `<game>-map-servers-dotnet-<env>` and
 `<game>-dungeon-servers-dotnet-<env>` (`GAMESERVER_GAME_ID` from the namespace's
 own `gameserver-config` key `game-id`, no `JWT_SECRET`), a Secret template and
-the gateway's allocate Role there and the log collector's read Role there
-(`rpg-log-collector`) — all rendered from `app/` by
+the gateway's allocate Role there, the log collector's read Role there
+(`rpg-log-collector`) and the Studio hub's Role + RoleBinding there
+(`studio-hub`) — all rendered from `app/` by
 `games/render.py`, never hand-copied. Fleet names are capped at 51 characters
 because Agones 1.59.0 names pods fleet + 12. Nothing is instantiated for a real
 second game and `dev-up.sh` applies none of it. Read `games/README.md`.
@@ -162,6 +165,173 @@ ship with `level="unknown"`. Changing a
 value needs a restart of the workload, see
 [`../docs/RUNBOOK-local-dev.md`](../docs/RUNBOOK-local-dev.md), "Seeing logs from
 the k8s cluster".
+
+### The Studio hub identity
+
+The Studio hub is an operator web tool that runs **outside** the cluster. It reaches
+the Kubernetes API with the credentials of one ServiceAccount, `studio-hub`, and
+everything it may do is a set of namespaced Roles. The manifests are in `hub/`, the
+single copy of the allow-list in code is `../k3s/hub_contract.py`, and the operator
+procedures (mint, rotate and revoke the token, read the CA, the SSH forward, the node
+file) are in [`../docs/RUNBOOK.md`](../docs/RUNBOOK.md), "Studio hub token".
+
+| Piece | What it is |
+|---|---|
+| `hub/00-namespace.yaml` | Namespace `rpg-k8s-hub`. **Nothing ever runs in it**, and it holds no Service, no ConfigMap and no Secret manifest. |
+| `hub/10-serviceaccount.yaml` | ServiceAccount `studio-hub`, `automountServiceAccountToken: false`. |
+| `hub/20-rbac.yaml` | Role + RoleBinding, both named `studio-hub`, in `rpg-k8s-realtime` and `rpg-k8s-data`. The subject is the ServiceAccount above and no other. |
+| `games/render.py` | The same pair in every non-default game namespace `rpg-k8s-realtime-<game>`, with the realtime rules. |
+| `hub/optional/node-access.yaml` | **Opt-in.** ClusterRole + ClusterRoleBinding `studio-hub-nodes`. `dev-up.sh` never applies it. |
+
+Outside `optional/` there is no ClusterRole and no ClusterRoleBinding for the hub, no
+Role in `rpg-k8s-hub`, `rpg-k8s-logging`, `agones-system` or `kube-system`, and no token
+anywhere in the repository.
+
+**Why its own namespace, and not `rpg-k8s-realtime`.** A ServiceAccount can be
+mounted by any pod created in its namespace. `rpg-k8s-realtime` runs workloads (the
+gateway, the game-server fleets), and the hub itself may patch a Deployment there. If
+the identity lived there, a pod the hub patched, or anyone able to create a pod in that
+namespace, could mount the hub's rights and carry them out of the cluster. In
+`rpg-k8s-hub` nothing runs, so the only way to act as the hub is a token an operator
+minted by hand. Deleting the namespace deletes the ServiceAccount and with it every
+token ever minted for it.
+
+#### What the hub can do: the rule table
+
+Rules are written and compared as (apiGroup, resource, verb) triples; `""` is the core
+group. No rule has `resourceNames`, a `*` or a `nonResourceURLs`.
+
+**Realtime shape**: `rpg-k8s-realtime` and every `rpg-k8s-realtime-<game>`.
+
+| apiGroup | resources | verbs |
+|---|---|---|
+| `""` | `pods` | `get`, `list`, `watch`, `delete` |
+| `""` | `pods/log` | `get` |
+| `""` | `events`, `services` | `get`, `list`, `watch` |
+| `events.k8s.io` | `events` | `get`, `list`, `watch` |
+| `apps` | `deployments` | `get`, `list`, `watch`, `patch` |
+| `apps` | `statefulsets`, `replicasets` | `get`, `list`, `watch` |
+| `agones.dev` | `fleets`, `gameserversets` | `get`, `list`, `watch` |
+| `agones.dev` | `fleets/scale` | `get`, `update`, `patch` |
+| `agones.dev` | `gameservers` | `get`, `list`, `watch`, `delete` |
+| `autoscaling.agones.dev` | `fleetautoscalers` | `get`, `list`, `watch`, `patch`, `update` |
+| `allocation.agones.dev` | `gameserverallocations` | `create` |
+
+**Data shape**: `rpg-k8s-data`. The first six rows only: no Agones group at all,
+because no Agones object lives there. Its only writes are `delete pods` and
+`patch deployments` (rollout restart of Nakama).
+
+**Node shape (opt-in)**: ClusterRole `studio-hub-nodes`, present only when an operator
+has applied `hub/optional/node-access.yaml`.
+
+| apiGroup | resources | verbs |
+|---|---|---|
+| `""` | `nodes` | `get`, `list`, `watch`, `patch` |
+| `""` | `pods` | `list` |
+| `""` | `pods/eviction` | `create` |
+
+In operator terms: the hub can read what runs and what the cluster says about it (pods,
+logs, events, services, Deployments, StatefulSets, ReplicaSets and the Agones Fleets,
+GameServers, GameServerSets and FleetAutoscalers); restart a pod and remove a
+GameServer by deleting it; rollout-restart a Deployment; scale a Fleet; change a
+FleetAutoscaler's policy; allocate a game server by hand; and, with the node file, list
+nodes, cordon and drain.
+
+#### What it cannot do
+
+- **No Secret access, in any namespace, with any verb.** No ConfigMap access either: no
+  listed hub feature needs one.
+- No `pods/exec`, `pods/attach`, `pods/portforward`, no namespaced `pods/eviction`, and
+  no create, update or patch on pods. The hub can read and delete a pod; it cannot run
+  anything in one or change one.
+- No write on StatefulSets, ReplicaSets, Services, Events or GameServerSets. No
+  `patch`, `update`, `create` or `delete` on Fleets; no `create`, `patch` or `update` on
+  GameServers; no verb but `create` on GameServerAllocations.
+- No `namespaces` and no other cluster-scoped kind by default. Nothing in
+  `rpg-k8s-logging`, `agones-system` or `kube-system`, or in the namespace of any other
+  stack.
+- In `rpg-k8s-data`, nothing beyond reading, deleting a pod and patching a Deployment:
+  no way to create or alter a database object, a StatefulSet, a Service or a ConfigMap.
+
+#### Decisions inside the table
+
+| Decision | Why |
+|---|---|
+| Fleet scaling is `fleets/scale`, **not** `patch fleets` | A patch on the Fleet would let the hub rewrite its whole template: image, env, ports, the Secret references. The scale subresource can only move `spec.replicas`. `get` lets a client read the subresource before writing; `update` and `patch` are the two ways a client writes it. |
+| **No StatefulSet restart** (no write on StatefulSets) | `postgres-game`, `postgres-meta` and `redis` each have one replica, so `delete pod` already is the restart. `patch statefulsets` would add the power to rewrite a database's pod spec for nothing. |
+| **No ConfigMaps** | No listed feature needs them. Add them only with a feature that does, as a change to `hub_contract.py` first. |
+| **No Secrets** | See the first cost below for the one indirect path that remains. |
+| `delete` on `pods` and `gameservers` | How the hub restarts a pod and removes a stuck or unwanted GameServer. A pod owned by a Deployment, StatefulSet or Fleet is recreated by its controller. |
+| `create` on `gameserverallocations` | Takes a game server out of a Fleet's Ready pool by hand. Create-only: allocations are not stored objects. |
+| `events` in both `""` and `events.k8s.io` | The same data; clients differ on which API they read. |
+| FleetAutoscaler `patch` **and** `update` | Change the buffer policy, pause it. |
+
+#### The stated costs
+
+Read these before widening anything or handing out a token.
+
+1. **`patch deployments` is not limited to a restart.** A rollout restart is a patch of
+   the pod template's annotations, and RBAC cannot narrow `patch` to one annotation. The
+   same verb lets the hub change the image, env, command, args and volumes of the
+   gateway and Nakama Deployments. Together with `pods/log` this is an **indirect path
+   to a Secret value**: a patched pod that mounts a Secret could print it to its log,
+   and the hub could read the log. It is accepted because rollout restart is a required
+   hub feature, and it is why the token is an **operator credential**: mint it for a
+   person or machine you would trust with the gateway's environment, short-lived and
+   revocable. The data namespace carries the same cost (Nakama is a Deployment there).
+2. **The node file is cluster-wide.** `pods list` there covers every namespace,
+   `kube-system` and other stacks' namespaces included: pod specs with images, commands
+   and **literal** env values (a value taken from a Secret shows only the Secret's name
+   and key). `pods/eviction create` there can evict **any** pod in the cluster
+   (PodDisruptionBudgets are respected; a pod without one simply goes). `patch nodes`
+   covers labels, annotations and taints, not only `spec.unschedulable`, and those steer
+   scheduling. The namespaced Roles give none of this reach. Without the file the hub
+   shows node features as **not granted**.
+
+#### SelfSubjectRulesReview needs no extra grant
+
+The hub discovers its rights with a `SelfSubjectRulesReview`. No Role here grants it,
+and none needs to: Kubernetes' default ClusterRoleBinding `system:basic-user` gives
+`create` on `selfsubjectrulesreviews` and `selfsubjectaccessreviews` to
+`system:authenticated`, which includes every ServiceAccount. This is stated from
+upstream Kubernetes defaults; this change did not observe it on a running cluster.
+
+The review is **per namespace**, and the hub has no `list namespaces`. So the hub must
+be **configured with its namespaces**: `rpg-k8s-realtime`, `rpg-k8s-data` and one
+`rpg-k8s-realtime-<game>` for every non-default game. It cannot discover a game
+namespace on its own, and a namespace that is not on its list is not shown, even when a
+Role exists there.
+
+#### How it is applied
+
+- `dev-up.sh` applies exactly `hub/00-namespace.yaml`, `10-serviceaccount.yaml` and
+  `20-rbac.yaml`, by name and in that order, after the app and data tiers (and the log
+  collector) exist. It never applies `optional/`, never a ClusterRole, and never mints
+  or prints a token. The Roles live in namespaces other manifests create, which is why
+  `hub/` comes after `app/` and `data/`.
+- **The per-game pair is not applied by `dev-up.sh`.** Every `rpg-k8s-realtime-<game>`
+  gets its Role + RoleBinding from `games/render.py`, as part of that game's
+  manifests, and the operator applies it with the existing game path
+  (`python backend/deploy/k8s/games/render.py --game <game> --nakama-tls <on|off> | kubectl apply -f -`;
+  read [`games/README.md`](games/README.md) first). `dev-up.sh` only **warns** for a
+  listed game that has no Role `studio-hub`, and prints that command.
+
+**`verify` now fails where the hub is not applied.** `verify/targets/k8s-dev.env` and
+`k8s-stg.env` declare `VERIFY_HUB_RBAC="rpg-k8s-hub/studio-hub"`, so the layer-1 check
+`cluster.hub_rbac` **FAILs** on a cluster where `k8s/hub` was never applied, and on a
+cluster where a game namespace was not rendered again after this change. What to run:
+
+```bash
+backend/deploy/k8s/dev-up.sh                                   # the identity and the two static Roles
+# then, for each non-default game that gateway-config lists:
+python backend/deploy/k8s/games/render.py --game <game> --nakama-tls <on|off> \
+  | kubectl --context <ctx> apply -f -
+```
+
+What the check does and does not see is in [`verify/README.md`](verify/README.md),
+"The Studio hub check". It is not the only guard: `../k3s/validate-manifests.py` and
+the offline tests compare the Roles with `../k3s/hub_contract.py` triple for triple, so
+this table, the manifests and that file cannot drift apart without a failing run.
 
 ### Ports
 

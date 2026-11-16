@@ -35,6 +35,7 @@ python render.py --game ember --nakama-tls off --out /tmp/ember         # all th
 | ConfigMap | `gameserver-config`, with `game-id: ember` added; carries `log-level: Information` and `log-format: json` like cuvara's | `app/20-configmaps.yaml` |
 | Role + RoleBinding | `rpg-gateway-allocator`: `create` on `allocation.agones.dev/gameserverallocations` **only**, bound to ServiceAccount `rpg-gateway` of the **stack** namespace | `app/10-rbac.yaml` (rule copied) |
 | Role + RoleBinding | `rpg-log-collector`: `get`/`list`/`watch` on `pods` and `get` on `pods/log` **only** (no ClusterRole, no secrets, no configmaps), bound to ServiceAccount `rpg-log-collector` of namespace `rpg-k8s-logging` | fixed in `render.py` (`LOG_COLLECTOR_*` constants) |
+| Role + RoleBinding | `studio-hub`: the **realtime shape** of `k3s/hub_contract.py` (read pods, logs, events, services, Deployments, StatefulSets, ReplicaSets, Fleets, GameServers, GameServerSets, FleetAutoscalers; delete pods and GameServers; patch Deployments; scale a Fleet through `fleets/scale`; patch and update FleetAutoscalers; create GameServerAllocations; **no** Secrets, **no** ConfigMaps, no ClusterRole), bound to ServiceAccount `studio-hub` of namespace `rpg-k8s-hub`. The exact rule table is in `../README.md`, "The Studio hub identity" | `k3s/hub_contract.py` (`HUB_RULES` in `render.py` is held equal to it by `test_render.py`) |
 | Fleet | `ember-map-servers-dotnet-k8s` = `<game>-map-servers-dotnet-<env>` | `app/50-fleet-map.yaml` |
 | Fleet | `ember-dungeon-servers-dotnet-k8s` = `<game>-dungeon-servers-dotnet-<env>` | `app/60-fleet-dungeon.yaml` |
 | FleetAutoscaler | `ember-dungeon-servers-dotnet-k8s-buffer` | `app/70-fleetautoscaler-dungeon.yaml` |
@@ -61,6 +62,19 @@ does not stop) when that namespace has no `rpg-log-collector` Role yet, because
 the render has not been applied. The values and env entries come
 from `app/`; the renderer refuses a source that lost either. The server logs JSON
 by default; `log-format: text` gives plain lines, which ship with `level="unknown"`.
+
+**The Studio hub.** The Studio hub (an operator tool outside the cluster) can see and
+operate a game only through the `studio-hub` Role above, so applying a game's render is
+what makes that game manageable from the hub. The pair is part of the rendered
+manifests and is applied by the operator's `render.py | kubectl apply -f -`, **not** by
+`dev-up.sh`: `dev-up.sh` applies only the static part (`k8s/hub/`) and **warns**, without
+stopping, for a game that `gateway-config` lists and that has no Role `studio-hub` yet.
+`verify`'s `cluster.hub_rbac` **FAILs** on such a game, so a game rendered before this
+Role existed has to be rendered and applied again. The hub is also configured by its
+operator with each game namespace (it cannot list namespaces; see "The Studio hub
+identity" in `../README.md`). `test_render.py` holds the rendered Role equal to the
+contract triple for triple, and `k3s/validate-manifests.py` checks it again for a
+rendered sample game.
 
 No game-server pod gets `JWT_SECRET` (ADR-8, ADR-33 D7): the source fleets do
 not mount it, the renderer refuses to copy one that does, and the Secret
