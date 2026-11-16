@@ -32,7 +32,8 @@ Role of exactly two rules, a hardened DaemonSet, a selector-less Service `loki`)
 It also reads deploy/k8s/hub/ (and its opt-in optional/ file) and enforces the
 Studio hub's contract (hub_contract.py: the single copy of the allow-list, no
 ClusterRole outside optional/, no Secret or ConfigMap access, a ServiceAccount
-without automount).
+without automount); every rendered game's `studio-hub` Role + RoleBinding is held
+to the same REALTIME allow-list (hub_contract.check_game_hub).
 Nothing is written or applied.
 The Agones install.yaml is cached in ~/.cache/rpg-mmo/agones-<version>.yaml.
 
@@ -563,6 +564,9 @@ def check_game_render(rendered: dict, game: str, stack_ns: str, renderer) -> lis
         problems.append(f"gateway-games does not list {game!r}")
     # The log collector's read grant and the log knobs of this game.
     problems += logging_contract.check_game_logging(docs, game, ns)
+    # The Studio hub's Role + RoleBinding: exact REALTIME triples, exact subject,
+    # no ClusterRole (the single copy of the allow-list is hub_contract.py).
+    problems += hub_contract.check_game_hub(docs, game, ns)
     return problems
 
 
@@ -625,7 +629,7 @@ def validate_game_template(schemas: dict) -> tuple[int, int]:
         if not problems:
             print(f"[ ok ] render[{game}]: ADR-33 leg 5 invariants (namespace, quota, '<game>-' fleets "
                   f"<= {renderer.FLEET_NAME_LIMIT} chars, game id, no JWT_SECRET, allocate RBAC, gateway env, "
-                  f"log collector Role + RoleBinding, log knobs)")
+                  f"log collector Role + RoleBinding, log knobs, Studio hub Role + RoleBinding)")
             checked += 1
 
     for game, env, why in GAME_REFUSALS:
@@ -777,7 +781,8 @@ def main() -> int:
         if not hub_problems:
             print(f"[ ok ] {len(hub_docs)} + {len(hub_optional)} optional document(s): no ClusterRole outside optional/, "
                   f"Roles of exactly the allow-list in hub_contract.py (realtime, data), no Secret or ConfigMap access, "
-                  f"ServiceAccount studio-hub without automount, node ClusterRole exact")
+                  f"ServiceAccount studio-hub without automount, node ClusterRole exact; "
+                  f"rendered games carry the same REALTIME Role, checked per game below")
             checked += 1
         game_checked, game_failures = validate_game_template(schemas)
         checked += game_checked

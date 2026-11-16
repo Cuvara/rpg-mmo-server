@@ -5,6 +5,8 @@ import pathlib
 import shlex
 import unittest
 
+import yaml
+
 path = pathlib.Path(__file__).resolve().parent / "render.py"
 spec = importlib.util.spec_from_file_location("rpg_mmo_games_render", path)
 renderer = importlib.util.module_from_spec(spec)
@@ -105,6 +107,57 @@ class RenderTlsTests(unittest.TestCase):
                          {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "rpg-log-collector"})
         # Nothing cluster-wide is rendered for the collector.
         self.assertFalse([d for d in result["manifests"] if d["kind"] in ("ClusterRole", "ClusterRoleBinding")])
+
+    def test_studio_hub_grant_is_the_realtime_shape_in_a_game_namespace(self):
+        result = renderer.render("ember")
+        ns = "rpg-k8s-realtime-ember"
+        roles = [d for d in result["manifests"] if d["kind"] == "Role" and d["metadata"]["name"] == "studio-hub"]
+        bindings = [d for d in result["manifests"]
+                    if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "studio-hub"]
+        self.assertEqual(len(roles), 1)
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual(roles[0]["metadata"]["namespace"], ns)
+        self.assertEqual(roles[0]["rules"], [dict(r) for r in renderer.HUB_RULES])
+        self.assertEqual(bindings[0]["metadata"]["namespace"], ns)
+        # The subject is the hub's own namespace, not this game's and not the stack's.
+        self.assertEqual(bindings[0]["subjects"], [
+            {"kind": "ServiceAccount", "name": "studio-hub", "namespace": "rpg-k8s-hub"}])
+        self.assertEqual(bindings[0]["roleRef"],
+                         {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "studio-hub"})
+        self.assertFalse([d for d in result["manifests"] if d["kind"] in ("ClusterRole", "ClusterRoleBinding")])
+        # No Secret or ConfigMap rule, no wildcard, no resourceNames.
+        for rule in roles[0]["rules"]:
+            self.assertEqual(set(rule), {"apiGroups", "resources", "verbs"})
+            self.assertFalse({"secrets", "configmaps", "*"} & set(rule["resources"]))
+            self.assertNotIn("*", rule["verbs"] + rule["apiGroups"])
+
+    def test_studio_hub_grant_is_rendered_in_every_game_namespace(self):
+        for game, env in (("ember", "k8s"), ("g" * 24, "k8s"), ("frost", "dev")):
+            with self.subTest(game=game, env=env):
+                result = renderer.render(game, env=env)
+                ns = f"rpg-k8s-realtime-{game}"
+                pair = [d for d in result["manifests"] if d["metadata"].get("name") == "studio-hub"]
+                self.assertEqual(sorted(d["kind"] for d in pair), ["Role", "RoleBinding"])
+                self.assertEqual({d["metadata"]["namespace"] for d in pair}, {ns})
+
+    def test_studio_hub_rules_equal_hub_contract_and_the_static_role(self):
+        # render.py keeps a literal copy (it is standalone); the single copy in code is
+        # k3s/hub_contract.py. Triple for triple, in both directions, and the committed
+        # static rpg-k8s-realtime Role must be the same grant.
+        k3s = path.parent.parent.parent / "k3s"
+        hspec = importlib.util.spec_from_file_location("hub_contract_under_test", k3s / "hub_contract.py")
+        hc = importlib.util.module_from_spec(hspec)
+        hspec.loader.exec_module(hc)
+        rendered, invalid = hc.rules_to_triples([dict(r) for r in renderer.HUB_RULES])
+        self.assertEqual(invalid, [])
+        self.assertEqual(rendered, set(hc.SHAPES["realtime"]))
+        self.assertEqual(hc.compare_rules([dict(r) for r in renderer.HUB_RULES], "realtime"), [])
+        static = [d for d in yaml.safe_load_all((path.parent.parent / "hub" / "20-rbac.yaml").read_text(encoding="utf-8"))
+                  if d and d["kind"] == "Role" and d["metadata"]["namespace"] == "rpg-k8s-realtime"]
+        self.assertEqual(len(static), 1)
+        self.assertEqual(hc.rules_to_triples(static[0]["rules"])[0], rendered)
+        self.assertEqual((renderer.HUB_NAMESPACE, renderer.HUB_SERVICE_ACCOUNT, renderer.HUB_ROLE),
+                         (hc.HUB_NAMESPACE, hc.HUB_ACCOUNT, hc.HUB_ROLE))
 
     def test_mismatches_are_refused(self):
         cases = [

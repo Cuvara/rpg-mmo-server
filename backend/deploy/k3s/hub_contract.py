@@ -45,8 +45,9 @@ tests/test_hub_contract.py that shows it rejecting a mutation):
     * no other RoleBinding names the hub's ServiceAccount
 
 Usage:
-    python hub_contract.py                         # the committed k8s/hub (+ optional/)
-    python hub_contract.py --dir DIR               # another directory (shows a mutation failing)
+    python hub_contract.py                         # the committed k8s/hub (+ optional/) plus a rendered sample game
+    python hub_contract.py --no-game               # skip the render.py leg
+    python hub_contract.py --dir DIR             # another directory (shows a mutation failing)
     python hub_contract.py compare --shape S       # compare rules read as JSON on stdin
 
 `compare` is the entry point of the verify check `cluster.hub_rbac` (called through
@@ -74,6 +75,7 @@ could not be read.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import pathlib
 import sys
@@ -85,6 +87,7 @@ except ImportError:  # pragma: no cover
 
 DEPLOY_DIR = pathlib.Path(__file__).resolve().parent.parent
 HUB_DIR = DEPLOY_DIR / "k8s" / "hub"
+GAME_RENDERER = DEPLOY_DIR / "k8s" / "games" / "render.py"
 OPTIONAL_SUBDIR = "optional"
 
 HUB_NAMESPACE = "rpg-k8s-hub"
@@ -431,6 +434,13 @@ def check_game_hub(manifests: list[dict], game: str, ns: str) -> list[str]:
     return problems
 
 
+def load_renderer():
+    spec = importlib.util.spec_from_file_location("rpg_mmo_games_render", GAME_RENDERER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
@@ -465,7 +475,8 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dir", type=pathlib.Path, default=HUB_DIR,
                         help="a k8s/hub-shaped directory (its optional/ subdirectory is read too)")
-    sub = parser.add_subparsers(dest="command")
+    parser.add_argument("--no-game", action="store_true", help="skip rendering a sample game")
+    sub =parser.add_subparsers(dest="command")
     cmp_parser = sub.add_parser("compare", help="compare a Role/ClusterRole (JSON on stdin) with an allow-list")
     cmp_parser.add_argument("--shape", required=True, choices=sorted(SHAPES))
     args = parser.parse_args(argv)
@@ -483,8 +494,20 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
         print(f"[FAIL] {p}")
     if not problems:
         print(f"[ ok ] {args.dir}: {len(docs)} + {len(optional)} optional document(s), hub contract holds")
-    print(f"\n{len(problems)} failure(s)")
-    return 1 if problems else 0
+    failures = len(problems)
+    if not args.no_game:
+        renderer = load_renderer()
+        for game in ("ember", "g" * 24):
+            rendered = renderer.render(game, nakama_tls=False)
+            ns = renderer.game_namespace(renderer.DEFAULT_STACK_NAMESPACE, game)
+            game_problems = check_game_hub(rendered["manifests"], game, ns)
+            for p in game_problems:
+                print(f"[FAIL] {p}")
+            failures += len(game_problems)
+            if not game_problems:
+                print(f"[ ok ] render[{game}]: hub Role + RoleBinding, REALTIME shape")
+    print(f"\n{failures} failure(s)")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

@@ -513,21 +513,42 @@ class RenderedGame(unittest.TestCase):
                        "roleRef": {"kind": "Role", "name": "rpg-gateway-allocate"}})
         self.assertEqual(self.check(m), [])
 
-    def test_a_real_render_carries_the_pair_once_render_emits_it(self):
-        # render.py is another subtask's file. Until it emits the hub pair this test
-        # only proves the sample renders without ClusterRoles; once it does, the pair
-        # must satisfy the contract.
-        rspec = importlib.util.spec_from_file_location("render_under_test", hc.DEPLOY_DIR / "k8s" / "games" / "render.py")
-        renderer = importlib.util.module_from_spec(rspec)
-        rspec.loader.exec_module(renderer)
+    def test_a_real_render_carries_the_pair_and_satisfies_the_contract(self):
+        renderer = hc.load_renderer()
         for game in ("ember", "g" * 24):
             with self.subTest(game=game):
                 manifests = renderer.render(game, nakama_tls=False)["manifests"]
                 ns = renderer.game_namespace(renderer.DEFAULT_STACK_NAMESPACE, game)
                 emitted = [d for d in manifests if d.get("metadata", {}).get("name") == "studio-hub"]
-                if emitted:
-                    self.assertEqual(hc.check_game_hub(manifests, game, ns), [])
+                self.assertEqual(sorted(d["kind"] for d in emitted), ["Role", "RoleBinding"])
+                self.assertEqual(hc.check_game_hub(manifests, game, ns), [])
                 self.assertFalse([d for d in manifests if d["kind"] in ("ClusterRole", "ClusterRoleBinding")])
+
+    def test_a_mutated_real_render_is_rejected(self):
+        # The same mutations as above, but on what render.py really emits.
+        renderer = hc.load_renderer()
+        ns = renderer.game_namespace(renderer.DEFAULT_STACK_NAMESPACE, "ember")
+
+        def mutated(fn):
+            manifests = copy.deepcopy(renderer.render("ember", nakama_tls=False)["manifests"])
+            role = next(d for d in manifests if d["kind"] == "Role" and d["metadata"]["name"] == "studio-hub")
+            binding = next(d for d in manifests if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "studio-hub")
+            fn(role, binding, manifests)
+            return hc.check_game_hub(manifests, "ember", ns)
+
+        cases = {
+            "extra: agones.dev/fleets patch": lambda r, b, ms: r["rules"].append(rule("agones.dev", "fleets", "patch")),
+            "extra: core/pods create": lambda r, b, ms: r["rules"][0]["verbs"].append("create"),
+            "extra: core/secrets get": lambda r, b, ms: r["rules"].append(rule("", "secrets", "get")),
+            "missing: core/pods delete": lambda r, b, ms: r["rules"][0]["verbs"].remove("delete"),
+            "wildcard": lambda r, b, ms: r["rules"][0].update(verbs=["*"]),
+            "only subject allowed": lambda r, b, ms: b["subjects"][0].update(namespace="rpg-k8s-realtime"),
+            "ClusterRole": lambda r, b, ms: ms.append({"kind": "ClusterRole", "metadata": {"name": "x"}}),
+        }
+        for needle, fn in cases.items():
+            with self.subTest(needle=needle):
+                problems = mutated(fn)
+                self.assertTrue(any(needle in p for p in problems), f"{needle!r} not in {problems}")
 
 
 class Compare(unittest.TestCase):
@@ -650,6 +671,13 @@ class Cli(unittest.TestCase):
         rc, out = self.run_main()
         self.assertEqual(rc, 0, out)
         self.assertIn("0 failure(s)", out)
+        # The no-argument run includes a rendered sample non-default game, like logging_contract.
+        self.assertIn("render[ember]: hub Role + RoleBinding", out)
+
+    def test_no_game_skips_the_render_leg(self):
+        rc, out = self.run_main("--no-game")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("render[", out)
 
     def test_a_mutated_copy_of_the_directory_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
