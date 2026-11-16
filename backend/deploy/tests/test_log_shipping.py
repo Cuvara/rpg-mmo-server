@@ -22,6 +22,8 @@ What is covered (see docs/MONITORING.md for the design these assert):
   * game server services carry the game / server-id labels consistently
   * Loki retention is 168h and the compactor enforces it
   * environments.tsv reserves one distinct Loki port per environment
+  * the canonical `service` table of MONITORING.md parses (the per-collector
+    tests are in test_service_labels.py and k8s/logging/tests)
 """
 
 import pathlib
@@ -899,6 +901,110 @@ class EnvironmentRegistryTests(unittest.TestCase):
                 self.assertNotIn(port, seen,
                                  f"port {port} is in both {seen.get(port)} and {row['environment']}")
                 seen[port] = row["environment"]
+
+
+# --------------------------------------------------------------------------
+# relabel evaluator (the semantics of discovery.relabel / Prometheus relabelling)
+# shared with k8s/logging/tests, which loads this module
+# --------------------------------------------------------------------------
+
+def eval_expr(expr, env):
+    """A string expression: literals, sys.env("NAME") and + between them."""
+    out, i = [], 0
+    while i < len(expr):
+        kind, value = expr[i]
+        if kind == "str":
+            out.append(value)
+        elif kind == "ident" and value == "sys.env":
+            # sys . env ( "NAME" ): the parser keeps ident `sys.env`, op (, str, op )
+            out.append(env[expr[i + 2][1]])
+            i += 3
+        elif kind == "op" and value == "+":
+            pass
+        else:
+            raise AssertionError(f"cannot evaluate expression token {expr[i]!r}")
+        i += 1
+    return "".join(out)
+
+
+def expand(replacement, match):
+    return re.sub(r"\$\{?(\d+)\}?", lambda m: match.group(int(m.group(1))) or "", replacement)
+
+
+def relabel(rules, labels, env):
+    """Apply the rules; None when a keep rule drops the target."""
+    labels = dict(labels)
+    for rule in rules:
+        action = eval_expr(rule.attrs["action"], env) if "action" in rule.attrs else "replace"
+        sources = strings_in(rule.attrs.get("source_labels", []))
+        value = ";".join(labels.get(s, "") for s in sources)
+        regex = eval_expr(rule.attrs["regex"], env) if "regex" in rule.attrs else "(.*)"
+        match = re.fullmatch(regex, value)  # relabel regexes are anchored
+        if action == "keep":
+            if not match:
+                return None
+        elif action == "drop":
+            if match:
+                return None
+        elif action == "replace":
+            if not match:
+                continue
+            target = eval_expr(rule.attrs["target_label"], env)
+            replacement = eval_expr(rule.attrs["replacement"], env) if "replacement" in rule.attrs else "$1"
+            result = expand(replacement, match)
+            if result:
+                labels[target] = result
+            else:
+                labels.pop(target, None)
+        else:
+            raise AssertionError(f"relabel action {action!r} is not modelled")
+    return labels
+
+
+def stream_labels(rules, target, env):
+    result = relabel(rules, target, env)
+    if result is None:
+        return None
+    return {k: v for k, v in result.items() if not k.startswith("__")}
+
+
+# --------------------------------------------------------------------------
+# the canonical `service` table of docs/MONITORING.md
+# --------------------------------------------------------------------------
+
+MONITORING_DOC = DEPLOY / "docs" / "MONITORING.md"
+SERVICE_TABLE_HEADING = "#### Canonical `service` values"
+
+
+def canonical_service_table():
+    """Rows of the table under the heading above, as dicts:
+    role, service, compose (list of compose service names), k8s (list of
+    (container, statefulset-or-None))."""
+    text = MONITORING_DOC.read_text(encoding="utf-8")
+    start = text.index(SERVICE_TABLE_HEADING)
+    rows, header_seen = [], False
+    for line in text[start:].splitlines()[1:]:
+        if line.startswith("#"):
+            break
+        if not line.startswith("|"):
+            if header_seen and rows:
+                break
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not header_seen:
+            header_seen = True
+            continue
+        if set("".join(cells)) <= set("-: "):
+            continue
+        ticks = [re.findall(r"`([^`]+)`", c) for c in cells]
+        k8s = ticks[3]
+        rows.append({
+            "role": cells[0],
+            "service": ticks[1][0],
+            "compose": ticks[2],
+            "k8s": [(k8s[0], k8s[1] if len(k8s) > 1 else None)] if k8s else [],
+        })
+    return rows
 
 
 class HelperTests(unittest.TestCase):

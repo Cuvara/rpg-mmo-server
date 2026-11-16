@@ -11,6 +11,8 @@
 //
 // Labels on every stream, and NO others (enforced by the label_keep stage):
 //   env, service, level
+// `service` takes the canonical values of docs/MONITORING.md: the compose service
+// name, except that every game server service is `gameserver`.
 // plus, on game server streams only:
 //   game, server_id
 // Never add a label built from a container id, user id, connection id or any
@@ -46,6 +48,19 @@ discovery.relabel "containers" {
   rule {
     source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
     target_label  = "service"
+  }
+
+  // `service` is a contract with the Studio hub, so one value per role on both
+  // collectors (docs/MONITORING.md, "Canonical service values"). The compose
+  // service of the game server is `gameserver-dotnet` (and `gameserver-dotnet-map02`
+  // for the second map server), the k8s container is `gameserver`; the canonical
+  // value is `gameserver`, so it is relabelled HERE and the service names stay as
+  // they are. The two instances are told apart by `server_id`, not by `service`.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "gameserver-dotnet(-.+)?"
+    target_label  = "service"
+    replacement   = "gameserver"
   }
 
   // Game servers carry the compose labels cuvara.log.game and

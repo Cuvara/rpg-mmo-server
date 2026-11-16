@@ -16,6 +16,8 @@ What is covered:
   * the label rules, evaluated by a small relabel evaluator over the rules in the
     config: default game -> cuvara, rpg-k8s-realtime-<game> -> <game>, the gateway
     and the data namespace get no game, server_id is the pod name on game servers
+  * the canonical `service` table of docs/MONITORING.md, pinned to the containers of
+    the manifests and to what the rules produce
   * the push goes to the Service `loki`, which has no selector, with no
     EndpointSlice in the directory
 
@@ -101,67 +103,12 @@ def generated_config():
 
 
 # --------------------------------------------------------------------------
-# relabel evaluator (the semantics of discovery.relabel / Prometheus relabelling)
+# relabel evaluator: the one in backend/deploy/tests/test_log_shipping.py
 # --------------------------------------------------------------------------
 
-def eval_expr(expr, env):
-    """A string expression: literals, sys.env("NAME") and + between them."""
-    out, i = [], 0
-    while i < len(expr):
-        kind, value = expr[i]
-        if kind == "str":
-            out.append(value)
-        elif kind == "ident" and value == "sys.env":
-            # sys . env ( "NAME" ): the parser keeps ident `sys.env`, op (, str, op )
-            out.append(env[expr[i + 2][1]])
-            i += 3
-        elif kind == "op" and value == "+":
-            pass
-        else:
-            raise AssertionError(f"cannot evaluate expression token {expr[i]!r}")
-        i += 1
-    return "".join(out)
-
-
-def expand(replacement, match):
-    return re.sub(r"\$\{?(\d+)\}?", lambda m: match.group(int(m.group(1))) or "", replacement)
-
-
-def relabel(rules, labels, env):
-    """Apply the rules; None when a keep rule drops the target."""
-    labels = dict(labels)
-    for rule in rules:
-        action = eval_expr(rule.attrs["action"], env) if "action" in rule.attrs else "replace"
-        sources = CT.strings_in(rule.attrs.get("source_labels", []))
-        value = ";".join(labels.get(s, "") for s in sources)
-        regex = eval_expr(rule.attrs["regex"], env) if "regex" in rule.attrs else "(.*)"
-        match = re.fullmatch(regex, value)  # relabel regexes are anchored
-        if action == "keep":
-            if not match:
-                return None
-        elif action == "drop":
-            if match:
-                return None
-        elif action == "replace":
-            if not match:
-                continue
-            target = eval_expr(rule.attrs["target_label"], env)
-            replacement = eval_expr(rule.attrs["replacement"], env) if "replacement" in rule.attrs else "$1"
-            result = expand(replacement, match)
-            if result:
-                labels[target] = result
-            else:
-                labels.pop(target, None)
-        else:
-            raise AssertionError(f"relabel action {action!r} is not modelled")
-    return labels
-
-
-def stream_labels(rules, target, env):
-    result = relabel(rules, target, env)
-    if result is None:
-        return None
-    return {k: v for k, v in result.items() if not k.startswith("__")}
+eval_expr = CT.eval_expr
+relabel = CT.relabel
+stream_labels = CT.stream_labels
 
 
 # --------------------------------------------------------------------------
@@ -414,7 +361,7 @@ class ConfigStructureTests(unittest.TestCase):
 ENV = {"NODE_NAME": "k3d-rpg-dev-server-0", "DEPLOY_ENVIRONMENT": "local"}
 
 
-def pod_target(namespace, container, pod, role=None, node="k3d-rpg-dev-server-0"):
+def pod_target(namespace, container, pod, role=None, node="k3d-rpg-dev-server-0", controller=None):
     t = {
         "__meta_kubernetes_namespace": namespace,
         "__meta_kubernetes_pod_name": pod,
@@ -425,6 +372,9 @@ def pod_target(namespace, container, pod, role=None, node="k3d-rpg-dev-server-0"
     }
     if role:
         t["__meta_kubernetes_pod_label_agones_dev_role"] = role
+    if controller:
+        t["__meta_kubernetes_pod_controller_kind"] = "StatefulSet"
+        t["__meta_kubernetes_pod_controller_name"] = controller
     return t
 
 
@@ -467,10 +417,14 @@ class LabelRuleTests(unittest.TestCase):
         self.assertEqual(got, {"env": "local", "service": "gateway"})
 
     def test_data_namespace_has_no_game_or_server_id(self):
-        for container, pod in (("nakama", "nakama-5c7d-abc"), ("migrate", "nakama-5c7d-abc"),
-                               ("redis", "redis-0"), ("postgres", "postgres-game-0")):
-            got = self.labels(pod_target("rpg-k8s-data", container, pod))
-            self.assertEqual(got, {"env": "local", "service": container}, container)
+        for container, pod, controller, service in (
+                ("nakama", "nakama-5c7d-abc", None, "nakama"),
+                ("migrate", "nakama-5c7d-abc", None, "migrate"),
+                ("redis", "redis-0", "redis", "redis"),
+                ("postgres", "postgres-meta-0", "postgres-meta", "postgres"),
+                ("postgres", "postgres-game-0", "postgres-game", "postgres-game")):
+            got = self.labels(pod_target("rpg-k8s-data", container, pod, controller=controller))
+            self.assertEqual(got, {"env": "local", "service": service}, f"{container} {pod}")
 
     def test_the_collector_itself_has_no_game(self):
         got = self.labels(pod_target("rpg-k8s-logging", "alloy", "alloy-abcde"))
@@ -490,6 +444,91 @@ class LabelRuleTests(unittest.TestCase):
     def test_env_comes_from_the_deploy_environment_variable(self):
         env = dict(ENV, DEPLOY_ENVIRONMENT="staging")
         self.assertEqual(self.labels(pod_target("rpg-k8s-data", "redis", "redis-0"), env)["env"], "staging")
+
+
+def manifest_containers():
+    """Container and initContainer names of every workload manifest of the tree."""
+    names = set()
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key in ("containers", "initContainers") and isinstance(value, list):
+                    names.update(c["name"] for c in value if isinstance(c, dict) and "name" in c)
+                walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    for sub in ("app", "data", "logging"):
+        for path in sorted((DEPLOY / "k8s" / sub).rglob("*.yaml")):
+            if "proof" in path.parts:
+                continue
+            for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+                walk(doc)
+    return names
+
+
+class CanonicalServiceTests(unittest.TestCase):
+    """docs/MONITORING.md, "Canonical service values", pinned on the k8s side."""
+
+    # Added to every game server pod by Agones, so no manifest of this repository names it.
+    NOT_IN_MANIFESTS = {"agones-gameserver-sidecar"}
+    EXPECTED = {
+        "gameserver": [("gameserver", None)],
+        "gateway": [("gateway", None)],
+        "nakama": [("nakama", None)],
+        "redis": [("redis", None)],
+        "postgres": [("postgres", "postgres-meta")],
+        "postgres-game": [("postgres", "postgres-game")],
+        "alloy": [("alloy", None)],
+    }
+    NAMESPACE = {"alloy": "rpg-k8s-logging", "gameserver": "rpg-k8s-realtime",
+                 "agones-gameserver-sidecar": "rpg-k8s-realtime", "gateway": "rpg-k8s-realtime"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.table = CT.canonical_service_table()
+        blocks, _ = CT.parse_alloy(generated_config())
+        cls.rules = CT.rules_of(CT.component(blocks, "discovery.relabel", "pods"))
+
+    def test_the_table_is_pinned_to_the_documented_values(self):
+        """The core roles and their k8s sources: changing one is a contract change."""
+        k8s = {row["service"]: row["k8s"] for row in self.table if row["k8s"]}
+        for service, source in self.EXPECTED.items():
+            self.assertEqual(k8s.get(service), source, service)
+
+    def test_every_container_of_the_manifests_has_a_row(self):
+        listed = {c for row in self.table for c, _ in row["k8s"]}
+        self.assertEqual(manifest_containers() - listed, set(),
+                         "a container with no row in the canonical service table")
+        self.assertEqual(listed - manifest_containers(), self.NOT_IN_MANIFESTS,
+                         "a row names a k8s container that no manifest defines")
+
+    def test_each_row_is_what_the_collector_produces(self):
+        for row in self.table:
+            for container, controller in row["k8s"]:
+                with self.subTest(service=row["service"], container=container, controller=controller):
+                    role = "gameserver" if container in ("gameserver", "agones-gameserver-sidecar") else None
+                    pod = f"{controller}-0" if controller else f"{container}-0"
+                    target = pod_target(self.NAMESPACE.get(container, "rpg-k8s-data"), container, pod, role,
+                                        controller=controller)
+                    self.assertEqual(stream_labels(self.rules, target, ENV)["service"], row["service"])
+
+    def test_two_game_servers_of_one_game_share_service_and_differ_in_server_id(self):
+        a, b = "map-servers-dotnet-k8s-aaaaa-11111", "map-servers-dotnet-k8s-aaaaa-22222"
+        la = stream_labels(self.rules, pod_target("rpg-k8s-realtime", "gameserver", a, "gameserver"), ENV)
+        lb = stream_labels(self.rules, pod_target("rpg-k8s-realtime", "gameserver", b, "gameserver"), ENV)
+        self.assertEqual((la["service"], la["server_id"], lb["server_id"]), ("gameserver", a, b))
+        self.assertEqual(lb["service"], "gameserver")
+
+    def test_the_two_databases_have_different_service_values_and_no_game(self):
+        meta = stream_labels(self.rules, pod_target("rpg-k8s-data", "postgres", "postgres-meta-0",
+                                                    controller="postgres-meta"), ENV)
+        game = stream_labels(self.rules, pod_target("rpg-k8s-data", "postgres", "postgres-game-0",
+                                                    controller="postgres-game"), ENV)
+        self.assertEqual((meta["service"], game["service"]), ("postgres", "postgres-game"))
+        self.assertEqual(set(game), {"env", "service"})
 
 
 if __name__ == "__main__":

@@ -274,6 +274,10 @@ else
 fi
 
 # Every game server container of the project: the compose labels are the truth.
+# The stream's `service` is the canonical value of docs/MONITORING.md for every
+# game server service (gameserver-dotnet, gameserver-dotnet-map02, ...), not the
+# compose service name; ${svc} below is only for the messages.
+GS_SERVICE=gameserver
 gs_found=0
 while read -r cid svc; do
 	[ -n "$cid" ] || continue
@@ -286,14 +290,14 @@ while read -r cid svc; do
 		continue
 	fi
 	# A real level is required: `unknown` (a plain-text game server) must not pass.
-	if wait_for "{env=\"${ENVL}\",service=\"${svc}\",game=\"${game}\",server_id=\"${sid}\",level=~\".+\",level!=\"unknown\"}"; then
+	if wait_for "{env=\"${ENVL}\",service=\"${GS_SERVICE}\",game=\"${game}\",server_id=\"${sid}\",level=~\".+\",level!=\"unknown\"}"; then
 		labels="$(stream_labels)"
 		ok=1
 		for k in env service level game server_id; do has_label "$labels" "$k" || { fail "${svc}: stream lacks label ${k}: ${labels}"; ok=0; }; done
 		label_is "$labels" level unknown && { fail "${svc}: level is unknown: ${labels}"; ok=0; }
 		[ -z "$(forbidden_labels "$labels")" ] || { fail "${svc}: stream carries per-container labels: $(forbidden_labels "$labels")"; ok=0; }
 		[ "$ok" -eq 1 ] && pass "${svc} stream found with env, service, a real level, game=${game} server_id=${sid}"
-	elif loki_query "{env=\"${ENVL}\",service=\"${svc}\",game=\"${game}\",server_id=\"${sid}\"}"; then
+	elif loki_query "{env=\"${ENVL}\",service=\"${GS_SERVICE}\",game=\"${game}\",server_id=\"${sid}\"}"; then
 		fail "${svc}: lines found for game=${game} server_id=${sid} but none with a real level (level=\"unknown\")"
 		info "the game server must log JSON: GAMESERVER_LOG_FORMAT=json (the default; text gives level unknown)"
 	else

@@ -29,7 +29,8 @@
 // game server), an IP or any other unbounded value: every distinct label set is
 // a Loki stream.
 //
-// `service` is the CONTAINER name. The values that exist in the manifests of this
+// `service` is the CONTAINER name, with the one relabel below, and it takes the
+// canonical values of docs/MONITORING.md. The values that exist in the manifests of this
 // directory tree (k8s/app, k8s/data, k8s/logging):
 //   gateway          Deployment gateway
 //   gameserver       Fleets map-servers-dotnet-k8s, dungeon-servers-dotnet-k8s
@@ -38,9 +39,9 @@
 //                    the Agones SDK sidecar Agones adds to every game server pod
 //   nakama           Deployment nakama
 //   migrate          init container of nakama (database migration)
-//   postgres         StatefulSets postgres-meta and postgres-game (the two are
-//                    told apart by namespace in Loki only through the line, not a
-//                    label: same service value by design)
+//   postgres         StatefulSet postgres-meta (the meta database)
+//   postgres-game    StatefulSet postgres-game: its container is also called
+//                    `postgres`, relabelled below to the canonical value
 //   redis            StatefulSet redis
 //   provision, psql  the one-off Jobs default-role and init-gamestate
 //   alloy            this collector
@@ -102,6 +103,18 @@ discovery.relabel "pods" {
   rule {
     source_labels = ["__meta_kubernetes_pod_container_name"]
     target_label  = "service"
+  }
+
+  // `service` is a contract with the Studio hub, so one value per role on both
+  // collectors (docs/MONITORING.md, "Canonical service values"). Both Postgres
+  // StatefulSets run a container called `postgres`; the canonical value for the
+  // game database is `postgres-game` (the compose service name), the meta
+  // database keeps `postgres`. The StatefulSet name is the controller of the pod.
+  rule {
+    source_labels = ["__meta_kubernetes_pod_controller_name", "__meta_kubernetes_pod_container_name"]
+    regex         = "postgres-game;postgres"
+    target_label  = "service"
+    replacement   = "postgres-game"
   }
 
   // Game server pods, default game. Two sources joined with ";": the Agones role
