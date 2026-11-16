@@ -67,10 +67,14 @@ by default; `log-format: text` gives plain lines, which ship with `level="unknow
 operate a game only through the `studio-hub` Role above, so applying a game's render is
 what makes that game manageable from the hub. The pair is part of the rendered
 manifests and is applied by the operator's `render.py | kubectl apply -f -`, **not** by
-`dev-up.sh`: `dev-up.sh` applies only the static part (`k8s/hub/`) and **warns**, without
-stopping, for a game that `gateway-config` lists and that has no Role `studio-hub` yet.
-`verify`'s `cluster.hub_rbac` **FAILs** on such a game, so a game rendered before this
-Role existed has to be rendered and applied again. The hub is also configured by its
+`dev-up.sh`: `dev-up.sh` applies only the static part (`k8s/hub/`). For a game that
+`gateway-config` lists and that has no Role `studio-hub` yet, its preflight **stops the
+deploy before the data and app tiers change** and prints the command, so a game rendered
+before this Role existed has to be rendered and applied again **before** the change is
+deployed (the apply also re-applies the game's fleet and quota). `verify`'s
+`cluster.hub_rbac` **FAILs** on such a game as the backstop. The Role's `patch
+deployments` is a rollout restart only because of the cluster-wide admission policy
+`k8s/hub/15-admission-policy.yaml`, which applies in this namespace too. The hub is also configured by its
 operator with each game namespace (it cannot list namespaces; see "The Studio hub
 identity" in `../README.md`). `test_render.py` holds the rendered Role equal to the
 contract triple for triple, and `k3s/validate-manifests.py` checks it again for a

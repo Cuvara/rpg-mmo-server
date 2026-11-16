@@ -80,7 +80,7 @@ be reported as "the probe could not be built".
 | `cluster.restarts` | no container in the namespaces restarted within the last `VERIFY_RESTART_WINDOW` seconds (default 1800), **and** every container is `Running` right now — so an active crash loop fails at any age | restarts **older** than the window are a WARN naming every container, and are not judged: the check says nothing about why they died. It also cannot see a crash that predates the current pod, because `restartCount` resets when a pod is recreated |
 | `cluster.secrets` | each declared Secret exists and every key decodes to a non-empty value | nothing about the value being *correct*. Values are never printed — only key names and byte lengths |
 | `cluster.log_collector` | the log collector named by `VERIFY_LOG_COLLECTOR` (`<namespace>/<daemonset>`, `rpg-k8s-logging/alloy` on both k8s targets) exists, is scheduled on at least one node with ready equal to desired, and the Service `loki` in that namespace has an EndpointSlice address. **FAIL** when the namespace or the DaemonSet is absent, desired is 0, or ready differs from desired. **WARN** when it is Ready but the Service has no address. SKIP when `VERIFY_LOG_COLLECTOR` is empty | that a log line reached Loki: it does not query Loki or read Alloy's own log, it cannot see a collected namespace whose Role is missing (Alloy logs a `403` for it), and the address is the one `connect-loki.sh` wrote, not proof that Loki answers on it |
-| `cluster.hub_rbac` | the Studio hub identity named by `VERIFY_HUB_RBAC` (`<namespace>/<serviceaccount>`, `rpg-k8s-hub/studio-hub` on both k8s targets) holds exactly the rights of `k3s/hub_contract.py`: the ServiceAccount exists; in `rpg-k8s-realtime`, `rpg-k8s-data` and every `rpg-k8s-realtime-<game>` that `gateway-config` lists, the Role `studio-hub` equals the allow-list triple for triple and its RoleBinding has the one subject and the one `roleRef`; no other RoleBinding there and no ClusterRoleBinding names the account (except `studio-hub-nodes`); the opt-in node ClusterRole is absent or exact. **FAIL** on an extra verb, an extra resource or a missing triple, a rule with `resourceNames` or a `*`, a missing Role, RoleBinding or ServiceAccount, a foreign binding, or a node ClusterRole that differs from its allow-list. **PASS** says whether node access is not granted (opt-in) or enabled. SKIP when `VERIFY_HUB_RBAC` is empty | that a token is valid or unexpired; that nothing else in the cluster reaches the hub's rights (it reads RoleBindings only in the expected namespaces, so a RoleBinding that names the account in another namespace is not seen); or that the API server admits the account (no `can-i`, no impersonation). Games come from `gateway-config`'s `games`, so a rendered game namespace left out of it is not covered |
+| `cluster.hub_rbac` | the Studio hub identity named by `VERIFY_HUB_RBAC` (`<namespace>/<serviceaccount>`, `rpg-k8s-hub/studio-hub` on both k8s targets) holds exactly the rights of `k3s/hub_contract.py`: the ServiceAccount exists; in `rpg-k8s-realtime`, `rpg-k8s-data` and every `rpg-k8s-realtime-<game>` that `gateway-config` lists, the Role `studio-hub` equals the allow-list triple for triple and its RoleBinding has the one subject and the one `roleRef`; no RoleBinding in any namespace outside that list and no ClusterRoleBinding names the account (except `studio-hub-nodes`); no legacy `kubernetes.io/service-account-token` Secret exists for it; the ValidatingAdmissionPolicy `studio-hub-restart-only` and its binding equal the repository's (`patch deployments` is a restart only because of it); the opt-in node ClusterRole is absent or exact. **FAIL** on an extra verb, an extra resource or a missing triple, a rule with `resourceNames` or a `*`, a missing Role, RoleBinding or ServiceAccount, a foreign binding, a legacy token Secret, a missing, unreadable or edited policy or binding, or a node ClusterRole that differs from its allow-list. **PASS** says whether node access is not granted (opt-in) or enabled. SKIP when `VERIFY_HUB_RBAC` is empty | that a token is valid or unexpired; a broad role bound to Group `system:authenticated`; that the policy's CEL *evaluates* as intended (its text is compared, not run: the live dry-run in `docs/RUNBOOK.md` is the proof); or that the API server admits the account (no `can-i`, no impersonation). Games come from `gateway-config`'s `games`, so a rendered game namespace left out of it is reported as a foreign binding |
 
 `cluster.fleet` reports **WARN** when the fleet is at size but has zero Ready
 replicas (everything Allocated) **and** the fleet does not pin a fleet-wide
@@ -406,9 +406,11 @@ unverified. `targets/k8s-dev.env` and `targets/k8s-stg.env` declare
 [`../README.md`](../README.md), "The Studio hub identity".
 
 How it decides. It reads live objects as JSON with `kubectl get` only (no create,
-patch or delete, and nothing from a Secret) and compares them through
-`k3s/hub_contract.py`: `compare` for a Role or ClusterRole, `bindings` for the
-bindings. Rules are compared as (apiGroup, resource, verb) triples, never by Role name
+patch or delete) and compares them through `k3s/hub_contract.py`: `compare` for a Role or
+ClusterRole, `bindings` for the bindings, `policy` for the admission policy and its
+binding, `secrets` for the legacy-token listing. **No Secret value is read**: the one
+Secret call is a `jsonpath` over `metadata.name`, `type` and the account annotation of the
+Secrets in `rpg-k8s-hub` (names and types; `.data` is never requested). Rules are compared as (apiGroup, resource, verb) triples, never by Role name
 or rule order, and in both directions (an extra triple and a missing one are both a
 difference).
 
@@ -418,7 +420,10 @@ difference).
 | Role `studio-hub` absent in an expected namespace | **FAIL** |
 | Role has an extra verb, an extra resource, a missing triple, `resourceNames` or a `*` | **FAIL**, naming each triple |
 | RoleBinding `studio-hub` absent, or with another subject or another `roleRef` | **FAIL** |
-| Another RoleBinding in an expected namespace, or any ClusterRoleBinding other than `studio-hub-nodes`, names the account (as ServiceAccount, as User `system:serviceaccount:rpg-k8s-hub:studio-hub`, or as Group `system:serviceaccounts:rpg-k8s-hub` / `system:serviceaccounts`) | **FAIL** |
+| Another RoleBinding in an expected namespace, **a RoleBinding in any other namespace** (`kube-system`, `agones-system`, `rpg-k8s-hub`, a game not in `gateway-config`), or any ClusterRoleBinding other than `studio-hub-nodes`, names the account (as ServiceAccount, as User `system:serviceaccount:rpg-k8s-hub:studio-hub`, or as Group `system:serviceaccounts:rpg-k8s-hub` / `system:serviceaccounts`) | **FAIL** |
+| A Secret of type `kubernetes.io/service-account-token` for `studio-hub` exists in `rpg-k8s-hub` (none is documented: the runbook mints bound tokens), or the Secrets cannot be listed | **FAIL** |
+| ValidatingAdmissionPolicy `studio-hub-restart-only` or its binding is absent, or cannot be read (the API must serve `admissionregistration.k8s.io/v1`, Kubernetes 1.30 or newer) | **FAIL** (every Role of the allow-list grants `patch` on deployments) |
+| The policy differs from `hub_contract.py`: an expression, `matchConditions`, `failurePolicy`, the resource rules, an `excludeResourceRules`, a `paramKind`; or the binding is not `validationActions: [Deny]`, carries a `namespaceSelector`, an exclusion or a `paramRef`, or names another policy | **FAIL**, one `differs: spec.<path>` line each |
 | `gateway-config` cannot be read (NotFound or another error): the game list is unknown | **FAIL** |
 | ClusterRole `studio-hub-nodes` differs from the node allow-list, or exists without its binding, or the binding exists without the ClusterRole | **FAIL** |
 | Everything exact, no node ClusterRole | **PASS** ("node access NOT granted (opt-in ...)") |
@@ -432,11 +437,12 @@ ConfigMap; verify has no list of game namespaces of its own.
 
 **What it does not prove.** Not that a token is valid or unexpired (it never sees one).
 Not that the API server admits the account (no `kubectl auth can-i`, no impersonation).
-And one blind spot to know about: **RoleBindings are looked at only in the expected
-namespaces**, plus every ClusterRoleBinding. A RoleBinding that names the account in a
-namespace outside that list (a game namespace not in `games`, `kube-system`, another
-stack's namespace) is not seen. Closing that needs a cluster-wide RoleBinding list,
-which the check does not make.
+**Not that the policy's CEL expressions evaluate as intended**: they are compared as
+text with the repository's, so an edited expression is caught, but whether an API
+server denies an image change is shown only by the server-side dry runs in
+`docs/RUNBOOK.md` ("Studio hub: the live check"). RoleBindings are read in **every**
+namespace (`kubectl get rolebindings -A`); the expected ones are checked in full and
+any other that names the account is a FAIL.
 
 Which subjects count as naming the account: a `ServiceAccount` subject `studio-hub`
 (namespace `rpg-k8s-hub`, empty or missing), a `User`
@@ -455,14 +461,16 @@ there.)
 saying the hub's per-game Roles are unverified. An existing ConfigMap with an empty
 `games` value is a PASS over `rpg-k8s-realtime` and `rpg-k8s-data` (`cuvara` only).
 
-**Two deploy consequences.** First, the two k8s targets now declare the hub, so on a
-cluster where `k8s/hub` was never applied, or where a rendered game namespace was not
-rendered again after this change, the check **FAILs**. Run `k8s/dev-up.sh` (it
-applies `k8s/hub`), then for each non-default game
-`python backend/deploy/k8s/games/render.py --game <game> --nakama-tls <on|off> | kubectl apply -f -`.
-Second, `dev-up.sh` does not apply the per-game pair: it only **warns** for a game with
-no Role `studio-hub`, and this check is what FAILs on it. CD runs this suite after
-`dev-up.sh`.
+**Deploy consequences.** The two k8s targets declare the hub, so on a cluster where
+`k8s/hub` was never applied the check **FAILs**; CD's `dev-up.sh` applies it (the
+admission policy first, then the Roles) before this suite runs, so **a cluster serving
+only the default game needs no manual step**. `dev-up.sh` does not apply the per-game
+pair, so **a cluster whose `gateway-config` names a non-default game must have that
+game re-rendered and applied before this change is deployed**
+(`python backend/deploy/k8s/games/render.py --game <game> --nakama-tls <on|off> | kubectl apply -f -`;
+read `k8s/games/README.md` first). `dev-up.sh` now stops in a preflight, before the data
+and app tiers change, for a listed game without its Role and for an API that cannot serve
+the policy; this check is the backstop. CD runs this suite after `dev-up.sh`.
 
 The decision is shown **offline**, with fixtures and without a cluster:
 
@@ -476,11 +484,16 @@ tables. It shows PASS for the exact state (with and without the node ClusterRole
 for rendered non-default games), FAIL for a missing ServiceAccount, an extra verb, an
 extra resource, a missing rule, a wildcard, `resourceNames`, a missing Role or binding
 in a game namespace, a wrong subject, a `roleRef` to `cluster-admin`, a foreign
-RoleBinding or ClusterRoleBinding, and each way the node ClusterRole can be wrong, and
+RoleBinding or ClusterRoleBinding, each way the admission policy or its binding can be
+wrong (absent, unreadable, an edited expression, `matchConditions` removed, `failurePolicy:
+Ignore`, a wrong operation or resource, an exclusion, Warn/Audit instead of Deny, a
+`namespaceSelector`), a binding that names the hub in `kube-system`, `rpg-k8s-hub` or an
+unlisted game, a legacy token Secret, and each way the node ClusterRole can be wrong, and
 SKIP for a target that declares no hub. It has not been run against a live cluster by
 this change. `bash backend/deploy/k8s/verify/tests/dev_up_hub_test.sh` is the offline
-test of the Studio hub block of `dev-up.sh` (fake `kubectl`; it applies exactly the
-three namespaced files by name, never `optional/`).
+test of the two Studio hub blocks of `dev-up.sh` (fake `kubectl`; the apply block applies
+exactly the four files by name, the policy before the Role, never `optional/`, and stops
+on a failed policy apply; the preflight reads only and stops before anything is applied).
 
 ## Adding a target
 

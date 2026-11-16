@@ -9,6 +9,8 @@ Sections:
 - [Studio hub token](#studio-hub-token): mint, check, rotate, revoke, read the cluster CA, the SSH forward.
 - [Studio hub: node access](#studio-hub-node-access): enable and disable the opt-in node ClusterRole.
 - [Studio hub: checking the grant](#studio-hub-checking-the-grant)
+- [Studio hub: the live check](#studio-hub-the-live-check): what an operator runs, once, on the local cluster, before relying on any claim here.
+- [Deploying the hub to an existing cluster](#deploying-the-hub-to-an-existing-cluster)
 
 What the hub is allowed to do, rule by rule, and why, is in
 [`../k8s/README.md`](../k8s/README.md), "The Studio hub identity". Read that first
@@ -33,15 +35,27 @@ credentials from.
 The Studio hub is an operator web tool **outside** the cluster. Its identity is the
 ServiceAccount `studio-hub` in namespace `rpg-k8s-hub` (applied by
 `k8s/dev-up.sh`, files `k8s/hub/00-namespace.yaml`, `10-serviceaccount.yaml`,
-`20-rbac.yaml`). The ServiceAccount has `automountServiceAccountToken: false` and
+`15-admission-policy.yaml`, `20-rbac.yaml`). The ServiceAccount has `automountServiceAccountToken: false` and
 nothing runs in its namespace, so the **only** credential that can act as the hub is
 a token an operator mints by hand with the procedure below.
 
-A token is an **operator credential**. With the namespaced grant it can restart
-and delete pods and patch Deployments (so it can change the gateway's and Nakama's
-image, env and command), and together with `pods/log` that is an indirect path to a
-Secret value (see "The costs" in `../k8s/README.md`). Mint it for a person or a
-machine you would trust with the gateway's environment.
+A token is an **operator credential**. Exactly what it can do, with and without the
+admission policy, is in `../k8s/README.md` ("What the token can do"). In short:
+
+- **With the policy `studio-hub-restart-only` in force** (the deployed state), `patch
+  deployments` is a rollout restart and nothing else: an image, env, command,
+  `privileged` or `hostPath` change, a `replicas` change and a label change are refused
+  by the API server. The token can still **delete pods** (the databases' too), **delete
+  game servers**, **scale fleets** (to zero), **edit fleet autoscalers**, **create
+  allocations**, and read logs, events and workload specs.
+- **Without the policy** (deleted, or never applied) the same `patch deployments` can
+  rewrite the pod template, which runs arbitrary code as root on the node: **the token
+  is then node-root-equivalent**. The policy needs Kubernetes 1.30 or newer;
+  `cluster.hub_rbac` FAILs when it or its binding is missing or differs from the
+  repository's. Do not hand out a token on a cluster where that check does not pass.
+
+Mint it for a person or a machine you would trust with deleting pods and scaling
+fleets, short-lived and revocable.
 
 ### The two ways to get a token, and the one this runbook uses
 
@@ -292,9 +306,12 @@ for `rpg-k8s-realtime`, `rpg-k8s-data` and every `rpg-k8s-realtime-<game>`.
 backend/deploy/k8s/verify/verify.sh --target k8s-dev --layer 1
 ```
 
-Look at the line `cluster.hub_rbac`. How it behaves, and what it cannot see (for
-example, a RoleBinding that names the account in a namespace outside the expected
-list), is in `../k8s/verify/README.md`, "The Studio hub check".
+Look at the line `cluster.hub_rbac`. It also compares the admission policy and its
+binding with the repository's, and fails on a RoleBinding that names the account in a
+namespace outside the expected list and on a legacy token Secret. How it behaves, and
+what it cannot see (a broad role bound to Group `system:authenticated`; whether the
+policy's expressions *evaluate* as intended, which only the live check shows), is in
+`../k8s/verify/README.md`, "The Studio hub check".
 
 **3. Show that a token works** (optional). Use a kubeconfig that keeps the token in a
 file rather than on the command line, so it does not show in the process list: a
@@ -312,11 +329,160 @@ A `tokenFile` user entry is standard client-go behaviour; it was not exercised i
 this change. Any 401 means an invalid or expired token (mint again); a 403 on a
 listed verb means a Role is missing or wrong (run `verify`).
 
+## Studio hub: the live check
+
+**NOT RUN.** Everything above about the API server's behaviour (what the policy denies,
+that `fleets/scale` is served, that a bound token dies when its Secret is deleted) was
+derived from Kubernetes' documented behaviour and the manifests, and has not been
+observed. Applying anything to a cluster, the local one included, waits for the
+owner's word. This is the list to run then. Differences from any earlier list: a
+context guard, the token in a mode-600 file read through a `tokenFile` kubeconfig and
+**never on a command line**, no `verify.sh --only` (it does not exist; the flag is
+`--layer 1`), an explicit fleet name, the admission-policy cases (a restart is allowed,
+an image change and a privileged/hostPath change are denied, all as **server-side dry
+runs** that persist nothing), a `patch fleets` negative, a revoke retry loop and
+cleanup on exit.
+
+Context `k3d-rpg-dev` only, in WSL Ubuntu, from the repository root. Expect about
+1.5-2 GB of memory while the cluster runs.
+
+```bash
+set -u
+CTX=k3d-rpg-dev
+case "$CTX" in k3d-rpg-dev) ;; *) echo "wrong context"; exit 1;; esac
+K="kubectl --context $CTX"
+SA=system:serviceaccount:rpg-k8s-hub:studio-hub
+HUB=backend/deploy/k8s/hub
+umask 077; W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+
+k3d cluster start rpg-dev
+$K wait --for=condition=Ready node --all --timeout=180s
+$K get ns rpg-k8s-realtime rpg-k8s-data >/dev/null || { echo "stack not deployed"; exit 1; }
+$K version | grep -i server                     # must be v1.30 or newer (ValidatingAdmissionPolicy v1)
+
+# 0. Is fleets/scale served by Agones? (a finding against the scale decision if not)
+$K get --raw /apis/agones.dev/v1 | grep -o '"name":"fleets/scale"' || echo "FINDING: fleets/scale NOT served"
+$K get --raw /apis/admissionregistration.k8s.io/v1 | grep -o '"name":"validatingadmissionpolicies"' || echo "FINDING: no policy API"
+
+# 1. Apply the namespaced part and the policy BY NAME (what dev-up.sh applies). Never $HUB/optional.
+for f in 00-namespace.yaml 10-serviceaccount.yaml 15-admission-policy.yaml 20-rbac.yaml; do $K apply -f "$HUB/$f" || exit 1; done
+$K get validatingadmissionpolicy studio-hub-restart-only -o jsonpath='{.status.typeChecking}'; echo   # empty = the expressions type-check
+$K get clusterrole,clusterrolebinding -o name | grep -c studio-hub    # want 0 (grep exits 1 on 0 matches)
+
+# 2. can-i, yes/no tables:
+#    realtime: every row of the README table yes; data: the first six rows yes, Agones no;
+#    the hub namespace, kube-system, agones-system: no; cluster scope (nodes, namespaces, pods -A, secrets -A): no.
+#    must be "no": create pods/log, patch pods/status, delete secrets, update deployments.apps/scale,
+#    patch statefulsets.apps, patch fleets.agones.dev, create pods, create pods/exec, get secrets.
+
+# 3. A real token, 10 minutes, bound to an empty Secret; the value only in files under $W.
+$K -n rpg-k8s-hub create secret generic studio-hub-token-binding
+$K create token studio-hub -n rpg-k8s-hub --duration=10m \
+  --bound-object-kind=Secret --bound-object-name=studio-hub-token-binding > "$W/token"
+$K config view --raw --minify -o 'jsonpath={.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$W/ca.crt"
+SERVER=$($K config view --raw --minify -o 'jsonpath={.clusters[0].cluster.server}')
+cat > "$W/hub.kubeconfig" <<EOF
+apiVersion: v1
+kind: Config
+clusters: [{name: c, cluster: {server: "$SERVER", certificate-authority: "$W/ca.crt"}}]
+users: [{name: hub, user: {tokenFile: "$W/token"}}]
+contexts: [{name: h, context: {cluster: c, user: hub}}]
+current-context: h
+EOF
+T() { KUBECONFIG="$W/hub.kubeconfig" kubectl "$@"; }
+T get pods -n rpg-k8s-realtime >/dev/null && echo "token: pods realtime OK"
+T get pods -n rpg-k8s-data     >/dev/null && echo "token: pods data OK"
+T get fleets.agones.dev -n rpg-k8s-realtime >/dev/null && echo "token: fleets OK"
+T get secrets -n rpg-k8s-realtime 2>&1 | grep -q Forbidden && echo "token: secrets realtime Forbidden (wanted)"
+T get secrets -n rpg-k8s-data     2>&1 | grep -q Forbidden && echo "token: secrets data Forbidden (wanted)"
+T auth can-i --list -n rpg-k8s-realtime | head -40     # SelfSubjectRulesReview with no extra grant
+
+# 4. Fleet scale through the subresource, to its CURRENT value, on a named fleet.
+FLEET=map-servers-dotnet-k8s
+REPL=$(T get fleets.agones.dev "$FLEET" -n rpg-k8s-realtime -o 'jsonpath={.spec.replicas}')
+T scale fleets.agones.dev "$FLEET" -n rpg-k8s-realtime --replicas="$REPL" && echo "token: fleets/scale OK"
+T patch fleets.agones.dev "$FLEET" -n rpg-k8s-realtime --type=merge -p '{}' --dry-run=server 2>&1 | grep -q Forbidden \
+  && echo "token: patch fleets Forbidden (wanted)"
+
+# 5. THE ADMISSION POLICY. Server-side dry runs: admission runs, nothing is persisted.
+RESTART='{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"2026-01-01T00:00:00Z"}}}}}'
+T patch deployment gateway -n rpg-k8s-realtime --dry-run=server --type=merge -p "$RESTART" \
+  && echo "policy: a restart patch is ALLOWED (wanted)"
+T rollout restart deployment/gateway -n rpg-k8s-realtime --dry-run=server \
+  && echo "policy: kubectl rollout restart is ALLOWED (wanted)"
+denied() { # name, then the patch args: wanted = Forbidden by the policy
+  local name=$1; shift
+  out=$(T patch deployment gateway -n rpg-k8s-realtime --dry-run=server "$@" 2>&1)
+  if printf '%s' "$out" | grep -q "studio-hub-restart-only"; then echo "policy: $name DENIED by the policy (wanted)"
+  else echo "FINDING: $name was not denied by the policy: $out"; fi
+}
+denied "image change"          --type=json  -p '[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"example.invalid/x:1"}]'
+denied "env change"            --type=json  -p '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"QA","value":"1"}}]'
+denied "privileged + hostPath" --type=json  -p '[
+ {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"qa-host","hostPath":{"path":"/"}}},
+ {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"qa-host","mountPath":"/host"}},
+ {"op":"add","path":"/spec/template/spec/containers/0/securityContext","value":{"privileged":true}}]'
+denied "replicas change"       --type=merge -p '{"spec":{"replicas":3}}'
+denied "template label change" --type=merge -p '{"spec":{"template":{"metadata":{"labels":{"qa":"x"}}}}}'
+denied "Deployment label"      --type=merge -p '{"metadata":{"labels":{"qa":"x"}}}'
+denied "another annotation"    --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"qa":"x"}}}}}'
+# The same image change by an ADMIN must NOT be denied: the policy only restricts the hub.
+$K patch deployment gateway -n rpg-k8s-realtime --dry-run=server --type=json \
+  -p '[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"example.invalid/x:1"}]' \
+  && echo "policy: an admin image change is not affected (wanted)"
+
+# 6. Revoke: delete the binding Secret; the same token must stop working (retry a few seconds).
+$K delete secret studio-hub-token-binding -n rpg-k8s-hub
+for i in 1 2 3 4 5; do T get pods -n rpg-k8s-realtime 2>&1 | grep -qi Unauthorized && { echo "token after revoke: Unauthorized (wanted)"; break; }; sleep 2; done
+
+# 7. The deployment check, then stop the cluster.
+backend/deploy/k8s/verify/verify.sh --target k8s-dev --layer 1   # read the cluster.hub_rbac line
+k3d cluster stop rpg-dev
+```
+
+Pass criteria: every yes/no table line as wanted; the studio-hub ClusterRole count 0;
+the policy's `typeChecking` status empty; `fleets/scale` served and the scale call
+succeeds (a NotFound or Forbidden here is a finding against the scale decision);
+`patch fleets` Forbidden; **the restart patch allowed and every `denied` line denied by
+the policy**, and the admin patch allowed; revoke gives Unauthorized; `cluster.hub_rbac`
+PASS. A `FINDING` on a `denied` line means a CEL expression did not do what its comment
+says: that is the one thing the offline tests cannot show, and the policy must not be
+relied on until it is fixed. This list was written without a cluster; treat a syntax slip
+in it as a script error, not a result.
+
+## Deploying the hub to an existing cluster
+
+- **A cluster serving only the default game (`cuvara`) needs no manual step.** CD's
+  `dev-up.sh` applies `k8s/hub` (the admission policy first, then the Roles) before
+  `verify` runs.
+- **A cluster whose `gateway-config` key `games` names a non-default game must have each
+  such game's namespace re-rendered and applied before this change is deployed**
+  (before the merge that triggers the deploy). Otherwise `dev-up.sh` stops in its
+  preflight, before the data and app tiers change, and the run is red. Per game (read
+  `k8s/games/README.md` first: the apply re-applies the game's fleet and quota):
+
+```bash
+python backend/deploy/k8s/games/render.py --game <game> --nakama-tls <on|off> \
+  | kubectl --context <admin-context> apply -f -
+```
+
+- The cluster must serve `admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy`
+  (Kubernetes 1.30 or newer). The documented clusters do (k3s v1.31.5 on k3d, v1.34.1 on
+  docker-desktop); a VPS k3s is installed unpinned, so read `kubectl version` there.
+  `dev-up.sh` stops before changing anything if it is not served.
+
 ## If something goes wrong
 
 | Symptom | Likely cause | Look at |
 |---|---|---|
 | `verify` FAILs `cluster.hub_rbac` with "ServiceAccount is absent" | `k8s/hub` was never applied on this cluster, or the account was deleted | Run `backend/deploy/k8s/dev-up.sh` |
+| `verify` FAILs `cluster.hub_rbac` with `ValidatingAdmissionPolicy studio-hub-restart-only is absent` (or its binding, or `differs:` lines) | The policy was deleted, edited, or never applied. While it is missing `patch deployments` is not a restart (see above) | Run `backend/deploy/k8s/dev-up.sh` (applies it before the Role). A `differs:` line names the field that was edited; `kubectl get validatingadmissionpolicy studio-hub-restart-only -o yaml` |
+| `verify` FAILs `cluster.hub_rbac` with "could not be read ... 1.30" | The API server does not serve `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy (Kubernetes older than 1.30) | Upgrade the cluster. The Role must not be applied without the policy |
+| The hub gets `Forbidden ... ValidatingAdmissionPolicy 'studio-hub-restart-only' ... denied request: the Studio hub may only restart a Deployment` | It sent a change other than `restartedAt` (image, env, replicas, a label ...). Working as designed | Use `kubectl rollout restart` semantics only. Change the Deployment with an admin identity and the manifests |
+| `dev-up.sh` stops before applying anything: "does not serve admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy" | Kubernetes older than 1.30 | Upgrade the cluster; nothing was changed |
+| `dev-up.sh` stops before applying anything: "game <g> is listed in gateway-config's games, but rpg-k8s-realtime-<g> has no Role studio-hub" | That game's render predates the hub | Re-render and apply it (next row), then run `dev-up.sh` again |
+| `verify` FAILs `cluster.hub_rbac` with `foreign: RoleBinding <ns>/<name> names ServiceAccount` in a namespace outside the expected list | A binding gives the hub rights where it should have none, or a game namespace is not in `gateway-config`'s `games` | Delete the binding, or add the game to `games` |
+| `verify` FAILs `cluster.hub_rbac` with `legacy token: Secret rpg-k8s-hub/<name>` | A never-expiring `kubernetes.io/service-account-token` Secret exists for the account | `kubectl --context <admin-context> -n rpg-k8s-hub delete secret <name>` |
 | `verify` FAILs `cluster.hub_rbac` with `rpg-k8s-realtime-<game>: Role studio-hub is absent` | That game's render predates the hub, or it was never applied | Re-render and apply it: `python backend/deploy/k8s/games/render.py --game <game> --nakama-tls <on\|off> \| kubectl --context <admin-context> apply -f -` (read `k8s/games/README.md` before re-applying a render) |
 | The hub reports 401 | Token expired, revoked, or the binding Secret was deleted | Mint a new token |
 | The hub reports a TLS name error | It dialled a name or address the API certificate does not carry | Dial `127.0.0.1` through the SSH forward, or add the name to `tls-san` (an operator action on the host) |

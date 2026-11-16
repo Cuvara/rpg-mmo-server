@@ -110,7 +110,7 @@ defaults to 10/min per source IP — raise it if players will share a carrier NA
 
 The Studio hub is an operator web tool outside the cluster; its identity is the
 ServiceAccount `studio-hub` in its own namespace `rpg-k8s-hub`, and its rights are
-namespaced Roles. Rules for working on it:
+namespaced Roles plus one admission policy that only restricts it. Rules for working on it:
 
 - **The single copy of the allow-list in code is `k3s/hub_contract.py`.** The manifests
   (`k8s/hub/20-rbac.yaml`, `k8s/hub/optional/node-access.yaml`), the per-game Role in
@@ -118,14 +118,24 @@ namespaced Roles. Rules for working on it:
   `cluster.hub_rbac` all compare with it, by (apiGroup, resource, verb) triples. Widen
   the hub in `hub_contract.py` first, then the manifests, then the rule table in
   `k8s/README.md`, in one change. One verb too many is a security defect.
+- **`patch deployments` is a rollout restart only because of the admission policy**
+  `k8s/hub/15-admission-policy.yaml` (`studio-hub-restart-only`, text pinned by
+  `POLICY_SPEC` / `BINDING_SPEC` in `hub_contract.py`). RBAC cannot narrow it; without the
+  policy the token could change a pod template, i.e. run a privileged hostPath pod on the
+  node. Never remove the policy, widen what it allows, or add a write on a resource that
+  carries a pod template (StatefulSet, DaemonSet, Job, Fleet, pods) without changing the
+  contract and its `WriteSurface` test first. The policy and its binding are the only
+  cluster-scoped objects applied by default; they only restrict. `dev-up.sh` applies the
+  policy before the Role and stops if it cannot.
 - No Secret access anywhere, no ConfigMap access, no `*`, no `resourceNames`, no
   ClusterRole outside `k8s/hub/optional/`. Node access (`optional/node-access.yaml`) is
   an operator's opt-in: `dev-up.sh` must never apply it, and a `k8s/hub/*.yaml` glob must
   never match it.
 - No token value and no kubeconfig carrying one is ever committed. The token procedure
   is in `docs/RUNBOOK.md`, "Studio hub token".
-- `dev-up.sh` applies the static part; the per-game Role is applied by
-  `render.py | kubectl apply -f -`, not by `dev-up.sh`. The two k8s verify targets
+- `dev-up.sh` applies the static part (four files, by name); the per-game Role is applied by
+  `render.py | kubectl apply -f -`, not by `dev-up.sh`, and a listed game without it stops
+  `dev-up.sh` in its preflight. The two k8s verify targets
   declare `VERIFY_HUB_RBAC`, so `cluster.hub_rbac` FAILs where either is missing.
 
 ## File Structure Target
