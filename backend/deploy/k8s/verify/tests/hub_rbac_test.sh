@@ -133,11 +133,23 @@ run_case "a foreign ClusterRoleBinding names the ServiceAccount"   FAIL --games 
 
 run_case "RoleBinding names the hub as User system:serviceaccount:..." FAIL --games cuvara --mutate foreign-rb-user -- "foreign: RoleBinding rpg-k8s-realtime/sneaky" "ClusterRole/cluster-admin"
 run_case "RoleBinding names Group system:serviceaccounts:rpg-k8s-hub" FAIL --games cuvara --mutate foreign-rb-group-ns -- "foreign: RoleBinding rpg-k8s-realtime/sneaky"
-run_case "RoleBinding names Group system:serviceaccounts"          FAIL --games cuvara --mutate foreign-rb-group-all -- "foreign: RoleBinding rpg-k8s-realtime/sneaky"
 run_case "ClusterRoleBinding names the hub as User system:serviceaccount:..." FAIL --games cuvara --mutate foreign-crb-user -- "ClusterRoleBindings" "foreign: ClusterRoleBinding sneaky"
 run_case "ClusterRoleBinding names Group system:serviceaccounts:rpg-k8s-hub" FAIL --games cuvara --mutate foreign-crb-group-ns -- "foreign: ClusterRoleBinding sneaky"
-run_case "ClusterRoleBinding names Group system:serviceaccounts"   FAIL --games cuvara --mutate foreign-crb-group-all -- "foreign: ClusterRoleBinding sneaky"
 run_case "User alias in a ClusterRoleBinding, node ClusterRole on" FAIL --games cuvara --node --mutate foreign-crb-user -- "foreign: ClusterRoleBinding sneaky"
+
+# ---- PASS: a binding to a group that contains every ServiceAccount / every user is not "naming the hub" ----
+# The fixtures of every other case already carry the stock cluster's default bindings (the first one is
+# system:service-account-issuer-discovery -> Group system:serviceaccounts, read live on k3s v1.35.5, which made
+# the check FAIL on a clean cluster). These cases add one more of the kind, and drop the defaults altogether.
+# They document what the check cannot see: such a binding widens the hub together with every other account.
+run_case "exact, no stock default bindings at all"                 PASS --games cuvara --mutate no-stock-defaults -- "NOT granted (opt-in"
+run_case "RoleBinding of Group system:serviceaccounts (every ServiceAccount)" PASS --games cuvara --mutate broad-rb-sa -- "NOT granted (opt-in"
+run_case "RoleBinding of Group system:authenticated"               PASS --games cuvara --mutate broad-rb-authenticated -- "NOT granted (opt-in"
+run_case "RoleBinding of Group system:unauthenticated"             PASS --games cuvara --mutate broad-rb-unauthenticated -- "NOT granted (opt-in"
+run_case "ClusterRoleBinding of Group system:serviceaccounts"      PASS --games cuvara --mutate broad-crb-sa -- "NOT granted (opt-in"
+run_case "ClusterRoleBinding of Group system:authenticated"        PASS --games cuvara --mutate broad-crb-authenticated -- "NOT granted (opt-in"
+run_case "ClusterRoleBinding of Group system:unauthenticated"      PASS --games cuvara --mutate broad-crb-unauthenticated -- "NOT granted (opt-in"
+run_case "broad ClusterRoleBinding beside the exact node binding"  PASS --games cuvara --node --mutate broad-crb-sa -- "node access ENABLED"
 
 # ---- FAIL: the admission policy that makes `patch deployments` a restart (F1) -----------------
 # Every Role of the allow-list grants `patch deployments`, so the policy is always required.
@@ -146,8 +158,11 @@ run_case "policy binding absent"                                   FAIL --games 
 run_case "API does not serve ValidatingAdmissionPolicy (< 1.30)"   FAIL --games cuvara --mutate policy-api-unserved -- "could not be read" "1.30"
 run_case "a validation expression replaced by 'true'"              FAIL --games cuvara --mutate policy-expression-changed -- "ValidatingAdmissionPolicy" "differs: spec.validations[0].expression"
 run_case "an expression differs by one trailing space"             FAIL --games cuvara --mutate policy-expression-whitespace -- "differs: spec.validations[3].expression"
-run_case "a validation dropped"                                    FAIL --games cuvara --mutate policy-validation-dropped -- "differs: spec.validations: 8 entries, the repository's policy has 9"
-run_case "a validation added"                                      FAIL --games cuvara --mutate policy-validation-added -- "differs: spec.validations: 10 entries"
+run_case "a validation dropped"                                    FAIL --games cuvara --mutate policy-validation-dropped -- "differs: spec.validations: 11 entries, the repository's policy has 12"
+run_case "a validation added"                                      FAIL --games cuvara --mutate policy-validation-added -- "differs: spec.validations: 13 entries"
+run_case "the ownerReferences validation removed (F2: a fake owner would delete a Deployment)" FAIL --games cuvara --mutate policy-no-ownerrefs-validation -- "differs: spec.validations: 11 entries, the repository's policy has 12"
+run_case "the finalizers validation removed (F2: a finalizer would wedge a Deployment)" FAIL --games cuvara --mutate policy-no-finalizers-validation -- "differs: spec.validations: 11 entries"
+run_case "the name/namespace/generateName validation removed"      FAIL --games cuvara --mutate policy-no-identity-validation -- "differs: spec.validations: 11 entries"
 run_case "matchConditions removed: the policy would hit every user" FAIL --games cuvara --mutate policy-any-user -- "differs: spec.matchConditions"
 run_case "matchCondition names another user (the hub is not matched)" FAIL --games cuvara --mutate policy-other-user -- "differs: spec.matchConditions[0].expression"
 run_case "failurePolicy Ignore (fails open)"                       FAIL --games cuvara --mutate policy-fail-open -- "differs: spec.failurePolicy: want \"Fail\", got \"Ignore\""
@@ -226,4 +241,4 @@ if [ "$failures" -ne 0 ]; then
   echo "RESULT=FAIL ($failures case(s) wrong)"
   exit 1
 fi
-echo "RESULT=PASS (an extra verb, an extra resource, a missing rule, a missing ServiceAccount, a missing game Role, a foreign binding (ServiceAccount, User or Group spelling), an unreadable gateway-config and a widened node role each FAIL; exact PASSes with and without node access)"
+echo "RESULT=PASS (an extra verb, an extra resource, a missing rule, a missing ServiceAccount, a missing game Role, a foreign binding (ServiceAccount, User or hub-namespace Group spelling), a missing, edited or weakened admission policy (a dropped ownerReferences, finalizers or identity validation included), a legacy token Secret, an unreadable gateway-config and a widened node role each FAIL; exact PASSes with and without node access, with the stock cluster's default bindings and with a binding to a broad group)"

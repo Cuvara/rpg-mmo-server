@@ -298,13 +298,36 @@ deployments` needs no `create pods` to run a pod it designed.
 
 | Write | With the policy (as deployed) | Without it (deleted, never applied, or a cluster that does not enforce it) |
 |---|---|---|
-| `patch deployments` (gateway and every game namespace's Deployments in `rpg-k8s-realtime*`, Nakama in `rpg-k8s-data`) | A rollout restart only: the policy allows an update by the hub only when nothing changed but the pod template annotation `kubectl.kubernetes.io/restartedAt`. Image, env, command, `securityContext`, volumes (hostPath), `replicas`, labels and every other annotation are **refused**. | **Any pod template change.** None of our namespaces carries a Pod Security label (only `rpg-k8s-logging` does) and k3s/k3d enforce no level by default, so a template with `privileged: true`, `hostPID` and a `hostPath: /` mount is admitted and runs as root on the node. On a single-node k3s that reaches the node's credentials, which is **cluster-admin: the token is node-root-equivalent**. |
+| `patch deployments` (gateway and every game namespace's Deployments in `rpg-k8s-realtime*`, Nakama in `rpg-k8s-data`) | A rollout restart only: the policy allows an update by the hub only when nothing changed but the pod template annotation `kubectl.kubernetes.io/restartedAt`. Image, env, command, `securityContext`, volumes (hostPath), `replicas`, labels, every other annotation and the Deployment's own `ownerReferences`, `finalizers`, `name` and `generateName` are **refused**. | **Any pod template change.** None of our namespaces carries a Pod Security label (only `rpg-k8s-logging` does) and k3s/k3d enforce no level by default, so a template with `privileged: true`, `hostPID` and a `hostPath: /` mount is admitted and runs as root on the node. On a single-node k3s that reaches the node's credentials, which is **cluster-admin: the token is node-root-equivalent**. |
 
 **It is the policy that makes "restart only" true.** The RBAC rule alone does not. The
 policy exists only in the cluster: anyone with cluster-admin can delete it, which is why
 `cluster.hub_rbac` FAILs when it, or its binding, is absent, is not `Deny`, or differs
 from `../k3s/hub_contract.py`. `failurePolicy: Fail`: if the policy cannot be evaluated,
 the hub's patch is refused, never allowed.
+
+**The rest of a Deployment's object, field by field.** `patch deployments` writes the whole
+object, not only `spec`, so the policy compares every field of the object that a client can
+set. A Deployment's `metadata.ownerReferences` was missed at first: a reference to an owner
+that does not exist makes the garbage collector delete the Deployment, a delete the Role
+does not grant (found by the live QA of this branch; the first eight validations never
+looked at it, and `finalizers` of the Deployment itself had the same gap).
+
+| Field of the object | Can the hub change it? | What decides, and what follows |
+|---|---|---|
+| `spec.template` (pod spec, labels, finalizers, annotations) and the sibling `spec` fields | no, except the `restartedAt` template annotation | validations 1 to 7 |
+| `metadata.labels`, `metadata.annotations` | no | validation 8 (the Deployment controller records its revision annotation through its own request, another username, which the policy does not see) |
+| `metadata.ownerReferences` | **no** | validation 9: a fake owner would make the garbage collector delete the Deployment |
+| `metadata.finalizers` | **no** | validation 10: a finalizer would make every delete of it, and of its namespace, wait until an admin removes it |
+| `metadata.name`, `namespace`, `generateName` | no | validation 11 (the API refuses a change of the first two anyway; `generateName` is not validated on update) |
+| `metadata.uid`, `creationTimestamp`, `deletionTimestamp`, `deletionGracePeriodSeconds` | no | the API server: immutable on update; a client cannot start a deletion by writing them. Not re-checked by the policy |
+| `metadata.generation`, `resourceVersion`, `selfLink` | no effect | the API server resets or ignores them (a wrong `resourceVersion` is a conflict, never a change) |
+| `metadata.managedFields` | **yes, and the policy does not compare it** | the field manager rewrites it on every patch, the legitimate restart included, so an equality check would deny the restart. It is bookkeeping of which manager owns which field: it carries no owner, finalizer or pod field and cannot start a deletion or change a spec. What the hub can do: drop or add manager entries, so a later `kubectl apply --server-side` by an operator re-takes the fields without a conflict. Accepted |
+| `status` | no | an update of the main resource replaces it with the stored one; `deployments/status` is not granted |
+
+The rows decided "by the API server" rest on how the API server behaves, which this
+repository cannot prove offline; the live check in the runbook runs a dry-run for the two
+that were found (`ownerReferences`, `finalizers`) and for the identity fields.
 
 **Real powers that remain with the policy in place** (none needs a Secret):
 
@@ -318,6 +341,25 @@ the hub's patch is refused, never allowed.
   other field of its spec: the target `fleetName` and the policy type. A `Webhook` policy
   makes the Agones controller send an HTTP request to a URL the hub names: an outbound
   call from the controller's network position, carrying the fleet's status (no Secret).
+- **Delete or wedge a FleetAutoscaler through its metadata (accepted).** The same hole as
+  the Deployment's, left open here on purpose: a FleetAutoscaler `patch`/`update` can set
+  `metadata.ownerReferences` to an owner that does not exist, and the garbage collector
+  deletes the autoscaler; a `metadata.finalizers` entry makes its delete (and its
+  namespace's) wait until an admin removes it. **Why no second policy:** the hub may
+  already edit the autoscaler's whole `spec` (point it at another fleet, a buffer of zero, or a
+  `minReplicas` that equals `maxReplicas`), which stops autoscaling just as well as deleting
+  it, and it can already scale the fleet by hand; so the delete adds no capability, only
+  loses the object, which the manifests in `k8s/app/` re-create (`dev-up.sh`, or `kubectl
+  apply`). It touches availability of the dungeon fleet's buffer only: no pod template, no
+  Secret, no node. A second policy would be one more cluster-scoped object whose
+  expressions this repository cannot evaluate offline, for no capability removed. If that
+  trade changes (the autoscaler starts to matter more than the spec edit), add a policy on
+  `fleetautoscalers` with `ownerReferences`, `finalizers`, `name`, `namespace` and
+  `generateName` equal, the same shape as validations 9 to 11, and extend `hub_contract.py`.
+  `fleets/scale` cannot carry this: it is the CRD scale subresource, whose update writes
+  back `spec.replicas` only (a `template` field is refused: `unknown field "spec.template"`,
+  seen live); by the same handler it takes no `metadata` from the scale object but the
+  `resourceVersion`, which the live check confirms with an `ownerReferences` patch on it.
 - **Create GameServerAllocations**: take game servers out of the Ready pool by hand, and
   set labels and annotations on the allocated GameServer.
 - **Read** pod logs, events, Services and the specs of workloads. Logs are the **mild**

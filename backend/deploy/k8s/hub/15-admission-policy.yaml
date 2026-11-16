@@ -14,7 +14,11 @@
 # made by the user `system:serviceaccount:rpg-k8s-hub:studio-hub` it allows the
 # request only when nothing changed except the pod template annotation
 # `kubectl.kubernetes.io/restartedAt` (exactly what `kubectl rollout restart` writes).
-# Anything else is denied with a message. Every other user is not matched (the
+# Anything else is denied with a message. "Nothing changed" includes the Deployment's own
+# metadata: labels, annotations, ownerReferences (a reference to an owner that does not
+# exist makes the garbage collector delete the Deployment), finalizers (a finalizer makes
+# every delete, and its namespace's deletion, wait) and name, namespace, generateName.
+# Every other user is not matched (the
 # matchCondition below) and is not affected; so are creates, deletes and the
 # `deployments/scale` and `deployments/status` subresources, none of which the Role
 # grants.
@@ -158,8 +162,12 @@ spec:
     # 8. THE DEPLOYMENT'S OWN LABELS, then its ANNOTATIONS, equal to the old ones. The
     #    API server does not change them on an update; the Deployment controller records
     #    its revision in an annotation through ITS OWN request (another username, so this
-    #    policy does not see it). managedFields, generation and resourceVersion are not
-    #    compared: they are the metadata fields the API server itself manages.
+    #    policy does not see it). generation and resourceVersion are not compared: they are
+    #    the metadata fields the API server itself manages. managedFields is NOT compared
+    #    either, on purpose: the field manager rewrites it on every patch, the legitimate
+    #    restart included, so an equality check would deny the restart; it is bookkeeping
+    #    of field ownership and carries no owner, finalizer or pod field. Nine to eleven
+    #    below close the metadata the first eight left open.
     - expression: >-
         has(object.metadata.labels) == has(oldObject.metadata.labels) &&
         (!has(object.metadata.labels) || object.metadata.labels ==
@@ -171,6 +179,37 @@ spec:
         (!has(object.metadata.annotations) || object.metadata.annotations ==
         oldObject.metadata.annotations)
       message: "the Studio hub may only restart a Deployment: its metadata.annotations must not change"
+      reason: Forbidden
+    # 9. THE DEPLOYMENT'S OWN ownerReferences. Without this the hub could add a reference
+    #    to an owner that does not exist (any apiVersion/kind, a made-up uid): the garbage
+    #    collector then deletes the Deployment, a delete the Role does not grant. Found by
+    #    the live QA, because 1-8 compared the pod template and the labels and annotations
+    #    but not this field. Same present-on-both-or-absent shape as 2.
+    - expression: >-
+        has(object.metadata.ownerReferences) ==
+        has(oldObject.metadata.ownerReferences) &&
+        (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences ==
+        oldObject.metadata.ownerReferences)
+      message: "the Studio hub may only restart a Deployment: its metadata.ownerReferences must not change"
+      reason: Forbidden
+    # 10. THE DEPLOYMENT'S OWN finalizers (3 is the template's). A finalizer on the
+    #     Deployment makes every delete of it, and the deletion of its namespace, wait until
+    #     an admin removes the entry.
+    - expression: >-
+        has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) &&
+        (!has(object.metadata.finalizers) || object.metadata.finalizers ==
+        oldObject.metadata.finalizers)
+      message: "the Studio hub may only restart a Deployment: its metadata.finalizers must not change"
+      reason: Forbidden
+    # 11. NAME, NAMESPACE, generateName. The API server already refuses a change of the
+    #     first two on update and does not validate the third; compared here so the policy
+    #     does not depend on that.
+    - expression: >-
+        object.metadata.name == oldObject.metadata.name && object.metadata.namespace ==
+        oldObject.metadata.namespace && has(object.metadata.generateName) ==
+        has(oldObject.metadata.generateName) && (!has(object.metadata.generateName) ||
+        object.metadata.generateName == oldObject.metadata.generateName)
+      message: "the Studio hub may only restart a Deployment: its metadata.name, namespace and generateName must not change"
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

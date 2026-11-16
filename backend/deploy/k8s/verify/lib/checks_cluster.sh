@@ -512,9 +512,14 @@ check_log_collector() {
 #         and its binding exist without each other; gateway-config cannot be read (NotFound
 #         or any other error: the game list is then unknown, so the per-game Roles are
 #         unverified). An existing ConfigMap with an empty `games` is NOT a failure: cuvara
-#         only, so realtime and data are the expected namespaces. Also not covered: a binding
-#         of a broad role to Group system:authenticated / system:unauthenticated (Kubernetes
-#         binds its own defaults to them, so it is not read as naming the hub)
+#         only, so realtime and data are the expected namespaces. A binding "names the hub" BY
+#         SUBJECT (ServiceAccount, User system:serviceaccount:rpg-k8s-hub:studio-hub, Group
+#         system:serviceaccounts:rpg-k8s-hub), never by its own name. NOT read as naming it,
+#         and so not seen: a binding to a group that contains every ServiceAccount or every
+#         user (system:serviceaccounts, system:authenticated, system:unauthenticated).
+#         Kubernetes binds its own defaults there (system:service-account-issuer-discovery,
+#         system:basic-user, system:discovery, system:public-info-viewer); counting them made
+#         the check FAIL on every stock cluster
 #   PASS everything exact. The node ClusterRole absent is a PASS that says node access
 #         is not granted (opt-in); present and exact is a PASS that says it is enabled
 #
@@ -783,5 +788,5 @@ register cluster.log_collector 1 "log collector Ready and attached to Loki" \
   check_log_collector
 register cluster.hub_rbac 1 "Studio hub holds exactly its contracted rights" \
   "the ServiceAccount studio-hub exists, and in rpg-k8s-realtime, rpg-k8s-data and every game namespace gateway-config lists its Role studio-hub equals the allow-list of k3s/hub_contract.py triple for triple (an extra verb, an extra resource or a missing one FAILs; rules are compared, not names), its RoleBinding has the one subject and roleRef, no RoleBinding in ANY namespace outside that list and no ClusterRoleBinding names the account except studio-hub-nodes, no legacy kubernetes.io/service-account-token Secret exists for it, the ValidatingAdmissionPolicy studio-hub-restart-only (what makes patch on deployments a rollout restart) and its binding (Deny, cluster-wide) equal the repository's expressions, and that opt-in node ClusterRole is either absent (PASS: node access not granted) or exact" \
-  "that the token an operator minted is valid or unexpired, that anything else in the cluster cannot reach the hub's rights (it reads every RoleBinding and ClusterRoleBinding by subject, but a binding of a broad role to Group system:authenticated is outside what it can see, because Kubernetes binds its own defaults to that group), that the policy's CEL expressions evaluate as intended (they are compared as TEXT with the repository's; whether the API server denies an image change is proved only by the live dry-run in docs/RUNBOOK.md), or that the API server admits a request (no kubectl auth can-i, no impersonation). A Secret is never read: the legacy-token listing asks for names and types only. Games come from gateway-config's games, so a rendered game namespace left out of it is not covered. Declared per target by VERIFY_HUB_RBAC; SKIPs when empty" \
+  "that the token an operator minted is valid or unexpired, that anything else in the cluster cannot reach the hub's rights (it reads every RoleBinding and ClusterRoleBinding by subject, but rights the hub has only because every ServiceAccount has them, through a binding to Group system:serviceaccounts, system:authenticated or system:unauthenticated, are outside what it can see, because Kubernetes binds its own defaults to those groups), that the policy's CEL expressions evaluate as intended (they are compared as TEXT with the repository's; whether the API server denies an image change is proved only by the live dry-run in docs/RUNBOOK.md), or that the API server admits a request (no kubectl auth can-i, no impersonation). A Secret is never read: the legacy-token listing asks for names and types only. Games come from gateway-config's games, so a rendered game namespace left out of it is not covered. Declared per target by VERIFY_HUB_RBAC; SKIPs when empty" \
   check_hub_rbac

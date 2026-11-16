@@ -48,11 +48,16 @@ tests/test_hub_contract.py that shows it rejecting a mutation):
       triples and one RoleBinding with the exact subject and roleRef
     * no ClusterRole and no ClusterRoleBinding in the render
     * no other RoleBinding names the hub's ServiceAccount
-  'Names the hub' (every binding check below): a subject of kind ServiceAccount studio-hub,
-  kind User system:serviceaccount:rpg-k8s-hub:studio-hub, or kind Group
-  system:serviceaccounts:rpg-k8s-hub / system:serviceaccounts, kind and name compared
-  exactly. NOT covered: Group system:authenticated / system:unauthenticated (Kubernetes
-  binds its own defaults to them, e.g. system:basic-user).
+  'Names the hub' (every binding check below) is decided BY SUBJECT, never by the name of
+  the binding: a subject of kind ServiceAccount studio-hub, kind User
+  system:serviceaccount:rpg-k8s-hub:studio-hub, or kind Group
+  system:serviceaccounts:rpg-k8s-hub (the three spellings of an identity that contains the
+  hub and nobody else), kind and name compared exactly. A Group that contains EVERY
+  ServiceAccount or every user (system:serviceaccounts, system:authenticated,
+  system:unauthenticated: BROAD_GROUP_NAMES) does not name the hub: Kubernetes binds its own
+  defaults to them (system:basic-user, system:discovery, system:public-info-viewer,
+  system:service-account-issuer-discovery), so a check that counted them would FAIL on every
+  cluster. What that leaves unseen is written in k8s/verify/README.md.
 
 Usage:
     python hub_contract.py policy --kind K         # compare a live policy / binding (JSON on stdin)
@@ -300,24 +305,38 @@ def _binding_problems(binding: dict, role_kind: str, role_name: str, label: str)
 
 # Other spellings of the same identity. Kubernetes authenticates the hub's token as
 # User `system:serviceaccount:<ns>:<name>` in the Groups `system:serviceaccounts`,
-# `system:serviceaccounts:<ns>` (and `system:authenticated`), so a binding naming any
-# of the first three grants the hub its rights without a ServiceAccount subject.
-# Kind and name are compared EXACTLY (case-sensitive, no prefix match).
+# `system:serviceaccounts:<ns>` and `system:authenticated`. The User and the namespace Group
+# contain the hub and nobody else, so a binding naming either grants the hub its rights
+# without a ServiceAccount subject. Kind and name are compared EXACTLY (case-sensitive, no
+# prefix match).
 HUB_USER_NAME = f"system:serviceaccount:{HUB_NAMESPACE}:{HUB_ACCOUNT}"
-HUB_GROUP_NAMES = (f"system:serviceaccounts:{HUB_NAMESPACE}", "system:serviceaccounts")
+HUB_GROUP_NAMES = (f"system:serviceaccounts:{HUB_NAMESPACE}",)
+
+# The groups that contain every ServiceAccount (or every user). A binding to one of them
+# reaches the hub and everyone else alike, so it is not "a binding naming the hub": it is
+# how Kubernetes' own defaults are bound (system:service-account-issuer-discovery to
+# system:serviceaccounts; system:basic-user, system:discovery and system:public-info-viewer
+# to system:authenticated / system:unauthenticated). Classifying them as the hub made
+# cluster.hub_rbac FAIL on a stock k3s (live QA, round 2). They are listed so that the
+# decision is one named constant and a test, not a gap.
+BROAD_GROUP_NAMES = ("system:serviceaccounts", "system:authenticated", "system:unauthenticated")
 
 
 def names_the_hub(binding: dict) -> bool:
     """True when a RoleBinding / ClusterRoleBinding reaches the hub identity through its subjects.
 
-    Matches: kind ServiceAccount `studio-hub` (namespace rpg-k8s-hub, or empty/missing);
-    kind User `system:serviceaccount:rpg-k8s-hub:studio-hub`; kind Group
-    `system:serviceaccounts:rpg-k8s-hub` or `system:serviceaccounts`.
+    Decided by SUBJECT, never by the binding's name. Matches: kind ServiceAccount
+    `studio-hub` (namespace rpg-k8s-hub, or empty/missing); kind User
+    `system:serviceaccount:rpg-k8s-hub:studio-hub`; kind Group
+    `system:serviceaccounts:rpg-k8s-hub`. One such subject is enough, whatever else the
+    binding lists.
 
-    Not covered, on purpose: Group `system:authenticated` / `system:unauthenticated`.
-    Kubernetes binds its own defaults to them (e.g. `system:basic-user`), so treating
-    them as naming the hub would make every cluster fail; a custom binding of a broad
-    role to `system:authenticated` is a cluster-wide hole this check does not see.
+    Not matched, on purpose: the groups that contain EVERY ServiceAccount or every user
+    (BROAD_GROUP_NAMES: `system:serviceaccounts`, `system:authenticated`,
+    `system:unauthenticated`). Kubernetes binds its own defaults to them, so counting them
+    would fail every cluster. The cost, stated in k8s/verify/README.md: a custom binding
+    that gives a broad role to one of those groups raises the rights of the hub together
+    with every other ServiceAccount, and this check does not see it.
 
     A ServiceAccount subject with an empty or missing namespace inside a RoleBinding of
     rpg-k8s-hub does not arise: that namespace is not inspected (no hub binding lives
@@ -352,6 +371,17 @@ def names_the_hub(binding: dict) -> bool:
 # one exception to "no cluster-scoped object by default": no ClusterRole and no
 # ClusterRoleBinding, and one policy that can only RESTRICT the hub (it matches one
 # username and can only deny).
+#
+# What of a Deployment's OBJECT (not spec) the hub can change, field by field (the same table is
+# pinned in tests/test_hub_contract.py, METADATA_FIELDS): labels, annotations, ownerReferences,
+# finalizers, name, namespace and generateName are compared (validations 8-11). uid,
+# creationTimestamp, deletionTimestamp, deletionGracePeriodSeconds, generation, resourceVersion and
+# selfLink are decided by the API server on every update (immutable, reset or only a lock), and
+# `status` is replaced by the stored one on an update of the main resource: none is compared here.
+# managedFields is deliberately NOT compared: the field manager rewrites it on every patch
+# (including the legitimate restart), so an equality check would deny the restart itself. What
+# the hub can do with it is bookkeeping of which manager owns which field; it carries no owner
+# edge, no finalizer and no pod field, and it can neither start a deletion nor change a spec.
 #
 # The expected spec lives here, in code, like the Role allow-list: k8s/hub/
 # 15-admission-policy.yaml must equal it (check_hub_manifests) and the verify check
@@ -446,6 +476,27 @@ POLICY_VALIDATIONS = (
     (
         _opt_equal_pair("object.metadata.annotations", "oldObject.metadata.annotations"),
         "the Studio hub may only restart a Deployment: its metadata.annotations must not change",
+    ),
+    # 9. The Deployment's own ownerReferences equal. A reference to an owner that does not exist
+    #    makes the garbage collector delete the Deployment, which the Role (no `delete
+    #    deployments`) does not allow. Found by the live QA: validations 1-8 never looked at it.
+    (
+        _opt_equal_pair("object.metadata.ownerReferences", "oldObject.metadata.ownerReferences"),
+        "the Studio hub may only restart a Deployment: its metadata.ownerReferences must not change",
+    ),
+    # 10. ... and its own finalizers (validation 3 is the TEMPLATE's). A finalizer makes every
+    #     delete of the Deployment, and the deletion of its namespace, wait until an admin removes it.
+    (
+        _opt_equal_pair("object.metadata.finalizers", "oldObject.metadata.finalizers"),
+        "the Studio hub may only restart a Deployment: its metadata.finalizers must not change",
+    ),
+    # 11. The identity: name and namespace are immutable in the API anyway, generateName is not
+    #     validated on update; all three equal, so the policy does not rest on that.
+    (
+        "object.metadata.name == oldObject.metadata.name && "
+        "object.metadata.namespace == oldObject.metadata.namespace && "
+        + _opt_equal_pair("object.metadata.generateName", "oldObject.metadata.generateName"),
+        "the Studio hub may only restart a Deployment: its metadata.name, namespace and generateName must not change",
     ),
 )
 

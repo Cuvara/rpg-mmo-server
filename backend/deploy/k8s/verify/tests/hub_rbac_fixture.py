@@ -66,13 +66,20 @@ MUTATIONS = {
     "binding-cluster-admin", "foreign-rb", "foreign-crb", "node-extra-verb", "node-missing-rule",
     "node-role-no-binding", "node-binding-no-role", "node-binding-cluster-admin", "no-gateway-games",
     "gateway-config-notfound", "gateway-config-error",
-    "foreign-rb-user", "foreign-rb-group-ns", "foreign-rb-group-all",
-    "foreign-crb-user", "foreign-crb-group-ns", "foreign-crb-group-all",
+    "foreign-rb-user", "foreign-rb-group-ns",
+    "foreign-crb-user", "foreign-crb-group-ns",
+    # a binding to a group that contains every ServiceAccount / every user is NOT a binding naming the hub
+    "broad-rb-sa", "broad-rb-authenticated", "broad-rb-unauthenticated",
+    "broad-crb-sa", "broad-crb-authenticated", "broad-crb-unauthenticated",
+    # a stock cluster's default bindings are the baseline; this one removes them (a cluster with none)
+    "no-stock-defaults",
     # the admission policy (F1)
     "no-policy", "no-policy-binding", "policy-api-unserved", "policy-expression-changed",
     "policy-expression-whitespace", "policy-validation-dropped", "policy-validation-added",
     "policy-any-user", "policy-other-user", "policy-fail-open", "policy-wrong-operation",
-    "policy-wrong-resource", "policy-exclude-rules", "binding-warn", "binding-audit-only",
+    "policy-wrong-resource", "policy-exclude-rules",
+    # F2 (round 2): a policy that does not look at the Deployment's own ownerReferences / finalizers / identity
+    "policy-no-ownerrefs-validation", "policy-no-finalizers-validation", "policy-no-identity-validation", "binding-warn", "binding-audit-only",
     "binding-namespace-selector", "binding-exclude-rules", "binding-other-policy",
     "binding-param-ref",
     # bindings and token Secrets outside the expected set (F3)
@@ -81,13 +88,36 @@ MUTATIONS = {
 }
 
 # The other spellings of the hub identity (User / Group subjects), see hub_contract.names_the_hub.
+# Both contain the hub and nobody else.
 ALIAS_SUBJECTS = {
     "user": {"kind": "User", "name": "system:serviceaccount:rpg-k8s-hub:studio-hub",
              "apiGroup": "rbac.authorization.k8s.io"},
     "group-ns": {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub",
                  "apiGroup": "rbac.authorization.k8s.io"},
-    "group-all": {"kind": "Group", "name": "system:serviceaccounts", "apiGroup": "rbac.authorization.k8s.io"},
 }
+
+# Groups that contain every ServiceAccount / every user: not "naming the hub" (hub_contract.BROAD_GROUP_NAMES).
+BROAD_SUBJECTS = {
+    "sa": {"kind": "Group", "name": "system:serviceaccounts", "apiGroup": "rbac.authorization.k8s.io"},
+    "authenticated": {"kind": "Group", "name": "system:authenticated", "apiGroup": "rbac.authorization.k8s.io"},
+    "unauthenticated": {"kind": "Group", "name": "system:unauthenticated", "apiGroup": "rbac.authorization.k8s.io"},
+}
+
+
+def stock_cluster_bindings():
+    """The ClusterRoleBindings every stock cluster carries for a group that contains the hub (and everyone
+    else). The first is the object the live QA read on k3s v1.35.5 (the one that made cluster.hub_rbac FAIL
+    on a clean cluster); the others are the Kubernetes bootstrap defaults for system:authenticated."""
+    def crb(name, *groups):
+        return {"apiVersion": RBAC, "kind": "ClusterRoleBinding",
+                "metadata": {"name": name, "labels": {"kubernetes.io/bootstrapping": "rbac-defaults"},
+                             "annotations": {"rbac.authorization.kubernetes.io/autoupdate": "true"}},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": name},
+                "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": g} for g in groups]}
+    return [crb("system:service-account-issuer-discovery", "system:serviceaccounts"),
+            crb("system:basic-user", "system:authenticated"),
+            crb("system:discovery", "system:authenticated"),
+            crb("system:public-info-viewer", "system:authenticated", "system:unauthenticated")]
 
 
 def api_policy():
@@ -190,6 +220,10 @@ def main(argv):
         if f"foreign-rb-{key}" in mut:
             bindings["rpg-k8s-realtime"].append(binding(
                 "sneaky", "rpg-k8s-realtime", "ClusterRole", "cluster-admin", subjects=[subject]))
+    for key, subject in BROAD_SUBJECTS.items():
+        if f"broad-rb-{key}" in mut:
+            bindings["rpg-k8s-realtime"].append(binding(
+                "everyone", "rpg-k8s-realtime", "ClusterRole", "view", subjects=[subject]))
 
     for ns, doc in roles.items():
         put(f"role.{ns}.json", doc)
@@ -207,6 +241,13 @@ def main(argv):
         vspec["validations"].pop()
     if "policy-validation-added" in mut:
         vspec["validations"].append({"expression": "true", "message": "x", "reason": "Forbidden"})
+    # the validations that close the metadata hole, by position in hub_contract.POLICY_VALIDATIONS
+    for flag, expr in (("policy-no-ownerrefs-validation", "object.metadata.ownerReferences"),
+                       ("policy-no-finalizers-validation", "object.metadata.finalizers"),
+                       ("policy-no-identity-validation", "object.metadata.name ==")):
+        if flag in mut:
+            vspec["validations"] = [v for v in vspec["validations"] if not v["expression"].startswith(
+                f"has({expr})" if "name" not in expr else expr)]
     if "policy-any-user" in mut:
         vspec["matchConditions"] = []
     if "policy-other-user" in mut:
@@ -276,6 +317,8 @@ def main(argv):
                                           "node-binding-cluster-admin"} & mut
     cluster_items = [binding("system:node", None, "ClusterRole", "system:node", kind="ClusterRoleBinding", subjects=[
         {"kind": "Group", "name": "system:nodes", "apiGroup": "rbac.authorization.k8s.io"}])]
+    if "no-stock-defaults" not in mut:
+        cluster_items += stock_cluster_bindings()
     if node_role:
         table = list(hc.NODE_RULES)
         cr = {"apiVersion": RBAC, "kind": "ClusterRole", "metadata": {"name": "studio-hub-nodes"}, "rules": rules(table)}
@@ -296,6 +339,10 @@ def main(argv):
     for key, subject in ALIAS_SUBJECTS.items():
         if f"foreign-crb-{key}" in mut:
             cluster_items.append(binding("sneaky", None, "ClusterRole", "cluster-admin",
+                                         kind="ClusterRoleBinding", subjects=[subject]))
+    for key, subject in BROAD_SUBJECTS.items():
+        if f"broad-crb-{key}" in mut:
+            cluster_items.append(binding("everyone", None, "ClusterRole", "view",
                                          kind="ClusterRoleBinding", subjects=[subject]))
     put("crb.json", listing(cluster_items))
     return 0

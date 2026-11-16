@@ -80,7 +80,7 @@ be reported as "the probe could not be built".
 | `cluster.restarts` | no container in the namespaces restarted within the last `VERIFY_RESTART_WINDOW` seconds (default 1800), **and** every container is `Running` right now — so an active crash loop fails at any age | restarts **older** than the window are a WARN naming every container, and are not judged: the check says nothing about why they died. It also cannot see a crash that predates the current pod, because `restartCount` resets when a pod is recreated |
 | `cluster.secrets` | each declared Secret exists and every key decodes to a non-empty value | nothing about the value being *correct*. Values are never printed — only key names and byte lengths |
 | `cluster.log_collector` | the log collector named by `VERIFY_LOG_COLLECTOR` (`<namespace>/<daemonset>`, `rpg-k8s-logging/alloy` on both k8s targets) exists, is scheduled on at least one node with ready equal to desired, and the Service `loki` in that namespace has an EndpointSlice address. **FAIL** when the namespace or the DaemonSet is absent, desired is 0, or ready differs from desired. **WARN** when it is Ready but the Service has no address. SKIP when `VERIFY_LOG_COLLECTOR` is empty | that a log line reached Loki: it does not query Loki or read Alloy's own log, it cannot see a collected namespace whose Role is missing (Alloy logs a `403` for it), and the address is the one `connect-loki.sh` wrote, not proof that Loki answers on it |
-| `cluster.hub_rbac` | the Studio hub identity named by `VERIFY_HUB_RBAC` (`<namespace>/<serviceaccount>`, `rpg-k8s-hub/studio-hub` on both k8s targets) holds exactly the rights of `k3s/hub_contract.py`: the ServiceAccount exists; in `rpg-k8s-realtime`, `rpg-k8s-data` and every `rpg-k8s-realtime-<game>` that `gateway-config` lists, the Role `studio-hub` equals the allow-list triple for triple and its RoleBinding has the one subject and the one `roleRef`; no RoleBinding in any namespace outside that list and no ClusterRoleBinding names the account (except `studio-hub-nodes`); no legacy `kubernetes.io/service-account-token` Secret exists for it; the ValidatingAdmissionPolicy `studio-hub-restart-only` and its binding equal the repository's (`patch deployments` is a restart only because of it); the opt-in node ClusterRole is absent or exact. **FAIL** on an extra verb, an extra resource or a missing triple, a rule with `resourceNames` or a `*`, a missing Role, RoleBinding or ServiceAccount, a foreign binding, a legacy token Secret, a missing, unreadable or edited policy or binding, or a node ClusterRole that differs from its allow-list. **PASS** says whether node access is not granted (opt-in) or enabled. SKIP when `VERIFY_HUB_RBAC` is empty | that a token is valid or unexpired; a broad role bound to Group `system:authenticated`; that the policy's CEL *evaluates* as intended (its text is compared, not run: the live dry-run in `docs/RUNBOOK.md` is the proof); or that the API server admits the account (no `can-i`, no impersonation). Games come from `gateway-config`'s `games`, so a rendered game namespace left out of it is reported as a foreign binding |
+| `cluster.hub_rbac` | the Studio hub identity named by `VERIFY_HUB_RBAC` (`<namespace>/<serviceaccount>`, `rpg-k8s-hub/studio-hub` on both k8s targets) holds exactly the rights of `k3s/hub_contract.py`: the ServiceAccount exists; in `rpg-k8s-realtime`, `rpg-k8s-data` and every `rpg-k8s-realtime-<game>` that `gateway-config` lists, the Role `studio-hub` equals the allow-list triple for triple and its RoleBinding has the one subject and the one `roleRef`; no RoleBinding in any namespace outside that list and no ClusterRoleBinding names the account (except `studio-hub-nodes`); no legacy `kubernetes.io/service-account-token` Secret exists for it; the ValidatingAdmissionPolicy `studio-hub-restart-only` and its binding equal the repository's (`patch deployments` is a restart only because of it); the opt-in node ClusterRole is absent or exact. **FAIL** on an extra verb, an extra resource or a missing triple, a rule with `resourceNames` or a `*`, a missing Role, RoleBinding or ServiceAccount, a foreign binding, a legacy token Secret, a missing, unreadable or edited policy or binding, or a node ClusterRole that differs from its allow-list. **PASS** says whether node access is not granted (opt-in) or enabled. SKIP when `VERIFY_HUB_RBAC` is empty | that a token is valid or unexpired; rights every ServiceAccount has through a binding to `system:serviceaccounts`, `system:authenticated` or `system:unauthenticated` (it cannot see those, see "What it cannot see" below); that the policy's CEL *evaluates* as intended (its text is compared, not run: the live dry-run in `docs/RUNBOOK.md` is the proof); or that the API server admits the account (no `can-i`, no impersonation). Games come from `gateway-config`'s `games`, so a rendered game namespace left out of it is reported as a foreign binding |
 
 `cluster.fleet` reports **WARN** when the fleet is at size but has zero Ready
 replicas (everything Allocated) **and** the fleet does not pin a fleet-wide
@@ -420,7 +420,7 @@ difference).
 | Role `studio-hub` absent in an expected namespace | **FAIL** |
 | Role has an extra verb, an extra resource, a missing triple, `resourceNames` or a `*` | **FAIL**, naming each triple |
 | RoleBinding `studio-hub` absent, or with another subject or another `roleRef` | **FAIL** |
-| Another RoleBinding in an expected namespace, **a RoleBinding in any other namespace** (`kube-system`, `agones-system`, `rpg-k8s-hub`, a game not in `gateway-config`), or any ClusterRoleBinding other than `studio-hub-nodes`, names the account (as ServiceAccount, as User `system:serviceaccount:rpg-k8s-hub:studio-hub`, or as Group `system:serviceaccounts:rpg-k8s-hub` / `system:serviceaccounts`) | **FAIL** |
+| Another RoleBinding in an expected namespace, **a RoleBinding in any other namespace** (`kube-system`, `agones-system`, `rpg-k8s-hub`, a game not in `gateway-config`), or any ClusterRoleBinding other than `studio-hub-nodes`, names the account (as ServiceAccount, as User `system:serviceaccount:rpg-k8s-hub:studio-hub`, or as Group `system:serviceaccounts:rpg-k8s-hub`). A binding to a group that contains every ServiceAccount or every user (`system:serviceaccounts`, `system:authenticated`, `system:unauthenticated`) is **not** that, so the cluster's own defaults pass | **FAIL** |
 | A Secret of type `kubernetes.io/service-account-token` for `studio-hub` exists in `rpg-k8s-hub` (none is documented: the runbook mints bound tokens), or the Secrets cannot be listed | **FAIL** |
 | ValidatingAdmissionPolicy `studio-hub-restart-only` or its binding is absent, or cannot be read (the API must serve `admissionregistration.k8s.io/v1`, Kubernetes 1.30 or newer) | **FAIL** (every Role of the allow-list grants `patch` on deployments) |
 | The policy differs from `hub_contract.py`: an expression, `matchConditions`, `failurePolicy`, the resource rules, an `excludeResourceRules`, a `paramKind`; or the binding is not `validationActions: [Deny]`, carries a `namespaceSelector`, an exclusion or a `paramRef`, or names another policy | **FAIL**, one `differs: spec.<path>` line each |
@@ -444,17 +444,48 @@ server denies an image change is shown only by the server-side dry runs in
 namespace (`kubectl get rolebindings -A`); the expected ones are checked in full and
 any other that names the account is a FAIL.
 
-Which subjects count as naming the account: a `ServiceAccount` subject `studio-hub`
-(namespace `rpg-k8s-hub`, empty or missing), a `User`
-`system:serviceaccount:rpg-k8s-hub:studio-hub`, and the `Group`s
-`system:serviceaccounts:rpg-k8s-hub` and `system:serviceaccounts`; kind and name are
-compared exactly. **Not covered:** a binding of a broad role to the `Group`s
-`system:authenticated` or `system:unauthenticated`. Kubernetes binds its own defaults to
-them (for example `system:basic-user`), so they are not read as naming the hub; such a
-custom binding would widen the hub, and everyone else, without this check seeing it.
-(A `ServiceAccount` subject with an empty or missing namespace inside a RoleBinding of
-`rpg-k8s-hub` does not arise: that namespace is not inspected, as no hub binding lives
-there.)
+Which subjects count as naming the account. The rule is decided **by subject, never by
+the name of the binding**, so a future Kubernetes default (or one a cluster adds) cannot
+break it by being called something new, and a binding that is called like a default but
+lists the hub is still foreign:
+
+| Subject | Names the hub? |
+|---|---|
+| `ServiceAccount` `studio-hub` (namespace `rpg-k8s-hub`, empty or missing) | yes |
+| `User` `system:serviceaccount:rpg-k8s-hub:studio-hub` | yes |
+| `Group` `system:serviceaccounts:rpg-k8s-hub` (every ServiceAccount of the hub's namespace: the hub alone) | yes |
+| `Group` `system:serviceaccounts` (every ServiceAccount of the cluster) | no |
+| `Group` `system:authenticated`, `system:unauthenticated` (every user) | no |
+
+Kind and name are compared exactly. One subject that names the hub is enough, whatever else
+the binding lists beside it. (A `ServiceAccount` subject with an empty or missing namespace
+inside a RoleBinding of `rpg-k8s-hub` does not arise: that namespace is not inspected, as no
+hub binding lives there.)
+
+**What it cannot see: rights every ServiceAccount has through a broad group.** The hub's
+token is in `system:serviceaccounts` and `system:authenticated`, so it holds whatever any
+binding gives those groups, and a binding that gives a broad role to one of them (for
+example `edit` to `system:serviceaccounts`) widens the hub together with every other
+ServiceAccount. The check does not see that, on purpose: those groups are how Kubernetes
+binds its own defaults, so reading them as "names the hub" made the check FAIL on every
+stock cluster (the live QA of this branch, on k3s v1.35.5, with
+`system:service-account-issuer-discovery`). If a cluster adds such a binding it is a
+cluster-wide decision, reviewed as one, not something the hub check can prove absent.
+
+The Kubernetes defaults bound to those groups that this repository knows of (all labelled
+`kubernetes.io/bootstrapping: rbac-defaults`, all read-only, none grants a resource of the
+hub's namespaces):
+
+| ClusterRoleBinding | Group | What it grants |
+|---|---|---|
+| `system:service-account-issuer-discovery` | `system:serviceaccounts` | `get` of four non-resource URLs: `/.well-known/openid-configuration`, `/openid/v1/jwks` (and the slashed variants); the object the QA read live |
+| `system:basic-user` | `system:authenticated` | `create` of SelfSubjectAccessReview, SelfSubjectRulesReview and SelfSubjectReview (what `kubectl auth can-i` uses) |
+| `system:discovery` | `system:authenticated` | `get` of the API discovery URLs (`/api`, `/apis`, `/version`, `/openapi`, ...) |
+| `system:public-info-viewer` | `system:authenticated`, `system:unauthenticated` | `get` of `/healthz`, `/livez`, `/readyz`, `/version` |
+
+A distribution or an add-on (Agones, a CNI, an ingress controller) can add more; each one a
+cluster has shows up in `kubectl get clusterrolebindings -o json` with a broad group as its
+only subject. None of them is read by the check.
 
 **Unreadable `gateway-config`.** If the ConfigMap `gateway-config` cannot be read
 (NotFound or any other error) the game list is unknown, not empty, so the check **FAILs**

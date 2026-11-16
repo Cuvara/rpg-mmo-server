@@ -510,7 +510,6 @@ class RenderedGame(unittest.TestCase):
         for subject in (
             {"kind": "User", "name": "system:serviceaccount:rpg-k8s-hub:studio-hub"},
             {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub"},
-            {"kind": "Group", "name": "system:serviceaccounts"},
         ):
             with self.subTest(subject=subject):
                 def m(ms, subject=subject):
@@ -518,6 +517,16 @@ class RenderedGame(unittest.TestCase):
                                "subjects": [subject],
                                "roleRef": {"kind": "ClusterRole", "name": "cluster-admin"}})
                 self.assertRejected(m, "under another name")
+
+    def test_a_binding_of_a_broad_group_is_not_a_binding_naming_the_hub(self):
+        # A group every ServiceAccount is in (or every user) does not name the hub; see names_the_hub.
+        for name in hc.BROAD_GROUP_NAMES:
+            with self.subTest(group=name):
+                def m(ms, name=name):
+                    ms.append({"kind": "RoleBinding", "metadata": {"name": "everyone", "namespace": self.NS},
+                               "subjects": [{"kind": "Group", "name": name}],
+                               "roleRef": {"kind": "ClusterRole", "name": "view"}})
+                self.assertEqual(self.check(m), [])
 
     def test_the_gateway_allocate_binding_is_not_confused_with_the_hub(self):
         def m(ms):
@@ -737,15 +746,19 @@ class Bindings(unittest.TestCase):
         self.assertIn("foreign: RoleBinding x/sloppy", out)
 
     # The same identity under its other spellings: User `system:serviceaccount:NS:NAME` and the
-    # Groups `system:serviceaccounts:NS` / `system:serviceaccounts`.
+    # Group `system:serviceaccounts:NS`. Both contain the hub and nobody else.
     ALIASES = (
         ("user", {"kind": "User", "name": "system:serviceaccount:rpg-k8s-hub:studio-hub",
                   "apiGroup": "rbac.authorization.k8s.io"}),
         ("group-namespace", {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub",
                              "apiGroup": "rbac.authorization.k8s.io"}),
-        ("group-all", {"kind": "Group", "name": "system:serviceaccounts",
-                       "apiGroup": "rbac.authorization.k8s.io"}),
     )
+
+    # Groups that contain every ServiceAccount (or every user). They reach the hub, and everyone
+    # else, so a binding to one of them is not a binding that names the hub.
+    BROAD = tuple(
+        (name, {"kind": "Group", "name": name, "apiGroup": "rbac.authorization.k8s.io"})
+        for name in ("system:serviceaccounts", "system:authenticated", "system:unauthenticated"))
 
     def test_a_rolebinding_naming_the_hub_as_user_or_group_is_reported(self):
         for label, subject in self.ALIASES:
@@ -799,10 +812,97 @@ class Bindings(unittest.TestCase):
             with self.subTest(subject=subject):
                 self.assertFalse(names(subject))
 
-    def test_system_authenticated_is_not_covered(self):
-        # Documented limit: Kubernetes binds its defaults (system:basic-user) to these groups.
-        for name in ("system:authenticated", "system:unauthenticated"):
-            self.assertFalse(hc.names_the_hub({"subjects": [{"kind": "Group", "name": name}]}))
+    def test_a_broad_group_is_not_the_hub(self):
+        # Classified by subject, not by binding name: Kubernetes binds its own defaults to these groups.
+        self.assertEqual(hc.BROAD_GROUP_NAMES,
+                         ("system:serviceaccounts", "system:authenticated", "system:unauthenticated"))
+        for name, subject in self.BROAD:
+            with self.subTest(group=name):
+                self.assertFalse(hc.names_the_hub({"subjects": [subject]}))
+
+    def test_a_broad_group_next_to_a_subject_that_names_the_hub_is_still_foreign(self):
+        # One subject that names the hub is enough, whatever else is listed beside it.
+        for _, broad in self.BROAD:
+            for label, hub in (("sa", self.SUBJECT), *self.ALIASES):
+                with self.subTest(broad=broad["name"], hub=label):
+                    mixed = self.binding("mixed", kind="ClusterRole", role="view",
+                                         binding_kind="ClusterRoleBinding", subjects=[broad, hub])
+                    rc, out, _ = self.run_bindings(self.listing(mixed), "--scope", "cluster", "--node", "absent")
+                    self.assertEqual(rc, 1)
+                    self.assertIn("foreign: ClusterRoleBinding mixed names ServiceAccount", out)
+
+    # The ClusterRoleBindings of a stock cluster that reach every ServiceAccount or every user. The first is
+    # the object the live QA read on k3s v1.35.5 (kubectl get clusterrolebinding -o json, trimmed to what the
+    # check reads); the other three are the Kubernetes bootstrap defaults bound to system:authenticated /
+    # system:unauthenticated.
+    STOCK_DEFAULTS = (
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+         "metadata": {"name": "system:service-account-issuer-discovery",
+                      "annotations": {"rbac.authorization.kubernetes.io/autoupdate": "true"},
+                      "labels": {"kubernetes.io/bootstrapping": "rbac-defaults"}},
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
+                     "name": "system:service-account-issuer-discovery"},
+         "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": "system:serviceaccounts"}]},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+         "metadata": {"name": "system:basic-user"},
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "system:basic-user"},
+         "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": "system:authenticated"}]},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+         "metadata": {"name": "system:discovery"},
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "system:discovery"},
+         "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": "system:authenticated"}]},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+         "metadata": {"name": "system:public-info-viewer"},
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
+                     "name": "system:public-info-viewer"},
+         "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": "system:authenticated"},
+                      {"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": "system:unauthenticated"}]},
+    )
+
+    def test_the_stock_cluster_default_bindings_are_not_foreign(self):
+        # F1 of the live QA: cluster.hub_rbac FAILed on a clean k3s because of the first of these.
+        for node, extra in (("absent", []), ("present", [self.node_binding()])):
+            with self.subTest(node=node):
+                rc, out, err = self.run_bindings(
+                    self.listing(*self.STOCK_DEFAULTS, *extra), "--scope", "cluster", "--node", node)
+                self.assertEqual((rc, out, err), (0, "", ""))
+
+    def test_beside_the_defaults_only_a_foreign_binding_is_reported(self):
+        for default in self.STOCK_DEFAULTS:
+            with self.subTest(default=default["metadata"]["name"]):
+                self.assertEqual(self.run_bindings(self.listing(default), "--scope", "cluster")[:2], (0, ""))
+        admin = self.binding("hub-admin", kind="ClusterRole", role="cluster-admin", binding_kind="ClusterRoleBinding")
+        rc, out, _ = self.run_bindings(self.listing(*self.STOCK_DEFAULTS, admin), "--scope", "cluster")
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertIn("foreign: ClusterRoleBinding hub-admin", out)
+
+    def test_a_default_looking_name_does_not_excuse_a_binding_that_names_the_hub(self):
+        # The rule reads subjects, never names: a binding called like a default but listing the hub is foreign.
+        imposter = copy.deepcopy(self.STOCK_DEFAULTS[0])
+        imposter["subjects"].append(self.SUBJECT)
+        rc, out, _ = self.run_bindings(self.listing(imposter), "--scope", "cluster")
+        self.assertEqual(rc, 1)
+        self.assertIn("foreign: ClusterRoleBinding system:service-account-issuer-discovery names ServiceAccount", out)
+
+    def test_a_namespaced_binding_of_a_broad_group_is_not_foreign_either(self):
+        for name, subject in self.BROAD:
+            with self.subTest(group=name):
+                everyone = self.binding("everyone", "x", kind="ClusterRole", role="view", subjects=[subject])
+                rc, out, _ = self.run_bindings(
+                    self.listing(self.binding("studio-hub", "x"), everyone),
+                    "--scope", "namespaced", "--namespace", "x")
+                self.assertEqual((rc, out), (0, ""))
+                rc, out, _ = self.run_bindings(
+                    self.listing(everyone), "--scope", "all-namespaces", "--expected", "rpg-k8s-data")
+                self.assertEqual((rc, out), (0, ""))
+
+    def test_the_verify_readme_lists_the_defaults_and_states_the_blind_spot(self):
+        text = (hc.DEPLOY_DIR / "k8s" / "verify" / "README.md").read_text(encoding="utf-8")
+        for default in self.STOCK_DEFAULTS:
+            self.assertIn(default["metadata"]["name"], text)
+        for needle in ("every ServiceAccount", "cannot see"):
+            self.assertIn(needle, text)
 
     def test_a_service_account_of_the_same_name_elsewhere_is_not_the_hub(self):
         other = self.binding("elsewhere", "x", subjects=[
@@ -1032,10 +1132,66 @@ class AdmissionPolicy(unittest.TestCase):
             self.assertIn(f"object.metadata.{field}", text)
             self.assertIn(f"oldObject.metadata.{field}", text)
 
+    # Every field of a Deployment's ObjectMeta (apps/v1, Kubernetes 1.30-1.35), what the hub can do with it
+    # through `patch deployments`, and what decides. The "api" rows rest on the API server's own rules
+    # (immutable or reset on update) and are NOT proven offline: the live check in docs/RUNBOOK.md runs one
+    # dry-run per row that matters. A field Kubernetes adds to ObjectMeta is not in this table: review it on
+    # every upgrade, like DEPLOYMENT_SPEC_FIELDS.
+    METADATA_FIELDS = {
+        # compared by the policy (a validation of the policy decides)
+        "labels": ("policy", "object.metadata.labels"),
+        "annotations": ("policy", "object.metadata.annotations"),
+        "ownerReferences": ("policy", "object.metadata.ownerReferences"),   # a fake owner: the garbage collector deletes the Deployment
+        "finalizers": ("policy", "object.metadata.finalizers"),             # a finalizer wedges every delete and its namespace
+        "name": ("policy", "object.metadata.name"),
+        "namespace": ("policy", "object.metadata.namespace"),
+        "generateName": ("policy", "object.metadata.generateName"),
+        # the API server decides, on every update, whatever the hub sends
+        "uid": ("api", "immutable on update"),
+        "creationTimestamp": ("api", "immutable on update"),
+        "deletionTimestamp": ("api", "immutable on update; a client cannot start a deletion by writing it"),
+        "deletionGracePeriodSeconds": ("api", "immutable on update"),
+        "generation": ("api", "reset to the stored value, then incremented by the server when the spec changed"),
+        "resourceVersion": ("api", "an optimistic lock: a wrong value is a conflict, never a change"),
+        "selfLink": ("api", "removed from the API"),
+        # deliberately NOT compared: the API server rewrites it on every request, so comparing it would deny
+        # the restart itself
+        "managedFields": ("not compared", "rewritten by the field manager on every patch"),
+    }
+
+    def test_every_deployment_metadata_field_has_a_stated_disposition(self):
+        text = "\n".join(e for e, _ in hc.POLICY_VALIDATIONS)
+        for field, (who, why) in self.METADATA_FIELDS.items():
+            with self.subTest(field=field):
+                if who == "policy":
+                    self.assertIn(why, text)
+                    self.assertIn(why.replace("object.", "oldObject.", 1), text)
+                else:
+                    self.assertNotIn(f"metadata.{field}", text)
+
+    def test_the_documents_state_the_metadata_decision(self):
+        deploy = hc.DEPLOY_DIR
+        readme = (deploy / "k8s" / "README.md").read_text(encoding="utf-8")
+        runbook = (deploy / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
+        yaml_text = (hc.HUB_DIR / "15-admission-policy.yaml").read_text(encoding="utf-8")
+        for name, text in (("k8s/README.md", readme), ("docs/RUNBOOK.md", runbook)):
+            for needle in ("ownerReferences", "finalizers", "managedFields"):
+                self.assertIn(needle, text, f"{name} does not mention {needle}")
+        for needle in ("ownerReferences", "finalizers", "managedFields", "garbage collector"):
+            self.assertIn(needle, yaml_text)
+
+    def test_the_fleetautoscaler_metadata_power_is_documented_as_accepted(self):
+        # The hub may patch/update a FleetAutoscaler, and an ownerReference there makes the garbage collector
+        # delete it. No policy covers it (accepted, with the reason): the docs must say so, in both places.
+        deploy = hc.DEPLOY_DIR
+        for name in ("k8s/README.md", "docs/RUNBOOK.md"):
+            text = (deploy / name).read_text(encoding="utf-8")
+            self.assertRegex(text, r"(?s)FleetAutoscaler.{0,400}ownerReference|ownerReference.{0,400}FleetAutoscaler", name)
+
     def test_optional_fields_are_read_only_behind_has(self):
         """Reading an absent field is a CEL error; each optional field's value is compared only under has()."""
         for e, _ in hc.POLICY_VALIDATIONS:
-            for field in ("labels", "finalizers", "minReadySeconds", "paused"):
+            for field in ("labels", "finalizers", "ownerReferences", "generateName", "minReadySeconds", "paused"):
                 if f".{field}" in e:
                     self.assertIn(f"has(", e, e)
                     self.assertIn(f"!has(", e, e)
@@ -1073,7 +1229,11 @@ class AdmissionPolicy(unittest.TestCase):
         for case, idx in decides.items():
             for i in idx:
                 self.assertLess(i, len(hc.POLICY_VALIDATIONS), case)
-        self.assertEqual(len(hc.POLICY_VALIDATIONS), 9)
+        self.assertEqual(len(hc.POLICY_VALIDATIONS), 12)
+        # F2 of the live QA: the Deployment's own ownerReferences / finalizers / identity are 9, 10, 11.
+        for i, field in ((9, "ownerReferences"), (10, "finalizers"), (11, "name")):
+            self.assertIn(f"object.metadata.{field}", hc.POLICY_VALIDATIONS[i][0])
+            self.assertIn(f"oldObject.metadata.{field}", hc.POLICY_VALIDATIONS[i][0])
 
     # ---- the live comparison ----
     def api_policy(self):
@@ -1182,7 +1342,7 @@ class AdmissionPolicy(unittest.TestCase):
     def test_the_manifest_comments_state_the_property_change(self):
         text = (hc.HUB_DIR / "15-admission-policy.yaml").read_text(encoding="utf-8")
         for needle in ("CLUSTER-SCOPED", "NO ClusterRole and NO ClusterRoleBinding", "RESTRICT",
-                       "restart", "1.30", "NOT PROVEN OFFLINE", "FAILS CLOSED"):
+                       "restart", "1.30", "NOT PROVEN OFFLINE", "FAILS CLOSED", "ownerReferences"):
             self.assertIn(needle, text)
 
 
@@ -1241,15 +1401,15 @@ class OutsideNamespaces(unittest.TestCase):
 
     def test_the_other_spellings_are_foreign_too(self):
         for subject in ({"kind": "User", "name": hc.HUB_USER_NAME},
-                        {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub"},
-                        {"kind": "Group", "name": "system:serviceaccounts"}):
+                        {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub"}):
             with self.subTest(subject=subject):
                 self.assertTrue(hc.outside_namespaces_problems([self.rb("kube-system", "x", [subject])], self.EXPECTED))
 
     def test_unrelated_bindings_and_the_expected_namespaces_are_not_reported_here(self):
         items = [self.rb("kube-system", "other", [{"kind": "ServiceAccount", "name": "other", "namespace": "kube-system"}]),
                  self.rb("rpg-k8s-data", "studio-hub", hc.WANT_SUBJECTS),
-                 self.rb("kube-system", "auth", [{"kind": "Group", "name": "system:authenticated"}])]
+                 self.rb("kube-system", "auth", [{"kind": "Group", "name": "system:authenticated"}]),
+                 self.rb("kube-system", "all-sa", [{"kind": "Group", "name": "system:serviceaccounts"}])]
         self.assertEqual(hc.outside_namespaces_problems(items, self.EXPECTED), [])
 
     def test_a_game_namespace_that_is_expected_is_not_foreign(self):
