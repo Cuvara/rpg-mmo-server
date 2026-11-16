@@ -413,7 +413,7 @@ const serverDownEvictTimeout = 5 * time.Second
 func (g *Gateway) handleServerDown(payload []byte) {
 	var ev registry.ServerDownEvent
 	if err := json.Unmarshal(payload, &ev); err != nil {
-		g.logger.Warn("malformed server_down event", "game_id", constants.GameOrDefault(ev.GameID), "err", err)
+		g.logger.Warn("malformed server_down event", "err", err)
 		return
 	}
 	if ev.ServerID == "" {

@@ -807,9 +807,9 @@ func (s *RegistryService) Evict(ctx context.Context, gameID, serverID string) er
 			}
 			return nil
 		}
-		if !errors.Is(err, storage.ErrNotFound) {
-			return fmt.Errorf("evict server %s: %w", serverID, err)
-		}
+		// DeregisterForGame reports an absent entry as success, so any other
+		// error is a store fault.
+		return fmt.Errorf("evict server %s: %w", serverID, err)
 	}
 	if s.watcher != nil {
 		s.watcher.UntrackServerForGame(gameID, serverID)
