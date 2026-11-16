@@ -79,6 +79,7 @@ be reported as "the probe could not be built".
 | `cluster.autoscaler` | no `FleetAutoscaler` targets **any** fleet in `VERIFY_NAMESPACES` whose pod template pins one `GAMESERVER_MAP_ID` for every replica | nothing about fleets outside `VERIFY_NAMESPACES`, and nothing about a map id supplied per pod through `valueFrom` — that case is reported as unpinned and the rule stands down. It also says nothing about whether a *permitted* autoscaler is correctly **sized**: buffer sizing is a capacity question and nothing here measures capacity |
 | `cluster.restarts` | no container in the namespaces restarted within the last `VERIFY_RESTART_WINDOW` seconds (default 1800), **and** every container is `Running` right now — so an active crash loop fails at any age | restarts **older** than the window are a WARN naming every container, and are not judged: the check says nothing about why they died. It also cannot see a crash that predates the current pod, because `restartCount` resets when a pod is recreated |
 | `cluster.secrets` | each declared Secret exists and every key decodes to a non-empty value | nothing about the value being *correct*. Values are never printed — only key names and byte lengths |
+| `cluster.log_collector` | the log collector named by `VERIFY_LOG_COLLECTOR` (`<namespace>/<daemonset>`, `rpg-k8s-logging/alloy` on both k8s targets) exists, is scheduled on at least one node with ready equal to desired, and the Service `loki` in that namespace has an EndpointSlice address. **FAIL** when the namespace or the DaemonSet is absent, desired is 0, or ready differs from desired. **WARN** when it is Ready but the Service has no address. SKIP when `VERIFY_LOG_COLLECTOR` is empty | that a log line reached Loki: it does not query Loki or read Alloy's own log, it cannot see a collected namespace whose Role is missing (Alloy logs a `403` for it), and the address is the one `connect-loki.sh` wrote, not proof that Loki answers on it |
 
 `cluster.fleet` reports **WARN** when the fleet is at size but has zero Ready
 replicas (everything Allocated) **and** the fleet does not pin a fleet-wide
@@ -353,6 +354,37 @@ whatever the target's exec prefixes need (`docker` for the compose data tier).
 unset, i.e. when the two binaries have to be built from source. Point both at
 prebuilt binaries and the suite needs no Go toolchain at all — that is how CD
 runs it.
+
+### The log collector check
+
+`cluster.log_collector` exists because the collector can be missing, or Ready but
+cut off from Loki, while every other check is green: no client path uses it. It is
+**opt-in per target**: a target that predates the collector (`dev-agones`) leaves
+`VERIFY_LOG_COLLECTOR` empty, and the check SKIPs saying that log shipping is
+unverified, which is not a statement that logs flow. `targets/k8s-dev.env` and
+`targets/k8s-stg.env` set it to `rpg-k8s-logging/alloy` and list
+`rpg-k8s-logging` in `VERIFY_NAMESPACES`, so the collector's pods are also held to
+`cluster.namespaces`, `cluster.workloads` and `cluster.restarts`.
+`VERIFY_LOG_SERVICE` (default `loki`) names the Service whose EndpointSlice is
+read.
+
+A missing address is a **WARN**, not a PASS and not a FAIL: the collector is
+healthy and the logs are going nowhere, which is true after `lgtm` has been
+recreated until `k8s/logging/connect-loki.sh` runs again, and which must not fail
+a deploy because logs are not in the client path. The message names that script.
+Not-ready and absent collectors FAIL.
+
+The decision is shown **offline** with fixtures, without a cluster:
+
+```bash
+bash backend/deploy/k8s/verify/tests/log_collector_test.sh
+```
+
+It runs the check's own function against a fake `kubectl` that answers only its
+three reads, for an absent namespace, an absent DaemonSet, desired 0, a status that
+is not filled in yet, ready below desired, no address, a healthy collector and a
+target that declares no collector, and compares each verdict. It has
+not been run against a live cluster: no cluster was touched.
 
 ## Adding a target
 

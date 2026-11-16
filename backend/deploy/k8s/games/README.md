@@ -55,7 +55,10 @@ namespace only through the `rpg-log-collector` Role above, so applying a game's
 render is what makes its pods collectable; its `game` label is the namespace
 suffix (`rpg-k8s-realtime-ember` is `ember`). Both fleets forward
 `GAMESERVER_LOG_LEVEL` / `GAMESERVER_LOG_FORMAT` from `gameserver-config`
-(`optional: true`, like the neighbouring knobs). The values and env entries come
+(`optional: true`, like the neighbouring knobs). `dev-up.sh` adds the namespace of
+every game the gateway serves to the collector's `log-namespaces`, and warns (it
+does not stop) when that namespace has no `rpg-log-collector` Role yet, because
+the render has not been applied. The values and env entries come
 from `app/`; the renderer refuses a source that lost either. The server reads
 them only once the `gameserver-json-logs` change is in the image; before that
 they are ignored.

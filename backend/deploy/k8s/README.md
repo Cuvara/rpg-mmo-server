@@ -15,17 +15,20 @@ nowhere else.
 |---|---|
 | `rpg-k8s-data` | `postgres-meta`, `postgres-game`, `redis` (StatefulSets, one PVC each), `nakama` |
 | `rpg-k8s-realtime` | `gateway` Deployment (1 replica, `hostPort` 7000, `strategy: Recreate`) + two ClusterIP Services, `map-servers-dotnet-k8s` Fleet |
+| `rpg-k8s-logging` | The log collector: the `alloy` DaemonSet, its ServiceAccount `rpg-log-collector`, the ConfigMaps `alloy-config` and `alloy-env`, and the selector-less Service `loki` that leads to the compose Loki (see [Logs](#logs)) |
 | `rpg-realtime` | The **pre-cutover** fleet. Scaled to 0. Kept as the rollback target |
 
-Manifests: `data/` (kustomize) and `app/` (numbered, applied in order). Read
-`app/README.md` for the app tier's own design notes.
+Manifests: `data/` (kustomize), `app/` (numbered, applied in order) and
+`logging/` (numbered, applied in order). Read `app/README.md` for the app tier's
+own design notes.
 
 **Other games (ADR-33 leg 5).** `app/` is the default game, `cuvara`, and stays
 as it is. A non-default game gets its own namespace `rpg-k8s-realtime-<game>`
 with a ResourceQuota, fleets `<game>-map-servers-dotnet-<env>` and
 `<game>-dungeon-servers-dotnet-<env>` (`GAMESERVER_GAME_ID` from the namespace's
 own `gameserver-config` key `game-id`, no `JWT_SECRET`), a Secret template and
-the gateway's allocate Role there — all rendered from `app/` by
+the gateway's allocate Role there and the log collector's read Role there
+(`rpg-log-collector`) — all rendered from `app/` by
 `games/render.py`, never hand-copied. Fleet names are capped at 51 characters
 because Agones 1.59.0 names pods fleet + 12. Nothing is instantiated for a real
 second game and `dev-up.sh` applies none of it. Read `games/README.md`.
@@ -73,8 +76,8 @@ cd backend/deploy/k8s
 
 Idempotent, and the same script CD runs in `DEPLOY_MODE=k8s`, so the box and CI
 cannot drift apart. It imports images into the k3d node, applies both tiers,
-pins the image tags, retires the legacy fleet and the compose stack, and starts
-the published host ports.
+pins the image tags, retires the legacy fleet and the compose stack, starts
+the published host ports, and applies the log collector (see [Logs](#logs)).
 
 The Secret is **not** in the repo. `app/30-secret-template.yaml` is a template;
 fill a copy outside the tree and apply it before the first run (on a fresh
@@ -82,6 +85,71 @@ cluster, `kubectl apply -f app/00-namespace.yaml` first, or let `dev-up.sh`
 create the namespace and stop at the check). Its `join-token-secret` must share
 no key with its `jwt-secret`; with more than one game, see the per-game join
 keyring checks under "Other games" above.
+
+### Logs
+
+The pod logs of every `rpg-k8s-*` namespace are shipped to the Loki that runs in
+the compose `lgtm` container on the host. `dev-up.sh` applies `logging/` after the
+data and app tiers exist and after the compose stack is retired and the ports are
+checked. What the log collector is, how it reaches Loki and what it can and cannot
+do is in [`../docs/MONITORING.md`](../docs/MONITORING.md), "Logs on k8s". In short:
+
+| Piece | What it is |
+|---|---|
+| `logging/00-namespace.yaml` … `60-loki-service.yaml` | Namespace `rpg-k8s-logging` (Pod Security `restricted`, `warn` and `audit` only), ServiceAccount `rpg-log-collector`, the Roles, ConfigMaps `alloy-env` and `alloy-config`, the `alloy` DaemonSet, and the selector-less Service `loki` |
+| `logging/20-rbac.yaml` | One Role and RoleBinding named `rpg-log-collector` in each of `rpg-k8s-realtime`, `rpg-k8s-data` and `rpg-k8s-logging`: `get`/`list`/`watch` on `pods` and `get` on `pods/log`, nothing else. **No ClusterRole, no hostPath.** The Role of a non-default game's namespace comes from `games/render.py` |
+| `logging/config-k8s.alloy` + `logging/generate-config.py` | The Alloy config. `40-alloy-config.yaml` is **generated** from `config-k8s.alloy` and the `level` stage of `../monitoring/alloy/config.alloy`; do not edit it, run `python3 backend/deploy/k8s/logging/generate-config.py` (`--check` exits 1 on drift) |
+| `logging/connect-loki.sh` | Attaches the `lgtm` container to the cluster's Docker network (`k3d-<cluster>`) and writes its address into the EndpointSlice `loki-lgtm` of the Service `loki`. Publishes no port. Idempotent; `--dry-run` changes nothing |
+
+What `dev-up.sh` does for the collector, in order:
+
+1. Before the first apply it resolves the environment name (the `env` label of
+   every log line): `DEPLOY_ENVIRONMENT` if set, otherwise `dev` for context
+   `k3d-rpg-dev` and `staging` for `k3d-rpg-stg`. Another context has to set
+   `DEPLOY_ENVIRONMENT`, or the script stops before it applies anything.
+2. Applies `00-namespace.yaml`, `10-serviceaccount.yaml` and `20-rbac.yaml`.
+3. Applies `alloy-env` from `30-alloy-env.yaml` with two values replaced:
+   `deploy-environment` (the name from step 1) and `log-namespaces` (the three
+   fixed namespaces plus every game namespace, `rpg-k8s-realtime-<game>`, from the
+   games the gateway serves). Then `40-alloy-config.yaml`, `50-daemonset.yaml` and
+   `60-loki-service.yaml`.
+4. Restarts `daemonset/alloy` only when `alloy-config` or `alloy-env` changed
+   (Alloy does not reload a ConfigMap) and the DaemonSet already existed.
+5. Warns (and goes on) for a game namespace that has no `rpg-log-collector` Role,
+   and prints the `render.py` command that applies it.
+6. Runs `logging/connect-loki.sh`. If `lgtm` is not running it warns and exits 0,
+   so a missing Loki does not fail the deploy; a non-zero exit is reported as a
+   warning.
+7. Waits for `daemonset/alloy` to roll out (`LOG_ROLLOUT_TIMEOUT`, default `180s`).
+   **This is the only collector failure that stops the deploy.**
+
+Nothing of this has been run against a cluster yet; every run-time behaviour is
+not yet observed (the list of what the first live run must show is in
+`MONITORING.md`).
+
+**Check.** `verify/` has the layer-1 check `cluster.log_collector`: it FAILs when
+the `rpg-k8s-logging` namespace or the `alloy` DaemonSet is absent, when the
+DaemonSet is scheduled on no node, or when ready is not equal to desired; it WARNs
+when the collector is Ready but the Service `loki` has no EndpointSlice address
+(Loki not attached); it PASSes otherwise. It does not prove that a line reached
+Loki. Details in [`verify/README.md`](verify/README.md). `k8s-dev.env` and
+`k8s-stg.env` declare it (`VERIFY_LOG_COLLECTOR="rpg-k8s-logging/alloy"`) and
+list `rpg-k8s-logging` in `VERIFY_NAMESPACES`.
+
+**Log keys in the ConfigMaps** (all `optional: true` in the workloads, so an older
+ConfigMap keeps working):
+
+| ConfigMap (namespace) | Key | Container env | Default |
+|---|---|---|---|
+| `gateway-config` (`rpg-k8s-realtime`) | `log-level` | `LOG_LEVEL` | `info` |
+| `gameserver-config` (`rpg-k8s-realtime` and every rendered game namespace) | `log-level` | `GAMESERVER_LOG_LEVEL` | `Information` |
+| `gameserver-config` (same) | `log-format` | `GAMESERVER_LOG_FORMAT` | `json` |
+
+The two game server keys take effect only once the `gameserver-json-logs` change
+is in the game server image; before that the server ignores them. Changing a
+value needs a restart of the workload, see
+[`../docs/RUNBOOK-local-dev.md`](../docs/RUNBOOK-local-dev.md), "Seeing logs from
+the k8s cluster".
 
 ### Ports
 
@@ -472,8 +540,8 @@ the window.
 `vars.DEPLOY_MODE` and does not enter it.
 
 A second environment needs a second CLUSTER, not a second namespace: `dev-up.sh`
-and the manifests under `{data,app}` hardcode `rpg-k8s-data` and
-`rpg-k8s-realtime`. Pointing two environments at one cluster makes them one
+and the manifests under `{data,app,logging}` hardcode `rpg-k8s-data`,
+`rpg-k8s-realtime` and `rpg-k8s-logging`. Pointing two environments at one cluster makes them one
 deployment — the last CD run wins and both report success.
 
 What differs per environment is the HOST side only; the manifests are shared
