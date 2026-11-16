@@ -392,3 +392,47 @@ func TestMemoryServerRegistry_GameOwnershipWithoutTTL(t *testing.T) {
 		t.Errorf("Register() without TTL = %v, want ErrGameMismatch", err)
 	}
 }
+
+func TestMemoryServerRegistry_DeregisterForGame(t *testing.T) {
+	ctx := context.Background()
+	for _, game := range []string{"cuvara", ""} {
+		t.Run("stale_"+game, func(t *testing.T) {
+			reg := NewMemoryServerRegistryWithTTL(time.Minute)
+			info := ServerInfo{ServerID: "ember-one", MapID: "m", GameID: "cuvara"}
+			if err := reg.Register(ctx, info); err != nil {
+				t.Fatal(err)
+			}
+			reg.servers[info.ServerID].lastSeen = time.Now().Add(-2 * time.Minute)
+			info.GameID = "ember"
+			if err := reg.Register(ctx, info); err != nil {
+				t.Fatal(err)
+			}
+			if err := reg.DeregisterForGame(ctx, game, info.ServerID); !errors.Is(err, ErrGameMismatch) {
+				t.Fatalf("got %v, want ErrGameMismatch", err)
+			}
+			got, err := reg.GetServer(ctx, info.ServerID)
+			if err != nil || got.GameID != "ember" {
+				t.Fatalf("server = %+v, error = %v", got, err)
+			}
+			found, err := reg.FindByGameAndMapID(ctx, "ember", "m")
+			if err != nil || len(found) != 1 {
+				t.Fatalf("servers = %+v, error = %v", found, err)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, stored, game string }{{"matching", "ember", "ember"}, {"legacy_default", "", "cuvara"}, {"legacy_empty", "", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := NewMemoryServerRegistry()
+			reg.servers["ember-one"] = &registryEntry{info: ServerInfo{ServerID: "ember-one", MapID: "m", GameID: tc.stored}, lastSeen: time.Now()}
+			if err := reg.DeregisterForGame(ctx, tc.game, "ember-one"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reg.GetServer(ctx, "ember-one"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("got %v, want ErrNotFound", err)
+			}
+			if err := reg.DeregisterForGame(ctx, tc.game, "ember-one"); err != nil {
+				t.Fatalf("absent: %v", err)
+			}
+		})
+	}
+}

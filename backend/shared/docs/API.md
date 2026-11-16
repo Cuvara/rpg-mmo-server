@@ -147,6 +147,7 @@ type SessionStore interface {
 type ServerRegistry interface {
     Register(ctx context.Context, info ServerInfo) error
     Deregister(ctx context.Context, serverID string) error
+    DeregisterForGame(ctx context.Context, gameID, serverID string) error
     FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error)                   // default game only
     FindByGameAndMapID(ctx context.Context, gameID, mapID string) ([]ServerInfo, error)   // ADR-33; "" = default game
     UpdatePlayerCount(ctx context.Context, serverID string, count int) error
@@ -215,6 +216,7 @@ func NewServerRegistry(addr, password string) *ServerRegistry
 func NewServerRegistryWithClient(client redis.UniversalClient, ttl time.Duration) *ServerRegistry
 func (r *ServerRegistry) Register(ctx context.Context, info storage.ServerInfo) error
 func (r *ServerRegistry) Deregister(ctx context.Context, serverID string) error
+func (r *ServerRegistry) DeregisterForGame(ctx context.Context, gameID, serverID string) error
 func (r *ServerRegistry) FindByMapID(ctx context.Context, mapID string) ([]storage.ServerInfo, error)
 func (r *ServerRegistry) UpdatePlayerCount(ctx context.Context, serverID string, count int) error
 func (r *ServerRegistry) Heartbeat(ctx context.Context, serverID string) error
@@ -257,7 +259,12 @@ The registry hash is a cross-language contract: the C# game server
 both languages. An absent or empty `game_id` reads as `constants.DefaultGameID`; writers
 always write it (explicit `cuvara` for the default game). `MapIndexKey` keeps the original
 `servers:map:{map_id}` for the default game (`""` or `cuvara`), so default-game keys are
-unchanged. `Deregister` removes the id from the index named by the stored `game_id`.
+unchanged. `Deregister` is the game-blind graceful path and removes the id from the index
+named by the stored `game_id`. `DeregisterForGame` treats empty game IDs and absent or
+empty stored `game_id` as the default; it returns nil for an absent entry and an error
+wrapping `storage.ErrGameMismatch` for a foreign owner without changing either key. Redis
+atomically checks ownership and deletes the matching hash and index member, retrying a
+bounded number of times if the stored map changes while choosing the index key.
 
 `Register` is a single Lua check-and-set (`testdata/multigame/register.lua`, byte-identical
 to the Go and C# copies): if `servers:id:{id}` exists and its `game_id` (absent = default)
