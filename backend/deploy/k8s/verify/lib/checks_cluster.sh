@@ -503,8 +503,13 @@ check_log_collector() {
 #         or roleRef; ANY other RoleBinding in an expected namespace, or any
 #         ClusterRoleBinding, names the ServiceAccount (except studio-hub-nodes); the node
 #         ClusterRole differs from the node allow-list by one triple; the node ClusterRole
-#         and its binding exist without each other
-#   PASS  everything exact. The node ClusterRole absent is a PASS that says node access
+#         and its binding exist without each other; gateway-config cannot be read (NotFound
+#         or any other error: the game list is then unknown, so the per-game Roles are
+#         unverified). An existing ConfigMap with an empty `games` is NOT a failure: cuvara
+#         only, so realtime and data are the expected namespaces. Also not covered: a binding
+#         of a broad role to Group system:authenticated / system:unauthenticated (Kubernetes
+#         binds its own defaults to them, so it is not read as naming the hub)
+#   PASS everything exact. The node ClusterRole absent is a PASS that says node access
 #         is not granted (opt-in); present and exact is a PASS that says it is enabled
 #
 # Read-only: no create, no patch, no delete, and nothing is read from a Secret.
@@ -564,9 +569,23 @@ check_hub_rbac() {
   fi
 
   # --- the expected namespaces: realtime and data, then the games gateway-config lists
-  local games_raw game seen other ns
+  # A ConfigMap that cannot be read is NOT an empty game list: the per-game Roles would be
+  # silently unchecked. NotFound and any other read error each add a problem (FAIL); only
+  # an existing ConfigMap with an empty or absent `games` value means "cuvara only".
+  local games_raw game seen other ns games_err games_rc games_errfile
   local -a namespaces=("rpg-k8s-realtime:realtime" "rpg-k8s-data:data") games=()
-  games_raw=$(k get configmap gateway-config -n rpg-k8s-realtime -o 'jsonpath={.data.games}' 2>/dev/null || true)
+  games_errfile=$(mktemp)
+  games_raw=$(k get configmap gateway-config -n rpg-k8s-realtime -o 'jsonpath={.data.games}' 2>"$games_errfile"); games_rc=$?
+  games_err=$(head -1 "$games_errfile"); rm -f "$games_errfile"
+  if [ "$games_rc" -ne 0 ]; then
+    case "$games_err" in
+      *NotFound*|*"not found"*)
+        HUB_PROBLEMS+=("gateway-config could not be read: ConfigMap gateway-config is NotFound in rpg-k8s-realtime, so the game list is unknown and the hub's per-game Roles are UNVERIFIED") ;;
+      *)
+        HUB_PROBLEMS+=("gateway-config could not be read ($games_err), so the game list is unknown and the hub's per-game Roles are UNVERIFIED") ;;
+    esac
+    games_raw=""
+  fi
   local IFS_SAVE="$IFS"
   IFS=',' read -r -a _hub_games <<<"$games_raw"
   IFS="$IFS_SAVE"

@@ -43,6 +43,11 @@ tests/test_hub_contract.py that shows it rejecting a mutation):
       triples and one RoleBinding with the exact subject and roleRef
     * no ClusterRole and no ClusterRoleBinding in the render
     * no other RoleBinding names the hub's ServiceAccount
+  'Names the hub' (every binding check below): a subject of kind ServiceAccount studio-hub,
+  kind User system:serviceaccount:rpg-k8s-hub:studio-hub, or kind Group
+  system:serviceaccounts:rpg-k8s-hub / system:serviceaccounts, kind and name compared
+  exactly. NOT covered: Group system:authenticated / system:unauthenticated (Kubernetes
+  binds its own defaults to them, e.g. system:basic-user).
 
 Usage:
     python hub_contract.py                         # the committed k8s/hub (+ optional/) plus a rendered sample game
@@ -272,12 +277,41 @@ def _binding_problems(binding: dict, role_kind: str, role_name: str, label: str)
     return problems
 
 
+# Other spellings of the same identity. Kubernetes authenticates the hub's token as
+# User `system:serviceaccount:<ns>:<name>` in the Groups `system:serviceaccounts`,
+# `system:serviceaccounts:<ns>` (and `system:authenticated`), so a binding naming any
+# of the first three grants the hub its rights without a ServiceAccount subject.
+# Kind and name are compared EXACTLY (case-sensitive, no prefix match).
+HUB_USER_NAME = f"system:serviceaccount:{HUB_NAMESPACE}:{HUB_ACCOUNT}"
+HUB_GROUP_NAMES = (f"system:serviceaccounts:{HUB_NAMESPACE}", "system:serviceaccounts")
+
+
 def names_the_hub(binding: dict) -> bool:
-    """True when a RoleBinding / ClusterRoleBinding has the hub ServiceAccount among its subjects."""
+    """True when a RoleBinding / ClusterRoleBinding reaches the hub identity through its subjects.
+
+    Matches: kind ServiceAccount `studio-hub` (namespace rpg-k8s-hub, or empty/missing);
+    kind User `system:serviceaccount:rpg-k8s-hub:studio-hub`; kind Group
+    `system:serviceaccounts:rpg-k8s-hub` or `system:serviceaccounts`.
+
+    Not covered, on purpose: Group `system:authenticated` / `system:unauthenticated`.
+    Kubernetes binds its own defaults to them (e.g. `system:basic-user`), so treating
+    them as naming the hub would make every cluster fail; a custom binding of a broad
+    role to `system:authenticated` is a cluster-wide hole this check does not see.
+
+    A ServiceAccount subject with an empty or missing namespace inside a RoleBinding of
+    rpg-k8s-hub does not arise: that namespace is not inspected (no hub binding lives
+    there), and an empty namespace is counted as naming the hub wherever it is found.
+    """
     for s in _as_list(binding.get("subjects")):
-        if isinstance(s, dict) and s.get("kind") == "ServiceAccount" and s.get("name") == HUB_ACCOUNT:
-            if s.get("namespace") in (HUB_NAMESPACE, None, ""):
-                return True
+        if not isinstance(s, dict):
+            continue
+        kind, name = s.get("kind"), s.get("name")
+        if kind == "ServiceAccount" and name == HUB_ACCOUNT and s.get("namespace") in (HUB_NAMESPACE, None, ""):
+            return True
+        if kind == "User" and name == HUB_USER_NAME:
+            return True
+        if kind == "Group" and name in HUB_GROUP_NAMES:
+            return True
     return False
 
 

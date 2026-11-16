@@ -36,7 +36,13 @@ k() {
   echo "$*" >> "$CALLS"
   case "$*" in
     "get serviceaccount studio-hub -n rpg-k8s-hub -o json") from_file sa.json 'serviceaccounts "studio-hub"' ;;
-    "get configmap gateway-config -n rpg-k8s-realtime -o jsonpath={.data.games}") cat "$FIX/games.txt" ;;
+    "get configmap gateway-config -n rpg-k8s-realtime -o jsonpath={.data.games}")
+      # kubectl prints its errors on stderr; the check must tell NotFound from any other error
+      if [ -f "$FIX/games.notfound" ]; then notfound 'configmaps "gateway-config"' >&2; return 1; fi
+      if [ -f "$FIX/games.error" ]; then
+        echo 'Error from server (Forbidden): configmaps "gateway-config" is forbidden: User cannot get resource' >&2; return 1
+      fi
+      cat "$FIX/games.txt" ;;
     "get role studio-hub -n "*" -o json")
       local cmd="$*" ns; ns=${cmd#get role studio-hub -n }; ns=${ns% -o json}
       from_file "role.$ns.json" "roles.rbac.authorization.k8s.io \"studio-hub\"" ;;
@@ -84,7 +90,7 @@ VERIFY_HUB_RBAC="rpg-k8s-hub/studio-hub"
 
 # ---- PASS: exact ------------------------------------------------------------
 run_case "exact, cuvara only, no node ClusterRole"                 PASS --games cuvara -- "NOT granted (opt-in" "rpg-k8s-realtime rpg-k8s-data"
-run_case "exact, no gateway games key at all (cuvara only)"        PASS --mutate no-gateway-games
+run_case "exact, gateway-config exists with an empty games value"  PASS --mutate no-gateway-games -- "rpg-k8s-realtime rpg-k8s-data"
 run_case "exact with the node ClusterRole enabled"                 PASS --games cuvara --node -- "node access ENABLED"
 run_case "exact, rendered non-default games ember and frost"       PASS --games cuvara,ember,frost -- "rpg-k8s-realtime-ember" "rpg-k8s-realtime-frost"
 run_case "exact, non-default game, node ClusterRole enabled"       PASS --games ember --node -- "rpg-k8s-realtime-ember" "ENABLED"
@@ -110,6 +116,18 @@ run_case "RoleBinding with another subject"                        FAIL --games 
 run_case "RoleBinding to cluster-admin"                            FAIL --games cuvara --mutate binding-cluster-admin -- "roleRef is"
 run_case "a foreign RoleBinding names the ServiceAccount"          FAIL --games cuvara --mutate foreign-rb -- "foreign: RoleBinding rpg-k8s-realtime/hub-edit"
 run_case "a foreign ClusterRoleBinding names the ServiceAccount"   FAIL --games cuvara --mutate foreign-crb -- "ClusterRoleBindings" "foreign: ClusterRoleBinding hub-admin"
+
+run_case "RoleBinding names the hub as User system:serviceaccount:..." FAIL --games cuvara --mutate foreign-rb-user -- "foreign: RoleBinding rpg-k8s-realtime/sneaky" "ClusterRole/cluster-admin"
+run_case "RoleBinding names Group system:serviceaccounts:rpg-k8s-hub" FAIL --games cuvara --mutate foreign-rb-group-ns -- "foreign: RoleBinding rpg-k8s-realtime/sneaky"
+run_case "RoleBinding names Group system:serviceaccounts"          FAIL --games cuvara --mutate foreign-rb-group-all -- "foreign: RoleBinding rpg-k8s-realtime/sneaky"
+run_case "ClusterRoleBinding names the hub as User system:serviceaccount:..." FAIL --games cuvara --mutate foreign-crb-user -- "ClusterRoleBindings" "foreign: ClusterRoleBinding sneaky"
+run_case "ClusterRoleBinding names Group system:serviceaccounts:rpg-k8s-hub" FAIL --games cuvara --mutate foreign-crb-group-ns -- "foreign: ClusterRoleBinding sneaky"
+run_case "ClusterRoleBinding names Group system:serviceaccounts"   FAIL --games cuvara --mutate foreign-crb-group-all -- "foreign: ClusterRoleBinding sneaky"
+run_case "User alias in a ClusterRoleBinding, node ClusterRole on" FAIL --games cuvara --node --mutate foreign-crb-user -- "foreign: ClusterRoleBinding sneaky"
+
+# ---- FAIL: gateway-config unreadable (the game list is unknown, not empty) --
+run_case "gateway-config NotFound"                                 FAIL --games ember --mutate gateway-config-notfound -- "gateway-config could not be read" "NotFound" "UNVERIFIED"
+run_case "gateway-config read error (Forbidden)"                   FAIL --games ember --mutate gateway-config-error -- "gateway-config could not be read" "Forbidden" "UNVERIFIED"
 
 # ---- FAIL: the opt-in node ClusterRole --------------------------------------
 run_case "node ClusterRole with one verb too many (nodes delete)"  FAIL --games cuvara --mutate node-extra-verb -- "ClusterRole studio-hub-nodes" "extra: core/nodes delete"
@@ -158,4 +176,4 @@ if [ "$failures" -ne 0 ]; then
   echo "RESULT=FAIL ($failures case(s) wrong)"
   exit 1
 fi
-echo "RESULT=PASS (an extra verb, an extra resource, a missing rule, a missing ServiceAccount, a missing game Role, a foreign binding and a widened node role each FAIL; exact PASSes with and without node access)"
+echo "RESULT=PASS (an extra verb, an extra resource, a missing rule, a missing ServiceAccount, a missing game Role, a foreign binding (ServiceAccount, User or Group spelling), an unreadable gateway-config and a widened node role each FAIL; exact PASSes with and without node access)"

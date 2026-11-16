@@ -230,6 +230,16 @@ has applied `hub/optional/node-access.yaml`.
 | `""` | `pods` | `list` |
 | `""` | `pods/eviction` | `create` |
 
+**Decision: the node ClusterRole grants no owner reads.** `kubectl drain` classifies each
+pod by looking up its owner (`get` on DaemonSets, and on whatever else owns a pod), and the
+node file deliberately has no `apps/daemonsets` get nor any other owner read. So a
+kubectl-style drain that looks owners up is **not supported** with this identity; it
+answers Forbidden. The hub's drain is its own loop: list the pods on the node
+(`pods list`, filtered by `spec.nodeName`) and create an eviction for each one
+(`pods/eviction create`). Deciding which pods to skip (DaemonSet or mirror pods) then
+rests on what the pod object itself says (its `ownerReferences` and annotations), not on
+a second read. No rule was added for this.
+
 In operator terms: the hub can read what runs and what the cluster says about it (pods,
 logs, events, services, Deployments, StatefulSets, ReplicaSets and the Agones Fleets,
 GameServers, GameServerSets and FleetAutoscalers); restart a pod and remove a

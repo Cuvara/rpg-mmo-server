@@ -418,7 +418,8 @@ difference).
 | Role `studio-hub` absent in an expected namespace | **FAIL** |
 | Role has an extra verb, an extra resource, a missing triple, `resourceNames` or a `*` | **FAIL**, naming each triple |
 | RoleBinding `studio-hub` absent, or with another subject or another `roleRef` | **FAIL** |
-| Another RoleBinding in an expected namespace, or any ClusterRoleBinding other than `studio-hub-nodes`, names the account | **FAIL** |
+| Another RoleBinding in an expected namespace, or any ClusterRoleBinding other than `studio-hub-nodes`, names the account (as ServiceAccount, as User `system:serviceaccount:rpg-k8s-hub:studio-hub`, or as Group `system:serviceaccounts:rpg-k8s-hub` / `system:serviceaccounts`) | **FAIL** |
+| `gateway-config` cannot be read (NotFound or another error): the game list is unknown | **FAIL** |
 | ClusterRole `studio-hub-nodes` differs from the node allow-list, or exists without its binding, or the binding exists without the ClusterRole | **FAIL** |
 | Everything exact, no node ClusterRole | **PASS** ("node access NOT granted (opt-in ...)") |
 | Everything exact, node ClusterRole present and exact | **PASS** ("node access ENABLED ...") |
@@ -436,6 +437,23 @@ namespaces**, plus every ClusterRoleBinding. A RoleBinding that names the accoun
 namespace outside that list (a game namespace not in `games`, `kube-system`, another
 stack's namespace) is not seen. Closing that needs a cluster-wide RoleBinding list,
 which the check does not make.
+
+Which subjects count as naming the account: a `ServiceAccount` subject `studio-hub`
+(namespace `rpg-k8s-hub`, empty or missing), a `User`
+`system:serviceaccount:rpg-k8s-hub:studio-hub`, and the `Group`s
+`system:serviceaccounts:rpg-k8s-hub` and `system:serviceaccounts`; kind and name are
+compared exactly. **Not covered:** a binding of a broad role to the `Group`s
+`system:authenticated` or `system:unauthenticated`. Kubernetes binds its own defaults to
+them (for example `system:basic-user`), so they are not read as naming the hub; such a
+custom binding would widen the hub, and everyone else, without this check seeing it.
+(A `ServiceAccount` subject with an empty or missing namespace inside a RoleBinding of
+`rpg-k8s-hub` does not arise: that namespace is not inspected, as no hub binding lives
+there.)
+
+**Unreadable `gateway-config`.** If the ConfigMap `gateway-config` cannot be read
+(NotFound or any other error) the game list is unknown, not empty, so the check **FAILs**
+saying the hub's per-game Roles are unverified. An existing ConfigMap with an empty
+`games` value is a PASS over `rpg-k8s-realtime` and `rpg-k8s-data` (`cuvara` only).
 
 **Two deploy consequences.** First, the two k8s targets now declare the hub, so on a
 cluster where `k8s/hub` was never applied, or where a rendered game namespace was not

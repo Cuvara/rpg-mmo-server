@@ -228,6 +228,13 @@ Read the costs before you apply it (full text in `../k8s/README.md`):
 - `patch nodes` covers labels, annotations and taints, not only
   `spec.unschedulable` (the cordon).
 
+Decision: the node ClusterRole grants **no owner reads** (no `apps/daemonsets` get, no
+other owner lookup). The hub's drain is therefore its own eviction loop over the pods
+listed by node (`pods list`, then `pods/eviction create` per pod). A kubectl-style
+drain that looks up each pod's owner is **not supported** with this identity and
+answers Forbidden for DaemonSet-owned pods; run `kubectl drain` with your admin
+context instead. No rule was added to the file for this.
+
 Enable:
 
 ```bash

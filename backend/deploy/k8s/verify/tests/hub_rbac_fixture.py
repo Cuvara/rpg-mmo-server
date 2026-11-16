@@ -9,7 +9,7 @@ the allow-list), so "exact" can never drift from the contract; every mutation be
 is a deliberate, named departure from it. A file that is absent is an object the
 fake kubectl answers NotFound for.
 
-Files: sa.json, role.<ns>.json, rb.<ns>.json, cr.json, crb.json, games.txt
+Files: sa.json, role.<ns>.json, rb.<ns>.json, cr.json, crb.json, games.txt (or games.notfound / games.error)
 """
 
 import argparse
@@ -61,6 +61,18 @@ MUTATIONS = {
     "game-role-missing", "game-extra-verb", "game-binding-missing", "binding-wrong-subject",
     "binding-cluster-admin", "foreign-rb", "foreign-crb", "node-extra-verb", "node-missing-rule",
     "node-role-no-binding", "node-binding-no-role", "node-binding-cluster-admin", "no-gateway-games",
+    "gateway-config-notfound", "gateway-config-error",
+    "foreign-rb-user", "foreign-rb-group-ns", "foreign-rb-group-all",
+    "foreign-crb-user", "foreign-crb-group-ns", "foreign-crb-group-all",
+}
+
+# The other spellings of the hub identity (User / Group subjects), see hub_contract.names_the_hub.
+ALIAS_SUBJECTS = {
+    "user": {"kind": "User", "name": "system:serviceaccount:rpg-k8s-hub:studio-hub",
+             "apiGroup": "rbac.authorization.k8s.io"},
+    "group-ns": {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub",
+                 "apiGroup": "rbac.authorization.k8s.io"},
+    "group-all": {"kind": "Group", "name": "system:serviceaccounts", "apiGroup": "rbac.authorization.k8s.io"},
 }
 
 
@@ -82,7 +94,14 @@ def main(argv):
 
     games = [g for g in args.games.split(",") if g]
     game_ns = [f"rpg-k8s-realtime-{g}" for g in games if g != "cuvara"]
-    (out / "games.txt").write_text("" if "no-gateway-games" in mut else args.games, encoding="utf-8")
+    # games.txt: the value of gateway-config's `games` (an empty file is an existing ConfigMap with
+    # an empty value). games.notfound / games.error make the fake answer NotFound / Forbidden instead.
+    if "gateway-config-notfound" in mut:
+        (out / "games.notfound").write_text("", encoding="utf-8")
+    elif "gateway-config-error" in mut:
+        (out / "games.error").write_text("", encoding="utf-8")
+    else:
+        (out / "games.txt").write_text("" if "no-gateway-games" in mut else args.games, encoding="utf-8")
 
     def put(name, doc):
         (out / name).write_text(json.dumps(doc), encoding="utf-8")
@@ -124,6 +143,10 @@ def main(argv):
         bindings["rpg-k8s-data"][1] = binding("studio-hub", "rpg-k8s-data", "ClusterRole", "cluster-admin")
     if "foreign-rb" in mut:
         bindings["rpg-k8s-realtime"].append(binding("hub-edit", "rpg-k8s-realtime", "ClusterRole", "edit"))
+    for key, subject in ALIAS_SUBJECTS.items():
+        if f"foreign-rb-{key}" in mut:
+            bindings["rpg-k8s-realtime"].append(binding(
+                "sneaky", "rpg-k8s-realtime", "ClusterRole", "cluster-admin", subjects=[subject]))
 
     for ns, doc in roles.items():
         put(f"role.{ns}.json", doc)
@@ -151,6 +174,10 @@ def main(argv):
         cluster_items.append(binding("studio-hub-nodes", None, "ClusterRole", kind="ClusterRoleBinding"))
     if "foreign-crb" in mut:
         cluster_items.append(binding("hub-admin", None, "ClusterRole", "cluster-admin", kind="ClusterRoleBinding"))
+    for key, subject in ALIAS_SUBJECTS.items():
+        if f"foreign-crb-{key}" in mut:
+            cluster_items.append(binding("sneaky", None, "ClusterRole", "cluster-admin",
+                                         kind="ClusterRoleBinding", subjects=[subject]))
     put("crb.json", listing(cluster_items))
     return 0
 

@@ -506,6 +506,19 @@ class RenderedGame(unittest.TestCase):
             ms.append(extra)
         self.assertRejected(m, "under another name")
 
+    def test_a_binding_naming_the_hub_as_user_or_group_is_rejected(self):
+        for subject in (
+            {"kind": "User", "name": "system:serviceaccount:rpg-k8s-hub:studio-hub"},
+            {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub"},
+            {"kind": "Group", "name": "system:serviceaccounts"},
+        ):
+            with self.subTest(subject=subject):
+                def m(ms, subject=subject):
+                    ms.append({"kind": "RoleBinding", "metadata": {"name": "sneaky", "namespace": self.NS},
+                               "subjects": [subject],
+                               "roleRef": {"kind": "ClusterRole", "name": "cluster-admin"}})
+                self.assertRejected(m, "under another name")
+
     def test_the_gateway_allocate_binding_is_not_confused_with_the_hub(self):
         def m(ms):
             ms.append({"kind": "RoleBinding", "metadata": {"name": "rpg-gateway-allocate", "namespace": self.NS},
@@ -722,6 +735,74 @@ class Bindings(unittest.TestCase):
             self.listing(self.binding("studio-hub", "x"), sloppy), "--scope", "namespaced", "--namespace", "x")
         self.assertEqual(rc, 1)
         self.assertIn("foreign: RoleBinding x/sloppy", out)
+
+    # The same identity under its other spellings: User `system:serviceaccount:NS:NAME` and the
+    # Groups `system:serviceaccounts:NS` / `system:serviceaccounts`.
+    ALIASES = (
+        ("user", {"kind": "User", "name": "system:serviceaccount:rpg-k8s-hub:studio-hub",
+                  "apiGroup": "rbac.authorization.k8s.io"}),
+        ("group-namespace", {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub",
+                             "apiGroup": "rbac.authorization.k8s.io"}),
+        ("group-all", {"kind": "Group", "name": "system:serviceaccounts",
+                       "apiGroup": "rbac.authorization.k8s.io"}),
+    )
+
+    def test_a_rolebinding_naming_the_hub_as_user_or_group_is_reported(self):
+        for label, subject in self.ALIASES:
+            with self.subTest(alias=label):
+                sneaky = self.binding("sneaky", "x", kind="ClusterRole", role="cluster-admin", subjects=[subject])
+                rc, out, _ = self.run_bindings(
+                    self.listing(self.binding("studio-hub", "x"), sneaky),
+                    "--scope", "namespaced", "--namespace", "x")
+                self.assertEqual(rc, 1)
+                self.assertIn("foreign: RoleBinding x/sneaky names ServiceAccount", out)
+                self.assertIn("roleRef ClusterRole/cluster-admin", out)
+
+    def test_a_clusterrolebinding_naming_the_hub_as_user_or_group_is_reported(self):
+        for label, subject in self.ALIASES:
+            for node, extra in (("absent", []), ("present", [self.node_binding()])):
+                with self.subTest(alias=label, node=node):
+                    sneaky = self.binding("sneaky", kind="ClusterRole", role="cluster-admin",
+                                          binding_kind="ClusterRoleBinding", subjects=[subject])
+                    rc, out, _ = self.run_bindings(
+                        self.listing(*extra, sneaky), "--scope", "cluster", "--node", node)
+                    self.assertEqual(rc, 1)
+                    self.assertIn("foreign: ClusterRoleBinding sneaky names ServiceAccount", out)
+
+    def test_the_hub_binding_itself_with_an_alias_subject_is_reported(self):
+        # `studio-hub` carrying an extra User/Group subject is a wrong-subjects problem (exact list compare).
+        for label, subject in self.ALIASES:
+            with self.subTest(alias=label):
+                widened = self.binding("studio-hub", "x", subjects=[self.SUBJECT, subject])
+                rc, out, _ = self.run_bindings(
+                    self.listing(widened), "--scope", "namespaced", "--namespace", "x")
+                self.assertEqual(rc, 1)
+                self.assertIn("subjects are", out)
+
+    def test_names_the_hub_compares_kind_and_name_exactly(self):
+        def names(*subjects):
+            return hc.names_the_hub({"subjects": list(subjects)})
+
+        for _, subject in self.ALIASES:
+            self.assertTrue(names(subject))
+        # Near misses are not the hub.
+        for subject in (
+            {"kind": "User", "name": "system:serviceaccount:rpg-k8s-realtime:studio-hub"},
+            {"kind": "User", "name": "system:serviceaccount:rpg-k8s-hub:other"},
+            {"kind": "User", "name": "studio-hub"},
+            {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-realtime"},
+            {"kind": "Group", "name": "system:serviceaccount:rpg-k8s-hub:studio-hub"},
+            {"kind": "Group", "name": "system:serviceaccounts:rpg-k8s-hub:"},
+            {"kind": "ServiceAccount", "name": "system:serviceaccounts", "namespace": "rpg-k8s-hub"},
+            {"kind": "Group", "name": "System:ServiceAccounts"},
+        ):
+            with self.subTest(subject=subject):
+                self.assertFalse(names(subject))
+
+    def test_system_authenticated_is_not_covered(self):
+        # Documented limit: Kubernetes binds its defaults (system:basic-user) to these groups.
+        for name in ("system:authenticated", "system:unauthenticated"):
+            self.assertFalse(hc.names_the_hub({"subjects": [{"kind": "Group", "name": name}]}))
 
     def test_a_service_account_of_the_same_name_elsewhere_is_not_the_hub(self):
         other = self.binding("elsewhere", "x", subjects=[
