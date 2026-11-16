@@ -29,6 +29,22 @@ class RenderTlsTests(unittest.TestCase):
             self.assertEqual(renderer.main(args), 0)
         self.assertIn("kind: Secret", output.getvalue())
 
+    def test_operator_examples_include_tls_choice(self):
+        deploy = path.parent.parent.parent
+        examples = (
+            (path.parent.parent / "dev-up.sh", 1),
+            (deploy / "docs/RUNBOOK-local-dev.md", 1),
+            (path.parent.parent / "README.md", 1),
+            (path.parent.parent / "app/40-gateway.yaml", 1),
+        )
+        for file, count in examples:
+            lines = [line for line in file.read_text(encoding="utf-8").splitlines()
+                     if "render.py --game" in line and "--print" in line]
+            with self.subTest(file=file):
+                self.assertEqual(len(lines), count)
+                for line in lines:
+                    self.assertRegex(line, r"--nakama-tls (?:on|off)(?=\s|`|$)")
+
     def test_cli_snippets_do_not_require_tls_decision(self):
         for part in ("secret-template", "gateway-env"):
             with self.subTest(part=part), contextlib.redirect_stdout(io.StringIO()) as output:

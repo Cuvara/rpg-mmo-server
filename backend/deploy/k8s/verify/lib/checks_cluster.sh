@@ -3,12 +3,7 @@
 
 k() { kubectl --context "$KUBE_CONTEXT" "$@"; }
 
-# Native Windows Python emits CRLF. Shell fields and verdict tags need LF;
-# remove only the line-ending CR and preserve Python failures through the pipe.
-cluster_python_lf() (
-  set -o pipefail
-  python3 "$@" | sed 's/\r$//'
-)
+source "$(dirname "${BASH_SOURCE[0]}")/python_lf.sh"
 
 check_cluster_reachable() {
   local out

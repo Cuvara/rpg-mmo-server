@@ -7,6 +7,8 @@
 # contract is: this layer PRINTS the exact invocation, and asserts on the NUnit
 # XML the run produces. A missing XML is a visible SKIP, never a pass.
 
+source "$(dirname "${BASH_SOURCE[0]}")/python_lf.sh"
+
 unity_command() {
   local proj="${VERIFY_UNITY_PROJECT:-E:\\SecretProject\\IndieRPGMMOAdventure}"
   cat <<CMD
@@ -36,7 +38,7 @@ $(unity_command)"
     return
   fi
   local parsed
-  parsed=$(python3 - "$xml" <<'PY'
+  parsed=$(cluster_python_lf - "$xml" <<'PY'
 import sys, xml.etree.ElementTree as ET
 try:
     r = ET.parse(sys.argv[1]).getroot()

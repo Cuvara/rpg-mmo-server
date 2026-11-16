@@ -123,7 +123,22 @@ for key_type in '' 'RSA ' 'ENCRYPTED '; do
     bad "${key_type}private key bundled with source certificate refused without provisioning or value output"
   fi
 done
-setup; rm "$FIXTURE/rpg-k8s-realtime-ember.url"
-if ! (run_blocks) > "$WORK/out" 2>&1 && grep -q 'render.py --game ember --nakama-tls' "$WORK/out"; then ok 'missing game config refused'; else bad 'missing game config refused'; fi
+for tls in 0 1; do
+  for block in repair check; do
+    setup; TLS_ON=$tls; rm "$FIXTURE/rpg-k8s-realtime-ember.url"
+    expected=off
+    if [ "$tls" = 1 ]; then
+      expected=on
+      printf 'https://realtime.example:7350' > "$FIXTURE/rpg-k8s-realtime.url"
+      printf '/etc/nakama-tls/tls.crt' > "$FIXTURE/rpg-k8s-realtime.pin"
+    fi
+    if ! (GAMES_LIST=(cuvara ember); GAME_NAMESPACES=(rpg-k8s-realtime-ember); source "$WORK/game TLS $block") > "$WORK/out" 2>&1 \
+      && grep -Fxq "  python deploy/k8s/games/render.py --game ember --nakama-tls $expected" "$WORK/out"; then
+      ok "missing game config: $block prints TLS $expected"
+    else
+      bad "missing game config: $block prints TLS $expected"
+    fi
+  done
+done
 echo "passed: $PASS failed: $FAIL"
 [ "$FAIL" -eq 0 ]

@@ -1258,8 +1258,15 @@ jobs:
             echo "::error::postgres-game-roles container is missing; refusing to migrate"
             exit 1
           fi
-          if ! role_exit=$(docker wait "$role_container"); then
-            echo "::error::Could not wait for postgres-game-roles; refusing to migrate"
+          if role_exit=$(timeout 300 docker wait "$role_container"); then
+            :
+          else
+            wait_status=$?
+            if [ "$wait_status" -eq 124 ]; then
+              echo "::error::postgres-game-roles did not finish in 300 seconds; read logs with docker compose logs postgres-game-roles"
+            else
+              echo "::error::Could not wait for postgres-game-roles; read logs with docker compose logs postgres-game-roles"
+            fi
             exit 1
           fi
           # docker wait prints the container exit code; its own success does not
