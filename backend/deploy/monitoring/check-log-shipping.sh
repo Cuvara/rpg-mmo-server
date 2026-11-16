@@ -295,7 +295,7 @@ while read -r cid svc; do
 		[ "$ok" -eq 1 ] && pass "${svc} stream found with env, service, a real level, game=${game} server_id=${sid}"
 	elif loki_query "{env=\"${ENVL}\",service=\"${svc}\",game=\"${game}\",server_id=\"${sid}\"}"; then
 		fail "${svc}: lines found for game=${game} server_id=${sid} but none with a real level (level=\"unknown\")"
-		info "the game server must log JSON: GAMESERVER_LOG_FORMAT=json and a build that includes the gameserver-json-logs task"
+		info "the game server must log JSON: GAMESERVER_LOG_FORMAT=json (the default; text gives level unknown)"
 	else
 		fail "${svc}: no line in Loki for game=${game} server_id=${sid} in the last ${CHECK_RANGE_SECONDS}s"
 		info "restart the game server or connect a client so it logs, then rerun"

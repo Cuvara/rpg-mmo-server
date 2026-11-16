@@ -81,6 +81,36 @@ jobs:
       - name: Test compose log shipping config
         run: python -m unittest discover -s backend/deploy/tests -p "test_*.py"
 
+      # The k8s log collector (Alloy DaemonSet, backend/deploy/k8s/logging):
+      # RBAC, hardening, labels, the connect-loki.sh attach, all against fakes.
+      - name: Test k8s log collector manifests and Loki attach
+        run: python -m unittest discover -s backend/deploy/k8s/logging/tests -p "test_*.py"
+
+      # The generated alloy-config ConfigMap must match its two sources
+      # (config-k8s.alloy + the compose collector's shared `level` block);
+      # --check exits 1 on drift.
+      - name: Check generated Alloy config is up to date
+        run: python backend/deploy/k8s/logging/generate-config.py --check
+
+      # The collector's contract (no ClusterRole, a Role of exactly two rules, a
+      # hardened DaemonSet, a selector-less Service loki, the per-game grant) is
+      # enforced by k3s/logging_contract.py, which needs PyYAML only. The full
+      # k3s/validate-manifests.py runs the same checks but also needs jsonschema
+      # and a download of Agones' install.yaml, so it is NOT run here (nothing
+      # added to this job's installs); run it locally.
+      - name: Test k8s log collector contract
+        run: |
+          python -m unittest discover -s backend/deploy/k3s/tests -p "test_*.py"
+          python backend/deploy/k3s/logging_contract.py
+
+      - name: Check cluster.log_collector verify rule
+        run: bash backend/deploy/k8s/verify/tests/log_collector_test.sh
+
+      # The deploy-environment and log-collector blocks of k8s/dev-up.sh, extracted
+      # and run against a fake kubectl and docker on a nonexistent context.
+      - name: Check dev-up.sh log collector apply
+        run: bash backend/deploy/k8s/verify/tests/dev_up_logging_test.sh
+
       - name: Check per-game database provisioning
         run: bash backend/deploy/db/tests/provision_test.sh
 

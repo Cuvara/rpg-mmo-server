@@ -1,0 +1,113 @@
+# Grafana Alloy as a DaemonSet: ships the pod logs of this node to Loki.
+#
+# What it can and cannot touch:
+#   * no hostPath, hostNetwork, hostPID or hostPort, nothing privileged: logs are
+#     read through the Kubernetes API (pods/log), not from /var/log/pods
+#   * non-root, read-only root filesystem, all capabilities dropped, no privilege
+#     escalation, RuntimeDefault seccomp
+#   * the only writable path is an emptyDir for Alloy's storage (read positions)
+#   * the ServiceAccount's only grants are the Roles in 20-rbac.yaml
+#   * no Service exposes Alloy. Its HTTP port (:12345, UI + /-/ready) listens on
+#     0.0.0.0 so the kubelet can probe it on the pod IP; that makes it reachable
+#     by any pod of the cluster that knows the pod IP. It serves the Alloy UI
+#     (component graph, config) and nothing that writes.
+#
+# The image version equals the compose default ALLOY_VERSION in
+# backend/deploy/docker-compose.yml (a test asserts they are the same), so both
+# collectors run the same Alloy and the shared `level` stage is the same code.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: alloy
+  namespace: rpg-k8s-logging
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rpg-mmo
+        app.kubernetes.io/name: alloy
+    spec:
+      serviceAccountName: rpg-log-collector
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        # 473 is the uid of the `alloy` user in the grafana/alloy image.
+        runAsUser: 473
+        runAsGroup: 473
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.11.3
+          imagePullPolicy: IfNotPresent
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --storage.path=/var/lib/alloy/data
+            - --server.http.listen-addr=0.0.0.0:12345
+            - --disable-reporting
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DEPLOY_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: alloy-env
+                  key: deploy-environment
+            - name: LOG_NAMESPACES
+              valueFrom:
+                configMapKeyRef:
+                  name: alloy-env
+                  key: log-namespaces
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 12345
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+              readOnly: true
+            - name: storage
+              mountPath: /var/lib/alloy/data
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-config
+            items:
+              - key: config.alloy
+                path: config.alloy
+        - name: storage
+          emptyDir:
+            sizeLimit: 64Mi

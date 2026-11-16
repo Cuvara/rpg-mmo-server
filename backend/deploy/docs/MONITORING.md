@@ -12,7 +12,7 @@ make monitoring-up          # docker compose --profile monitoring up -d
 | http://localhost:3000 | Grafana (`admin` / `localdev`, override with `GRAFANA_USER` / `GRAFANA_ADMIN_PASSWORD`) |
 | http://localhost:9090/targets | Bundled Prometheus — scrape health |
 | `localhost:4317` / `localhost:4318` | OTLP gRPC / HTTP ingest (traces, logs, metrics — for later) |
-| `127.0.0.1:3100` | Bundled Loki query API (`LOKI_PORT`), loopback only, no authentication. Container logs are shipped here by Alloy — see "Logs" below |
+| `127.0.0.1:3100` | Bundled Loki query API (`LOKI_PORT`), loopback only, no authentication. Container logs (compose) and pod logs (k8s) are shipped here by Alloy — see "Logs" below |
 
 `make monitoring-down` stops it, `make monitoring-logs` tails it, `make monitoring-targets` prints target health from the CLI.
 
@@ -62,7 +62,10 @@ and one into the `alloy` container; two more are the check and its helper:
 
 The `alloy` and `docker-socket-proxy` services in `docker-compose.yml`
 (profile `monitoring`) are ours too, and `tests/test_log_shipping.py` holds the
-offline tests for all of the above.
+offline tests for all of the above. The k8s collector is a second Alloy under
+`k8s/logging/` (see "Logs on k8s"); its `level` stage is the block of
+`alloy/config.alloy` between the `shared level pipeline` markers, so editing that
+block means regenerating `k8s/logging/40-alloy-config.yaml`.
 
 Plus the `lgtm-data` volume on `/data` — every bundled component persists there,
 so restarts keep the TSDB, Grafana state and Loki chunks.
@@ -249,7 +252,8 @@ they are not vendored. Once the matching exporter exists, import in Grafana via
 The `monitoring` profile also ships the container logs of the compose stack to
 the Loki bundled in `lgtm`, where Grafana's Loki datasource (provisioned by the
 image) reads them. This section says how a line gets there, what was decided and
-why, and how to query it.
+why, and how to query it. It covers compose; the k8s deployment has its own
+subsection, "Logs on k8s", after "The check and the offline tests".
 
 > **Status of verification.** Everything below describes what the files in this
 > directory do. The offline tests (`tests/test_log_shipping.py`) check the
@@ -273,8 +277,8 @@ why, and how to query it.
 >    (`docker run --rm --entrypoint sh grafana/otel-lgtm:0.11.15 -c 'cat
 >    /otel-lgtm/loki-config.yaml'`). Until then they are only compared with the
 >    repository file at the tag.
-> 4. A game server line carries a real `level`. This needs a build that includes
->    the `gameserver-json-logs` task; without it the check FAILs on purpose.
+> 4. A game server line carries a real `level`. The game server logs JSON by
+>    default; with `GAMESERVER_LOG_FORMAT=text` the check FAILs on purpose.
 > 5. The proxy's behaviour on `archive`, `export` and `attach/ws` (the residual
 >    risk below) is observed, not assumed.
 
@@ -403,20 +407,18 @@ Rules:
   missing field, a number, a custom word. The closed set is deliberate: an open
   one would mint a stream per distinct value. This change does not alter what the
   services print.
-- **Dependency: the game server's `level` needs the JSON-logs task.** On the
-  branch that holds this change alone, the C# game server still logs plain text
-  (the .NET simple console formatter: a header line such as `info: Category[0]`
-  followed by indented message lines). The task `gameserver-json-logs` of the
-  same plan (branch `feat/server/log-shipping-gameserver-json-logs`, integrated
-  with this one into `feat/server/log-shipping`) makes the game server log JSON
-  by default. Until it is in the build, and whenever
-  `GAMESERVER_LOG_FORMAT=text` is set to keep the plain output, **every game
-  server line ships with `level="unknown"`** (`env`, `service`, `game` and
+- **The game server's `level` needs JSON logs, which is its default.** The C#
+  game server logs one JSON object per line unless `GAMESERVER_LOG_FORMAT=text`
+  is set (the .NET simple console format: a header line such as
+  `info: Category[0]` followed by indented message lines). With `text`, **every
+  game server line ships with `level="unknown"`** (`env`, `service`, `game` and
   `server_id` are unaffected, they come from compose labels). There is no regex
   for the plain header on purpose: it would split one event over two streams, the
-  header and its indented message lines. Compose does not forward
-  `GAMESERVER_LOG_LEVEL` or `GAMESERVER_LOG_FORMAT`; that is that task's decision
-  and this one does not change it.
+  header and its indented message lines. Compose forwards both knobs to every game
+  server service, with the server's own defaults
+  (`GAMESERVER_LOG_LEVEL=Information`, `GAMESERVER_LOG_FORMAT=json`, documented in
+  `.env.example`), and so do the k8s ConfigMaps and the Agones dev fleet (see "Log
+  level and format knobs on k8s").
 - **Lines are shipped as written.** Non-JSON lines are not rewritten, dropped or
   wrapped, and JSON lines are only read, never changed.
 
@@ -477,6 +479,10 @@ no setting can widen it, and the override file keeps it that way. The offline
 tests assert the literal in the base file and with the override; the live check
 asserts it with `docker port`.
 
+The k8s collector does not change this: it reaches the same Loki over the
+cluster's Docker network and publishes no port (see "Decision: how the DaemonSet
+reaches Loki"), at the price of the residual risk recorded there.
+
 `LOKI_PORT` differs per environment so that stacks sharing a host do not
 collide, and `environments.tsv` reserves it like the other ports (the isolation
 preflight checks it):
@@ -509,9 +515,9 @@ logql '{service="gameserver-dotnet"} | json | msg=~"(?i).*disconnect.*"'   # a f
 ```
 
 The `level` label is the way to filter by severity, for every service. The last
-example needs the game server to log JSON (see the dependency note above) and
+example needs the game server to log JSON (its default, see the note above) and
 uses the `msg` field of its JSON line; the pattern is only an example. On a game
-server that logs plain text, `| json` finds nothing and `level` is `unknown`;
+server set to `GAMESERVER_LOG_FORMAT=text`, `| json` finds nothing and `level` is `unknown`;
 use a text filter (`|= "..."`) there.
 
 `env` is the value of `DEPLOY_ENVIRONMENT` (`dev`, `staging`, `production`,
@@ -534,7 +540,7 @@ Label names: `curl -s $LOKI/loki/api/v1/labels`.
   its compose labels (SKIP when that profile is down). The game server stream
   must carry a **real** level, one other than `unknown`: the check FAILs for a
   game server that logs plain text, and says that the game server must log JSON
-  (`GAMESERVER_LOG_FORMAT=json`, a build that includes the JSON-logs task). Output is `PASS:`/`FAIL:`/`SKIP:` lines and the exit
+  (`GAMESERVER_LOG_FORMAT=json`, the default). Output is `PASS:`/`FAIL:`/`SKIP:` lines and the exit
   status is 1 on any FAIL. Inputs: `COMPOSE_PROJECT_NAME`, `DEPLOY_ENVIRONMENT`,
   `LOKI_PORT`, `CHECK_TIMEOUT`. **NOT_RUN**: starting the stack needs the owner's
   go-ahead.
@@ -556,6 +562,290 @@ Label names: `curl -s $LOKI/loki/api/v1/labels`.
   distinct Loki port per row of `environments.tsv`. Alloy's syntax is checked only
   structurally (balanced braces and quotes, resolvable component references);
   Alloy itself is not run.
+
+### Logs on k8s (`DEPLOY_MODE=k8s`)
+
+When the realtime tier runs in a k3d cluster, the pod logs of the cluster go to
+the **same Loki**, through a second collector: an Alloy **DaemonSet** in its own
+namespace `rpg-k8s-logging` (`k8s/logging/`). The compose collector above only
+sees containers of its own compose project, and in k8s mode the gateway, Nakama,
+the data tier and the game servers are pods, not compose containers.
+
+> **Status of verification.** Everything in this section describes what the files
+> in `backend/deploy/k8s/logging/` do. **Nothing was applied to a cluster and no
+> line was seen arriving in Loki**, so every run-time behaviour below is **not yet
+> observed**. The offline tests (`k8s/logging/tests/`, `k3s/tests/`,
+> `k8s/verify/tests/log_collector_test.sh`, `k8s/verify/tests/dev_up_logging_test.sh`)
+> read the manifests and run `connect-loki.sh` and the collector block of
+> `dev-up.sh` against fakes. "First live run on k8s" at the end of this
+> section lists what has to be observed.
+
+#### How a line flows on k8s
+
+```
+container stdout/stderr
+  -> kubelet / container runtime          keeps the log of each container
+  -> kube-apiserver  GET .../pods/<pod>/log     (pods/log)
+  -> alloy DaemonSet (rpg-k8s-logging)    discovery.kubernetes + loki.source.kubernetes + loki.process
+  -> Service loki (rpg-k8s-logging)       selector-less, port 3100
+  -> EndpointSlice loki-lgtm              the address of the lgtm container on the Docker network k3d-<cluster>
+  -> lgtm : Loki :3100                    /loki/api/v1/push, the same Loki as compose
+  -> Grafana (Explore, Loki datasource)   or   curl 127.0.0.1:${LOKI_PORT}
+```
+
+- Alloy reads logs through the Kubernetes API. It mounts **no hostPath** and
+  cannot read any file of the node.
+- It runs once per node and ships only the pods of its own node (`NODE_NAME` from
+  the downward API, a server-side field selector plus a second `keep` rule).
+- The image is `grafana/alloy:v1.11.3`, the same version as the compose default
+  `ALLOY_VERSION`; a test asserts the two are equal. Its read positions live in an
+  `emptyDir`, so what happens to the lines around a pod restart is not yet
+  observed.
+- `k8s/logging/` holds `00-namespace.yaml`, `10-serviceaccount.yaml` (account
+  `rpg-log-collector`), `20-rbac.yaml`, `30-alloy-env.yaml` (ConfigMap
+  `alloy-env`), `40-alloy-config.yaml` (generated ConfigMap `alloy-config`),
+  `50-daemonset.yaml`, `60-loki-service.yaml` (Service `loki`) and
+  `connect-loki.sh`, which writes the EndpointSlice. The namespace is labelled
+  Pod Security `restricted` in `warn` and `audit` mode (not `enforce`), so a
+  violation is reported at apply time and a Kubernetes upgrade cannot be what
+  stops logging.
+- The `level` stage is **the compose one**, not a copy kept by hand.
+  `k8s/logging/generate-config.py` copies the block between the markers
+  `// BEGIN shared level pipeline` and `// END shared level pipeline` of
+  `monitoring/alloy/config.alloy` into the k8s half
+  (`k8s/logging/config-k8s.alloy`) and writes the result into
+  `40-alloy-config.yaml`. That file is generated: do not edit it. After changing
+  either source, run `python3 backend/deploy/k8s/logging/generate-config.py`;
+  `generate-config.py --check` exits 1 on drift, and CI runs it.
+
+#### Decision: how the DaemonSet reaches Loki (option A)
+
+In k8s mode the monitoring stack still runs under compose on the host. Loki is
+the one inside the `lgtm` container, published only on a literal `127.0.0.1`. A
+pod cannot reach the host's loopback, and widening that bind is exactly what must
+not happen (see "Loki is loopback only, without authentication"). Three ways were
+considered:
+
+| Option | What it does | Verdict |
+|---|---|---|
+| **A. Attach `lgtm` to the cluster's Docker network** | `connect-loki.sh` runs `docker network connect k3d-<cluster> <prefix>-lgtm` when it is not connected yet, reads the container's address on that network, and writes it into an EndpointSlice of the selector-less Service `loki`. Alloy pushes to `http://loki.rpg-k8s-logging.svc.cluster.local:3100/loki/api/v1/push`. | **Chosen** by the run lead. |
+| A + NetworkPolicy | A, plus an egress policy in every `rpg-k8s-*` namespace that blocks the Loki address for everything except the collector. | Considered, **not done**: it would put the egress of every app pod under policy for the first time, on a path (Agones, hostPort, KCP/UDP) that nobody could test live, and the address in the policy changes whenever `lgtm` is recreated. |
+| B. Authenticated push-only proxy | A small reverse proxy in compose in front of Loki that accepts only `POST /loki/api/v1/push` with a bearer token and joins the k3d network instead of `lgtm`. | **Recorded follow-up**, not built: it needs a new image and service in `docker-compose.yml`, a new secret on both sides and `cd.yml` changes. |
+
+Why A: **no port is published anywhere.** There is no new host port, the
+loopback bind of `lgtm` is unchanged, and a Docker bridge network is not routable
+from outside the host. Production runs compose, so this concerns dev and staging
+k3d only. The residual risk is not wider than what the host has today, where any
+process on the host can already reach Loki on loopback.
+
+**Residual risk, stated plainly.**
+
+- **Loki stays unauthenticated.** After the attach, every container on the Docker
+  network `k3d-<cluster>` can reach it, and that includes **every pod of that
+  cluster**. A pod can both read and write that environment's logs.
+- So **a compromised pod of one game could read another game's logs** on that
+  cluster, and the gateway's, Nakama's and the databases' logs too. The logs are
+  as exposed as the least trusted pod of the cluster.
+- Nothing is published beyond the host, and the loopback bind is unchanged. The
+  attach is per cluster: it joins the `lgtm` of one environment to the network of
+  one cluster.
+- **A recreated `lgtm` loses the attachment** and gets a new address until
+  `connect-loki.sh` or `dev-up.sh` runs again. While the Service `loki` has no
+  address, or a stale one, Alloy's pushes fail and retry, and its buffer is
+  eventually dropped. `cluster.log_collector` WARNs when the address is missing.
+- The durable form of the attachment is an external network in
+  `docker-compose.yml`, which this change does not own.
+- **Option B is the recorded follow-up** (the collector would hold a push-only
+  credential, and no pod could read logs). A NetworkPolicy was considered and not
+  done (table above).
+
+What `connect-loki.sh` does, so that its power can be judged:
+
+- It runs `docker network connect` and one `docker inspect` whose `--format` reads
+  only `.NetworkSettings.Networks` and prints one IPv4 address. There is no plain
+  `docker inspect` in the file, so no container Config or Env is read or printed.
+  It publishes no port, starts and stops nothing, and refuses names with
+  characters outside `[A-Za-z0-9_.-]`.
+- It is idempotent. It resolves the network from the kube context (`k3d-rpg-dev`
+  gives network `k3d-rpg-dev` and environment `dev`; `k3d-rpg-stg` gives
+  `k3d-rpg-stg` and `staging`) and the container as `<name_prefix>-lgtm` from the
+  `environments.tsv` row (`rpg-lgtm`, `rpg-stg-lgtm`). `KUBE_CONTEXT`,
+  `DEPLOY_ENVIRONMENT`, `LOKI_CONTAINER` and `LOKI_NETWORK` override that, and
+  `--dry-run` prints the plan and changes nothing.
+- When docker answered and `lgtm` is not listed as running, or has no address after
+  the attach, it prints a WARN, **deletes** the EndpointSlice so that no stale
+  address is left, and exits 0: logs are not in the client path, so this never
+  fails a deploy. When docker **could not be asked** (not installed, or `docker ps`
+  printed nothing and exited non-zero) the state of `lgtm` is unknown, not
+  "stopped": it prints a WARN, leaves the existing EndpointSlice as it is and exits
+  0. A non-empty `docker ps` listing counts as an answer whatever the exit status
+  (the WSL shim can print the list and still exit non-zero). It exits 1 only when
+  the cluster API refuses the EndpointSlice.
+- `dev-up.sh` does not stop on a collector that does not become Ready within
+  `LOG_ROLLOUT_TIMEOUT`: it prints a `::warning::` line and a WARN with the tail of
+  the collector's log and the commands to look at it. `cluster.log_collector`
+  FAILs on a collector that is not Ready and CD runs verify after `dev-up.sh`, so
+  the deploy still fails there, after the rest of the stack is up and verified.
+
+#### What the collector's RBAC allows
+
+There is **no ClusterRole and no ClusterRoleBinding**, and **no hostPath volume**
+(also no `hostNetwork`, `hostPID`, `hostPort` or privileged container). The
+ServiceAccount `rpg-log-collector` of `rpg-k8s-logging` is bound by a namespaced
+**Role** `rpg-log-collector` plus a RoleBinding of the same name in **each
+collected namespace**: `rpg-k8s-realtime`, `rpg-k8s-data` and `rpg-k8s-logging`
+(`k8s/logging/20-rbac.yaml`), and `rpg-k8s-realtime-<game>` for every non-default
+game (rendered by `k8s/games/render.py`, never copied by hand). Every Role has
+exactly two rules:
+
+| Rule | Why |
+|---|---|
+| `pods`: `get`, `list`, `watch` | `discovery.kubernetes` lists and watches the pods of each collected namespace, to learn which containers exist and to build the label set. |
+| `pods/log`: `get` | `loki.source.kubernetes` tails each container through `GET .../pods/<pod>/log`, which is the container's stdout and stderr as `kubectl logs` shows it. |
+
+What a pod object reveals, and what it does not. The collector can read the pod
+**object** (spec and status). That shows **literal environment values**
+(`env: value:`). For a value that comes from a Secret it shows only the
+`secretKeyRef` **name and key**, never the **value**: the value is not in the pod
+object, and there is no `secrets` rule to read the Secret itself. It cannot read a
+ConfigMap either. It cannot create, patch or delete a pod, and it has no
+`pods/exec` or `pods/attach`.
+
+Not granted, on purpose: secrets, configmaps, nodes, events, namespaces, any
+resource outside the core `pods` group, any verb beyond those above, any
+cluster-scoped kind. A namespace without such a Role cannot be collected, so
+collecting a new namespace is a reviewed change. The DaemonSet runs as non-root
+(uid 473, the `alloy` user of the image) with a read-only root filesystem, all
+capabilities dropped, no privilege escalation and the `RuntimeDefault` seccomp
+profile. Its only writable path is the `emptyDir` for read positions. The API
+token of the ServiceAccount is mounted, and no Secret is referenced anywhere in
+`k8s/logging/`.
+
+Alloy's HTTP port `12345` (UI and `/-/ready`) listens on `0.0.0.0` so that the
+kubelet can probe it on the pod IP. No Service exposes it, but any pod of the
+cluster that knows the pod IP can open the Alloy UI (component graph and config);
+it serves nothing that writes.
+
+`k3s/logging_contract.py` enforces these rules offline: no ClusterRole, a Role of
+exactly the two rules, a hardened DaemonSet, a selector-less Service `loki`, and
+the per-game Role and binding. `k3s/validate-manifests.py` runs it as part of its
+no-argument run.
+
+#### Labels on k8s
+
+The stream labels are the contract of "Label contract" above, enforced by the same
+final `stage.label_keep`: exactly `env`, `service`, `level`, plus `game` and
+`server_id` on game server pods.
+
+| Label | On | Source on k8s |
+|---|---|---|
+| `env` | every stream | `deploy-environment` in ConfigMap `alloy-env`. `dev-up.sh` sets it to `DEPLOY_ENVIRONMENT`, or `dev` for context `k3d-rpg-dev` and `staging` for `k3d-rpg-stg`; any other context must set `DEPLOY_ENVIRONMENT`, or `dev-up.sh` stops before it applies anything. The bare default in the repository file is `local`. |
+| `service` | every stream | the **container name**, with the real values of the manifests: `gateway`, `gameserver` (every fleet, every game), `agones-gameserver-sidecar` (the SDK sidecar that Agones adds to every game server pod), `nakama`, `migrate` (init container of Nakama), `postgres` (both StatefulSets), `redis`, `provision` and `psql` (the one-off Jobs), `alloy`. |
+| `level` | every stream | the shared pipeline: read from JSON lines only, see "Label contract" above. |
+| `game` | game server pods only (Agones label `agones.dev/role=gameserver`, both containers) | the **namespace**: `rpg-k8s-realtime` gives `cuvara` (the default game), `rpg-k8s-realtime-<game>` gives `<game>`. |
+| `server_id` | game server pods only | the **pod name**. The fleets set `POD_NAME` from `metadata.name` and the server resolves its id from `POD_NAME` (a fleet has no `GAMESERVER_ID`), so the pod name is the id the Redis registry uses. |
+
+- **The gateway has no `game`.** It shares the default game's namespace
+  `rpg-k8s-realtime`, but only pods with the Agones role label get `game`, and a
+  stream without `game` is stack-wide. The **data namespace** (`rpg-k8s-data`:
+  Nakama, Postgres, Redis) and the collector's own namespace carry neither `game`
+  nor `server_id`.
+- **`server_id` values turn over.** Dungeon pods come and go, so a new `server_id`
+  value appears for each new game server pod and old ones stop receiving lines.
+  The number of values is bounded by the number of game server pods that exist
+  over the retention window, and no other label is built from a pod name, a UID or
+  an IP.
+- Pods outside `rpg-k8s-*` are never shipped, whatever `log-namespaces` lists: a
+  `keep` rule on the namespace backs the list.
+- `service` is a container name here and a compose service name there
+  (`gameserver` against `gameserver-dotnet`, `gameserver-dotnet-map02`), so a
+  query that has to cover both writes `service=~"gameserver.*"`.
+
+The collected namespaces are the fixed three plus every game namespace.
+`dev-up.sh` builds the list (`log-namespaces` in `alloy-env`) from the games the
+gateway serves, with the same mapping that its game TLS repair uses. A game
+namespace in the list without the collector's Role is not collected: Alloy's pod
+list for it is refused (a `403` in Alloy's own log). `dev-up.sh` warns about that,
+carries on, and prints the `render.py` command that applies the game.
+
+#### Log level and format knobs on k8s
+
+| ConfigMap | Key | Env of the container | Default | Values |
+|---|---|---|---|---|
+| `gateway-config` | `log-level` | `LOG_LEVEL` (gateway) | `info` | `debug`, `info`, `warn`, `error` |
+| `gameserver-config` | `log-level` | `GAMESERVER_LOG_LEVEL` | `Information` | `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical` |
+| `gameserver-config` | `log-format` | `GAMESERVER_LOG_FORMAT` | `json` | `json`, `text` |
+
+All three env entries are `optional: true`, so a cluster whose ConfigMap predates a
+key keeps starting. A non-default game's `gameserver-config` is rendered from the
+same source and carries the same two keys and defaults, and `render.py` refuses a
+source that lost them. The game server logs JSON by default; `log-format: text`
+gives plain lines, which ship with `level="unknown"` (see the note under "Label
+contract"). The gateway reads `LOG_LEVEL` and logs JSON. A pod reads its ConfigMap at start, so
+changing a value needs a restart of the workload (the runbook has the commands).
+
+#### Querying on k8s
+
+The queries are those of "How to query"; only `env` and `service` differ. `env`
+is `dev` or `staging` here, and the Loki port is `LOKI_PORT` of that environment
+(dev 3100, staging 3120):
+
+```bash
+LOKI=http://127.0.0.1:${LOKI_PORT:-3100}
+logql() { curl -s -G "$LOKI/loki/api/v1/query_range" --data-urlencode "query=$1" --data-urlencode limit=20; }
+
+logql '{env="dev", service="gateway"}'                          # the gateway pod
+logql '{env="dev", service="nakama", level=~"warn|error"}'      # Nakama warnings and errors
+logql '{env="dev", game="cuvara"}'                              # every game server pod of the default game
+logql '{env="dev", game="ember"}'                               # every game server pod of the game "ember"
+logql '{env="dev", service="gameserver", server_id="<pod name>"}'   # one game server; server_id is the pod name
+logql '{env="dev", service="agones-gameserver-sidecar"}'        # the Agones SDK sidecar of the game servers
+logql '{env="dev", game=""}'                                    # stack-wide streams: gateway, Nakama, data tier, collector
+logql '{env="dev", service="alloy"}'                            # the collector's own log
+```
+
+List the real `server_id` values with
+`curl -s $LOKI/loki/api/v1/label/server_id/values`, or the pod names with
+`kubectl --context k3d-rpg-dev get pods -n rpg-k8s-realtime`.
+
+#### Known gap (not fixed here): CD does not run `lgtm` in `DEPLOY_MODE=k8s`
+
+In `DEPLOY_MODE=k8s`, `cd.yml` neither starts nor updates `lgtm` nor the compose
+collector. `dev-up.sh` does not stop `lgtm` (it is not in its list of compose dev
+containers), so one that is already running stays up, but nothing guarantees that
+one runs. On a k8s environment this decides whether logs arrive at all: with no
+`lgtm`, `connect-loki.sh` warns and `cluster.log_collector` WARNs. `cd.yml` and
+`docker-compose.yml` were outside the files this change could edit, so this is
+recorded for a follow-up, together with the external network and option B above.
+
+#### First live run on k8s: what has to be observed
+
+Nothing below has been observed. The first run on a dev cluster (it needs the
+owner's go-ahead) has to show, and record, that:
+
+1. `kubectl apply` accepts the manifests, the `rpg-k8s-logging` namespace raises no
+   Pod Security warning, and `daemonset/alloy` becomes Ready on the node.
+2. Alloy v1.11.3 loads the generated `config.alloy`: its own log shows no config
+   error and no `403` for any collected namespace.
+3. **A pod reaches a sibling container's address on the k3d network**, here `lgtm`
+   at the address `connect-loki.sh` wrote, on port 3100. This is the main
+   unverified assumption of option A.
+4. A gateway line reaches Loki with `env`, `service="gateway"` and `level`.
+5. A game server line carries `game="cuvara"` and a `server_id` equal to its pod
+   name, which is the id in the Redis registry, and a pod of a rendered
+   non-default game carries its own `game`.
+6. Nothing from `rpg-k8s-data` or the gateway carries `game`, and no label other
+   than the five of the contract appears.
+7. `docker network connect` and `docker inspect` behave as the script assumes under
+   WSL (the script asserts on state, not on exit status, because the Docker shim
+   there can exit non-zero after succeeding).
+8. After `lgtm` is recreated, `cluster.log_collector` WARNs, and
+   `connect-loki.sh` restores the flow.
+9. Changing a log level in a ConfigMap and restarting the workload changes what is
+   logged (for the game server only with a build that includes the JSON-logs
+   change).
+10. `cluster.log_collector` PASSes on a healthy cluster and FAILs with the collector
+    deleted. Offline it is shown against fixtures only.
 
 ## Deploying to a VPS
 
@@ -699,7 +989,8 @@ a literal in the compose file.
 **Grafana Cloud free tier (VPS / soft-launch).** Keep the exact same exporters;
 replace the local stack with **Grafana Alloy** on the host: Alloy scrapes
 `:9100/:9101/:9102`, remote-writes to Grafana Cloud Prometheus, ships logs to
-Loki. The compose stack already runs an Alloy for logs only ("Logs" above); the
+Loki. The compose stack already runs an Alloy for logs only ("Logs" above), and
+the k8s deployment an Alloy DaemonSet ("Logs on k8s"); the
 move would point its `loki.write` at Grafana Cloud's Loki endpoint (with
 credentials) and keep the label contract unchanged. The dashboard JSON imports unchanged (datasource is a `prometheus` uid).
 Free tier covers ~10k series / 50GB logs — enough through soft launch.

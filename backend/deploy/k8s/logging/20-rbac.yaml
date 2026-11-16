@@ -1,0 +1,139 @@
+# What the log collector may do to the Kubernetes API, and why.
+#
+# THE RULE IS THE NARROWEST ONE THAT WORKS. There is NO ClusterRole and NO
+# ClusterRoleBinding in this directory, on purpose: a cluster-wide grant would
+# let the collector list pods in every namespace of the cluster, including
+# kube-system and the namespaces of other stacks. Instead each COLLECTED
+# namespace carries its own Role + RoleBinding below, both named
+# `rpg-log-collector`, bound to the ServiceAccount `rpg-log-collector` of
+# rpg-k8s-logging. A namespace that has no such Role cannot be collected, which
+# is the property wanted: collecting a namespace is a reviewed change.
+#
+# Static pairs here: rpg-k8s-realtime (gateway, default game's fleets),
+# rpg-k8s-data (Nakama, Postgres, Redis) and rpg-k8s-logging (the collector
+# itself). The pair for a non-default game's namespace, rpg-k8s-realtime-<game>,
+# is rendered by deploy/k8s/games/render.py with the same two rules, never
+# copied by hand. These Roles live in namespaces that other manifests create, so
+# apply them after k8s/app and k8s/data (dev-up.sh does).
+#
+# EXACTLY TWO RULES, in every Role:
+#
+#   1. pods: get, list, watch
+#      Alloy's discovery.kubernetes (role pod) lists the pods of each collected
+#      namespace and watches them, to learn which containers exist and to build
+#      the label set (namespace, pod name, container name, the Agones role label,
+#      node). What it CAN read: the pod OBJECT, i.e. its spec and status. A pod
+#      object shows LITERAL env values (`env: value:`), and for a value taken
+#      from a Secret only the secretKeyRef NAME and key, never the secret's
+#      value: the pod object does not contain it. It cannot read the Secret
+#      itself (no `secrets` rule) nor a ConfigMap. It cannot create, patch, delete
+#      or exec into a pod: no write verb, and no pods/exec or pods/attach.
+#
+#   2. pods/log: get
+#      loki.source.kubernetes tails each container through the API server's log
+#      endpoint (GET .../pods/<pod>/log), i.e. the container's stdout and stderr
+#      exactly as `kubectl logs` shows them. Nothing else of the container, not
+#      its filesystem.
+#
+# NOT granted, so nobody adds it "to make it work" without noticing: secrets,
+# configmaps, nodes, events, namespaces, any resource outside the core pods
+# group, any verb beyond those listed, any cluster-scoped kind.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rpg-log-collector
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rpg-log-collector
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: rpg-log-collector
+    namespace: rpg-k8s-logging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rpg-log-collector
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rpg-log-collector
+  namespace: rpg-k8s-data
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rpg-log-collector
+  namespace: rpg-k8s-data
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: rpg-log-collector
+    namespace: rpg-k8s-logging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rpg-log-collector
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rpg-log-collector
+  namespace: rpg-k8s-logging
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rpg-log-collector
+  namespace: rpg-k8s-logging
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: rpg-log-collector
+    namespace: rpg-k8s-logging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rpg-log-collector

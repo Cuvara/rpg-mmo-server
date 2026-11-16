@@ -70,6 +70,12 @@ loki.source.docker "containers" {
   refresh_interval = "10s"
 }
 
+// BEGIN shared level pipeline
+// Single source of the `level` stage. The k8s collector (deploy/k8s/logging/)
+// copies everything from this line to the END marker verbatim into its
+// generated ConfigMap (k8s/logging/generate-config.py; `--check` fails on drift).
+// Change it here, regenerate there. The writer it forwards to must keep the name
+// loki.write "lgtm" in both collectors.
 loki.process "level" {
   forward_to = [loki.write.lgtm.receiver]
 
@@ -89,13 +95,12 @@ loki.process "level" {
   //   Nakama      zap            info warn error debug dpanic panic fatal
   //   gameserver  JSON logger    TRACE DEBUG INFO WARN ERROR CRITICAL
   //               (one object per line: ts level category msg ...; it is the
-  //               default of the gameserver-json-logs task of the same plan)
+  //               server's default, GAMESERVER_LOG_FORMAT=json)
   //
   // `level` is read ONLY from JSON. There is deliberately no regex for the
   // plain .NET console format (a header line `info: Category[0]` plus indented
   // message lines): it would put one event on two streams. A game server that
-  // logs text (GAMESERVER_LOG_FORMAT=text), or a build without the JSON-logs
-  // task, therefore ships with level="unknown".
+  // logs text (GAMESERVER_LOG_FORMAT=text) therefore ships with level="unknown".
   stage.match {
     selector = `{service=~".+"} |~ "^\\s*\\{"`
 
@@ -126,6 +131,8 @@ loki.process "level" {
     values = ["env", "service", "level", "game", "server_id"]
   }
 }
+
+// END shared level pipeline
 
 loki.write "lgtm" {
   endpoint {
