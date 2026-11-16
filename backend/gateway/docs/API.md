@@ -266,8 +266,11 @@ comma-separated rotation format). There is no fallback to `JOIN_TOKEN_SECRET` or
 server compares `gid` (absent meaning `cuvara`) with its own `GAMESERVER_GAME_ID`
 after the `sid` check and refuses a mismatch with `Token is for a different game`
 (ADR-33 leg 2); the distinct secret is defence in depth on top of that check. At
-startup the gateway warns when a game's secret is missing, equals `JWT_SECRET`, or
-shares any rotation key with another game's join secret (`cuvara`'s included).
+startup the gateway warns when a game's secret is missing (that game stays unroutable),
+and **refuses to start** when any key of any join keyring, rotation entries included,
+is also a key of `JWT_SECRET` or of another game's join keyring (`cuvara`'s included;
+MG-02, `cmd/gateway/keyring_separation.go`). The token format and claim set are
+unchanged by that check.
 
 ### Character (`cid`, ADR-31)
 
@@ -289,8 +292,11 @@ sharing them made one compromised pod able to forge client auth tokens.
 
 > **`JOIN_TOKEN_SECRET` is mandatory on both sides — there is no fallback.**
 > The gateway refuses to start without it (`cmd/gateway/main.go`), and so does
-> the C# game server (`Program.cs`, exit code 2). Both log a warning when it is
-> set to the *same value* as `JWT_SECRET`, which defeats the split.
+> the C# game server (`Program.cs`, exit code 2). The gateway also refuses to
+> start when any of its keys is a key of `JWT_SECRET`, compared key by key so a
+> shared rotation entry counts (MG-02); a whole-value comparison with a warning,
+> the earlier behaviour, missed `JWT_SECRET=new,old` next to a join keyring
+> holding `old`.
 >
 > Corrected 2026-08-11: this section previously said an unset `JOIN_TOKEN_SECRET`
 > falls back to `JWT_SECRET` "because `gameserver-dotnet` cannot read the new

@@ -92,6 +92,10 @@ func main() {
 	// for local dev and loudly logged so nobody ships it:
 	//   JWT_SECRET         — Nakama-issued client auth token.
 	//   JOIN_TOKEN_SECRET  — gateway-issued join token. REQUIRED (fatal if unset).
+	//   JOIN_TOKEN_SECRET_<GAME> — a non-default game's join token. Missing or
+	//                      unparseable warns and that game's EnterWorld is refused.
+	//   No key may appear in JWT_SECRET and any join keyring, or in the join
+	//   keyrings of two games: FATAL (MG-02, checkKeyringSeparation).
 	//   GATEWAY_TLS_CERT/_KEY — TLS on this listener (ADR-23). Both empty =
 	//                      plaintext, the default; exactly one set is FATAL.
 	// GATEWAY_TLS_CERT / GATEWAY_TLS_KEY — the
@@ -122,19 +126,22 @@ func main() {
 			"Do NOT reuse JWT_SECRET: a compromised game-server pod must not be able to forge auth tokens.")
 		os.Exit(1)
 	}
-	if joinSecret == cfg.JWTSecret {
-		log.Warn("JOIN_TOKEN_SECRET and JWT_SECRET are the same value -- a leak of either secret compromises both the Nakama auth hop and the game-server hop. Use distinct secrets before launch.")
+	// Every join keyring the gateway will sign with, in games.IDs() order, for
+	// the key-separation check below. The default game's keyring is always
+	// present: WithJoinTokenSecret installs it whether or not GAMES lists it.
+	defaultJoinSetting := "JOIN_TOKEN_SECRET"
+	if *joinTokenSecret != "" {
+		defaultJoinSetting = "--join-token-secret"
 	}
-	// Compare individual rotation keys as well as complete secret settings.
-	joinSecretOwners := make(map[string]string)
-	for _, key := range strings.Split(joinSecret, ",") {
-		if key = strings.TrimSpace(key); key != "" {
-			joinSecretOwners[key] = constants.DefaultGameID
-		}
+	defaultJoin := gameKeyring{Game: constants.DefaultGameID, Setting: defaultJoinSetting, Spec: joinSecret}
+	var joinKeyrings []gameKeyring
+	if !games.Allowed(constants.DefaultGameID) {
+		joinKeyrings = append(joinKeyrings, defaultJoin)
 	}
 	var gameJoinOptions []server.Option
 	for _, game := range games.IDs() {
 		if game == constants.DefaultGameID {
+			joinKeyrings = append(joinKeyrings, defaultJoin)
 			continue
 		}
 		envName := "JOIN_TOKEN_SECRET_" + strings.ToUpper(game)
@@ -147,24 +154,19 @@ func main() {
 				"game", game, "setting", envName)
 			continue
 		}
-		if secret == cfg.JWTSecret {
-			log.Warn("game join-token secret and JWT_SECRET are the same value -- use distinct secrets before launch",
-				"game", game, "setting", envName)
-		}
-		// Same split and trim as ParseKeyring, which does not expose its keys.
-		for _, key := range strings.Split(secret, sharedjwt.KeyringSeparator) {
-			key = strings.TrimSpace(key)
-			if key == "" {
-				continue
-			}
-			if owner, ok := joinSecretOwners[key]; ok && owner != game {
-				log.Warn("games share a join-token secret; a game server can forge another game's tokens",
-					"game", game, "other_game", owner, "setting", envName)
-			} else {
-				joinSecretOwners[key] = game
-			}
-		}
+		joinKeyrings = append(joinKeyrings, gameKeyring{Game: game, Setting: envName, Spec: secret})
 		gameJoinOptions = append(gameJoinOptions, server.WithGameJoinTokenSecret(game, secret))
+	}
+	// MG-02: no key may be both an auth key and a join key, or a join key of
+	// two games. Each key is compared on its own (a rotation entry counts), and
+	// the gateway refuses to start rather than warn: a game-server pod holding
+	// an auth key can mint auth tokens for any user and any game. This runs
+	// before the metrics listener and any backend wiring. The error names
+	// settings and games only, never a key.
+	if err := checkKeyringSeparation(cfg.JWTSecret, joinKeyrings); err != nil {
+		log.Error("refusing to start: a key is shared across keyrings; give JWT_SECRET and every game's join-token secret their own keys",
+			"err", err)
+		os.Exit(1)
 	}
 	if cfg.JWTSecret == "dev-secret-change-me" {
 		log.Warn("JWT_SECRET is the built-in development default -- anyone can forge auth tokens. Set JWT_SECRET before exposing this gateway.")
