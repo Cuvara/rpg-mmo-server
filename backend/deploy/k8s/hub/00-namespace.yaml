@@ -1,0 +1,26 @@
+# The Studio hub's own namespace. NOTHING ever runs in it.
+#
+# The Studio hub is an operator web tool that lives OUTSIDE the cluster. Its
+# identity is the ServiceAccount `studio-hub` (10-serviceaccount.yaml), and what
+# that identity may do is the Role + RoleBinding pairs in 20-rbac.yaml.
+#
+# Why its own namespace and not rpg-k8s-realtime: a ServiceAccount can be mounted
+# by ANY pod created in its namespace. The realtime namespace runs workloads (the
+# gateway, the game-server fleets) and the hub itself may patch a Deployment
+# there, so a ServiceAccount living there could be mounted by a pod the hub
+# patched, or by anyone who can create a pod in that namespace, and the hub's
+# rights would walk out of the cluster in a pod's token. Here there is no
+# workload, no Service, no ConfigMap and no Secret, and no Role grants anything
+# in this namespace (not even to the hub): the only way to act as the hub is a
+# token an operator minted by hand (docs/RUNBOOK.md, "Studio hub token").
+#
+# Deleting this namespace deletes the ServiceAccount, which invalidates every
+# token ever minted for it and removes the hub's identity in one step; the Roles
+# in the other namespaces then bind a subject that no longer exists.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpg-k8s-hub
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: hub

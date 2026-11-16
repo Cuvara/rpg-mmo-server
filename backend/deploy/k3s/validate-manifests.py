@@ -29,6 +29,10 @@ namespace, the game invariants in check_game_render) and asserts that invalid,
 reserved, default and too-long ids are refused. It also reads deploy/k8s/logging/
 and enforces the log collector's contract (logging_contract.py: no ClusterRole, a
 Role of exactly two rules, a hardened DaemonSet, a selector-less Service `loki`).
+It also reads deploy/k8s/hub/ (and its opt-in optional/ file) and enforces the
+Studio hub's contract (hub_contract.py: the single copy of the allow-list, no
+ClusterRole outside optional/, no Secret or ConfigMap access, a ServiceAccount
+without automount).
 Nothing is written or applied.
 The Agones install.yaml is cached in ~/.cache/rpg-mmo/agones-<version>.yaml.
 
@@ -71,7 +75,21 @@ def _load_logging_contract():
     return module
 
 
+def _load_hub_contract():
+    """hub_contract.py sits beside this file: the Studio hub's allow-list, the single
+    copy in code. PyYAML only, like logging_contract.py, so CI runs it on its own
+    (tests/test_hub_contract.py)."""
+    import importlib.util
+
+    path = pathlib.Path(__file__).resolve().parent / "hub_contract.py"
+    spec = importlib.util.spec_from_file_location("rpg_mmo_hub_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
 logging_contract = _load_logging_contract()
+hub_contract = _load_hub_contract()
 DEFAULT_AGONES_VERSION = "1.59.0"
 INSTALL_URL = (
     "https://raw.githubusercontent.com/googleforgames/agones/"
@@ -86,8 +104,13 @@ REQUIRED_NATIVE_FIELDS = {
     # The log collector's manifests (k8s/logging); their contract is in
     # logging_contract.py, this is only the shape every object needs.
     "ServiceAccount": ["metadata.name"],
-    "Role": ["metadata.name"],
-    "RoleBinding": ["metadata.name"],
+    "Role": ["metadata.name", "metadata.namespace", "rules"],
+    "RoleBinding": ["metadata.name", "metadata.namespace", "subjects", "roleRef"],
+    # The Studio hub's manifests (k8s/hub, incl. the opt-in optional/node-access.yaml);
+    # their contract is in hub_contract.py. The only cluster-scoped kinds anywhere
+    # in the validated set, and a ClusterRole outside optional/ fails that contract.
+    "ClusterRole": ["metadata.name", "rules"],
+    "ClusterRoleBinding": ["metadata.name", "subjects", "roleRef"],
     "DaemonSet": ["metadata.name"],
     "Service": ["metadata.name"],
 }
@@ -488,16 +511,19 @@ def check_game_render(rendered: dict, game: str, stack_ns: str, renderer) -> lis
     if len(cms) != 1 or (dig(cms[0], "data") or {}).get("game-id") != game:
         problems.append(f"gameserver-config must set game-id: {game!r}")
 
-    # The collector's Role and RoleBinding (k8s/logging) share the namespace; their
-    # contract is logging_contract.check_game_logging, called below. The allocate
-    # grant is every OTHER Role and RoleBinding.
+    # The collector's Role and RoleBinding (k8s/logging) and the Studio hub's
+    # (k8s/hub) share the namespace; their contracts are
+    # logging_contract.check_game_logging (called below) and
+    # hub_contract.check_game_hub. The allocate grant is every OTHER Role and
+    # RoleBinding.
     collector = logging_contract.COLLECTOR_ROLE
-    roles = [r for r in of_kind("Role") if dig(r, "metadata.name") != collector]
+    others = (collector, hub_contract.HUB_ROLE)
+    roles = [r for r in of_kind("Role") if dig(r, "metadata.name") not in others]
     if len(roles) != 1 or roles[0].get("rules") != ALLOCATE_RULES:
         problems.append(f"expected one Role granting exactly {ALLOCATE_RULES}, got {[r.get('rules') for r in roles]}")
     gw_bindings = [
         b for b in of_kind("RoleBinding")
-        if dig(b, "roleRef.kind") == "Role" and dig(b, "metadata.name") != collector
+        if dig(b, "roleRef.kind") == "Role" and dig(b, "metadata.name") not in others
     ]
     want_subject = [{"kind": "ServiceAccount", "name": "rpg-gateway", "namespace": stack_ns}]
     if len(gw_bindings) != 1 or gw_bindings[0].get("subjects") != want_subject or (
@@ -643,6 +669,9 @@ def main() -> int:
             sorted((DEPLOY_DIR / "agones").glob("*.yaml"))
             + sorted((DEPLOY_DIR / "k3s").glob("*.yaml"))
             + sorted(logging_contract.LOGGING_DIR.glob("*.yaml"))
+            + sorted(hub_contract.HUB_DIR.glob("*.yaml"))
+            # The opt-in node ClusterRole is shape-validated too, although dev-up.sh never applies it.
+            + sorted((hub_contract.HUB_DIR / hub_contract.OPTIONAL_SUBDIR).glob("*.yaml"))
         )
 
     print(f"==> Agones {args.agones_version} CRD schemas")
@@ -737,6 +766,18 @@ def main() -> int:
         if not log_problems:
             print(f"[ ok ] {len(log_docs)} document(s): no ClusterRole, Role of exactly pods get/list/watch + "
                   f"pods/log get, hardened DaemonSet, selector-less Service loki")
+            checked += 1
+        print(f"\n==> Studio hub contract ({hub_contract.HUB_DIR.relative_to(DEPLOY_DIR)})")
+        hub_docs, hub_optional, hub_problems = hub_contract.load_hub(hub_contract.HUB_DIR)
+        if not hub_problems:
+            hub_problems = hub_contract.check_hub(hub_docs, hub_optional)
+        for problem in hub_problems:
+            print(f"[FAIL] {problem}")
+        failures += len(hub_problems)
+        if not hub_problems:
+            print(f"[ ok ] {len(hub_docs)} + {len(hub_optional)} optional document(s): no ClusterRole outside optional/, "
+                  f"Roles of exactly the allow-list in hub_contract.py (realtime, data), no Secret or ConfigMap access, "
+                  f"ServiceAccount studio-hub without automount, node ClusterRole exact")
             checked += 1
         game_checked, game_failures = validate_game_template(schemas)
         checked += game_checked
