@@ -480,7 +480,8 @@ curl -s -G "http://127.0.0.1:${LOKI_PORT:-3100}/loki/api/v1/query_range" \
 ```
 
 Labels are `env` (`local` here), `service`, `level`, and on game servers `game`
-and `server_id`; a line that is not JSON has `level="unknown"`. Full contract,
+and `server_id`; a line that is not JSON has `level="unknown"` (so does every
+game server line while the game server logs plain text). Full contract,
 retention and the decision to read logs through a read-only socket proxy:
 `MONITORING.md` §Logs. `docker compose logs` keeps working and shows the raw lines.
 
@@ -499,7 +500,7 @@ When a line is missing in Loki:
 | Alloy cannot reach Docker | `docker compose logs docker-socket-proxy`: a `403` in the access log means the request is outside the read-only allow-list, which is by design |
 | Other stack's lines or none of yours | Alloy keeps only its own compose project: `COMPOSE_PROJECT_NAME` in `.env` must equal this stack's project (`./stack.sh up --scratch` writes it for you) |
 | A line arrives seconds late, or the first lines of a new container are missing | Alloy refreshes discovery every 10 s and tails a container from when it first sees it |
-| Present, but under `level="unknown"` | The line is not a JSON object, or its `level` is not a known spelling (`MONITORING.md` §Logs) |
+| Present, but under `level="unknown"` | The line is not a JSON object, or its `level` is not a known spelling (`MONITORING.md` §Logs). A **game server** is `unknown` when it logs plain text: `GAMESERVER_LOG_FORMAT=text`, or a build without the `gameserver-json-logs` task (JSON by default); there is no regex for the plain format on purpose |
 | Game server line without `game` / `server_id` | The service lacks the `cuvara.log.game` / `cuvara.log.server_id` compose labels |
 | `connection refused` on 3100 | `LOKI_PORT` remapped, or `lgtm` not up; Loki is published on `127.0.0.1` only |
 

@@ -202,10 +202,12 @@ IMAGE="${CHECK_IMAGE:-$(docker inspect --format '{{.Config.Image}}' "$LGTM_CID" 
 MARKER="logship-$(date +%s)-$$-${RANDOM}"
 CHECK_SERVICE="log-shipping-check"
 LIFETIME=$(( (CHECK_TIMEOUT + 30) / 2 ))
-# One JSON line (level spelled the way the game server does) and one plain line,
-# repeated, because Alloy only tails a container once its 10s discovery refresh
-# has seen it. The loop ends by itself so a killed check leaves nothing running.
-SCRIPT="i=0; while [ \$i -lt ${LIFETIME} ]; do echo '{\"level\":\"Warning\",\"msg\":\"${MARKER} json\"}'; echo '${MARKER} plain'; i=\$((i+1)); sleep 2; done"
+# One JSON line (level WARN, the spelling the gateway and the game server JSON
+# logger write; expected label: warn) and one plain line (expected label:
+# unknown), repeated, because Alloy only tails a container once its 10s discovery
+# refresh has seen it. The loop ends by itself so a killed check leaves nothing
+# running.
+SCRIPT="i=0; while [ \$i -lt ${LIFETIME} ]; do echo '{\"level\":\"WARN\",\"msg\":\"${MARKER} json\"}'; echo '${MARKER} plain'; i=\$((i+1)); sleep 2; done"
 MARKER_CID="$(docker run -d --rm --entrypoint sh \
 	--label "com.docker.compose.project=${PROJECT}" \
 	--label "com.docker.compose.service=${CHECK_SERVICE}" \
@@ -225,11 +227,11 @@ if wait_for "{${SEL},level=\"warn\"} |= \"${MARKER} json\"" "$MARKER_START"; the
 	for k in env service level; do has_label "$labels" "$k" || { fail "marker stream lacks label ${k}: ${labels}"; ok=0; }; done
 	label_is "$labels" env "$ENVL" || { fail "marker stream env is not '${ENVL}': ${labels}"; ok=0; }
 	label_is "$labels" service "$CHECK_SERVICE" || { fail "marker stream service is not '${CHECK_SERVICE}': ${labels}"; ok=0; }
-	label_is "$labels" level warn || { fail "marker level is not 'warn' (JSON \"Warning\"): ${labels}"; ok=0; }
+	label_is "$labels" level warn || { fail "marker level is not 'warn' (JSON \"WARN\"): ${labels}"; ok=0; }
 	extra="$(forbidden_labels "$labels")"
 	[ -z "$extra" ] || { fail "marker stream carries per-container labels:${extra}"; ok=0; }
 	[ "$ok" -eq 1 ] && pass "JSON marker found with env=${ENVL} service=${CHECK_SERVICE} level=warn and no id-like label"
-	if printf '%s' "$BODY" | grep -qF "\\\"level\\\":\\\"Warning\\\""; then
+	if printf '%s' "$BODY" | grep -qF "\\\"level\\\":\\\"WARN\\\""; then
 		pass "the JSON line was shipped as written (body not rewritten)"
 	else
 		fail "the shipped JSON line differs from what the container wrote"
@@ -283,12 +285,17 @@ while read -r cid svc; do
 		fail "${svc}: compose label cuvara.log.server_id is empty"
 		continue
 	fi
-	if wait_for "{env=\"${ENVL}\",service=\"${svc}\",game=\"${game}\",server_id=\"${sid}\",level=~\".+\"}"; then
+	# A real level is required: `unknown` (a plain-text game server) must not pass.
+	if wait_for "{env=\"${ENVL}\",service=\"${svc}\",game=\"${game}\",server_id=\"${sid}\",level=~\".+\",level!=\"unknown\"}"; then
 		labels="$(stream_labels)"
 		ok=1
 		for k in env service level game server_id; do has_label "$labels" "$k" || { fail "${svc}: stream lacks label ${k}: ${labels}"; ok=0; }; done
+		label_is "$labels" level unknown && { fail "${svc}: level is unknown: ${labels}"; ok=0; }
 		[ -z "$(forbidden_labels "$labels")" ] || { fail "${svc}: stream carries per-container labels: $(forbidden_labels "$labels")"; ok=0; }
-		[ "$ok" -eq 1 ] && pass "${svc} stream found with env, service, level, game=${game} server_id=${sid}"
+		[ "$ok" -eq 1 ] && pass "${svc} stream found with env, service, a real level, game=${game} server_id=${sid}"
+	elif loki_query "{env=\"${ENVL}\",service=\"${svc}\",game=\"${game}\",server_id=\"${sid}\"}"; then
+		fail "${svc}: lines found for game=${game} server_id=${sid} but none with a real level (level=\"unknown\")"
+		info "the game server must log JSON: GAMESERVER_LOG_FORMAT=json and a build that includes the gameserver-json-logs task"
 	else
 		fail "${svc}: no line in Loki for game=${game} server_id=${sid} in the last ${CHECK_RANGE_SECONDS}s"
 		info "restart the game server or connect a client so it logs, then rerun"

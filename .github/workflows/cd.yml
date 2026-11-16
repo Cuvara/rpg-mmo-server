@@ -415,6 +415,7 @@ jobs:
           for f in bin/gateway bin/smoketest bin/verify-probe bin/gameserver-dotnet deploy/nakama.so \
                    scripts/deploy-local.sh \
                    deploy/monitoring/prometheus.yaml \
+                   deploy/monitoring/alerts.yaml \
                    deploy/monitoring/grafana-dashboards.yaml \
                    deploy/monitoring/dashboards/rpg-gameplay.json \
                    deploy/monitoring/alloy/config.alloy \

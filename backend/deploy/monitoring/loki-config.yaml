@@ -7,7 +7,10 @@
 #
 # COPIED VERBATIM from grafana/docker-otel-lgtm v0.11.15 (docker/loki-config.yaml),
 # the tag that matches OTEL_LGTM_VERSION: every block below EXCEPT the two marked
-# "OURS". Re-copy them when OTEL_LGTM_VERSION is bumped:
+# "OURS". Compared with the repository file at that tag (fetched 2026-11-16;
+# upstream has no compactor and no limits_config block), NOT with the file inside
+# the image: that comparison is on the first-live-run list in docs/MONITORING.md.
+# Re-copy them when OTEL_LGTM_VERSION is bumped:
 #   docker run --rm --entrypoint sh grafana/otel-lgtm:<tag> -c 'cat /otel-lgtm/loki-config.yaml'
 # (or https://raw.githubusercontent.com/grafana/docker-otel-lgtm/<tag>/docker/loki-config.yaml)
 #

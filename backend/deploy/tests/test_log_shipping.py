@@ -44,11 +44,6 @@ PROFILE = "monitoring"
 STREAM_LABELS = {"env", "service", "level", "game", "server_id"}
 LEVEL_VALUES = {"trace", "debug", "info", "warn", "error", "fatal", "unknown"}
 
-# Mounted files that exist and ARE shipped (cd.yml copies their directory) but
-# are not named in the `for f in ...` required-file list. Pre-existing; adding a
-# name here hides a real gap, so keep it empty unless the list is out of scope.
-NOT_IN_REQUIRED_LIST = {"deploy/monitoring/alerts.yaml"}
-
 
 # --------------------------------------------------------------------------
 # compose helpers: interpolation and the base + override merge
@@ -524,9 +519,8 @@ class ComposeMonitoringTests(unittest.TestCase):
                         f"{source} is not copied into the bundle by cd.yml")
                     if path.is_file():
                         listed = f"deploy/{rel}"
-                        if listed not in NOT_IN_REQUIRED_LIST:
-                            self.assertIn(listed, required,
-                                          f"{listed} is not in cd.yml's required-file list")
+                        self.assertIn(listed, required,
+                                      f"{listed} is not in cd.yml's required-file list")
                     checked += 1
         self.assertGreaterEqual(checked, 6)
 
@@ -783,6 +777,52 @@ class AlloyConfigTests(unittest.TestCase):
         produced = set(re.findall(r"\}\}([a-z]+)\{\{", body))
         self.assertEqual(produced, LEVEL_VALUES)
         self.assertTrue(body.rstrip().endswith("{{ end }}"))
+
+    def test_real_level_spellings_map_to_the_closed_set(self):
+        """Evaluate the template's if / else-if chain without Alloy.
+
+        The spellings are what the services really write: the C# game server's
+        JSON logger (INFO WARN ERROR DEBUG TRACE CRITICAL; NONE is never a
+        logged level), the Go gateway's slog (INFO WARN ERROR DEBUG) and
+        Nakama's zap (lowercase, plus dpanic panic fatal). `information` and
+        `warning` are accepted only as harmless aliases.
+        """
+        template = next(b for b in walk(self.blocks) if b.kind == "stage.template")
+        body = strings_in(template.attrs["template"])[0]
+        branches = re.findall(
+            r'(?:\{\{ if|\{\{ else if) or((?: \(eq \$l "[a-z]+"\))+) \}\}([a-z]+)(?=\{\{)', body)
+        self.assertEqual(len(branches), 6, "one branch per level except unknown")
+        table = {}
+        for spellings, result in branches:
+            for spelling in re.findall(r'"([a-z]+)"', spellings):
+                self.assertNotIn(spelling, table, f"{spelling} is matched by two branches")
+                table[spelling] = result
+
+        def level_of(raw):
+            # The template: empty -> unknown, compare lowercased, else unknown.
+            if not raw:
+                return "unknown"
+            return table.get(str(raw).lower(), "unknown")
+
+        cases = {
+            # C# game server (JSON logger of the gameserver-json-logs task)
+            "TRACE": "trace", "DEBUG": "debug", "INFO": "info",
+            "WARN": "warn", "ERROR": "error", "CRITICAL": "fatal",
+            "NONE": "unknown",
+            # Go gateway (slog)
+            # (INFO WARN ERROR DEBUG are covered above)
+            # Nakama (zap)
+            "info": "info", "warn": "warn", "error": "error", "debug": "debug",
+            "dpanic": "fatal", "panic": "fatal", "fatal": "fatal",
+            # aliases, not what any service prints today
+            "Information": "info", "Warning": "warn",
+            # anything else must not mint a stream per value
+            "": "unknown", "7": "unknown", "notice": "unknown", "INFO+2": "unknown",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(level=raw):
+                self.assertEqual(level_of(raw), expected)
+        self.assertEqual(set(table.values()) | {"unknown"}, LEVEL_VALUES)
 
     def test_lines_are_never_rewritten_or_dropped(self):
         forbidden = {"stage.output", "stage.replace", "stage.drop", "stage.regex",

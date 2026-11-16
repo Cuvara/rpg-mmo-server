@@ -261,6 +261,22 @@ why, and how to query it.
 > `loki-config.yaml`, and Alloy v1.11.3 has not been observed loading
 > `config.alloy`. Run the check on a real stack before relying on any of it (see
 > "The check and the offline tests").
+>
+> **First live run: what has to be observed.**
+>
+> 1. Alloy v1.11.3 loads `config.alloy` and a gateway line reaches Loki with
+>    `env`, `service` and `level`.
+> 2. The bundled Loki loads `loki-config.yaml` and `GET /config` shows
+>    `retention_period` 1w and `retention_enabled: true`.
+> 3. The copied blocks of `loki-config.yaml` are identical to
+>    `/otel-lgtm/loki-config.yaml` inside the image `grafana/otel-lgtm:0.11.15`
+>    (`docker run --rm --entrypoint sh grafana/otel-lgtm:0.11.15 -c 'cat
+>    /otel-lgtm/loki-config.yaml'`). Until then they are only compared with the
+>    repository file at the tag.
+> 4. A game server line carries a real `level`. This needs a build that includes
+>    the `gameserver-json-logs` task; without it the check FAILs on purpose.
+> 5. The proxy's behaviour on `archive`, `export` and `attach/ws` (the residual
+>    risk below) is observed, not assumed.
 
 ### How a line flows
 
@@ -321,9 +337,10 @@ that the proxy publishes no port, and that its network is internal.
 - The proxy filters by method and path section, so with `CONTAINERS=1` every
   `GET` under `/containers/` passes, not only list, inspect and logs. By the
   proxy's design that includes endpoints that read a container's filesystem
-  (`archive`, `export`). That is a property of the image that was not tested
-  here; treat the collector as able to read everything about the stack's
-  containers.
+  (`archive`, `export`) and `GET /containers/{id}/attach/ws`, the websocket
+  attach, which can carry stdin. Both are properties of the image that were not
+  tested here (the attach endpoint stays untested); treat the collector as able
+  to read everything about the stack's containers.
 - What limits it: the proxy has no published port and sits on an internal network
   that only it and Alloy join, and Alloy has no published port, so nothing outside
   the compose project can reach the proxy. Anything that can run a container on
@@ -372,14 +389,34 @@ Rules:
 - **`level`** is read only from a line that looks like a JSON object (first
   non-space character `{`), from its `level` field, and normalised to one
   spelling per level: `trace` (trace, trc), `debug` (debug, dbg), `info` (info,
-  information, inf), `warn` (warn, warning, wrn), `error` (error, err), `fatal`
-  (fatal, critical, crit, panic, dpanic). That covers the gateway's slog (`INFO`,
-  `WARN`, …), Nakama's zap (`info`, `dpanic`, …) and the .NET names
-  (`Information`, `Warning`, `Critical`). **Anything else is `unknown`**: a plain
-  line, a line that does not parse, a missing field, a number, a custom word. The
-  closed set is deliberate: an open one would mint a stream per distinct value.
-  This change does not alter what the services print; a service that prints plain
-  text is `level="unknown"`.
+  inf), `warn` (warn, wrn), `error` (error, err), `fatal` (fatal, critical, crit,
+  panic, dpanic). `information` and `warning` are also accepted, as harmless
+  aliases: no service here prints them. What the services really write:
+
+  | Service | Format | `level` spellings written |
+  |---|---|---|
+  | `gateway` | Go slog, JSON | `INFO` `WARN` `ERROR` `DEBUG` |
+  | `nakama` | zap, JSON | `info` `warn` `error` `debug` `dpanic` `panic` `fatal` |
+  | `gameserver-dotnet*` | one JSON object per line: `ts`, `level`, `category`, `msg`, optional `exception`, `game`, `map_id`, `server_id` | `TRACE` `DEBUG` `INFO` `WARN` `ERROR` `CRITICAL` (`NONE` exists but is never a logged level) |
+
+  **Anything else is `unknown`**: a plain line, a line that does not parse, a
+  missing field, a number, a custom word. The closed set is deliberate: an open
+  one would mint a stream per distinct value. This change does not alter what the
+  services print.
+- **Dependency: the game server's `level` needs the JSON-logs task.** On the
+  branch that holds this change alone, the C# game server still logs plain text
+  (the .NET simple console formatter: a header line such as `info: Category[0]`
+  followed by indented message lines). The task `gameserver-json-logs` of the
+  same plan (branch `feat/server/log-shipping-gameserver-json-logs`, integrated
+  with this one into `feat/server/log-shipping`) makes the game server log JSON
+  by default. Until it is in the build, and whenever
+  `GAMESERVER_LOG_FORMAT=text` is set to keep the plain output, **every game
+  server line ships with `level="unknown"`** (`env`, `service`, `game` and
+  `server_id` are unaffected, they come from compose labels). There is no regex
+  for the plain header on purpose: it would split one event over two streams, the
+  header and its indented message lines. Compose does not forward
+  `GAMESERVER_LOG_LEVEL` or `GAMESERVER_LOG_FORMAT`; that is that task's decision
+  and this one does not change it.
 - **Lines are shipped as written.** Non-JSON lines are not rewritten, dropped or
   wrapped, and JSON lines are only read, never changed.
 
@@ -395,7 +432,13 @@ same pattern as `prometheus.yaml`.
 - **Copied verbatim** from `grafana/docker-otel-lgtm` v0.11.15
   (`docker/loki-config.yaml`), the tag that matches `OTEL_LGTM_VERSION`:
   `auth_enabled`, `server`, `common`, `schema_config`, `ruler`,
-  `pattern_ingester`, `ingester`, `frontend`, `query_scheduler`.
+  `pattern_ingester`, `ingester`, `frontend`, `query_scheduler`. The copy was
+  compared with the repository file at that tag (fetched from
+  `raw.githubusercontent.com` on 2026-11-16, and the copied blocks match it;
+  upstream has no `compactor` and no `limits_config` block, so nothing of
+  upstream is replaced by ours). It was **not** compared with the file inside the
+  image `grafana/otel-lgtm:0.11.15`; that comparison is on the first-live-run
+  list below.
 - **Ours**, marked `OURS` in the file: `compactor` (`retention_enabled: true`,
   `delete_request_store: filesystem`, working directory under `/data/loki`, i.e.
   the `lgtm-data` volume) and `limits_config.retention_period: 168h`. Loki deletes
@@ -461,8 +504,15 @@ logql '{game="cuvara"}'                                        # every game serv
 logql '{game="cuvara", server_id="gs-dotnet-map_02"}'          # one game server
 logql '{env="local", game=""}'                                 # stack-wide streams only (no game label)
 logql '{env="local", service="gateway"} |= "timeout"'          # text filter inside the lines
-logql '{env="local", service="gameserver-dotnet"} | json | level="Warning"'   # a field inside a JSON body
+logql '{service="gameserver-dotnet", level="warn"}'            # game server warnings: filter on the level label
+logql '{service="gameserver-dotnet"} | json | msg=~"(?i).*disconnect.*"'   # a field inside the JSON body
 ```
+
+The `level` label is the way to filter by severity, for every service. The last
+example needs the game server to log JSON (see the dependency note above) and
+uses the `msg` field of its JSON line; the pattern is only an example. On a game
+server that logs plain text, `| json` finds nothing and `level` is `unknown`;
+use a text filter (`|= "..."`) there.
 
 `env` is the value of `DEPLOY_ENVIRONMENT` (`dev`, `staging`, `production`,
 `local`, `scratch`). Without `start`/`end`, `query_range` looks at the last hour.
@@ -477,11 +527,14 @@ Label names: `curl -s $LOKI/loki/api/v1/labels`.
   short-lived container (started from the host's Docker CLI with the compose
   project and a service label set by hand, so no stack container needs a socket)
   reaches Loki with `env`, `service` and `level` and no id-like label, once as a
-  JSON line (`level="warn"`, body unchanged) and once as a plain line
-  (`level="unknown"`); and, when the `realtime` profile is up, that a gateway
-  stream and a game server stream exist with `env`, `service`, `level` and, for
-  the game server, `game` and `server_id` matching its compose labels (SKIP when
-  that profile is down). Output is `PASS:`/`FAIL:`/`SKIP:` lines and the exit
+  JSON line (`{"level":"WARN",...}`, expected `level="warn"`, body unchanged) and
+  once as a plain line (`level="unknown"`); and, when the `realtime` profile is
+  up, that a gateway stream and a game server stream exist with `env`,
+  `service`, `level` and, for the game server, `game` and `server_id` matching
+  its compose labels (SKIP when that profile is down). The game server stream
+  must carry a **real** level, one other than `unknown`: the check FAILs for a
+  game server that logs plain text, and says that the game server must log JSON
+  (`GAMESERVER_LOG_FORMAT=json`, a build that includes the JSON-logs task). Output is `PASS:`/`FAIL:`/`SKIP:` lines and the exit
   status is 1 on any FAIL. Inputs: `COMPOSE_PROJECT_NAME`, `DEPLOY_ENVIRONMENT`,
   `LOKI_PORT`, `CHECK_TIMEOUT`. **NOT_RUN**: starting the stack needs the owner's
   go-ahead.

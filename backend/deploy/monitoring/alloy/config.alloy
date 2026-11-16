@@ -83,10 +83,19 @@ loki.process "level" {
   // Only a line that looks like a JSON object is parsed. The line body is
   // never rewritten: stages here only read it and set labels.
   //
-  // Sources of the field, all named `level`:
-  //   gateway    Go slog       INFO WARN ERROR DEBUG
-  //   Nakama     zap           info warn error debug dpanic panic fatal
-  //   gameserver JSON logger   Information Warning Critical ...
+  // Sources of the field, all named `level`, with the spellings each service
+  // really writes:
+  //   gateway     Go slog        INFO WARN ERROR DEBUG
+  //   Nakama      zap            info warn error debug dpanic panic fatal
+  //   gameserver  JSON logger    TRACE DEBUG INFO WARN ERROR CRITICAL
+  //               (one object per line: ts level category msg ...; it is the
+  //               default of the gameserver-json-logs task of the same plan)
+  //
+  // `level` is read ONLY from JSON. There is deliberately no regex for the
+  // plain .NET console format (a header line `info: Category[0]` plus indented
+  // message lines): it would put one event on two streams. A game server that
+  // logs text (GAMESERVER_LOG_FORMAT=text), or a build without the JSON-logs
+  // task, therefore ships with level="unknown".
   stage.match {
     selector = `{service=~".+"} |~ "^\\s*\\{"`
 
@@ -97,7 +106,9 @@ loki.process "level" {
     }
 
     // One spelling per level. Anything else (a number, a custom word) becomes
-    // `unknown` instead of minting a stream per distinct value.
+    // `unknown` instead of minting a stream per distinct value. `information`,
+    // `warning` and the three-letter forms are harmless aliases: no service in
+    // this stack prints them.
     stage.template {
       source   = "level"
       template = `{{ if .level }}{{ $l := ToLower (printf "%v" .level) }}{{ if or (eq $l "trace") (eq $l "trc") }}trace{{ else if or (eq $l "debug") (eq $l "dbg") }}debug{{ else if or (eq $l "info") (eq $l "information") (eq $l "inf") }}info{{ else if or (eq $l "warn") (eq $l "warning") (eq $l "wrn") }}warn{{ else if or (eq $l "error") (eq $l "err") }}error{{ else if or (eq $l "fatal") (eq $l "critical") (eq $l "crit") (eq $l "panic") (eq $l "dpanic") }}fatal{{ else }}unknown{{ end }}{{ else }}unknown{{ end }}`
