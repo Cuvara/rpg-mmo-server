@@ -51,6 +51,13 @@ docker build -f deploy/docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver
 - All public APIs need XML doc comments
 - NativeAOT compatible — no reflection-based serialization, no dynamic assembly loading
 - System.Text.Json with source generators for AOT-safe serialization
+- Logging: stdout is **one JSON object per line and nothing else** (`GAMESERVER_LOG_FORMAT`,
+  default `json`; `text` is for local reading). Never write to stdout directly
+  (`Console.WriteLine`, `Console.Out`): log through an `ILogger`, and create any new
+  `ILoggerFactory` with `ServerLogging.CreateFactory` (`GameServer/Observability/Logging/`)
+  so level, format and the `game`/`map_id`/`server_id` fields stay uniform
+- No log calls per tick (or per input/snapshot) at the default level; log state changes
+  and errors, and guard anything costly with `IsEnabled`
 - All comments, notes, and code in English
 
 ## Testing
