@@ -26,7 +26,10 @@ renders the per-game template (deploy/k8s/games/render.py, ADR-33 leg 5) in
 memory for a sample game id and for the longest legal id, validates the
 rendered documents (Agones schemas, the check_fleet contract in the game's own
 namespace, the game invariants in check_game_render) and asserts that invalid,
-reserved, default and too-long ids are refused. Nothing is written or applied.
+reserved, default and too-long ids are refused. It also reads deploy/k8s/logging/
+and enforces the log collector's contract (logging_contract.py: no ClusterRole, a
+Role of exactly two rules, a hardened DaemonSet, a selector-less Service `loki`).
+Nothing is written or applied.
 The Agones install.yaml is cached in ~/.cache/rpg-mmo/agones-<version>.yaml.
 
 This does NOT replace `kubectl apply --dry-run=server -f <file>`, which
@@ -53,6 +56,22 @@ except ImportError:  # pragma: no cover
     sys.exit("jsonschema required: pip install jsonschema")
 
 DEPLOY_DIR = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _load_logging_contract():
+    """logging_contract.py sits beside this file. It needs PyYAML only, so CI runs
+    it on its own (tests/test_logging_contract.py) without the jsonschema and
+    Agones download this validator needs."""
+    import importlib.util
+
+    path = pathlib.Path(__file__).resolve().parent / "logging_contract.py"
+    spec = importlib.util.spec_from_file_location("rpg_mmo_logging_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+logging_contract = _load_logging_contract()
 DEFAULT_AGONES_VERSION = "1.59.0"
 INSTALL_URL = (
     "https://raw.githubusercontent.com/googleforgames/agones/"
@@ -64,6 +83,13 @@ REQUIRED_NATIVE_FIELDS = {
     "Namespace": ["metadata.name"],
     "Secret": ["metadata.name"],
     "ConfigMap": ["metadata.name"],
+    # The log collector's manifests (k8s/logging); their contract is in
+    # logging_contract.py, this is only the shape every object needs.
+    "ServiceAccount": ["metadata.name"],
+    "Role": ["metadata.name"],
+    "RoleBinding": ["metadata.name"],
+    "DaemonSet": ["metadata.name"],
+    "Service": ["metadata.name"],
 }
 
 
@@ -462,10 +488,17 @@ def check_game_render(rendered: dict, game: str, stack_ns: str, renderer) -> lis
     if len(cms) != 1 or (dig(cms[0], "data") or {}).get("game-id") != game:
         problems.append(f"gameserver-config must set game-id: {game!r}")
 
-    roles = of_kind("Role")
+    # The collector's Role and RoleBinding (k8s/logging) share the namespace; their
+    # contract is logging_contract.check_game_logging, called below. The allocate
+    # grant is every OTHER Role and RoleBinding.
+    collector = logging_contract.COLLECTOR_ROLE
+    roles = [r for r in of_kind("Role") if dig(r, "metadata.name") != collector]
     if len(roles) != 1 or roles[0].get("rules") != ALLOCATE_RULES:
         problems.append(f"expected one Role granting exactly {ALLOCATE_RULES}, got {[r.get('rules') for r in roles]}")
-    gw_bindings = [b for b in of_kind("RoleBinding") if dig(b, "roleRef.kind") == "Role"]
+    gw_bindings = [
+        b for b in of_kind("RoleBinding")
+        if dig(b, "roleRef.kind") == "Role" and dig(b, "metadata.name") != collector
+    ]
     want_subject = [{"kind": "ServiceAccount", "name": "rpg-gateway", "namespace": stack_ns}]
     if len(gw_bindings) != 1 or gw_bindings[0].get("subjects") != want_subject or (
         roles and dig(gw_bindings[0], "roleRef.name") != dig(roles[0], "metadata.name")
@@ -502,6 +535,8 @@ def check_game_render(rendered: dict, game: str, stack_ns: str, renderer) -> lis
         problems.append("gateway env snippet carries a GAMES entry; GAMES is read from gateway-config key 'games'")
     if game not in str(rendered.get("gateway-games", "")).split(","):
         problems.append(f"gateway-games does not list {game!r}")
+    # The log collector's read grant and the log knobs of this game.
+    problems += logging_contract.check_game_logging(docs, game, ns)
     return problems
 
 
@@ -563,7 +598,8 @@ def validate_game_template(schemas: dict) -> tuple[int, int]:
         failures += len(problems)
         if not problems:
             print(f"[ ok ] render[{game}]: ADR-33 leg 5 invariants (namespace, quota, '<game>-' fleets "
-                  f"<= {renderer.FLEET_NAME_LIMIT} chars, game id, no JWT_SECRET, allocate RBAC, gateway env)")
+                  f"<= {renderer.FLEET_NAME_LIMIT} chars, game id, no JWT_SECRET, allocate RBAC, gateway env, "
+                  f"log collector Role + RoleBinding, log knobs)")
             checked += 1
 
     for game, env, why in GAME_REFUSALS:
@@ -603,8 +639,10 @@ def main() -> int:
     if args.files:
         files = [pathlib.Path(f) for f in args.files]
     else:
-        files = sorted((DEPLOY_DIR / "agones").glob("*.yaml")) + sorted(
-            (DEPLOY_DIR / "k3s").glob("*.yaml")
+        files = (
+            sorted((DEPLOY_DIR / "agones").glob("*.yaml"))
+            + sorted((DEPLOY_DIR / "k3s").glob("*.yaml"))
+            + sorted(logging_contract.LOGGING_DIR.glob("*.yaml"))
         )
 
     print(f"==> Agones {args.agones_version} CRD schemas")
@@ -690,6 +728,16 @@ def main() -> int:
         print(f"[warn] {warning}")
 
     if not args.files:
+        print(f"\n==> log collector contract ({logging_contract.LOGGING_DIR.relative_to(DEPLOY_DIR)})")
+        log_docs, log_problems = logging_contract.load_dir(logging_contract.LOGGING_DIR)
+        log_problems += logging_contract.check_logging_manifests(log_docs)
+        for problem in log_problems:
+            print(f"[FAIL] {problem}")
+        failures += len(log_problems)
+        if not log_problems:
+            print(f"[ ok ] {len(log_docs)} document(s): no ClusterRole, Role of exactly pods get/list/watch + "
+                  f"pods/log get, hardened DaemonSet, selector-less Service loki")
+            checked += 1
         game_checked, game_failures = validate_game_template(schemas)
         checked += game_checked
         failures += game_failures

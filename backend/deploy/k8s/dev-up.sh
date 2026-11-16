@@ -141,6 +141,42 @@ say "context"
 $K config current-context >/dev/null
 echo "context: $CTX"
 
+# The environment this cluster is, resolved BEFORE the first apply. It becomes the
+# `env` label of every log line the collector ships (k8s/logging/30-alloy-env.yaml),
+# so a wrong or missing value must stop the deploy here, not surface as logs filed
+# under the wrong environment after the cluster has changed. DEPLOY_ENVIRONMENT
+# wins; otherwise the two k3d contexts this repo knows. Any other context has to
+# say what it is.
+# BEGIN deploy environment
+resolve_deploy_environment() { # context -> DEPLOY_ENV; 1 when it cannot be told
+  DEPLOY_ENV="${DEPLOY_ENVIRONMENT:-}"
+  if [ -z "$DEPLOY_ENV" ]; then
+    case "$1" in
+      k3d-rpg-dev) DEPLOY_ENV=dev ;;
+      k3d-rpg-stg) DEPLOY_ENV=staging ;;
+      *)
+        echo "ERROR: cannot tell which environment kube context '$1' is." >&2
+        echo "  Set DEPLOY_ENVIRONMENT to a row of backend/deploy/environments.tsv (dev, staging, production)." >&2
+        echo "  It labels the logs the cluster's collector ships (label env)." >&2
+        return 1
+        ;;
+    esac
+  fi
+  # It lands in a ConfigMap value and in a Loki label: refuse anything odd.
+  case "$DEPLOY_ENV" in
+    '' | *[!A-Za-z0-9_.-]*)
+      echo "ERROR: DEPLOY_ENVIRONMENT '$DEPLOY_ENV' must match [A-Za-z0-9_.-]+." >&2
+      DEPLOY_ENV=
+      return 1
+      ;;
+  esac
+}
+if ! resolve_deploy_environment "$CTX"; then
+  exit 1
+fi
+# END deploy environment
+echo "environment: $DEPLOY_ENV"
+
 # ---------------------------------------------------------------- images
 # k3d does NOT share the host docker image store, and `k3d image import` fails
 # on this box (Docker Desktop named pipe) -- stream through ctr instead.
@@ -1324,6 +1360,109 @@ pf() { # name localport namespace target targetport
   return 1
 }
 pf postgres-game "$PG_GAME_LOCAL_PORT" rpg-k8s-data svc/postgres-game 5432
+
+# ------------------------------------------------------------ log collector
+# The Alloy DaemonSet that ships the pod logs of every rpg-k8s-* namespace to the
+# Loki inside the compose `lgtm` container (k8s/logging/, docs/MONITORING.md).
+#
+# WHERE IT RUNS IN THIS SCRIPT, AND WHY THERE. After the secret and keyring checks
+# (nothing is applied before them, and the collector must not be the first thing a
+# refused deploy leaves behind), after the app and data namespaces exist (its Roles
+# live in them) and after the compose stack is retired and the ports are checked,
+# so a collector problem can never leave both stacks serving one environment
+# (ADR-2). Logs are not in the client path: the only thing here that fails the
+# deploy is a collector that never becomes Ready.
+#
+# Everything above the rollout wait is straight-line under `set -e`;
+# verify/tests/dev_up_logging_test.sh extracts exactly the span between the BEGIN
+# and END markers (each required to occur once) and runs it against a fake kubectl.
+# BEGIN log collector apply
+LOG_DIR="$HERE/logging"
+LOG_NS="rpg-k8s-logging"
+LOG_ROLLOUT_TIMEOUT="${LOG_ROLLOUT_TIMEOUT:-180s}"
+
+say "apply the log collector ($LOG_NS) for environment $DEPLOY_ENV"
+# Collected namespaces: the three fixed ones plus every game namespace, from the
+# same mapping the game TLS repair above uses, so the two lists cannot disagree.
+rendered_game_namespaces
+LOG_NAMESPACES="rpg-k8s-realtime,rpg-k8s-data,$LOG_NS"
+for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+  LOG_NAMESPACES="$LOG_NAMESPACES,$game_ns"
+done
+
+# Alloy does not reload a ConfigMap, so the DaemonSet is restarted when -- and only
+# when -- alloy-config or alloy-env actually changed. A ConfigMap's resourceVersion
+# moves only on a real change (a no-op apply leaves it), so it is the comparison.
+# A DaemonSet that did not exist yet needs no restart: it starts on the new config.
+log_ds_before=$($K get daemonset alloy -n "$LOG_NS" -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
+log_cfg_before=$($K get configmap alloy-config -n "$LOG_NS" -o 'jsonpath={.metadata.resourceVersion}' 2>/dev/null || true)
+log_env_before=$($K get configmap alloy-env -n "$LOG_NS" -o 'jsonpath={.metadata.resourceVersion}' 2>/dev/null || true)
+
+# In order: the namespace, then the ServiceAccount, then the Roles that bind into
+# rpg-k8s-realtime / rpg-k8s-data / this namespace (all exist by now).
+for f in 00-namespace.yaml 10-serviceaccount.yaml 20-rbac.yaml; do
+  $K apply -f "$LOG_DIR/$f"
+done
+# alloy-env is the repo's 30-alloy-env.yaml with its two data values replaced, not
+# the file as it stands (its values are the bare-cluster defaults, and applying
+# them first would flip the ConfigMap twice per deploy). Both substitutions are
+# asserted, so a reworded manifest fails here instead of shipping the defaults.
+log_env_yaml=$(sed \
+  -e "s|^  deploy-environment: .*|  deploy-environment: \"$DEPLOY_ENV\"|" \
+  -e "s|^  log-namespaces: .*|  log-namespaces: \"$LOG_NAMESPACES\"|" \
+  "$LOG_DIR/30-alloy-env.yaml")
+if ! grep -Fxq "  deploy-environment: \"$DEPLOY_ENV\"" <<<"$log_env_yaml" \
+  || ! grep -Fxq "  log-namespaces: \"$LOG_NAMESPACES\"" <<<"$log_env_yaml"; then
+  echo "ERROR: $LOG_DIR/30-alloy-env.yaml lost its deploy-environment / log-namespaces lines; refusing to apply it." >&2
+  exit 1
+fi
+printf '%s\n' "$log_env_yaml" | $K apply -f -
+for f in 40-alloy-config.yaml 50-daemonset.yaml 60-loki-service.yaml; do
+  $K apply -f "$LOG_DIR/$f"
+done
+
+log_cfg_after=$($K get configmap alloy-config -n "$LOG_NS" -o 'jsonpath={.metadata.resourceVersion}' 2>/dev/null || true)
+log_env_after=$($K get configmap alloy-env -n "$LOG_NS" -o 'jsonpath={.metadata.resourceVersion}' 2>/dev/null || true)
+if [ -n "$log_ds_before" ] && { [ "$log_cfg_before" != "$log_cfg_after" ] || [ "$log_env_before" != "$log_env_after" ]; }; then
+  echo "alloy-config or alloy-env changed; restarting the collector to read it"
+  $K rollout restart daemonset/alloy -n "$LOG_NS"
+else
+  echo "alloy-config and alloy-env unchanged (or the collector is new); no restart"
+fi
+
+# A game namespace in log-namespaces without the collector's Role is not collected:
+# Alloy's pod list for it is refused (403 in Alloy's own log). The fleets do not
+# need the Role, so this warns and carries on.
+for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+  if ! $K get role rpg-log-collector -n "$game_ns" >/dev/null 2>&1; then
+    game=${game_ns#rpg-k8s-realtime-}
+    render_tls=off; [ -z "${nk_cert_path:-}" ] || render_tls=on
+    echo "::warning title=Game logs not collected::$game_ns has no Role rpg-log-collector"
+    echo "WARN: $game_ns has no Role rpg-log-collector, so the collector cannot read its pods and its logs are not shipped." >&2
+    echo "  Render it again and apply it (the Role and RoleBinding are part of the rendered manifests):" >&2
+    echo "    python backend/deploy/k8s/games/render.py --game $game --nakama-tls $render_tls | kubectl --context $CTX apply -f -" >&2
+  fi
+done
+
+# Let the collector reach Loki: attaches the compose `lgtm` container to this
+# cluster's Docker network and writes the EndpointSlice behind the selector-less
+# Service `loki`. It opens no port. It exits 0 with a WARN when lgtm is absent, so a
+# missing Loki cannot fail the deploy; a non-zero exit (the API refused the
+# EndpointSlice) is reported here and verify's cluster.log_collector WARNs on it.
+if ! KUBE_CONTEXT="$CTX" DEPLOY_ENVIRONMENT="$DEPLOY_ENV" bash "$LOG_DIR/connect-loki.sh"; then
+  echo "::warning title=Loki not attached::k8s/logging/connect-loki.sh failed; pod logs will not reach Loki"
+  echo "WARN: connect-loki.sh failed; re-run it: KUBE_CONTEXT=$CTX DEPLOY_ENVIRONMENT=$DEPLOY_ENV backend/deploy/k8s/logging/connect-loki.sh" >&2
+fi
+
+# The one failure that stops the deploy: a collector that does not become Ready.
+if ! $K rollout status -n "$LOG_NS" daemonset/alloy --timeout="$LOG_ROLLOUT_TIMEOUT"; then
+  echo "ERROR: the log collector (daemonset/alloy in $LOG_NS) did not become Ready within $LOG_ROLLOUT_TIMEOUT. Its last log lines:" >&2
+  $K logs -n "$LOG_NS" daemonset/alloy --tail=20 2>&1 | sed 's/^/  /' >&2 || true
+  exit 1
+fi
+echo "checked: the log collector is Ready, collecting: $LOG_NAMESPACES (env=$DEPLOY_ENV)"
+# END log collector apply
+unset game game_ns f log_ds_before log_cfg_before log_env_before log_cfg_after log_env_after log_env_yaml render_tls
 
 say "state"
 $K get pods -n rpg-k8s-data -n rpg-k8s-data 2>/dev/null || true
