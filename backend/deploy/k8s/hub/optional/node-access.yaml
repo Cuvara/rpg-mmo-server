@@ -1,0 +1,78 @@
+# OPT-IN node access for the Studio hub. dev-up.sh NEVER applies this file, and
+# it sits in a subdirectory so that no `k8s/hub/*.yaml` glob can pick it up by
+# accident. Without it the hub shows its node features (list nodes, cordon, drain)
+# as "not granted"; the namespaced part in ../20-rbac.yaml is unaffected.
+#
+# Enable:   kubectl apply -f backend/deploy/k8s/hub/optional/node-access.yaml
+# Disable:  kubectl delete -f backend/deploy/k8s/hub/optional/node-access.yaml
+# (docs/RUNBOOK.md, "Studio hub: node access"). It is the ONLY ClusterRole and
+# ClusterRoleBinding of the hub, bound to the same ServiceAccount as the Roles.
+#
+# EXACTLY THREE RULES (single copy in code: k3s/hub_contract.py, NODE):
+#
+#   1. nodes: get, list, watch, patch
+#      List and inspect nodes; `patch` is cordon / uncordon (spec.unschedulable).
+#
+#   2. pods: list
+#
+#   3. pods/eviction: create
+#      A drain evicts every pod on a node: it LISTS the pods bound to that node
+#      (a pods list across namespaces, filtered by node name) and CREATES an
+#      Eviction for each one.
+#
+# THE COSTS, STATED PLAINLY. Nodes are cluster-scoped and so is a drain, so this
+# cannot be narrowed to the rpg-k8s-* namespaces:
+#
+#   * `pods list` is CLUSTER-WIDE. With this file the hub can list the pods of
+#     EVERY namespace, kube-system and other stacks' namespaces included. A pod
+#     object shows its spec and status: images, command, and LITERAL env values
+#     (`env: value:`). For a value taken from a Secret it shows only the
+#     secretKeyRef name and key, never the secret's value. The namespaced Roles
+#     give no such reach.
+#   * `pods/eviction create` is CLUSTER-WIDE. The hub can evict ANY pod in the
+#     cluster, not only the rpg-k8s-* ones (an eviction respects
+#     PodDisruptionBudgets, but a pod without one simply goes). The namespaced
+#     Roles have no eviction rule.
+#   * `patch nodes` covers labels, annotations and taints, not only
+#     spec.unschedulable: RBAC cannot narrow a patch to one field. Taints and
+#     labels steer scheduling (an adversarial or mistaken patch can strand
+#     workloads or move them).
+#
+# Not granted even here: delete or update on nodes, any write on pods other than
+# eviction, secrets, configmaps, namespaces, `*` anywhere.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: studio-hub-nodes
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: studio-hub
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Cluster-wide pods LIST, because a drain lists the pods of a node.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  # Cluster-wide eviction, because a drain evicts every pod of a node.
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: studio-hub-nodes
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: studio-hub
+subjects:
+  - kind: ServiceAccount
+    name: studio-hub
+    namespace: rpg-k8s-hub
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: studio-hub-nodes

@@ -1,0 +1,198 @@
+# What the Studio hub may do to the Kubernetes API, and why.
+#
+# THE RULE IS THE NARROWEST ONE THAT WORKS, PER NAMESPACE. There is NO ClusterRole
+# and NO ClusterRoleBinding in this file, on purpose: a cluster-wide grant would
+# reach kube-system and the namespaces of other stacks. Each namespace the hub
+# manages carries its own Role + RoleBinding below, both named `studio-hub`, bound
+# to the ServiceAccount `studio-hub` of rpg-k8s-hub. A namespace without such a
+# Role cannot be touched by the hub, which is the property wanted: managing a
+# namespace is a reviewed change. (Nodes are cluster-scoped, so they are the one
+# exception, and live in the opt-in optional/node-access.yaml.)
+#
+# Two shapes, compared by (apiGroup, resource, verb) triples, never by rule order
+# or by name. The single copy of the allow-list in code is k3s/hub_contract.py
+# (REALTIME and DATA); k3s/validate-manifests.py, the offline tests and the
+# `cluster.hub_rbac` verify check all read it from there, so a rule added here
+# without the same change there fails CI. No `resourceNames`, no `*` anywhere,
+# no `nonResourceURLs`.
+#
+# Static pairs here: rpg-k8s-realtime (REALTIME shape) and rpg-k8s-data (DATA
+# shape). The pair for a non-default game's namespace, rpg-k8s-realtime-<game>,
+# is rendered by deploy/k8s/games/render.py with the REALTIME shape, never copied
+# by hand. These Roles live in namespaces that other manifests create, so apply
+# them after k8s/app and k8s/data (dev-up.sh does).
+#
+# NOT granted, anywhere, so nobody adds it "to make it work" without noticing:
+#   * secrets (any verb). See "The cost of patch deployments" for the one indirect
+#     path that remains and why it is accepted.
+#   * configmaps: no listed hub feature needs them.
+#   * pods/exec, pods/attach, pods/portforward, pods/eviction (namespaced), and
+#     create / update / patch on pods: the hub can read and DELETE a pod, it can
+#     not run anything in one or change one.
+#   * any write on statefulsets, replicasets, services, events or gameserversets.
+#   * patch / update / create / delete on fleets, create / patch / update on
+#     gameservers, any verb on gameserverallocations other than create.
+#   * namespaces, nodes, any other cluster-scoped kind.
+#
+# DECISIONS INSIDE THE TABLE
+#
+#   * Fleet scale is the `fleets/scale` SUBRESOURCE, not `patch fleets`. A patch on
+#     the Fleet would let the hub rewrite the whole template: image, env, ports,
+#     the secretKeyRefs. The scale subresource can only move spec.replicas.
+#     (`get fleets/scale` lets `kubectl scale --current-replicas` and a
+#     read-modify-write through the subresource work; `update` and `patch` are
+#     the two ways a client writes it.)
+#   * StatefulSet restart is NOT offered, so there is no write on statefulsets.
+#     Every StatefulSet here (postgres-game, postgres-meta, redis) has ONE
+#     replica, so deleting its pod already is the restart, and `patch statefulsets`
+#     would add the power to rewrite a database's pod spec for nothing.
+#   * Delete on pods and on gameservers is how the hub restarts a pod and removes
+#     a stuck or unwanted GameServer. A deleted pod owned by a Deployment,
+#     StatefulSet or Fleet is recreated by its controller.
+#   * allocation.agones.dev gameserverallocations `create` is how the hub takes a
+#     game server out of a fleet's Ready pool by hand. Create-only: allocations
+#     are not stored objects, so there is nothing to get, list or delete.
+#   * events are granted in BOTH API groups ("" and events.k8s.io): same data,
+#     but clients differ on which one they read.
+#   * fleetautoscalers: patch AND update (change the buffer policy, pause it).
+#
+# THE COST OF `patch deployments`  (read this before widening anything)
+#   A rollout restart is a patch of the pod template's annotations, and RBAC cannot
+#   narrow `patch` to one annotation. The same verb also lets the hub change the
+#   image, env, command, args and volumes of the gateway and Nakama Deployments.
+#   Together with `pods/log` that is an INDIRECT path to a Secret VALUE: a patched
+#   pod that mounts a Secret could print it to its log, and the hub could read the
+#   log. It is accepted because rollout restart is a required hub feature, and it
+#   is why the hub token is an OPERATOR credential: mint it for a person or a
+#   machine you would trust with the gateway's environment, keep it short-lived and
+#   revocable (docs/RUNBOOK.md, "Studio hub token"). The data namespace carries
+#   the same cost (Nakama is a Deployment there) and nothing more.
+#
+# SelfSubjectRulesReview needs NO grant here: Kubernetes' default ClusterRoleBinding
+# `system:basic-user` gives every authenticated subject, ServiceAccounts included,
+# `create` on selfsubjectrulesreviews and selfsubjectaccessreviews. The review is
+# per namespace and the hub has no `list namespaces`, so the hub is CONFIGURED with
+# the namespaces it manages and cannot discover a game namespace by itself.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: studio-hub
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: studio-hub
+rules:
+  # Read and restart pods. `delete` is the restart (the owner recreates the pod).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Container logs, exactly as `kubectl logs` shows them (stdout and stderr).
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Read-only: what runs and what the cluster says about it.
+  - apiGroups: [""]
+    resources: ["events", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Rollout restart is `patch`; see "The cost of patch deployments" above.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Read-only: no write on statefulsets or replicasets (restart = delete the pod).
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Agones, read-only.
+  - apiGroups: ["agones.dev"]
+    resources: ["fleets", "gameserversets"]
+    verbs: ["get", "list", "watch"]
+  # Scale a Fleet through the subresource, NOT through `patch fleets`.
+  - apiGroups: ["agones.dev"]
+    resources: ["fleets/scale"]
+    verbs: ["get", "update", "patch"]
+  # Read and remove a GameServer (a stuck or unwanted one).
+  - apiGroups: ["agones.dev"]
+    resources: ["gameservers"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Change the autoscaler's policy (buffer size, pause).
+  - apiGroups: ["autoscaling.agones.dev"]
+    resources: ["fleetautoscalers"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # Allocate a game server by hand. Create-only.
+  - apiGroups: ["allocation.agones.dev"]
+    resources: ["gameserverallocations"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: studio-hub
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: studio-hub
+subjects:
+  - kind: ServiceAccount
+    name: studio-hub
+    namespace: rpg-k8s-hub
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: studio-hub
+---
+# DATA shape: rpg-k8s-data holds Nakama (a Deployment), PostgreSQL (two
+# StatefulSets) and Redis (a StatefulSet). No Agones object lives here, so there is
+# no Agones rule at all: the REALTIME shape minus the Agones rows. The only writes
+# are `delete pods` (restart any of them) and `patch deployments` (rollout restart
+# of Nakama), plus the indirect-Secret cost described above. Nothing here can
+# create or alter a database object, a StatefulSet, a Service, or a ConfigMap, and
+# there is no Secret rule (the database passwords live in Secrets of this
+# namespace).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: studio-hub
+  namespace: rpg-k8s-data
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: studio-hub
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: studio-hub
+  namespace: rpg-k8s-data
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: studio-hub
+subjects:
+  - kind: ServiceAccount
+    name: studio-hub
+    namespace: rpg-k8s-hub
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: studio-hub

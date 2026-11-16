@@ -481,6 +481,174 @@ check_log_collector() {
   pass "collector daemonset/$ds Ready ($ready/$desired) in $ns; Service $svc has an address (not asserted: that a line reached Loki)"
 }
 
+# The Studio hub's identity (k8s/hub, k3s/hub_contract.py) holds EXACTLY the rights
+# the contract allows, in every namespace it is granted.
+#
+# Opt-in per target, like the log collector: VERIFY_HUB_RBAC="<namespace>/<serviceaccount>"
+# (rpg-k8s-hub/studio-hub) declares it; empty means this target has no k8s/hub and the
+# check SKIPs saying so.
+#
+# Expected namespaces: rpg-k8s-realtime and rpg-k8s-data, plus rpg-k8s-realtime-<game>
+# for every game other than cuvara in gateway-config's `games`. That is the list dev-up.sh
+# derives (parse_games / rendered_game_namespaces) from the same live ConfigMap, so there
+# is no second list here; verify has no list of game namespaces of its own.
+#
+# It reads live objects as JSON with `k get` (get only) and compares them through
+# k3s/hub_contract.py (`compare`, `bindings`): rules by (apiGroup, resource, verb)
+# triples, never by Role name or rule order.
+#
+#   FAIL  the ServiceAccount is absent; the Role studio-hub is absent from an expected
+#         namespace, or has an extra verb, an extra resource, a missing triple, a
+#         resourceNames/wildcard rule; its RoleBinding is absent or has another subject
+#         or roleRef; ANY other RoleBinding in an expected namespace, or any
+#         ClusterRoleBinding, names the ServiceAccount (except studio-hub-nodes); the node
+#         ClusterRole differs from the node allow-list by one triple; the node ClusterRole
+#         and its binding exist without each other; gateway-config cannot be read (NotFound
+#         or any other error: the game list is then unknown, so the per-game Roles are
+#         unverified). An existing ConfigMap with an empty `games` is NOT a failure: cuvara
+#         only, so realtime and data are the expected namespaces. Also not covered: a binding
+#         of a broad role to Group system:authenticated / system:unauthenticated (Kubernetes
+#         binds its own defaults to them, so it is not read as naming the hub)
+#   PASS everything exact. The node ClusterRole absent is a PASS that says node access
+#         is not granted (opt-in); present and exact is a PASS that says it is enabled
+#
+# Read-only: no create, no patch, no delete, and nothing is read from a Secret.
+_HUB_CONTRACT_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../k3s" 2>/dev/null && pwd)/hub_contract.py"
+HUB_PROBLEMS=()
+
+# _hub_get <kubectl get args...> -> 0 found (JSON in _HUB_OUT), 1 NotFound, 2 any other error
+_hub_get() {
+  local rc
+  _HUB_OUT=$(k get "$@" -o json 2>&1); rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  case "$_HUB_OUT" in
+    *NotFound*|*"not found"*) return 1 ;;
+  esac
+  return 2
+}
+
+# _hub_py <label> <json> <hub_contract.py args...>: one problem per line the contract prints
+_hub_py() {
+  local label="$1" json="$2" out rc line
+  shift 2
+  out=$(printf '%s' "$json" | cluster_python_lf "$_HUB_CONTRACT_PY" "$@"); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$rc" -ne 1 ] || [ -z "$out" ]; then
+    HUB_PROBLEMS+=("$label: the comparison (hub_contract.py $1) could not run, exit $rc")
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] && HUB_PROBLEMS+=("$label: $line")
+  done <<<"$out"
+}
+
+check_hub_rbac() {
+  if [ -z "${VERIFY_HUB_RBAC:-}" ]; then
+    skip "no Studio hub declared for this target (VERIFY_HUB_RBAC empty) -- the hub's rights are UNVERIFIED. NOT a statement that they are right."
+    return
+  fi
+  local hub_ns="${VERIFY_HUB_RBAC%%/*}" hub_sa="${VERIFY_HUB_RBAC##*/}"
+  local look="kubectl --context $KUBE_CONTEXT -n $hub_ns get sa $hub_sa; backend/deploy/k8s/dev-up.sh applies k8s/hub; python backend/deploy/k8s/games/render.py renders the per-game Role"
+  HUB_PROBLEMS=()
+  if [ ! -f "$_HUB_CONTRACT_PY" ]; then
+    fail "the hub contract is not on this host" "backend/deploy/k3s/hub_contract.py next to backend/deploy/k8s" "$_HUB_CONTRACT_PY not found" "$look"
+    return
+  fi
+
+  # --- the ServiceAccount
+  local rc
+  _hub_get serviceaccount "$hub_sa" -n "$hub_ns"; rc=$?
+  if [ "$rc" -eq 1 ]; then
+    fail "the Studio hub ServiceAccount is absent" "serviceaccount/$hub_sa in namespace $hub_ns" "not found" "$look"
+    return
+  elif [ "$rc" -ne 0 ]; then
+    fail "the Studio hub ServiceAccount could not be read" "serviceaccount/$hub_sa in namespace $hub_ns" "$(printf '%s' "$_HUB_OUT" | head -2)" "$look"
+    return
+  fi
+
+  # --- the expected namespaces: realtime and data, then the games gateway-config lists
+  # A ConfigMap that cannot be read is NOT an empty game list: the per-game Roles would be
+  # silently unchecked. NotFound and any other read error each add a problem (FAIL); only
+  # an existing ConfigMap with an empty or absent `games` value means "cuvara only".
+  local games_raw game seen other ns games_err games_rc games_errfile
+  local -a namespaces=("rpg-k8s-realtime:realtime" "rpg-k8s-data:data") games=()
+  games_errfile=$(mktemp)
+  games_raw=$(k get configmap gateway-config -n rpg-k8s-realtime -o 'jsonpath={.data.games}' 2>"$games_errfile"); games_rc=$?
+  games_err=$(head -1 "$games_errfile"); rm -f "$games_errfile"
+  if [ "$games_rc" -ne 0 ]; then
+    case "$games_err" in
+      *NotFound*|*"not found"*)
+        HUB_PROBLEMS+=("gateway-config could not be read: ConfigMap gateway-config is NotFound in rpg-k8s-realtime, so the game list is unknown and the hub's per-game Roles are UNVERIFIED") ;;
+      *)
+        HUB_PROBLEMS+=("gateway-config could not be read ($games_err), so the game list is unknown and the hub's per-game Roles are UNVERIFIED") ;;
+    esac
+    games_raw=""
+  fi
+  local IFS_SAVE="$IFS"
+  IFS=',' read -r -a _hub_games <<<"$games_raw"
+  IFS="$IFS_SAVE"
+  for game in ${_hub_games[@]+"${_hub_games[@]}"}; do
+    game="${game#"${game%%[![:space:]]*}"}"; game="${game%"${game##*[![:space:]]}"}"
+    [ -n "$game" ] && [ "$game" != cuvara ] || continue
+    case "$game" in
+      *[!abcdefghijklmnopqrstuvwxyz0123456789]*) HUB_PROBLEMS+=("gateway-config games: '$game' is not a valid game id; its namespace cannot be derived"); continue ;;
+    esac
+    seen=0
+    for other in ${games[@]+"${games[@]}"}; do [ "$other" = "$game" ] && seen=1; done
+    [ "$seen" -eq 1 ] || games+=("$game")
+  done
+  for game in ${games[@]+"${games[@]}"}; do namespaces+=("rpg-k8s-realtime-$game:realtime"); done
+
+  # --- one Role + RoleBinding pair per expected namespace
+  local entry shape
+  for entry in "${namespaces[@]}"; do
+    ns="${entry%%:*}"; shape="${entry##*:}"
+    _hub_get role studio-hub -n "$ns"; rc=$?
+    if [ "$rc" -eq 1 ]; then
+      HUB_PROBLEMS+=("$ns: Role studio-hub is absent")
+    elif [ "$rc" -ne 0 ]; then
+      HUB_PROBLEMS+=("$ns: Role studio-hub could not be read: $(printf '%s' "$_HUB_OUT" | head -1)")
+    else
+      _hub_py "$ns: Role studio-hub" "$_HUB_OUT" compare --shape "$shape"
+    fi
+    _hub_get rolebindings -n "$ns"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+      HUB_PROBLEMS+=("$ns: RoleBindings could not be read: $(printf '%s' "$_HUB_OUT" | head -1)")
+    else
+      _hub_py "$ns: RoleBindings" "$_HUB_OUT" bindings --scope namespaced --namespace "$ns"
+    fi
+  done
+
+  # --- the cluster scope: opt-in node access, and nothing else may name the account
+  local node=absent
+  _hub_get clusterrole studio-hub-nodes; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    node=present
+    _hub_py "ClusterRole studio-hub-nodes" "$_HUB_OUT" compare --shape node
+  elif [ "$rc" -ne 1 ]; then
+    HUB_PROBLEMS+=("ClusterRole studio-hub-nodes could not be read: $(printf '%s' "$_HUB_OUT" | head -1)")
+  fi
+  _hub_get clusterrolebindings; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    HUB_PROBLEMS+=("ClusterRoleBindings could not be read: $(printf '%s' "$_HUB_OUT" | head -1)")
+  else
+    _hub_py "ClusterRoleBindings" "$_HUB_OUT" bindings --scope cluster --node "$node"
+  fi
+
+  if [ ${#HUB_PROBLEMS[@]} -gt 0 ]; then
+    fail "the Studio hub's rights differ from the contract (${#HUB_PROBLEMS[@]} problem(s))" \
+      "exactly the allow-list of backend/deploy/k3s/hub_contract.py in: $(printf '%s ' "${namespaces[@]%%:*}")" \
+      "$(printf '%s; ' "${HUB_PROBLEMS[@]}")" \
+      "$look; kubectl --context $KUBE_CONTEXT get role,rolebinding studio-hub -n <ns> -o yaml"
+    return
+  fi
+  local node_note="node access NOT granted (opt-in: k8s/hub/optional/node-access.yaml is not applied)"
+  [ "$node" = present ] && node_note="node access ENABLED (ClusterRole studio-hub-nodes exact, bound to the hub only)"
+  pass "ServiceAccount $hub_ns/$hub_sa exists; Role studio-hub equals the allow-list in $(printf '%s ' "${namespaces[@]%%:*}")(rules compared, not names); no other binding names it; $node_note"
+}
+
 # Secrets exist and every key holds a non-empty value. Values are never printed
 # or logged -- only key names and byte lengths.
 check_secrets() {
@@ -568,3 +736,7 @@ register cluster.log_collector 1 "log collector Ready and attached to Loki" \
   "the Alloy DaemonSet in the logging namespace exists with desired >= 1 and every desired pod Ready, and the Service loki has an EndpointSlice address (Loki attached). FAIL when the namespace or DaemonSet is absent or not ready; WARN when ready but Loki is not attached" \
   "that a log line reached Loki. It does not query Loki, does not read Alloy's own log, and cannot see a collected namespace whose Role is missing (Alloy logs a 403 for it); the address is the one connect-loki.sh wrote, not proof that Loki answers on it. Declared per target by VERIFY_LOG_COLLECTOR; SKIPs when empty" \
   check_log_collector
+register cluster.hub_rbac 1 "Studio hub holds exactly its contracted rights" \
+  "the ServiceAccount studio-hub exists, and in rpg-k8s-realtime, rpg-k8s-data and every game namespace gateway-config lists its Role studio-hub equals the allow-list of k3s/hub_contract.py triple for triple (an extra verb, an extra resource or a missing one FAILs; rules are compared, not names), its RoleBinding has the one subject and roleRef, no other RoleBinding there and no ClusterRoleBinding names the account except studio-hub-nodes, and that opt-in node ClusterRole is either absent (PASS: node access not granted) or exact" \
+  "that the token an operator minted is valid or unexpired, that anything else in the cluster cannot reach the hub's rights (it reads only RoleBindings of the expected namespaces and every ClusterRoleBinding; a RoleBinding naming the account in another namespace is not seen), or that the API server admits it (no kubectl auth can-i, no impersonation). Games come from gateway-config's games, so a rendered game namespace left out of it is not covered. Declared per target by VERIFY_HUB_RBAC; SKIPs when empty" \
+  check_hub_rbac
