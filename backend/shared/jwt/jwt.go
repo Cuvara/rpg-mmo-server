@@ -1,14 +1,19 @@
 package jwt
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/gameid"
@@ -19,10 +24,9 @@ type header struct {
 	Typ string `json:"typ"`
 }
 
-// ClockSkew is the tolerance applied when checking token expiration. A token
-// whose exp is up to this many seconds in the past is still accepted, so small
-// clock differences between the gateway and game server do not cause spurious
-// rejections.
+// ClockSkew is the tolerance applied to exp, iat, and nbf. A token whose exp
+// is up to this many seconds in the past, or iat/nbf this far in the future,
+// is still accepted to accommodate small differences between service clocks.
 const ClockSkew = 5 * time.Second
 
 // Claims holds the JWT payload.
@@ -46,9 +50,10 @@ type Claims struct {
 // Game returns the claim's game, defaulting an absent claim.
 func (c Claims) Game() string { return constants.GameOrDefault(c.GameID) }
 
-// IsExpired returns true if the token has expired, accounting for ClockSkew.
+// IsExpired reports an invalid non-positive expiration or an expiration in the
+// past, accounting for ClockSkew. Verify also requires exp to be present.
 func (c Claims) IsExpired() bool {
-	return time.Now().Add(-ClockSkew).Unix() > c.ExpireAt
+	return c.ExpireAt <= 0 || time.Now().Add(-ClockSkew).Unix() > c.ExpireAt
 }
 
 var defaultHeader = header{Alg: "HS256", Typ: "JWT"}
@@ -116,63 +121,242 @@ func SignWithGame(userID, serverID, characterID, gameID, secret string, expiry t
 	return sigInput + "." + sig, nil
 }
 
-// verifyHeader decodes the JWT header segment and enforces the only algorithm
+// verifyHeader reads the JWT header and enforces the only algorithm
 // and token type this package supports (HS256 / JWT). This rejects algorithm
 // confusion attacks such as `"alg":"none"` before any signature work happens.
-func verifyHeader(seg string) error {
-	hdrJSON, err := base64.RawURLEncoding.DecodeString(seg)
+func verifyHeader(hdrJSON []byte) error {
+	fields, err := decodeJSONObject(hdrJSON)
 	if err != nil {
-		return fmt.Errorf("decode header: %w", err)
+		return fmt.Errorf("parse header: %w", err)
 	}
-
-	var h header
-	if err := json.Unmarshal(hdrJSON, &h); err != nil {
-		return fmt.Errorf("unmarshal header: %w", err)
+	if _, present := fields["crit"]; present {
+		return fmt.Errorf("unsupported critical header")
 	}
-
-	if h.Alg != defaultHeader.Alg {
-		return fmt.Errorf("unsupported alg %q, want %q", h.Alg, defaultHeader.Alg)
+	alg, err := stringClaim(fields, "alg", true)
+	if err != nil {
+		return fmt.Errorf("header alg: %w", err)
 	}
-	if h.Typ != defaultHeader.Typ {
-		return fmt.Errorf("unsupported typ %q, want %q", h.Typ, defaultHeader.Typ)
+	if alg != defaultHeader.Alg {
+		return fmt.Errorf("unsupported alg %q, want %q", alg, defaultHeader.Alg)
+	}
+	typ, err := stringClaim(fields, "typ", true)
+	if err != nil {
+		return fmt.Errorf("header typ: %w", err)
+	}
+	if typ != defaultHeader.Typ {
+		return fmt.Errorf("unsupported typ %q, want %q", typ, defaultHeader.Typ)
 	}
 	return nil
 }
 
-// Verify validates a HS256 JWT and returns its claims.
+// Verify validates a canonical HS256/JWT token and its exact, case-sensitive
+// claims. Only an otherwise valid expired token returns claims with an error;
+// every other refusal returns zero Claims (also used by Keyring.Verify).
 func Verify(token, secret string) (Claims, error) {
+	return verifyAt(token, secret, time.Now())
+}
+
+// verifyAt is the deterministic clock seam used by the shared parity vectors.
+func verifyAt(token, secret string, now time.Time) (Claims, error) {
+	if token == "" {
+		return Claims{}, fmt.Errorf("verify: %w", errors.New("invalid token format: empty token"))
+	}
+	if secret == "" {
+		return Claims{}, fmt.Errorf("verify: %w", errors.New("empty secret"))
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return Claims{}, fmt.Errorf("invalid token format")
 	}
 
-	if err := verifyHeader(parts[0]); err != nil {
+	var decoded [3][]byte
+	for i, part := range parts {
+		var err error
+		decoded[i], err = decodeSegment(part)
+		if err != nil {
+			return Claims{}, fmt.Errorf("invalid token segment %d: %w", i+1, err)
+		}
+	}
+	if len(decoded[2]) != sha256.Size {
+		return Claims{}, fmt.Errorf("invalid signature length: want %d bytes", sha256.Size)
+	}
+	if err := verifyHeader(decoded[0]); err != nil {
 		return Claims{}, fmt.Errorf("invalid header: %w", err)
 	}
 
 	sigInput := parts[0] + "." + parts[1]
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(sigInput))
-	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-
-	if !hmac.Equal([]byte(parts[2]), []byte(expectedSig)) {
+	if !hmac.Equal(decoded[2], mac.Sum(nil)) {
 		return Claims{}, fmt.Errorf("invalid signature")
 	}
 
-	clmJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	claims, err := decodeClaims(decoded[1], now)
 	if err != nil {
-		return Claims{}, fmt.Errorf("decode claims: %w", err)
+		return Claims{}, fmt.Errorf("invalid claims: %w", err)
 	}
 
-	var claims Claims
-	if err := json.Unmarshal(clmJSON, &claims); err != nil {
-		return Claims{}, fmt.Errorf("unmarshal claims: %w", err)
-	}
-
-	if claims.IsExpired() {
+	if now.Add(-ClockSkew).Unix() > claims.ExpireAt {
 		return claims, fmt.Errorf("token expired")
 	}
 
+	return claims, nil
+}
+
+// decodeSegment refuses alternate encodings of the same signed bytes. Go's
+// base64 decoder alone tolerates CR/LF and non-zero unused trailing bits.
+func decodeSegment(segment string) ([]byte, error) {
+	for i := 0; i < len(segment); i++ {
+		c := segment[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return nil, fmt.Errorf("non-base64url byte at offset %d", i)
+		}
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(segment)
+	if err != nil {
+		return nil, fmt.Errorf("decode base64url: %w", err)
+	}
+	if base64.RawURLEncoding.EncodeToString(decoded) != segment {
+		return nil, fmt.Errorf("non-canonical base64url")
+	}
+	return decoded, nil
+}
+
+// decodeJSONObject retains exact member names, rejecting duplicates (including
+// escaped spellings of the same name). Unknown members remain opaque values.
+func decodeJSONObject(raw []byte) (map[string]json.RawMessage, error) {
+	if !utf8.Valid(raw) {
+		return nil, fmt.Errorf("invalid UTF-8")
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	start, err := d.Token()
+	if err != nil {
+		return nil, fmt.Errorf("read object: %w", err)
+	}
+	if start != json.Delim('{') {
+		return nil, fmt.Errorf("expected JSON object")
+	}
+	fields := make(map[string]json.RawMessage)
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return nil, fmt.Errorf("read member name: %w", err)
+		}
+		name, ok := key.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected member name")
+		}
+		if _, duplicate := fields[name]; duplicate {
+			return nil, fmt.Errorf("duplicate member %q", name)
+		}
+		var value json.RawMessage
+		if err := d.Decode(&value); err != nil {
+			return nil, fmt.Errorf("read member %q: %w", name, err)
+		}
+		fields[name] = value
+	}
+	if _, err := d.Token(); err != nil {
+		return nil, fmt.Errorf("close object: %w", err)
+	}
+	if _, err := d.Token(); err != io.EOF {
+		if err != nil {
+			return nil, fmt.Errorf("trailing JSON: %w", err)
+		}
+		return nil, fmt.Errorf("trailing JSON value")
+	}
+	return fields, nil
+}
+
+func stringClaim(fields map[string]json.RawMessage, name string, required bool) (string, error) {
+	raw, present := fields[name]
+	if !present && !required {
+		return "", nil
+	}
+	if len(raw) == 0 || raw[0] != '"' {
+		return "", fmt.Errorf("%s must be a JSON string", name)
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("read %s: %w", name, err)
+	}
+	return value, nil
+}
+
+// integerClaim requires the lexical JSON integer form, excluding fractions,
+// exponents, quoted numbers and null, before checking the signed 64-bit range.
+func integerClaim(raw json.RawMessage) (int64, error) {
+	digits := raw
+	if len(digits) > 0 && digits[0] == '-' {
+		digits = digits[1:]
+	}
+	if len(digits) == 0 || len(digits) > 1 && digits[0] == '0' {
+		return 0, fmt.Errorf("expected JSON integer")
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("expected JSON integer")
+		}
+	}
+	value, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse int64: %w", err)
+	}
+	return value, nil
+}
+
+func decodeClaims(raw []byte, now time.Time) (Claims, error) {
+	fields, err := decodeJSONObject(raw)
+	if err != nil {
+		return Claims{}, fmt.Errorf("parse payload: %w", err)
+	}
+	var claims Claims
+	for _, field := range []struct {
+		name     string
+		target   *string
+		required bool
+	}{
+		{"sub", &claims.UserID, true}, {"sid", &claims.ServerID, false},
+		{"jti", &claims.Jti, false}, {"cid", &claims.CharacterID, false}, {"gid", &claims.GameID, false},
+	} {
+		value, err := stringClaim(fields, field.name, field.required)
+		if err != nil {
+			return Claims{}, fmt.Errorf("read claim %s: %w", field.name, err)
+		}
+		*field.target = value
+	}
+	if claims.UserID == "" {
+		return Claims{}, fmt.Errorf("sub must not be empty")
+	}
+	// Empty and explicit default gid remain accepted for existing test tokens.
+	if claims.GameID != "" && !gameid.ValidGameID(claims.GameID) {
+		return Claims{}, fmt.Errorf("invalid gid %q", claims.GameID)
+	}
+	claims.ExpireAt, err = integerClaim(fields["exp"])
+	if err != nil {
+		return Claims{}, fmt.Errorf("read exp: %w", err)
+	}
+	if claims.ExpireAt <= 0 {
+		return Claims{}, fmt.Errorf("exp must be positive")
+	}
+	latest := now.Add(ClockSkew).Unix()
+	if raw, present := fields["iat"]; present {
+		claims.IssuedAt, err = integerClaim(raw)
+		if err != nil {
+			return Claims{}, fmt.Errorf("read iat: %w", err)
+		}
+		if claims.IssuedAt < 0 || claims.IssuedAt > latest {
+			return Claims{}, fmt.Errorf("iat outside allowed time range")
+		}
+	}
+	if raw, present := fields["nbf"]; present {
+		nbf, err := integerClaim(raw)
+		if err != nil {
+			return Claims{}, fmt.Errorf("read nbf: %w", err)
+		}
+		if nbf > latest {
+			return Claims{}, fmt.Errorf("token not yet valid")
+		}
+	}
 	return claims, nil
 }
 

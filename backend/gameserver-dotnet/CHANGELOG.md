@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- Join-token JWT validation now matches Go `shared/jwt` and the shared C1–C7 golden vectors in `backend/shared/testdata/jwt/vectors.json`: refuses missing or non-`JWT` `typ`, any `crit`, duplicate JSON members, invalid UTF-8, non-canonical/padded base64url, wrong signature lengths, missing/non-positive `exp`, invalid or future `iat`/`nbf`, null string claims, and invalid/reserved `gid` values. HS256 remains the only accepted algorithm. All dates require signed 64-bit JSON integers with 5-second clock tolerance; invalid claims are refused before classifying an otherwise valid token as expired, preserving keyring expiry short-circuiting. Explicit `gid: ""` and `gid: "cuvara"` stay accepted for existing tokens in `JwtCharacterClaimTests.Verify_ReadsGidAlongsideCid_AndToleratesAbsence` and `JoinGameIdTests.MatchingGame_Joins`, respectively. Parsing uses `Utf8JsonReader` without reflection for NativeAOT; `JwtGoldenVectorTests` reads every shared verdict and accepted claim at the fixture's fixed time. Contract: `docs/API.md`, "Join-token JWT validation".
+
 ### Changed
 
 - `IsValidGameId` and Go `ValidGameID` now reserve `other` because the gateway metrics label buckets unknown games as `other`.
