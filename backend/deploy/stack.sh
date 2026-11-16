@@ -122,6 +122,13 @@ if [ "$SCRATCH" -eq 1 ]; then
 		echo "GAMESERVER_CONTAINER_PORT=9300"
 		echo "GATEWAY_METRICS_PORT=9502"
 		echo "GAMESERVER_METRICS_PORT=9501"
+		# Log shipping (monitoring profile). Alloy keeps only containers of ITS OWN
+		# compose project, and the project here is set with -p, which the container
+		# cannot see, so name it in the env file too or a scratch Alloy would watch
+		# the default stack. LOKI_PORT is offset like the other published ports.
+		echo "COMPOSE_PROJECT_NAME=$PROJECT"
+		echo "DEPLOY_ENVIRONMENT=scratch"
+		echo "LOKI_PORT=4100"
 		# ADVERTISED to clients in MsgEnterWorldResp.ServerAddr — must be the
 		# PUBLISHED port, not the in-container listen port.
 		echo "GAMESERVER_PUBLIC_ADDR=:9300"

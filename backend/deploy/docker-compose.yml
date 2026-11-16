@@ -416,6 +416,16 @@ services:
         condition: service_healthy
       postgres-game-roles:
         condition: service_completed_successfully
+    # Log-shipping identity, read by monitoring/alloy/config.alloy through the
+    # Docker API and turned into the Loki labels `game` and `server_id`. The
+    # namespace is cuvara.log.*; every game server service in this stack and in
+    # docker-compose.override.yml must carry both. The values are computed from
+    # the same variables the service already uses below, so a label can never
+    # disagree with what the process reports: the game falls back to `cuvara`
+    # when GAMESERVER_GAME_ID is unset OR empty (`:-`), like the server itself.
+    labels:
+      cuvara.log.game: ${GAMESERVER_GAME_ID:-cuvara}
+      cuvara.log.server_id: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}
     # NOTE: configuration is done through the environment below, not through
     # args. (A previous version of this comment claimed the C# arg parser only
     # matches space-separated flags — it does not: GameServer/Program.cs GetArg
@@ -736,10 +746,19 @@ services:
       - "${OTLP_BIND:-127.0.0.1}:${OTLP_GRPC_PORT:-4317}:4317"       # OTLP gRPC (traces/metrics/logs)
       - "${OTLP_BIND:-127.0.0.1}:${OTLP_HTTP_PORT:-4318}:4318"       # OTLP HTTP
       - "${PROMETHEUS_BIND:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090" # bundled Prometheus (targets/query)
+      # Bundled Loki (query/push API). The bind address is a LITERAL 127.0.0.1 and
+      # deliberately not a *_BIND variable: Loki has no authentication, so there is
+      # no setting that may widen it. Alloy reaches it in-network as lgtm:3100; the
+      # host port exists for LogQL from the host (scripts, `logcli`, the check).
+      - "127.0.0.1:${LOKI_PORT:-3100}:3100"                           # bundled Loki, loopback only
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./monitoring/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      # Replaces the image's Loki config to turn on 7-day retention, which the
+      # image offers no other way to set. Header of the file says which blocks are
+      # copied from the image and must be re-copied on an OTEL_LGTM_VERSION bump.
+      - ./monitoring/loki-config.yaml:/otel-lgtm/loki-config.yaml:ro
       # Alert rules, referenced by rule_files: in the file above. Mounted as a
       # separate file rather than inlined so `promtool check rules` can read it.
       - ./monitoring/alerts.yaml:/otel-lgtm/alerts.yaml:ro
@@ -756,8 +775,115 @@ services:
       retries: 12
       start_period: 30s
 
+  # ------------------------------------------------------------ log shipping
+  # Container logs -> the Loki inside `lgtm`. Two services, one decision: the
+  # collector must never hold a writable Docker socket.
+  #
+  # The Docker socket is root on the host: anything that can POST to it can start
+  # a privileged container. So Alloy gets NO socket. It talks to this proxy, which
+  # is the only thing that mounts it, and the proxy answers only GET on the few
+  # endpoints discovery and log tailing need. Everything else is refused with 403.
+  # Files instead of a socket (bind /var/lib/docker/containers read-only) were
+  # rejected: the hosts run Docker Desktop through WSL, where that directory
+  # belongs to the engine's VM and cannot be bind-mounted from here, and the API
+  # also hands us the compose labels (service, game, server id) that the log files
+  # do not carry. docs/MONITORING.md records the decision.
+  #
+  # `:ro` on the socket is NOT the protection (a read-only mount of a socket still
+  # lets you write to it); the proxy's method and path filter is. It sits on an
+  # `internal` network that only it and alloy join, publishes no port and has no
+  # route out.
+  docker-socket-proxy:
+    profiles: ["monitoring"]
+    image: tecnativa/docker-socket-proxy:${DOCKER_SOCKET_PROXY_VERSION:-0.3.0}
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-docker-proxy
+    restart: unless-stopped
+    environment:
+      # Read-only: no write verb passes, whatever the path.
+      POST: "0"
+      # What Alloy uses: list/inspect/logs of containers (discovery.docker and
+      # loki.source.docker), the network list (discovery.docker resolves addresses
+      # through it), and the ping/version calls the Docker client makes to
+      # negotiate an API version.
+      CONTAINERS: "1"
+      NETWORKS: "1"
+      PING: "1"
+      VERSION: "1"
+      # Stated explicitly rather than left to the image's defaults, so a default
+      # that changes in a later tag cannot silently widen the surface. EVENTS stays
+      # off: Alloy polls (refresh_interval) and does not need the event stream.
+      EVENTS: "0"
+      INFO: "0"
+      AUTH: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      DISTRIBUTION: "0"
+      EXEC: "0"
+      GRPC: "0"
+      IMAGES: "0"
+      PLUGINS: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      SESSION: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"
+      VOLUMES: "0"
+      ALLOW_START: "0"
+      ALLOW_STOP: "0"
+      ALLOW_RESTARTS: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - log-collector
+
+  # Grafana Alloy: discovers this project's containers, tails their logs, sets the
+  # labels (monitoring/alloy/config.alloy) and pushes to Loki. No published port:
+  # its UI (:12345) stays inside the network.
+  alloy:
+    profiles: ["monitoring"]
+    image: grafana/alloy:${ALLOY_VERSION:-v1.11.3}
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-alloy
+    restart: unless-stopped
+    depends_on:
+      lgtm:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_started
+    environment:
+      # Three stacks can share one Docker daemon (meta, scratch, CD), so Alloy
+      # keeps only containers of its own compose project. CD writes both values
+      # into deploy/.env.
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-rpg-mmo-meta}
+      # Becomes the `env` label (the identity in environments.tsv).
+      DEPLOY_ENVIRONMENT: ${DEPLOY_ENVIRONMENT:-local}
+    # The config is bind-mounted, so it travels with this file in CD (the bundle
+    # step stages monitoring/). Literal relative source, never $PWD or absolute.
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Read positions per container, so a restart continues instead of re-shipping.
+      - alloy-data:/var/lib/alloy/data
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    networks:
+      # `default` for lgtm:3100, log-collector for the proxy. Declaring `networks:`
+      # drops the implicit default, so it is listed.
+      - default
+      - log-collector
+
+# Only docker-socket-proxy and alloy join it. `internal: true` removes the route
+# out, so the proxy cannot be reached from outside and cannot reach out.
+networks:
+  log-collector:
+    internal: true
+
 volumes:
   postgres-data:
   postgres-game-data:
   redis-data:
   lgtm-data:
+  alloy-data:
