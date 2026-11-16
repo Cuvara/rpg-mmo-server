@@ -61,6 +61,103 @@ On shutdown the server sends `disconnect{reason=server_shutdown}` to every clien
 waits 2 s, closes the connections and only then closes the UDP socket — every
 session shares that socket, so closing it first would discard the notice.
 
+## Logs
+
+The server writes **one JSON object per line on stdout** and nothing else. A log
+shipper can read stdout line by line and parse every line.
+
+```json
+{"ts":"2026-11-16T08:41:53.217Z","level":"INFO","category":"Program","msg":"  MapId:     map_01","game":"cuvara","map_id":"map_01","server_id":"gs-3f9c1a7e5b2d"}
+```
+
+(The line shape is exactly what `JsonLinesConsoleFormatter` writes; the values are
+illustrative.)
+
+| Field | Meaning |
+|-------|---------|
+| `ts` | Event time, UTC, RFC 3339 with milliseconds and a `Z` suffix (`2026-11-16T08:41:53.217Z`) |
+| `level` | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` or `CRITICAL` |
+| `category` | The logger category (usually the class name, e.g. `Program`, `GameServerHost`) |
+| `msg` | The formatted message. Always present; an empty string when an exception was logged with no message |
+| `exception` | `Exception.ToString()` (type, message, stack trace). **Only present when the event has an exception** |
+| `game` | The game this server serves (`GAMESERVER_GAME_ID`, default `cuvara`) |
+| `map_id` | The map this server owns (`GAMESERVER_MAP_ID`, default `map_01`) |
+| `server_id` | The server id (`GAMESERVER_ID` / `POD_NAME` / generated `gs-<hex>`) |
+
+`game`, `map_id` and `server_id` are fixed for the life of the process, so they are
+on **every** line, written once at startup into the formatter rather than looked up
+per call. Fields are written in the order above. A message or exception that spans
+several lines is JSON-escaped (`\n`) and stays on one line.
+
+### Level and format
+
+| Variable | Values | Default |
+|----------|--------|---------|
+| `GAMESERVER_LOG_LEVEL` (`--log-level`) | `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical` (ASCII case-insensitive) | `Information` |
+| `GAMESERVER_LOG_FORMAT` (`--log-format`) | `json`, `text` (ASCII case-insensitive) | `json` |
+
+Unset or empty selects the default. At the default level the set of events logged is
+the same as before these knobs existed. The flag wins over the variable.
+
+**Raising the level.** Set `GAMESERVER_LOG_LEVEL=Debug` (or `Trace`) on the pod or
+process and restart it; the level is read once at startup and there is no runtime
+switch. A lower level only writes more lines, it never changes what is logged at a
+higher one.
+
+**An invalid value exits 2 at startup**, before migrations, registration or any
+connection, like every other `GAMESERVER_*` knob. `None`, numbers and typos are
+refused rather than guessed. The refusal is logged as one Critical line, written with
+the default level and format so a shipper still receives it:
+
+```
+invalid GAMESERVER_LOG_LEVEL='verbose': expected one of Trace, Debug, Information, Warning, Error, Critical
+invalid GAMESERVER_LOG_FORMAT='yaml': expected one of json, text
+```
+
+### Reading logs locally
+
+- `GAMESERVER_LOG_FORMAT=text` (or `--log-format text`) restores the previous console
+  output (plain, multi-line). It has no `game` / `map_id` / `server_id` fields: those
+  are a feature of the JSON format only.
+- Or keep JSON and filter it: `dotnet run --project GameServer | jq -r '"\(.ts) \(.level) \(.category): \(.msg)"'`,
+  or `... | jq 'select(.level == "WARN" or .level == "ERROR")'`. Show an exception
+  with `jq -r '.exception // empty'`.
+
+### Compared with the Go gateway's slog JSON
+
+The gateway logs through Go's `log/slog` JSON handler (`backend/shared/logger`) to
+stdout. The two are close but not identical, so a collector needs a small mapping.
+
+| Concept | Gateway (`slog.NewJSONHandler`) | Game server (this module) | Mapping |
+|---------|---------------------------------|---------------------------|---------|
+| Timestamp key | `time` | `ts` | Rename one to the other |
+| Timestamp format | RFC 3339 with nanoseconds, in **local time zone** (`2026-11-16T15:41:53.217123456+07:00`; `Z` only when the host is UTC) | RFC 3339, **always UTC**, milliseconds, `Z` | Parse both as RFC 3339; both are accepted by an RFC 3339 parser |
+| Level key | `level` | `level` | Same key |
+| Level values | `DEBUG`, `INFO`, `WARN`, `ERROR` (offsets such as `INFO+2` for custom levels; none are used here) | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `CRITICAL` | The four shared levels are spelled identically; the game server adds `TRACE` and `CRITICAL`. Map `CRITICAL` to the collector's highest severity (fatal) |
+| Message key | `msg` | `msg` | Same key |
+| Logger name | none (no `category`; the gateway adds no logger name unless a call adds an attribute) | `category` | Present only on the game server |
+| Error | An attribute chosen by the call site (the gateway uses `err`), as a string | `exception`, the full `Exception.ToString()` including the stack trace | Map the gateway's error attribute and `exception` to one error field if one is wanted |
+| Other attributes | Each `slog` attribute is its own top-level key | **None**: structured arguments are folded into `msg` | See limits below |
+| Game / map / server identity | Whatever the call site attaches | `game`, `map_id`, `server_id` on every line | Select on these three for the game server; the gateway does not stamp them |
+
+Both default to level `info`. The gateway takes its level from its own configuration
+(`debug`, `info`, `warn`, `error`; anything else is `info`), whereas
+`GAMESERVER_LOG_LEVEL` refuses an unknown value instead of falling back.
+
+### Limits
+
+- **Structured message arguments are not separate fields.** A call such as
+  `LogInformation("Player {UserId} joined", id)` produces `msg` = `"Player u1 joined"`;
+  `UserId` is not a key. Search `msg` as text.
+- **Logger scopes are not emitted.** Only the three process-level identity fields are
+  added; any `BeginScope` content is dropped.
+- `text` format has no identity fields.
+- The level is fixed at startup (no runtime change).
+- Lone UTF-16 surrogates in a message are replaced with U+FFFD so the line stays valid
+  JSON; if a line still cannot be encoded the server writes a short fallback `ERROR`
+  line (`log line could not be encoded`, without the identity fields) rather than lose
+  the event or throw out of a log call.
+
 ## Probing admission hardening
 
 `scripts/admission-probe.py` was removed with the TCP gameplay listener (ADR-32): it
