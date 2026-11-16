@@ -1,0 +1,232 @@
+# GENERATED FILE - do not edit by hand.
+#
+# Built by k8s/logging/generate-config.py from
+#   k8s/logging/config-k8s.alloy            the k8s-specific half
+#   monitoring/alloy/config.alloy           the `level` stage, copied verbatim
+#                                           between its BEGIN/END shared level
+#                                           pipeline markers (single source)
+# Regenerate after changing either:
+#   python3 backend/deploy/k8s/logging/generate-config.py
+# CI and the offline tests run it with --check, which exits 1 on drift.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: rpg-k8s-logging
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: alloy
+data:
+  config.alloy: |
+    // Grafana Alloy: ships the pod logs of the k8s deployment (namespaces
+    // rpg-k8s-*) to the Loki bundled in the compose `lgtm` service. See
+    // docs/MONITORING.md ("Logs").
+    //
+    // This file is the k8s-specific HALF of the collector config. The `level` stage
+    // is NOT here: generate-config.py copies it, byte for byte, from the compose
+    // collector (monitoring/alloy/config.alloy, between its BEGIN/END markers) at
+    // the placeholder line below and writes the result into the ConfigMap manifest
+    // 40-alloy-config.yaml. Do not edit that manifest by hand.
+    //
+    // Collection path: the Kubernetes API only (discovery.kubernetes +
+    // loki.source.kubernetes). Alloy mounts no hostPath, so it cannot read any log
+    // file of the node. Its grants are a namespaced Role per collected namespace:
+    // pods get/list/watch and pods/log get (20-rbac.yaml says what that means).
+    //
+    // Environment (set by 50-daemonset.yaml):
+    //   NODE_NAME            spec.nodeName (downward API): only pods of THIS node are
+    //                        shipped, so a second node would not double-ship
+    //   DEPLOY_ENVIRONMENT   value of the `env` label (ConfigMap alloy-env)
+    //   LOG_NAMESPACES       comma list of the namespaces to collect (ConfigMap
+    //                        alloy-env; dev-up.sh adds the game namespaces)
+    //
+    // Labels on every stream, and NO others (enforced by the label_keep stage of the
+    // shared block):
+    //   env, service, level
+    // plus, on game server pods only:
+    //   game, server_id
+    // Never add a label built from a pod UID, a pod name (other than server_id on a
+    // game server), an IP or any other unbounded value: every distinct label set is
+    // a Loki stream.
+    //
+    // `service` is the CONTAINER name. The values that exist in the manifests of this
+    // directory tree (k8s/app, k8s/data, k8s/logging):
+    //   gateway          Deployment gateway
+    //   gameserver       Fleets map-servers-dotnet-k8s, dungeon-servers-dotnet-k8s
+    //                    (and every rendered game's fleets)
+    //   agones-gameserver-sidecar
+    //                    the Agones SDK sidecar Agones adds to every game server pod
+    //   nakama           Deployment nakama
+    //   migrate          init container of nakama (database migration)
+    //   postgres         StatefulSets postgres-meta and postgres-game (the two are
+    //                    told apart by namespace in Loki only through the line, not a
+    //                    label: same service value by design)
+    //   redis            StatefulSet redis
+    //   provision, psql  the one-off Jobs default-role and init-gamestate
+    //   alloy            this collector
+    // A new workload adds a container name, never an unbounded one.
+    //
+    // `game` and `server_id` exist only for pods with the Agones label
+    // agones.dev/role=gameserver (both of their containers):
+    //   game       from the namespace: rpg-k8s-realtime -> cuvara (the default game),
+    //              rpg-k8s-realtime-<game> -> <game> (ADR-33 D7, rendered by
+    //              k8s/games/render.py)
+    //   server_id  the POD NAME. The fleet sets POD_NAME from metadata.name and
+    //              Program.cs resolves the server id from POD_NAME (no GAMESERVER_ID),
+    //              so the pod name is the id the Redis registry uses.
+    // The gateway shares the default game's namespace and gets NO game: a stream
+    // without `game` is stack-wide (docs/MONITORING.md, label contract). Everything
+    // in rpg-k8s-data and rpg-k8s-logging gets neither label.
+
+    discovery.kubernetes "pods" {
+      role = "pod"
+
+      // Namespaced list/watch: with `names` set, discovery asks the API for pods of
+      // each listed namespace, which a Role in that namespace allows. No ClusterRole
+      // is needed and none exists.
+      namespaces {
+        names = string.split(sys.env("LOG_NAMESPACES"), ",")
+      }
+
+      // Only this node's pods are listed (server-side field selector).
+      selectors {
+        role  = "pod"
+        field = "spec.nodeName=" + sys.env("NODE_NAME")
+      }
+    }
+
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      // The rule that is actually relied on, as in the compose collector: a relabel
+      // `keep` is anchored, and it is what the offline config test checks. Whatever
+      // LOG_NAMESPACES lists, a namespace outside rpg-k8s-* is never shipped.
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        regex         = "rpg-k8s-.+"
+        action        = "keep"
+      }
+
+      // Second guard for the node: the selector above already limits the list.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_node_name"]
+        regex         = sys.env("NODE_NAME")
+        action        = "keep"
+      }
+
+      rule {
+        target_label = "env"
+        replacement  = sys.env("DEPLOY_ENVIRONMENT")
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "service"
+      }
+
+      // Game server pods, default game. Two sources joined with ";": the Agones role
+      // label (label name agones.dev/role, sanitised to agones_dev_role) and the
+      // namespace. A pod without the label, or in another namespace, does not match
+      // and gets no `game`.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_agones_dev_role", "__meta_kubernetes_namespace"]
+        regex         = "gameserver;rpg-k8s-realtime"
+        target_label  = "game"
+        replacement   = "cuvara"
+      }
+
+      // Game server pods of another game: rpg-k8s-realtime-<game> -> <game>.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_agones_dev_role", "__meta_kubernetes_namespace"]
+        regex         = "gameserver;rpg-k8s-realtime-(.+)"
+        target_label  = "game"
+        replacement   = "$1"
+      }
+
+      // server_id = the pod name, on game server pods only.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_agones_dev_role", "__meta_kubernetes_pod_name"]
+        regex         = "gameserver;(.+)"
+        target_label  = "server_id"
+        replacement   = "$1"
+      }
+    }
+
+    loki.source.kubernetes "pods" {
+      targets    = discovery.relabel.pods.output
+      forward_to = [loki.process.level.receiver]
+    }
+
+    // BEGIN shared level pipeline
+    // Single source of the `level` stage. The k8s collector (deploy/k8s/logging/)
+    // copies everything from this line to the END marker verbatim into its
+    // generated ConfigMap (k8s/logging/generate-config.py; `--check` fails on drift).
+    // Change it here, regenerate there. The writer it forwards to must keep the name
+    // loki.write "lgtm" in both collectors.
+    loki.process "level" {
+      forward_to = [loki.write.lgtm.receiver]
+
+      // Every stream starts as `unknown`: a plain or unparseable line keeps it.
+      stage.static_labels {
+        values = {
+          level = "unknown",
+        }
+      }
+
+      // Only a line that looks like a JSON object is parsed. The line body is
+      // never rewritten: stages here only read it and set labels.
+      //
+      // Sources of the field, all named `level`, with the spellings each service
+      // really writes:
+      //   gateway     Go slog        INFO WARN ERROR DEBUG
+      //   Nakama      zap            info warn error debug dpanic panic fatal
+      //   gameserver  JSON logger    TRACE DEBUG INFO WARN ERROR CRITICAL
+      //               (one object per line: ts level category msg ...; it is the
+      //               default of the gameserver-json-logs task of the same plan)
+      //
+      // `level` is read ONLY from JSON. There is deliberately no regex for the
+      // plain .NET console format (a header line `info: Category[0]` plus indented
+      // message lines): it would put one event on two streams. A game server that
+      // logs text (GAMESERVER_LOG_FORMAT=text), or a build without the JSON-logs
+      // task, therefore ships with level="unknown".
+      stage.match {
+        selector = `{service=~".+"} |~ "^\\s*\\{"`
+
+        stage.json {
+          expressions = {
+            level = "level",
+          }
+        }
+
+        // One spelling per level. Anything else (a number, a custom word) becomes
+        // `unknown` instead of minting a stream per distinct value. `information`,
+        // `warning` and the three-letter forms are harmless aliases: no service in
+        // this stack prints them.
+        stage.template {
+          source   = "level"
+          template = `{{ if .level }}{{ $l := ToLower (printf "%v" .level) }}{{ if or (eq $l "trace") (eq $l "trc") }}trace{{ else if or (eq $l "debug") (eq $l "dbg") }}debug{{ else if or (eq $l "info") (eq $l "information") (eq $l "inf") }}info{{ else if or (eq $l "warn") (eq $l "warning") (eq $l "wrn") }}warn{{ else if or (eq $l "error") (eq $l "err") }}error{{ else if or (eq $l "fatal") (eq $l "critical") (eq $l "crit") (eq $l "panic") (eq $l "dpanic") }}fatal{{ else }}unknown{{ end }}{{ else }}unknown{{ end }}`
+        }
+
+        stage.labels {
+          values = {
+            level = "",
+          }
+        }
+      }
+
+      // The contract: exactly these labels reach Loki, whatever discovery added.
+      stage.label_keep {
+        values = ["env", "service", "level", "game", "server_id"]
+      }
+    }
+
+    // END shared level pipeline
+
+    loki.write "lgtm" {
+      endpoint {
+        // The Service `loki` in this namespace has no selector: its EndpointSlice
+        // points at the compose `lgtm` container on the cluster's Docker network and
+        // is written only by k8s/logging/connect-loki.sh.
+        url = "http://loki.rpg-k8s-logging.svc.cluster.local:3100/loki/api/v1/push"
+      }
+    }

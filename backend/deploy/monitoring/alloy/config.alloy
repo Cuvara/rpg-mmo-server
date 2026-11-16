@@ -70,6 +70,12 @@ loki.source.docker "containers" {
   refresh_interval = "10s"
 }
 
+// BEGIN shared level pipeline
+// Single source of the `level` stage. The k8s collector (deploy/k8s/logging/)
+// copies everything from this line to the END marker verbatim into its
+// generated ConfigMap (k8s/logging/generate-config.py; `--check` fails on drift).
+// Change it here, regenerate there. The writer it forwards to must keep the name
+// loki.write "lgtm" in both collectors.
 loki.process "level" {
   forward_to = [loki.write.lgtm.receiver]
 
@@ -126,6 +132,8 @@ loki.process "level" {
     values = ["env", "service", "level", "game", "server_id"]
   }
 }
+
+// END shared level pipeline
 
 loki.write "lgtm" {
   endpoint {

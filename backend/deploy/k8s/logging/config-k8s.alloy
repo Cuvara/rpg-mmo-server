@@ -1,0 +1,149 @@
+// Grafana Alloy: ships the pod logs of the k8s deployment (namespaces
+// rpg-k8s-*) to the Loki bundled in the compose `lgtm` service. See
+// docs/MONITORING.md ("Logs").
+//
+// This file is the k8s-specific HALF of the collector config. The `level` stage
+// is NOT here: generate-config.py copies it, byte for byte, from the compose
+// collector (monitoring/alloy/config.alloy, between its BEGIN/END markers) at
+// the placeholder line below and writes the result into the ConfigMap manifest
+// 40-alloy-config.yaml. Do not edit that manifest by hand.
+//
+// Collection path: the Kubernetes API only (discovery.kubernetes +
+// loki.source.kubernetes). Alloy mounts no hostPath, so it cannot read any log
+// file of the node. Its grants are a namespaced Role per collected namespace:
+// pods get/list/watch and pods/log get (20-rbac.yaml says what that means).
+//
+// Environment (set by 50-daemonset.yaml):
+//   NODE_NAME            spec.nodeName (downward API): only pods of THIS node are
+//                        shipped, so a second node would not double-ship
+//   DEPLOY_ENVIRONMENT   value of the `env` label (ConfigMap alloy-env)
+//   LOG_NAMESPACES       comma list of the namespaces to collect (ConfigMap
+//                        alloy-env; dev-up.sh adds the game namespaces)
+//
+// Labels on every stream, and NO others (enforced by the label_keep stage of the
+// shared block):
+//   env, service, level
+// plus, on game server pods only:
+//   game, server_id
+// Never add a label built from a pod UID, a pod name (other than server_id on a
+// game server), an IP or any other unbounded value: every distinct label set is
+// a Loki stream.
+//
+// `service` is the CONTAINER name. The values that exist in the manifests of this
+// directory tree (k8s/app, k8s/data, k8s/logging):
+//   gateway          Deployment gateway
+//   gameserver       Fleets map-servers-dotnet-k8s, dungeon-servers-dotnet-k8s
+//                    (and every rendered game's fleets)
+//   agones-gameserver-sidecar
+//                    the Agones SDK sidecar Agones adds to every game server pod
+//   nakama           Deployment nakama
+//   migrate          init container of nakama (database migration)
+//   postgres         StatefulSets postgres-meta and postgres-game (the two are
+//                    told apart by namespace in Loki only through the line, not a
+//                    label: same service value by design)
+//   redis            StatefulSet redis
+//   provision, psql  the one-off Jobs default-role and init-gamestate
+//   alloy            this collector
+// A new workload adds a container name, never an unbounded one.
+//
+// `game` and `server_id` exist only for pods with the Agones label
+// agones.dev/role=gameserver (both of their containers):
+//   game       from the namespace: rpg-k8s-realtime -> cuvara (the default game),
+//              rpg-k8s-realtime-<game> -> <game> (ADR-33 D7, rendered by
+//              k8s/games/render.py)
+//   server_id  the POD NAME. The fleet sets POD_NAME from metadata.name and
+//              Program.cs resolves the server id from POD_NAME (no GAMESERVER_ID),
+//              so the pod name is the id the Redis registry uses.
+// The gateway shares the default game's namespace and gets NO game: a stream
+// without `game` is stack-wide (docs/MONITORING.md, label contract). Everything
+// in rpg-k8s-data and rpg-k8s-logging gets neither label.
+
+discovery.kubernetes "pods" {
+  role = "pod"
+
+  // Namespaced list/watch: with `names` set, discovery asks the API for pods of
+  // each listed namespace, which a Role in that namespace allows. No ClusterRole
+  // is needed and none exists.
+  namespaces {
+    names = string.split(sys.env("LOG_NAMESPACES"), ",")
+  }
+
+  // Only this node's pods are listed (server-side field selector).
+  selectors {
+    role  = "pod"
+    field = "spec.nodeName=" + sys.env("NODE_NAME")
+  }
+}
+
+discovery.relabel "pods" {
+  targets = discovery.kubernetes.pods.targets
+
+  // The rule that is actually relied on, as in the compose collector: a relabel
+  // `keep` is anchored, and it is what the offline config test checks. Whatever
+  // LOG_NAMESPACES lists, a namespace outside rpg-k8s-* is never shipped.
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    regex         = "rpg-k8s-.+"
+    action        = "keep"
+  }
+
+  // Second guard for the node: the selector above already limits the list.
+  rule {
+    source_labels = ["__meta_kubernetes_pod_node_name"]
+    regex         = sys.env("NODE_NAME")
+    action        = "keep"
+  }
+
+  rule {
+    target_label = "env"
+    replacement  = sys.env("DEPLOY_ENVIRONMENT")
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "service"
+  }
+
+  // Game server pods, default game. Two sources joined with ";": the Agones role
+  // label (label name agones.dev/role, sanitised to agones_dev_role) and the
+  // namespace. A pod without the label, or in another namespace, does not match
+  // and gets no `game`.
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_agones_dev_role", "__meta_kubernetes_namespace"]
+    regex         = "gameserver;rpg-k8s-realtime"
+    target_label  = "game"
+    replacement   = "cuvara"
+  }
+
+  // Game server pods of another game: rpg-k8s-realtime-<game> -> <game>.
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_agones_dev_role", "__meta_kubernetes_namespace"]
+    regex         = "gameserver;rpg-k8s-realtime-(.+)"
+    target_label  = "game"
+    replacement   = "$1"
+  }
+
+  // server_id = the pod name, on game server pods only.
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_agones_dev_role", "__meta_kubernetes_pod_name"]
+    regex         = "gameserver;(.+)"
+    target_label  = "server_id"
+    replacement   = "$1"
+  }
+}
+
+loki.source.kubernetes "pods" {
+  targets    = discovery.relabel.pods.output
+  forward_to = [loki.process.level.receiver]
+}
+
+// @@SHARED_LEVEL_PIPELINE@@
+
+loki.write "lgtm" {
+  endpoint {
+    // The Service `loki` in this namespace has no selector: its EndpointSlice
+    // points at the compose `lgtm` container on the cluster's Docker network and
+    // is written only by k8s/logging/connect-loki.sh.
+    url = "http://loki.rpg-k8s-logging.svc.cluster.local:3100/loki/api/v1/push"
+  }
+}

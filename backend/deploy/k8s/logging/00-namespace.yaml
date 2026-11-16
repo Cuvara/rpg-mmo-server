@@ -1,0 +1,24 @@
+# The log collector's own namespace.
+#
+# It is separate from rpg-k8s-realtime and rpg-k8s-data on purpose: the
+# collector's ServiceAccount lives here, so nothing that runs in the app or data
+# namespaces shares an identity, a Role or a ConfigMap with it, and tearing the
+# collector down (`kubectl delete ns rpg-k8s-logging`) touches nothing else.
+#
+# It is itself collected (its Role is in 20-rbac.yaml), so Alloy's own logs reach
+# Loki under service=alloy.
+#
+# Pod Security: the DaemonSet meets the `restricted` profile (non-root, no
+# privilege escalation, all capabilities dropped, RuntimeDefault seccomp, no
+# hostPath), so a violation is reported at apply time. `warn`/`audit` rather
+# than `enforce`: this is logging, and a profile change in a Kubernetes upgrade
+# must not be what stops it from starting.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpg-k8s-logging
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: logging
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
