@@ -1521,11 +1521,13 @@ for an annotated type, and only the **reflection-based resolver** consults
    `AgonesSdk` (`AgonesJsonContext`), `ContentLoader` (`ContentJsonContext`),
    `GameManifest` (`ManifestJsonContext`), `EventPublisher` (`EventJsonContext`),
    `KickEvents` (`KickJsonContext`), `MapLoader` (`MapJsonContext`), `NakamaClient`
-   (`NakamaJsonContext`, eight calls), `MetricsEndpoint` (`ServerStatusContext`) and two in
-   `JwtValidator` (`JwtJsonContext`): 17 calls in 9 files, counted 2026-11-13 with
+   (`NakamaJsonContext`, eight calls) and `MetricsEndpoint` (`ServerStatusContext`):
+   15 calls in 8 files after the JWT parity change, counted with
    `grep -rn --include='*.cs' "JsonSerializer\." GameServer/ | grep -v '///'`, which drops
    doc-comment lines (one, in `Content/ContentJson.cs`, names `JsonSerializer.Deserialize`
-   without calling it). No call passes a `JsonSerializerOptions` or
+   without calling it). `JwtValidator` now walks `Utf8JsonReader` directly for
+   explicit duplicate-member and claim-type checks; it makes no serializer calls.
+   No call passes a `JsonSerializerOptions` or
    names a type without its `JsonTypeInfo`. Some serialised types do hold ordinary
    collections (`ServerStatus.InputsRejectedByReason` is a `Dictionary<string, long>`),
    and the source generator emits code for those itself; none is a Pooled type (fact 4).

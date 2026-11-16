@@ -19,7 +19,7 @@ public class JoinGameIdTests
 
     [Theory]
     [InlineData(null, null)]
-    [InlineData(null, "cuvara")]
+    [InlineData(null, "")]
     [InlineData("foo", "foo")]
     public async Task MatchingGame_Joins(string? serverGame, string? tokenGame)
     {
@@ -30,6 +30,21 @@ public class JoinGameIdTests
         var response = await JoinAsync(client, CreateToken("user-matching", h.ServerId, tokenGame));
 
         Assert.True(response.Ok, response.Error);
+    }
+
+    [Fact]
+    public async Task ExplicitDefaultGameClaim_IsRefusedAsInvalidToken()
+    {
+        await using var h = await Harness.StartAsync();
+        using var client = new KcpTestClient();
+        await client.ConnectAsync("127.0.0.1", h.Port);
+
+        // ADR-33 issuers omit gid for the default game; spelling it explicitly
+        // is refused by the shared JWT parser before the join's game comparison.
+        var response = await JoinAsync(client, CreateToken("user-default-claim", h.ServerId, GameId.DefaultGameId));
+
+        Assert.False(response.Ok);
+        Assert.Equal("Invalid or expired token", response.Error);
     }
 
     [Theory]

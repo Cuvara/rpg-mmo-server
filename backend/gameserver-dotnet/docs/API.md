@@ -203,6 +203,43 @@ hammering the game server. `"Server is full"` is an authenticated refusal on
 still-open connection is admitted as a replacement, not refused as a second
 player. Details and metrics: `docs/DESIGN.md`, "Admission hardening".
 
+#### Join-token JWT validation
+
+`JwtValidator` and Go `shared/jwt` enforce the same C1–C7 contract, pinned by
+[`backend/shared/testdata/jwt/vectors.json`](../../shared/testdata/jwt/vectors.json).
+Both test suites read the tokens and expected verdicts directly at the fixture's
+fixed Unix time; accepted vectors also pin `sub`, `sid`, `jti`, `cid`, `gid` and `exp`.
+
+- Token and secret must be non-empty. The token has exactly three canonical,
+  unpadded base64url segments: only `[A-Za-z0-9_-]`, a valid length, and a byte
+  decode/encode round trip with zero unused trailing bits. Padding, whitespace,
+  `+` and `/` are refused. The decoded signature must be exactly 32 bytes.
+- The header and payload must each be a UTF-8 JSON object with no duplicate
+  member names, including escaped spellings of the same name. Names and string
+  comparisons are case-sensitive. The header must contain exactly `alg: "HS256"`
+  and `typ: "JWT"` as their values; other algorithms, a missing/wrong `typ`, and
+  any `crit` member are refused before HMAC verification. Other members are ignored.
+- HMAC-SHA256 signs the original encoded header and payload, separated by `.`;
+  signature comparison takes constant time. The secret is encoded as UTF-8.
+- `sub` is a required non-empty string. Optional `sid`, `jti` and `cid` must be
+  strings when present; empty strings are accepted, while `null` is refused.
+  Optional `gid` follows the same type rule. Absent or empty `gid` means the
+  default game; a non-empty value must pass `GameId.IsValidGameId` and must not
+  equal `cuvara`. Thus game ids are 2–24 lowercase ASCII letters/digits, start
+  with a letter, and exclude reserved `gs`, `map`, `dungeon` and `other`.
+  Explicit `gid: ""` stays accepted for compatibility with
+  `JwtCharacterClaimTests.Verify_ReadsGidAlongsideCid_AndToleratesAbsence`;
+  issuers omit `gid` for the default game (ADR-33).
+- `exp` is required, a signed 64-bit JSON integer, and strictly positive.
+  Optional `iat` is a signed 64-bit JSON integer in `[0, now + 5]`;
+  optional `nbf` is a signed 64-bit JSON integer at most `now + 5` (negative
+  values are accepted). Fractions, exponents, quoted numbers and `null` are
+  refused for all three dates. Unknown payload members are ignored.
+- Only after the signature and all claims validate is a token expired when
+  `now - 5 > exp`; equality is accepted. This reports `VerifyStatus.Expired`
+  and stops keyring retries. HMAC mismatch reports `BadSignature`; other refusals
+  report `Invalid`. The join reply presents each as `Invalid or expired token`.
+
 #### Join refusal reasons
 
 A refused join gets `{ "ok": false, "error": "<reason>", "protocol_version": N }`
@@ -213,7 +250,7 @@ and the close. The checks run in this order and the first failure answers:
 | 1 | `Expected JoinToken message` | First frame was not a `join_token` |
 | 2 | `Malformed JoinToken message` | The `join_token` body did not decode |
 | 3 | `protocol_version_mismatch` | Peer protocol version outside the supported window (see "Protocol version") |
-| 4 | `Invalid or expired token` | Signature does not verify against `JOIN_TOKEN_SECRET`, or `exp` has passed |
+| 4 | `Invalid or expired token` | JWT validation above fails against `JOIN_TOKEN_SECRET`, including expiration |
 | 5 | `Token is for a different server` | The token's `sid` is empty or names another server |
 | 6 | `Token is for a different game` | The token's `gid` names another game than this server's `GAMESERVER_GAME_ID` (ADR-33) |
 | 7 | `Token already used` | The token's `jti` was missing or already consumed (replay) |
