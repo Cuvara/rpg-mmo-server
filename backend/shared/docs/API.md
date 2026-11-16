@@ -24,10 +24,30 @@ func (c Claims) IsExpired() bool
 func (c Claims) Game() string // constants.GameOrDefault(c.GameID)
 ```
 
-`Verify` enforces, in order: 3-segment format → header check (`alg == "HS256"` **and**
-`typ == "JWT"`) → HMAC signature → `exp`. Tokens carrying `alg: "none"`, `HS512`, `RS256`,
-a missing/odd `typ`, or a non-base64 header are rejected before any signature work.
-The API is unchanged — callers need no edits.
+`Verify` requires a non-empty token and secret, exactly three canonical unpadded
+base64url segments, and a 32-byte HMAC-SHA256 signature. Padding, standard-base64
+characters, whitespace and non-zero trailing bits are refused. Before HMAC
+verification, the header must be a UTF-8 JSON object with no duplicate members,
+exact case-sensitive string members `alg:"HS256"` and `typ:"JWT"`, and no `crit`
+member. The signature is compared in constant time over the original encoded
+header and payload. After a matching signature, the payload must also be a UTF-8
+JSON object without duplicate members, with exact case-sensitive claim names.
+`sub` is a required non-empty string. Optional `sid`, `jti`, `cid` and `gid`
+must be strings when present, never null, and empty strings are accepted.
+Absent or empty `gid` means the default game. A non-empty `gid` must pass
+`gameid.ValidGameID`; an explicit `"cuvara"` is accepted for compatibility with
+existing test tokens, although issuers omit `gid` for the default game. The
+claim value is returned as sent.
+
+`exp` is required, must be a positive signed 64-bit JSON integer, and expires
+only when `now - 5 > exp` (Unix seconds). Optional `iat` and `nbf` must also be
+signed 64-bit JSON integers: `iat >= 0`, and both must be `<= now + 5`.
+Fractions, exponent notation, numeric strings and null are refused for these
+time claims. Unknown headers and claims are ignored. An otherwise valid expired
+token returns decoded claims together with an error, preserving `Keyring.Verify`'s
+expiry short-circuit; every other failure returns zero claims. Both parsers'
+expected verdicts are recorded in `testdata/jwt/vectors.json`; regenerate it from
+`backend/shared` with `go test ./jwt/ -update-jwt-vectors`.
 
 `cid` (ADR-31, contract `join-token`): the roster character the token plays. Nakama's
 `gateway_token` sets it after an ownership check; the gateway copies it into the join token;
@@ -42,7 +62,8 @@ the keyring variant. The `jti` rule is unchanged: a jti is added iff `serverID` 
 byte. A non-empty game that fails `gameid.ValidGameID` is refused with an error.
 `SignWithCharacter` now delegates with an empty game, so every existing signing call is
 source- and byte-compatible. The C# `JwtValidator` reads it into `JwtClaims.GameId` (empty
-when absent). **Nothing mints a non-empty `gid` yet** and no reader acts on it.
+when absent). Nakama gateway-token issuance and gateway join-token issuance use
+`SignWithGame`; non-default games carry `gid`, and default-game tokens omit it.
 
 ### `Keyring` — secret rotation
 
