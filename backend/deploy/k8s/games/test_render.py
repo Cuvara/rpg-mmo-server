@@ -1,4 +1,4 @@
-﻿import contextlib
+import contextlib
 import importlib.util
 import io
 import pathlib

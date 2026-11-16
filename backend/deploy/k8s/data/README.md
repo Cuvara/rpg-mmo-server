@@ -357,12 +357,15 @@ so it cannot read or create the real deploy `.env`. From `backend/deploy`:
 ```
 
 For the k8s half, **do not run the whole `dev-up.sh` as a dry run**: it applies
-resources before reaching these checks. This isolated dry run extracts only its
-read-only JWT/join checks and puts a fake `kubectl` first on PATH. The fake only
+namespaces and imports images before reaching these checks. This isolated dry run
+extracts only its read-only JWT/join checks and puts a fake `kubectl` first on PATH. The fake only
 accepts the throwaway, nonexistent context `k3d-rpg-secret-check-does-not-exist`;
 it never calls a cluster or reads a real Secret. `k8s/verify/tests/secret_check_test.sh`
-automates these cases (and more) with the same awk markers; the block below is the
-manual equivalent. From `backend/deploy`:
+automates these cases (and more). It extracts the block between
+`# BEGIN app-secret and join-keyring checks (read-only)` and
+`# END app-secret and join-keyring checks`, asserts each marker occurs exactly
+once, and asserts the block ends before the first `apply -k "$HERE/data"`.
+The block below is the manual equivalent. From `backend/deploy`:
 
 ```bash
 (
@@ -370,13 +373,21 @@ manual equivalent. From `backend/deploy`:
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
   mkdir "$work/bin"
-  awk '/^nk_jwt=/ { copy=1 } copy { print }
-       /^echo "checked: rpg-app-secrets.*join-token-secret/ { exit }' \
+  begin='# BEGIN app-secret and join-keyring checks (read-only)'
+  end='# END app-secret and join-keyring checks'
+  [ "$(grep -Fxc "$begin" k8s/dev-up.sh)" -eq 1 ]
+  [ "$(grep -Fxc "$end" k8s/dev-up.sh)" -eq 1 ]
+  awk -v b="$begin" -v e="$end" \
+    '$0 == b { copy=1 } copy { print } $0 == e { exit }' \
     k8s/dev-up.sh > "$work/check.sh"
-  grep -q '^echo "checked: rpg-app-secrets.*join-token-secret' "$work/check.sh"
+  grep -Fxq "$end" "$work/check.sh"
+  end_line=$(grep -nFx "$end" k8s/dev-up.sh | cut -d: -f1)
+  data_line=$(grep -nF 'apply -k "$HERE/data"' k8s/dev-up.sh | head -n 1 | cut -d: -f1)
+  [ "$end_line" -lt "$data_line" ]
   cat > "$work/bin/kubectl" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
+  '--context k3d-rpg-secret-check-does-not-exist get secret rpg-app-secrets -n rpg-k8s-realtime') : ;;
   '--context k3d-rpg-secret-check-does-not-exist get secret nakama -n rpg-k8s-data -o jsonpath={.data.JWT_SECRET}'|\
   '--context k3d-rpg-secret-check-does-not-exist get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath={.data.jwt-secret}')
     printf '%s' "$FAKE_JWT" | base64 ;;

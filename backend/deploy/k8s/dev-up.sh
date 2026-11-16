@@ -765,6 +765,12 @@ if [ -n "$nk_on" ]; then
     echo "ERROR: nakama-tls-pin Secret is absent in rpg-k8s-realtime." >&2
     exit 1
   fi
+  if ! source_pin=$($K get secret nakama-tls-pin -n rpg-k8s-realtime -o 'jsonpath={.data.tls\.crt}' \
+    | base64 -d) || [ -z "$source_pin" ] \
+    || ! grep -Eq '^-----BEGIN CERTIFICATE-----[[:space:]]*$' <<< "$source_pin"; then
+    echo "ERROR: source nakama-tls-pin tls.crt is empty, unreadable, or not a PEM certificate." >&2
+    exit 1
+  fi
   for game_ns in rpg-k8s-realtime ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
     cur_url=$($K get configmap gameserver-config -n "$game_ns" -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
     https_url="https://${cur_url#http://}"
@@ -773,8 +779,7 @@ if [ -n "$nk_on" ]; then
       -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
     if [ "$game_ns" != rpg-k8s-realtime ]; then
       # Stream only the public certificate; never put its contents in output or argv.
-      if ! $K get secret nakama-tls-pin -n rpg-k8s-realtime -o 'jsonpath={.data.tls\.crt}' \
-        | base64 -d | $K create secret generic nakama-tls-pin -n "$game_ns" \
+      if ! printf '%s\n' "$source_pin" | $K create secret generic nakama-tls-pin -n "$game_ns" \
           --from-file=tls.crt=/dev/stdin --dry-run=client -o yaml | $K apply -f - >/dev/null; then
         echo "ERROR: could not provision $game_ns/nakama-tls-pin from the source certificate." >&2
         exit 1
@@ -784,6 +789,7 @@ if [ -n "$nk_on" ]; then
       echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
     fi
   done
+  source_pin=
 fi
 # END game TLS repair
 

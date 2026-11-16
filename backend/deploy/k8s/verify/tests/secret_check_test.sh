@@ -34,16 +34,22 @@ done
 
 run_case() { # name expected-status env-file-lines...
 	local name="$1" want="$2" rc=0
+	local -a lc=()
 	shift 2
+	if [ -n "${CASE_LC_ALL:-}" ]; then
+		name="$name [LC_ALL=$CASE_LC_ALL]"
+		lc=(LC_ALL="$CASE_LC_ALL")
+	fi
 	printf '%s\n' "$@" > "$WORK/deploy/.env"
 	: > "$WORK/guard.log"
 	env -i PATH="$WORK/bin:$PATH" \
 		RPG_FACTORY_WORKSPACE="${RPG_FACTORY_WORKSPACE:-}" \
 		SECRET_CHECK_GUARD_LOG="$WORK/guard.log" \
+		${lc[@]+"${lc[@]}"} \
 		bash "$WORK/deploy/stack.sh" check-secrets > "$WORK/output" 2>&1 || rc=$?
 	if [ "$rc" -eq "$want" ]; then ok "$name: status"; else bad "$name: status"; fi
 	if grep -Fq -e test-jwt-a -e test-join-a -e test-join-b -e test-jwt-new -e test-jwt-old \
-		-e dev-secret-change-me -e dev-join-secret-change-me "$WORK/output"; then
+		-e test-join-c -e dev-secret-change-me -e dev-join-secret-change-me "$WORK/output"; then
 		bad "$name: secret appeared in stdout/stderr"
 	else
 		ok "$name: no secret in stdout/stderr"
@@ -68,6 +74,9 @@ run_case per-game-equal 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a
 run_case per-game-empty 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO='
 run_case per-game-rotation 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b,test-jwt-a'
 run_case per-game-distinct 0 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b'
+run_case per-game-shares-default 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b,test-join-a'
+run_case two-games-share 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b' 'JOIN_TOKEN_SECRET_BAR=" test-join-b"'
+run_case games-distinct 0 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b' 'JOIN_TOKEN_SECRET_BAR=test-join-c'
 run_case unusable-keyring 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=" , "'
 # JWT_SECRET is a keyring at the gateway too: every join key is compared with
 # every JWT key, not with the whole JWT_SECRET string.
@@ -75,6 +84,17 @@ run_case jwt-keyring-shared 1 'JWT_SECRET=test-jwt-new,test-jwt-old' 'JOIN_TOKEN
 run_case jwt-keyring-distinct 0 'JWT_SECRET=test-jwt-new,test-jwt-old' 'JOIN_TOKEN_SECRET=test-join-a'
 run_case jwt-keyring-trimmed 1 'JWT_SECRET=" test-jwt-new , test-jwt-old"' 'JOIN_TOKEN_SECRET=test-join-a,test-jwt-new'
 run_case jwt-keyring-per-game 1 'JWT_SECRET=test-jwt-new,test-jwt-old' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b,test-jwt-old'
+
+# Go trims both Unicode edges even when the shell's locale is C.
+for CASE_LC_ALL in C C.UTF-8; do
+	for edge in $'\xc2\xa0' $'\xe3\x80\x80'; do
+		run_case unicode-auth-overlap 1 'JWT_SECRET=test-jwt-a' "JOIN_TOKEN_SECRET=\"${edge}test-jwt-a${edge}\""
+		run_case unicode-default-overlap 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' "JOIN_TOKEN_SECRET_FOO=\"${edge}test-join-a${edge}\""
+		run_case unicode-games-overlap 1 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' 'JOIN_TOKEN_SECRET_FOO=test-join-b' "JOIN_TOKEN_SECRET_BAR=\"${edge}test-join-b${edge}\""
+		run_case unicode-games-distinct 0 'JWT_SECRET=test-jwt-a' 'JOIN_TOKEN_SECRET=test-join-a' "JOIN_TOKEN_SECRET_FOO=\"${edge}test-join-b${edge}\"" 'JOIN_TOKEN_SECRET_BAR=test-join-c'
+	done
+done
+unset CASE_LC_ALL
 
 # ------------------------------------------------------------------ k8s path
 mkdir -p "$WORK/k8s-bin"

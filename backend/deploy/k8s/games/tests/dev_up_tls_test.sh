@@ -37,7 +37,7 @@ get)
     case "${2-}" in *nakama-url*) cat "$FIXTURE/$ns.url";; *nakama-tls-pin*) cat "$FIXTURE/$ns.pin";; '') :;; *) exit 99;; esac
   elif [ "$kind/$name" = secret/nakama-tls-pin ]; then
     [ -f "$FIXTURE/$ns.secret" ] || exit 1
-    case "${2-}" in *metadata.name*) printf nakama-tls-pin;; *tls*crt*) printf 'ZHVtbXk=';; '') :;; *) exit 99;; esac
+    case "${2-}" in *metadata.name*) printf nakama-tls-pin;; *tls*crt*) base64 < "$FIXTURE/source.crt";; '') :;; *) exit 99;; esac
   elif [ "$kind/$name/$ns" = secret/nakama-tls/rpg-k8s-data ]; then
     printf nakama-tls
   else exit 99; fi ;;
@@ -69,6 +69,7 @@ setup() {
     : > "$FIXTURE/$ns.pin"
   done
   : > "$FIXTURE/rpg-k8s-realtime.secret"
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' 'fake-public-certificate' '-----END CERTIFICATE-----' > "$FIXTURE/source.crt"
 }
 run_blocks() {
   GAMES_LIST=(cuvara ember frost)
@@ -99,6 +100,18 @@ setup; printf 'https://ember.example:7350' > "$FIXTURE/rpg-k8s-realtime-ember.ur
 if ! (run_blocks) > "$WORK/out" 2>&1 && grep -q 'rpg-k8s-realtime-ember' "$WORK/out"; then ok 'TLS off rejects game https'; else bad 'TLS off rejects game https'; fi
 setup; TLS_ON=1; rm "$FIXTURE/rpg-k8s-realtime.secret"
 if ! (run_blocks) > "$WORK/out" 2>&1 && grep -q 'ERROR:' "$WORK/out"; then ok 'missing source pin refused'; else bad 'missing source pin refused'; fi
+for source in empty non-PEM; do
+  setup
+  : > "$FIXTURE/source.crt"
+  [ "$source" = empty ] || printf '%s\n' 'fake-invalid-certificate-value' > "$FIXTURE/source.crt"
+  if ! (run_blocks) > "$WORK/out" 2>&1 && grep -q 'ERROR:.*source.*tls.crt' "$WORK/out" \
+    && ! grep -Eq '^(create|apply) ' "$LOG" \
+    && ! grep -Fq 'fake-invalid-certificate-value' "$WORK/out"; then
+    ok "$source source certificate refused without provisioning or value output"
+  else
+    bad "$source source certificate refused without provisioning or value output"
+  fi
+done
 setup; rm "$FIXTURE/rpg-k8s-realtime-ember.url"
 if ! (run_blocks) > "$WORK/out" 2>&1 && grep -q 'render.py --game ember --nakama-tls' "$WORK/out"; then ok 'missing game config refused'; else bad 'missing game config refused'; fi
 echo "passed: $PASS failed: $FAIL"
