@@ -408,10 +408,8 @@ func (g *Gateway) OnEvent(ev storage.Event) {
 // consumption indefinitely.
 const serverDownEvictTimeout = 5 * time.Second
 
-// handleServerDown consumes one server_down event: it evicts the named server
-// from the registry so the assignment path stops returning it. Eviction is
-// idempotent and a re-registering server becomes assignable again through the
-// normal path, so acting on a duplicate or stale event is harmless.
+// handleServerDown evicts the named server only when its game matches the event.
+// A missing game ID denotes the default game; duplicate events are harmless.
 func (g *Gateway) handleServerDown(payload []byte) {
 	var ev registry.ServerDownEvent
 	if err := json.Unmarshal(payload, &ev); err != nil {
@@ -419,21 +417,22 @@ func (g *Gateway) handleServerDown(payload []byte) {
 		return
 	}
 	if ev.ServerID == "" {
-		g.logger.Warn("server_down event with empty server_id, ignoring")
+		g.logger.Warn("server_down event with empty server_id, ignoring", "game_id", constants.GameOrDefault(ev.GameID))
 		return
 	}
 
+	gameID := constants.GameOrDefault(ev.GameID)
 	ctx, cancel := context.WithTimeout(context.Background(), serverDownEvictTimeout)
 	defer cancel()
-	if err := g.registry.Evict(ctx, ev.ServerID); err != nil {
+	if err := g.registry.Evict(ctx, gameID, ev.ServerID); err != nil {
 		// The registry TTL remains the backstop: a failed eviction degrades to
 		// the pre-#236 behaviour instead of losing the event silently.
 		g.logger.Warn("failed to evict dead server from registry; its TTL is now the only removal path",
-			"server_id", ev.ServerID, "map_id", ev.MapID, "err", err)
+			"game_id", gameID, "server_id", ev.ServerID, "map_id", ev.MapID, "err", err)
 		return
 	}
 	g.logger.Info("evicted dead server from registry",
-		"server_id", ev.ServerID, "map_id", ev.MapID)
+		"game_id", gameID, "server_id", ev.ServerID, "map_id", ev.MapID)
 }
 
 // EventCount returns how many events the relay has delivered so far.

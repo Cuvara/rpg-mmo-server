@@ -830,6 +830,11 @@ servers:map:{game}:{map_id}   SET   server ids of another game on that map
 returns 0 without touching any key (`storage.ErrGameMismatch` in Go,
 `RegistryGameMismatchException` in C#); otherwise `HSET`, `PEXPIRE`, `SADD` as before.
 
+`DeregisterForGame` checks the normalized owner before deleting; absent entries succeed
+and foreign entries return `ErrGameMismatch` unchanged. Redis reads the map then atomically
+rechecks it and ownership while deleting the hash and index member, with bounded retries if
+the map changed. `Deregister` remains the game-blind graceful path.
+
 **Why**:
 
 - **Absent means the default game** (same rule as the `gid` claim): every hash written
@@ -851,7 +856,7 @@ returns 0 without touching any key (`storage.ErrGameMismatch` in Go,
   hash-is-truth liveness rule above.
 - **Not cluster-safe, by consequence.** The script takes `servers:id:{id}` and the map
   index key together, and `Deregister`'s `TxPipeline` deletes and removes across the same
-  two keys. They hash to different slots, so Redis Cluster refuses both (`CROSSSLOT`). The
+  two keys; game-checked deregistration also spans them. They hash to different slots, so Redis Cluster refuses these operations (`CROSSSLOT`). The
   supported topology is one standalone Redis or a Sentinel-managed primary (ADR-4), and the
   Go store uses a plain `redis.Client`, not a cluster client. Making it cluster-safe would
   need hash-tagged key names, a contract change on both sides. The C# connection disables

@@ -19,6 +19,7 @@ public class JoinGameIdTests
 
     [Theory]
     [InlineData(null, null)]
+    [InlineData(null, "")]
     [InlineData(null, "cuvara")]
     [InlineData("foo", "foo")]
     public async Task MatchingGame_Joins(string? serverGame, string? tokenGame)

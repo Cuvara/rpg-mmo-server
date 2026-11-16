@@ -86,6 +86,30 @@ persistentvolumeclaim/data-redis-0           Bound   1Gi   RWO   local-path
 
 ---
 
+## Default game database role
+
+`apply.sh` generates the `gamestate-default-role` ConfigMap from the original
+`../../db/provision-default-role.sh`. After the database is ready, run the manual
+`job-default-role.yaml` Job before starting game servers, on both fresh and reused
+PVCs. Set the `postgres-game` Secret's `GAMESTATE_ROLE_PASSWORD` to the same
+password used in the app tier's `game-db-url`; `GAMESTATE_APP_USER` must be
+`gamestate`. The Job uses `POSTGRES_USER` and `POSTGRES_PASSWORD` as bootstrap
+admin credentials, and passes `POSTGRES_DB` as `POSTGRES_GAME_DB` to the
+provisioner (default `gamestate` for a manual invocation). The database name must
+be an ASCII identifier of at most 63 characters, starting with a letter or underscore.
+It transfers existing database objects without recreating the
+database and revokes PUBLIC CONNECT on other databases, which affects other roles
+that rely on that grant. Review those access requirements before running it.
+
+```bash
+kubectl --context k3d-rpg-dev -n rpg-k8s-data apply -f job-default-role.yaml
+kubectl --context k3d-rpg-dev -n rpg-k8s-data wait --for=condition=complete job/default-role --timeout=120s
+kubectl --context k3d-rpg-dev -n rpg-k8s-data logs job/default-role
+kubectl --context k3d-rpg-dev -n rpg-k8s-data delete job default-role
+```
+
+Recreate the Job to rerun the idempotent upgrade after changing the app password.
+
 ## The initdb ConfigMap, and what a reused PVC means
 
 `postgres-game` mounts `db/init-gamestate.sql` into
@@ -204,7 +228,7 @@ Same namespace, short name is enough; the FQDN is what to use across namespaces.
 | Service | In-cluster address | Notes |
 |---|---|---|
 | PostgreSQL meta | `postgres-meta:5432` | `postgres-meta.rpg-k8s-data.svc.cluster.local` |
-| PostgreSQL gamestate | `postgres-game:5432` | `GAME_DB_URL=postgres://game:localdev@postgres-game:5432/gamestate?sslmode=disable` |
+| PostgreSQL gamestate | `postgres-game:5432` | `GAME_DB_URL=postgres://gamestate:localdev-app@postgres-game:5432/gamestate?sslmode=disable` |
 | Redis | `redis:6379` | `REDIS_ADDR=redis:6379` — same value as compose, so app env ports over unchanged |
 | Nakama HTTP | `nakama:7350` | `NAKAMA_URL=http://nakama:7350` — also unchanged from compose |
 | Nakama gRPC / console / metrics | `nakama:7349` / `:7351` / `:9100` | metrics for a future Prometheus scrape |
@@ -336,12 +360,15 @@ so it cannot read or create the real deploy `.env`. From `backend/deploy`:
 ```
 
 For the k8s half, **do not run the whole `dev-up.sh` as a dry run**: it applies
-resources before reaching these checks. This isolated dry run extracts only its
-read-only JWT/join checks and puts a fake `kubectl` first on PATH. The fake only
+namespaces and imports images before reaching these checks. This isolated dry run
+extracts only its read-only JWT/join checks and puts a fake `kubectl` first on PATH. The fake only
 accepts the throwaway, nonexistent context `k3d-rpg-secret-check-does-not-exist`;
 it never calls a cluster or reads a real Secret. `k8s/verify/tests/secret_check_test.sh`
-automates these cases (and more) with the same awk markers; the block below is the
-manual equivalent. From `backend/deploy`:
+automates these cases (and more). It extracts the block between
+`# BEGIN app-secret and join-keyring checks (read-only)` and
+`# END app-secret and join-keyring checks`, asserts each marker occurs exactly
+once, and asserts the block ends before the first `apply -k "$HERE/data"`.
+The block below is the manual equivalent. From `backend/deploy`:
 
 ```bash
 (
@@ -349,13 +376,21 @@ manual equivalent. From `backend/deploy`:
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
   mkdir "$work/bin"
-  awk '/^nk_jwt=/ { copy=1 } copy { print }
-       /^echo "checked: rpg-app-secrets.*join-token-secret/ { exit }' \
+  begin='# BEGIN app-secret and join-keyring checks (read-only)'
+  end='# END app-secret and join-keyring checks'
+  [ "$(grep -Fxc "$begin" k8s/dev-up.sh)" -eq 1 ]
+  [ "$(grep -Fxc "$end" k8s/dev-up.sh)" -eq 1 ]
+  awk -v b="$begin" -v e="$end" \
+    '$0 == b { copy=1 } copy { print } $0 == e { exit }' \
     k8s/dev-up.sh > "$work/check.sh"
-  grep -q '^echo "checked: rpg-app-secrets.*join-token-secret' "$work/check.sh"
+  grep -Fxq "$end" "$work/check.sh"
+  end_line=$(grep -nFx "$end" k8s/dev-up.sh | cut -d: -f1)
+  data_line=$(grep -nF 'apply -k "$HERE/data"' k8s/dev-up.sh | head -n 1 | cut -d: -f1)
+  [ "$end_line" -lt "$data_line" ]
   cat > "$work/bin/kubectl" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
+  '--context k3d-rpg-secret-check-does-not-exist get secret rpg-app-secrets -n rpg-k8s-realtime') : ;;
   '--context k3d-rpg-secret-check-does-not-exist get secret nakama -n rpg-k8s-data -o jsonpath={.data.JWT_SECRET}'|\
   '--context k3d-rpg-secret-check-does-not-exist get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath={.data.jwt-secret}')
     printf '%s' "$FAKE_JWT" | base64 ;;

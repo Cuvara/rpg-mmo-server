@@ -10,8 +10,9 @@
 # for arguments needing shell quoting. Do not put passwords in PSQL_CMD.
 # --revoke-public-connect removes PUBLIC CONNECT on every other non-template
 # database currently accessible to this role. Roles relying on PUBLIC lose new
-# connections there; owners and superusers retain access. The default game's
-# existing user owns gamestate. No privileges are granted on that database.
+# connections there; owners and superusers retain access. Provision cuvara's
+# existing gamestate database with provision-default-role.sh instead. No
+# privileges are granted on that database by this per-game script.
 # The flag is normally required: on stock PostgreSQL, PUBLIC holds CONNECT on
 # postgres and gamestate, so a run without it creates the role and database and
 # then fails the isolation check (exit 1). Rerunning with the flag converges.
@@ -31,7 +32,7 @@ shift
 	usage_error 'invalid game id: expected ^[a-z][a-z0-9]{1,23}$'
 case "$game" in
 	gs|map|dungeon) usage_error "reserved game id: $game" ;;
-	cuvara) usage_error 'cuvara is the default game; it keeps the existing gamestate database and its existing user' ;;
+	cuvara) usage_error 'cuvara is the default game; use provision-default-role.sh for its existing gamestate database' ;;
 esac
 
 connection_limit=20

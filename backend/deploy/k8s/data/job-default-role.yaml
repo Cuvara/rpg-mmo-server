@@ -1,0 +1,57 @@
+# Manual, idempotent upgrade; apply.sh first creates gamestate-default-role.
+# Run after postgres-game is ready and before starting the default game servers.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: default-role
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: data
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rpg-mmo
+        rpg-mmo/tier: data
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: provision
+          image: postgres:16.4-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: postgres-game }
+          env:
+            - name: PGHOST
+              value: postgres-game
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: postgres-game, key: POSTGRES_USER } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-game, key: POSTGRES_PASSWORD } }
+            - name: PGDATABASE
+              valueFrom: { secretKeyRef: { name: postgres-game, key: POSTGRES_DB } }
+            - name: POSTGRES_GAME_DB
+              valueFrom: { secretKeyRef: { name: postgres-game, key: POSTGRES_DB } }
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              [ "${GAMESTATE_APP_USER}" = gamestate ] || { echo "GAMESTATE_APP_USER must be gamestate" >&2; exit 1; }
+              for i in $(seq 1 30); do
+                if pg_isready; then break; fi
+                echo "postgres-game not ready, retrying ($i/30)"; sleep 2
+              done
+              tr -d "\r" < /mnt/provision-default-role.sh > /tmp/provision-default-role.sh
+              bash /tmp/provision-default-role.sh
+          volumeMounts:
+            - name: script
+              mountPath: /mnt
+              readOnly: true
+      volumes:
+        - name: script
+          configMap:
+            name: gamestate-default-role

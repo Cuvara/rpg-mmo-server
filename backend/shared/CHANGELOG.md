@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Pin the shared JWT golden-vector fixture to LF in root `.gitattributes`, so
+  deterministic byte comparisons pass on Windows checkouts with `core.autocrlf`.
+- Correct the `Claims.GameID` comment: issuers populate `gid` for non-default games;
+  default-game tokens omit it.
+- Harden JWT verification to match the C# parser: require canonical unpadded
+  base64url, a 32-byte HS256 signature, exact `alg:"HS256"` and `typ:"JWT"`,
+  UTF-8 JSON objects without duplicate members, typed case-sensitive claims,
+  a non-empty subject, a positive integer expiration, and valid `iat`/`nbf` with
+  five-second clock skew. Reject empty secrets, critical headers and invalid
+  game IDs. Preserve populated claims only for otherwise valid expired tokens,
+  so key rotation keeps its expiry short-circuit. Explicit `gid:""` and
+  `gid:"cuvara"` stay accepted because existing test tokens depend on them
+  (C# `JwtCharacterClaimTests.Verify_ReadsGidAlongsideCid_AndToleratesAbsence`,
+  `JoinGameIdTests.MatchingGame_Joins`). Explicit empty `cid` stays supported.
+  Current Nakama and gateway issuers already use HS256/JWT and positive
+  expirations, and omit `gid` for the default game.
+- Game-checked deregistration protects a replacement server owned by another game, including legacy default-game entries. Redis removes the matching hash and map index atomically.
 - Docs only: `docs/DESIGN.md` (ADR-33 registry section) and `docs/API.md` now say the registry
   key scheme is not cluster-safe. The register script and `Deregister`'s `TxPipeline` each span
   `servers:id:{id}` and the map index key, which hash to different slots, so the registry needs
@@ -14,6 +31,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   interface (ADR-33 leg 3 widened it) and drops the notes saying it was a concrete method only.
 
 ### Added
+- Add 153 deterministic shared JWT golden vectors in `testdata/jwt/vectors.json`,
+  read by both the Go and the C# test suites so the parsers cannot drift.
+  Regenerate from `backend/shared` with `go test ./jwt/ -update-jwt-vectors`.
 - **`constants.SessionKey(gameID, userID)` (ADR-33 leg 3).** The session store key:
   `session:{user_id}` for the default game (empty or `cuvara`, unchanged from today) and
   `session:{game}:{user_id}` for any other game. The gateway's session manager uses it.

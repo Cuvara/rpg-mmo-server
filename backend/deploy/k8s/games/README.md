@@ -11,14 +11,19 @@ Read first: ADR-33 D2 (option S1, game-qualified server ids), D3, D6 and D7 in
 
 ## What a render gives you
 
+`--nakama-tls` is required when rendering manifests or using `--out` (which writes
+all three outputs). Standalone `--print secret-template` and `--print gateway-env`
+do not contain Nakama settings, so they can omit the flag.
+
 ```bash
 cd backend/deploy/k8s/games
-python render.py --game ember                          # manifests on stdout
-python render.py --game ember --print secret-template  # the Secret TEMPLATE
-python render.py --game ember --print gateway-env      # the gateway env snippet
-python render.py --game ember --out /tmp/ember         # all three as files (keep out of git)
+python render.py --game ember --nakama-tls off                          # manifests on stdout
+python render.py --game ember --nakama-tls off --print secret-template  # the Secret TEMPLATE
+python render.py --game ember --nakama-tls off --print gateway-env      # the gateway env snippet
+python render.py --game ember --nakama-tls off --out /tmp/ember         # all three as files (keep out of git)
 #   [--env k8s] [--stack-namespace rpg-k8s-realtime]
 #   [--image rpg-mmo/gameserver-dotnet:ember-develop]
+#   [--nakama-url URL] [--nakama-tls-pin PATH]
 ```
 
 | Object | Name (`--game ember`, defaults) | Derived from |
@@ -36,9 +41,9 @@ python render.py --game ember --out /tmp/ember         # all three as files (kee
 | Gateway env (separate output) | `ALLOCATOR_FLEET_MAP_EMBER`, `ALLOCATOR_FLEET_DUNGEON_EMBER`, `ALLOCATOR_NAMESPACE_EMBER`, `JOIN_TOKEN_SECRET_EMBER`; its header carries the `gateway-config` patch that sets `games` (no `GAMES` env entry, see below) | gateway `cmd/gateway/main.go`, `registry.FleetEnvName` |
 
 **The `k8s/app/` files are the source of truth.** The renderer loads them and
-only renames, re-namespaces, re-labels (`rpg-mmo/game: <game>`) and re-images,
+renames, re-namespaces, re-labels (`rpg-mmo/game: <game>`), re-images, and sets Nakama TLS configuration,
 so a game cannot drift from cuvara's fleet shape: a change to
-`app/50-fleet-map.yaml` reaches every game on the next render. The one semantic
+`app/50-fleet-map.yaml` reaches every game on the next render. Another semantic
 change is `GAMESERVER_GAME_ID`: in `k8s/app` it reads `gameserver-config` key
 `game-id` with `optional: true` (absent means cuvara); here the key is set to
 the game and the reference is **required**, because a non-default game's pod
@@ -57,7 +62,10 @@ template has no `jwt-secret` key.
 - an `--env` or `--stack-namespace` that is not an RFC 1123 label, or a stack
   namespace that already ends in `-<game>`;
 - any fleet name over **51** characters, and any namespace or other name over
-  **63**.
+  **63**;
+- a Nakama URL with whitespace, no host, or a scheme inconsistent with the TLS
+  decision; a pin with whitespace; TLS on with an empty or relative pin; or
+  TLS off with any pin.
 
 `validate-manifests.py` (no file arguments) renders `ember` and the longest
 legal id (24 characters) in memory, validates every rendered document and
@@ -130,7 +138,7 @@ Once set, cuvara is served only if listed, so the value is `cuvara,<game>`
 `join-token-secret-<game>` in the stack namespace and `join-token-secret` in
 the game namespace hold the **same value**, which must differ from every other
 game's (ADR-33 D7: a game server can forge join tokens for any server sharing
-its join secret; the gateway warns when two games share a key). The gateway's
+its join secret; the gateway refuses to start if keys are shared). The gateway's
 own ServiceAccount, Role and RoleBinding in `k8s/app/10-rbac.yaml` are
 unchanged; the game namespace's Role/RoleBinding is the only new grant.
 
@@ -145,14 +153,34 @@ unchanged; the game namespace's Role/RoleBinding is the only new grant.
    (`<game>-develop` from develop, which is render.py's default `--image`);
    add the game to that list in both `publish-images.yml` and `cd.yml`
    (`docs/CICD.md`, "Images per game").
-3. Render with `--out` to a directory **outside** the repo.
+3. Read `tls-cert-path` in `rpg-k8s-data/nakama-config`: a set value means TLS
+   is on; otherwise it is off. Render with the required `--nakama-tls on` or
+   `--nakama-tls off` and `--out` to a directory **outside** the repo. The
+   default URL uses the source ConfigMap host with `https` when on and `http`
+   when off. The default pin is `/etc/nakama-tls/tls.crt` when on and empty
+   when off. `--nakama-url` and `--nakama-tls-pin` override these defaults;
+   TLS on requires an `https://` URL and non-empty absolute pin path, while
+   off requires an `http://` URL and empty pin. URLs require a host, and neither
+   input may contain whitespace.
+   With TLS on, the game namespace needs Secret `nakama-tls-pin` containing
+   only the public certificate under `tls.crt`, copied from
+   `rpg-k8s-realtime/nakama-tls-pin`. The manifests header gives a pipe command
+   that copies it without printing its value. `dev-up.sh` provisions this Secret
+   and repairs `gameserver-config` in every game namespace
+   `rpg-k8s-realtime-<game>` listed in `gateway-config`'s `games`.
 4. Fill the Secret template there (or `kubectl create secret generic`), with
    `game-db-url` for `gamestate_<game>`, `join-token-secret`, `nakama-http-key`
    (same value as cuvara's) and the optional keys. Create `registry-creds` in
    the game namespace if the image is pulled from the registry
    (`k8s/registry/README.md`).
-5. Add `join-token-secret-<game>` to the stack namespace's `rpg-app-secrets`,
-   merge the gateway env snippet, set `games` in `gateway-config` (the patch
+5. Before the gateway can serve the game, add `join-token-secret-<game>` to
+   `rpg-k8s-realtime/rpg-app-secrets` with its own keyring, sharing no keys
+   with `jwt-secret` or another game's join keyring. The game namespace's
+   `rpg-app-secrets` must exist with `join-token-secret` equal to it.
+   `dev-up.sh` refuses deployment before applying workloads otherwise. The
+   gateway refuses to start if any key is shared; a missing per-game key only
+   warns and refuses EnterWorld for that game. Merge the gateway env snippet,
+   set `games` in `gateway-config` (the patch
    in the snippet header) and in `rpg-k8s-data`'s `nakama-config` (the recipe
    in `k8s/data/nakama.yaml`) to the same list, then roll the gateway and
    Nakama.

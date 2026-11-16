@@ -169,7 +169,7 @@ Useful variants:
 ./scripts/setup-github-env.sh staging --generate \
   --deploy-dir /srv/rpg --deploy-mode containers \
   --gameserver-public-addr game.example.com:9200 \
-  --game-db-url 'postgres://game:<pw>@localhost:5433/gamestate?sslmode=disable'
+  --game-db-url 'postgres://gamestate:<app-password>@localhost:5433/gamestate?sslmode=disable'
 
 # see everything it would do
 ./scripts/setup-github-env.sh production --generate --dry-run --non-interactive
@@ -215,7 +215,7 @@ grep -oE 'vars\.[A-Z_]+' .github/workflows/cd.yml | sort -u
 | `GAMESERVER_PUBLIC_ADDR` | `:<gameserver port>` | **The address handed to clients verbatim** in `MsgEnterWorldResp.ServerAddr`, so it must be one they can dial. The default is listen-style (hostless), which only clients that rewrite it to their own loopback will accept at all — the Go smoketest does, a C# `TcpClient` throws — so it is correct only for host-mode deploys. On a VPS this must be `<public-host-or-ip>:<port>`. This is the single most common misconfiguration. |
 | `GATEWAY_CONTAINER_PORT` / `GAMESERVER_CONTAINER_PORT` | port of the matching `*_ADDR` | Host ports the containers publish (containers mode). |
 | `REDIS_ADDR` | `localhost:6379` | Redis as the *host processes* see it. Containers use the in-network name automatically. |
-| `GAME_DB_URL` | *(empty)* | Game-state Postgres DSN. **Empty keeps the in-memory player store — progress is lost on restart**, and the `db-migrate` job skips itself. Point it at the `postgres-game` service as the host sees it, e.g. `postgres://game:localdev@localhost:5433/gamestate?sslmode=disable`. |
+| `GAME_DB_URL` | *(empty)* | Game-state Postgres DSN. **Empty keeps the in-memory player store — progress is lost on restart**, and the `db-migrate` job skips itself. Point it at the `postgres-game` service as the host sees it **as the app role `gamestate`, never the bootstrap superuser `game`**: `postgres://gamestate:<app-password>@localhost:5433/gamestate?sslmode=disable`. In `DEPLOY_MODE=host` this one value feeds both the game server (`deploy-local.sh` sources `deploy/.env` before starting `gameserver-dotnet`) and the `db-migrate` job's `--migrate-only`; the app role owns database `gamestate`, so the game server's `Migrator` and `--migrate-only` both work with it. The role must exist first: see "The game database login" below. |
 
 **Backing services**
 
@@ -246,6 +246,33 @@ grep -oE 'vars\.[A-Z_]+' .github/workflows/cd.yml | sort -u
 | `BACKUP_DIR` | `$RPG_DEPLOY_DIR/backups` | Where `pg_dump` output lands. `/var/backups` is root-only on a stock host and CD does not run as root. |
 | `BACKUP_KEEP` | `7` | Dumps retained per database. |
 
+**The game database login (`gamestate`)**
+
+`postgres-game` runs under Docker Compose on the VPS in both deploy modes, as
+`rpg-postgres-game` (the data-tier step of `cd.yml` runs `docker compose up -d`
+before migrating). The restricted login `gamestate` is created, and ownership of
+an existing `gamestate` database moved to it, by `db/provision-default-role.sh`
+(`docs/DATABASE.md`, "Default game's restricted login"):
+
+- **Compose runs it for you.** The one-shot `postgres-game-roles` service
+  executes the script as the bootstrap user on every `docker compose up`, so the
+  data-tier step creates the role. That step only waits for `pg_isready` on
+  `postgres-game`, not for the one-shot to finish; if the first `db-migrate`
+  fails with an authentication error, check
+  `docker compose ps -a postgres-game-roles` and run
+  `docker compose up postgres-game-roles` from `$RPG_DEPLOY_DIR/deploy`, then
+  re-run the deploy.
+- **By hand** (a Postgres that compose does not manage), run the script with an
+  administrative connection, `PSQL_CMD` pointing at it and
+  `GAMESTATE_ROLE_PASSWORD` exported: see the script header.
+- **The password.** The role's password is `POSTGRES_GAME_APP_PASSWORD`, which
+  defaults to `localdev-app` in `docker-compose.yml`. `cd.yml` does not write
+  that variable into `deploy/.env` (which it regenerates wholesale on every
+  deploy), so a CD-managed stack currently creates the role with the default
+  and `GAME_DB_URL` must carry the same value. The port is published on every
+  interface, so on a public VPS firewall 5433 and treat wiring a real
+  `POSTGRES_GAME_APP_PASSWORD` through CD as a follow-up.
+
 ### Doing it by hand
 
 If you would rather not run the script, this is the equivalent (the script adds
@@ -270,7 +297,7 @@ gh variable set GAMESERVER_PUBLIC_ADDR --env "$ENV" --repo "$REPO" --body 'game.
 gh variable set GAMESERVER_MAP_ID      --env "$ENV" --repo "$REPO" --body 'map_01'
 gh variable set REDIS_ADDR             --env "$ENV" --repo "$REPO" --body 'localhost:6379'
 gh variable set GAME_DB_URL            --env "$ENV" --repo "$REPO" \
-  --body 'postgres://game:localdev@localhost:5433/gamestate?sslmode=disable'
+  --body 'postgres://gamestate:<app-password>@localhost:5433/gamestate?sslmode=disable'
 gh variable set MONITORING_ENABLED     --env "$ENV" --repo "$REPO" --body 'true'
 gh variable set GRAFANA_BIND           --env "$ENV" --repo "$REPO" --body '127.0.0.1'
 ```

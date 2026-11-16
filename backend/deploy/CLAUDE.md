@@ -169,3 +169,5 @@ deploy/
     uptime/
       health-endpoints.yaml
 ```
+
+The default game server connects as the fixed `gamestate` app role. `POSTGRES_GAME_USER` and `POSTGRES_GAME_PASSWORD` are bootstrap/admin credentials; use `POSTGRES_GAME_APP_USER` and `POSTGRES_GAME_APP_PASSWORD` for game DSNs.

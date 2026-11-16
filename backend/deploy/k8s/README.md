@@ -30,6 +30,40 @@ the gateway's allocate Role there — all rendered from `app/` by
 because Agones 1.59.0 names pods fleet + 12. Nothing is instantiated for a real
 second game and `dev-up.sh` applies none of it. Read `games/README.md`.
 
+`dev-up.sh` does **check** every game the gateway serves before it applies any
+workload (MULTI-GAME-CROSS-REVIEW MG-02). Only the two namespaces
+(`data/namespace.yaml`, `app/00-namespace.yaml`) are applied first, so the
+Secrets have somewhere to live on a first deploy; the checks then run, read-only,
+before the data tier, the app tier or any fleet is applied, so a refused deploy
+leaves no new pod holding a shared key. It reads `gateway-config`'s `games` key,
+parsed like the gateway's `GAMES` (blank, or a ConfigMap that does not exist yet,
+means cuvara only; an invalid entry is refused), and refuses to continue when:
+
+- `rpg-k8s-realtime/rpg-app-secrets` is absent, or its `jwt-secret` differs from
+  `rpg-k8s-data/nakama`'s `JWT_SECRET`;
+- any key of any game's join keyring (`join-token-secret` for cuvara, which is
+  always checked, and `join-token-secret-<game>` in `rpg-k8s-realtime`'s
+  `rpg-app-secrets` for every other game) equals any `jwt-secret` key;
+- two games' join keyrings share a key;
+- a listed non-default game has no `join-token-secret-<game>`, or one with no
+  non-empty key (it is listed, so the deploy must serve it);
+- `rpg-k8s-realtime-<game>/rpg-app-secrets` is absent (apply the game's Secret
+  first: `games/render.py --game <game> --nakama-tls off --print secret-template`), or its
+  `join-token-secret` is not the same ordered key list as the gateway's
+  `join-token-secret-<game>`.
+
+Keyrings are compared key by key after the gateway's parsing (split on `,`,
+trim, drop empty entries). The trim is Go's `strings.TrimSpace` reproduced byte
+for byte in any locale: ASCII whitespace plus U+0085, U+00A0, U+1680,
+U+2000-U+200A, U+2028, U+2029, U+202F, U+205F and U+3000 at either end of an
+entry, never inside one. `gateway-config`'s `games` entries are trimmed the same
+way. Messages name games and Secret keys, never a value.
+The block sits between the `# BEGIN app-secret and join-keyring checks` and
+`# END app-secret and join-keyring checks` lines of `dev-up.sh`;
+`verify/tests/secret_check_test.sh` extracts exactly that span, runs it against
+a fake `kubectl` on a nonexistent context, and fails if the block ever moves
+below the first workload apply.
+
 ## Bring dev up
 
 ```bash
@@ -43,7 +77,11 @@ pins the image tags, retires the legacy fleet and the compose stack, and starts
 the published host ports.
 
 The Secret is **not** in the repo. `app/30-secret-template.yaml` is a template;
-fill a copy outside the tree and apply it before the first run.
+fill a copy outside the tree and apply it before the first run (on a fresh
+cluster, `kubectl apply -f app/00-namespace.yaml` first, or let `dev-up.sh`
+create the namespace and stop at the check). Its `join-token-secret` must share
+no key with its `jwt-secret`; with more than one game, see the per-game join
+keyring checks under "Other games" above.
 
 ### Ports
 
@@ -515,3 +553,11 @@ docker build -f deploy/docker/Dockerfile.nakama \
 The `data/nakama.yaml` Deployment references `rpg-mmo/nakama:3.40.0` with
 `imagePullPolicy: IfNotPresent`. For k3d, import the image after building.
 For a real registry, push with `registry/push.sh`.
+
+### Game namespace meta-hop TLS
+
+`dev-up.sh` derives meta-hop TLS from `nakama-config` and repairs the URL and
+pin in the default namespace and every rendered game namespace listed by the
+gateway. When TLS is on it copies the public pin certificate into each game
+namespace; its ADR-24 check verifies every game namespace against the same
+TLS decision. Render each listed game before running the script.

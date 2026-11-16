@@ -193,6 +193,22 @@ func (r *MemoryServerRegistry) Deregister(_ context.Context, serverID string) er
 	return nil
 }
 
+// DeregisterForGame removes a live entry only if its normalized owner matches.
+func (r *MemoryServerRegistry) DeregisterForGame(_ context.Context, gameID, serverID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.servers[serverID]
+	if !ok || !r.alive(e) {
+		return nil
+	}
+	gameID = constants.GameOrDefault(gameID)
+	if constants.GameOrDefault(e.info.GameID) != gameID {
+		return fmt.Errorf("deregister server %s for game %s: %w", serverID, gameID, ErrGameMismatch)
+	}
+	delete(r.servers, serverID)
+	return nil
+}
+
 // FindByMapID returns live servers on mapID for the default game only.
 func (r *MemoryServerRegistry) FindByMapID(ctx context.Context, mapID string) ([]ServerInfo, error) {
 	return r.FindByGameAndMapID(ctx, constants.DefaultGameID, mapID)

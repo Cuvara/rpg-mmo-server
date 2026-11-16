@@ -29,6 +29,8 @@ import (
 // stops heartbeating; the map index is pruned lazily on lookup.
 // Registration atomically checks ownership before updating the hash, TTL and
 // index; a live id owned by another game is refused without changing Redis.
+// Game-checked deregistration atomically verifies ownership and removes the hash
+// and its map index member, retrying if the stored map changes before the script.
 const (
 	registryIDPrefix  = constants.ServerRegistryKey + "id:"
 	registryMapPrefix = constants.ServerRegistryKey + "map:"
@@ -152,7 +154,7 @@ func (r *ServerRegistry) Heartbeat(ctx context.Context, serverID string) error {
 	return nil
 }
 
-// Deregister removes the server hash and its map index entry.
+// Deregister is the game-blind graceful path; it removes the current owner and its index entry.
 func (r *ServerRegistry) Deregister(ctx context.Context, serverID string) error {
 	key := serverKey(serverID)
 	fields, err := r.client.HGetAll(ctx, key).Result()
@@ -169,6 +171,52 @@ func (r *ServerRegistry) Deregister(ctx context.Context, serverID string) error 
 		return fmt.Errorf("redis deregister server %s: %w", serverID, err)
 	}
 	return nil
+}
+
+// gameDeregisterScript checks the map read before execution, then ownership, before
+// deleting either key. Codes: 1 removed, 0 foreign, -1 absent, -2 retry.
+var gameDeregisterScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local map = redis.call('HGET', KEYS[1], 'map_id') or ''
+if map ~= ARGV[3] then return -2 end
+local current = redis.call('HGET', KEYS[1], 'game_id')
+if not current or current == '' then current = ARGV[1] end
+if current ~= ARGV[2] then return 0 end
+redis.call('DEL', KEYS[1])
+if #KEYS > 1 then redis.call('SREM', KEYS[2], ARGV[4]) end
+return 1
+`)
+
+// DeregisterForGame atomically removes the matching owner's hash and index member.
+func (r *ServerRegistry) DeregisterForGame(ctx context.Context, gameID, serverID string) error {
+	gameID = constants.GameOrDefault(gameID)
+	key := serverKey(serverID)
+	const maxAttempts = 4
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		mapID, err := r.client.HGet(ctx, key, fieldMapID).Result()
+		if err != nil && err != redis.Nil {
+			return fmt.Errorf("redis lookup server %s map: %w", serverID, err)
+		}
+		keys := []string{key}
+		if mapID != "" {
+			keys = append(keys, MapIndexKey(gameID, mapID))
+		}
+		result, err := gameDeregisterScript.Run(ctx, r.client, keys, constants.DefaultGameID, gameID, mapID, serverID).Int64()
+		if err != nil {
+			return fmt.Errorf("redis deregister server %s for game %s: %w", serverID, gameID, err)
+		}
+		switch result {
+		case 1, -1:
+			return nil
+		case 0:
+			return fmt.Errorf("redis deregister server %s for game %s: %w", serverID, gameID, storage.ErrGameMismatch)
+		case -2:
+			continue
+		default:
+			return fmt.Errorf("redis deregister server %s: unexpected result %d", serverID, result)
+		}
+	}
+	return fmt.Errorf("redis deregister server %s: map changed during %d attempts", serverID, maxAttempts)
 }
 
 // GetServer returns a single live server. Returns ErrNotFound when the entry is

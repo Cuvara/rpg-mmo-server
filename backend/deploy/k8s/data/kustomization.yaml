@@ -54,3 +54,6 @@ configMapGenerator:
 # already pin to two existing copies, so apply.sh generates the ConfigMap from
 # the original file instead. Run apply.sh, not `kubectl apply -k`, for a first
 # boot. See README.md §The initdb ConfigMap.
+
+# apply.sh also generates gamestate-default-role from ../../db/provision-default-role.sh.
+# job-default-role.yaml is a manual one-shot and is intentionally not a resource.

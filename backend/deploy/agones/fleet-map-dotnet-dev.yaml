@@ -434,13 +434,13 @@ spec:
                 # The value is a DSN CARRYING A PASSWORD, so it lives in the
                 # Secret and never in this file or the ConfigMap. k3s/setup-dev.sh
                 # writes the key, translating the compose host for a pod:
-                #   compose : postgres://game:...@postgres-game:5432/gamestate
-                #   pod/k3d : postgres://game:...@host.k3d.internal:5433/gamestate
+                #   compose : postgres://gamestate:...@postgres-game:5432/gamestate
+                #   pod/k3d : postgres://gamestate:...@host.k3d.internal:5433/gamestate
                 # The pod form is the HOST-PUBLISHED port (5433), not the
                 # in-network 5432 — a pod is not on the compose network, so it
                 # reaches postgres the same way any host process does. MEASURED
                 # from a pod in this namespace: `psql -h host.k3d.internal -p
-                # 5433 -U game -d gamestate -c '\dt'` lists player_states and
+                # 5433 -U gamestate -d gamestate -c '\dt'` lists player_states and
                 # schema_migrations.
                 #
                 # `optional: true`, and that is deliberate, matching

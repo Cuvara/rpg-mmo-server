@@ -198,7 +198,7 @@ esac
 if [[ -n "${POD_GAME_DB_URL:-}" ]]; then
   POD_GAME_DB="$POD_GAME_DB_URL"
 elif [[ -n "$DEFAULT_DB_HOST" ]]; then
-  POD_GAME_DB="postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@${DEFAULT_DB_HOST}:${POSTGRES_GAME_PORT:-5433}/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable"
+  POD_GAME_DB="postgres://${POSTGRES_GAME_APP_USER:-gamestate}:${POSTGRES_GAME_APP_PASSWORD:-localdev-app}@${DEFAULT_DB_HOST}:${POSTGRES_GAME_PORT:-5433}/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable"
 else
   POD_GAME_DB=""
 fi

@@ -347,6 +347,271 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
+# The app tier's Secret and every game's join keyring are checked HERE, before the
+# first workload is applied (MULTI-GAME-CROSS-REVIEW MG-02): a deploy that shares a
+# key between jwt-secret and a join keyring, or between two games' join keyrings,
+# must be refused before any pod that would hold that key exists. Everything
+# between the BEGIN and END markers is read-only; verify/tests/secret_check_test.sh
+# extracts exactly that span and runs it against a fake kubectl.
+#
+# rpg-app-secrets lives in rpg-k8s-realtime, which on a first deploy would only be
+# created by the app-tier apply below. So the namespace (not a workload) goes first,
+# as the data namespace does above, and gives the operator somewhere to put the
+# Secret. gateway-config may not exist yet either: an absent ConfigMap or `games`
+# key means cuvara only, the gateway's own default.
+say "apply the app namespace, then check its secrets and the join keyrings"
+$K apply -f "$HERE/app/00-namespace.yaml"
+# BEGIN app-secret and join-keyring checks (read-only)
+if ! $K get secret rpg-app-secrets -n rpg-k8s-realtime >/dev/null 2>&1; then
+  echo "ERROR: secret rpg-k8s-realtime/rpg-app-secrets is absent." >&2
+  echo "Fill a copy of app/30-secret-template.yaml OUTSIDE the repo and apply it first." >&2
+  exit 1
+fi
+
+# Asserted here, where both halves exist, and never assumed: they are applied
+# from different places -- the data tier by kustomize, this one out-of-band --
+# so nothing else compares them. A mismatch yields a stack that comes up
+# perfectly healthy and rejects every client login with
+# "local jwt verify: invalid signature". Measured on staging 2026-08-20.
+nk_jwt=$($K get secret nakama -n rpg-k8s-data -o jsonpath='{.data.JWT_SECRET}' 2>/dev/null | base64 -d 2>/dev/null || true)
+gw_jwt=$($K get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath='{.data.jwt-secret}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$nk_jwt" ] || [ "$nk_jwt" != "$gw_jwt" ]; then
+  echo "ERROR: nakama's JWT_SECRET does not equal rpg-app-secrets' jwt-secret." >&2
+  echo "  Nakama signs the gateway token; the gateway verifies it locally." >&2
+  exit 1
+fi
+echo "checked: nakama's JWT_SECRET matches the gateway's jwt-secret"
+
+# Game-server pods hold only their game's join secret (ADR-33), so these
+# comparisons must happen at deploy time, where every key is available. Every
+# one is a comma-separated rotation keyring at the gateway (shared/jwt
+# ParseKeyring: split on ',', strings.TrimSpace, drop empty entries), so compare
+# them key by key, for EVERY game the gateway serves, not only cuvara
+# (MULTI-GAME-CROSS-REVIEW MG-02):
+#   - a join key equal to ANY jwt key lets that game's pods mint gateway tokens
+#     for any user and any `gid`, and so obtain any game's legitimate join token;
+#   - a join key shared by two games lets one game's pods mint join tokens that
+#     the other game's servers verify (ADR-33 D7).
+# Messages name games and Secret key names only. Never log a value, its length
+# or its position in the list.
+#
+# Go's strings.TrimSpace, byte for byte and in any locale. [[:space:]] is not:
+# its members depend on the locale, so under LC_ALL=C a leading U+00A0 survived
+# here while the gateway trimmed it, and a key shared with jwt-secret passed this
+# check and then stopped the gateway after workloads were applied. The list is
+# exactly what Go's unicode.IsSpace accepts (ASCII \t \n \v \f \r and space;
+# U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F,
+# U+3000), as UTF-8 bytes, stripped from both ends until none is left. Only
+# whole sequences match, as Go decodes them; inner whitespace is kept. CR goes
+# in through a variable and a plain array assignment: Cygwin/MSYS bash drops a CR
+# written as a $'\r' word in any array assignment, and any CR at all in a
+# `local -a name=(...)` one, which would silently stop CR from being trimmed (the
+# parity test caught it).
+go_trim_space() { # string -> TRIMMED
+  local LC_ALL=C s="$1" prev w cr
+  local -a ws
+  cr=$'\r'
+  ws=($'\t' $'\n' $'\v' $'\f' "$cr" ' '
+    $'\xc2\x85' $'\xc2\xa0' $'\xe1\x9a\x80'
+    $'\xe2\x80\x80' $'\xe2\x80\x81' $'\xe2\x80\x82' $'\xe2\x80\x83' $'\xe2\x80\x84'
+    $'\xe2\x80\x85' $'\xe2\x80\x86' $'\xe2\x80\x87' $'\xe2\x80\x88' $'\xe2\x80\x89'
+    $'\xe2\x80\x8a' $'\xe2\x80\xa8' $'\xe2\x80\xa9' $'\xe2\x80\xaf' $'\xe2\x81\x9f'
+    $'\xe3\x80\x80')
+  while :; do
+    prev=$s
+    for w in "${ws[@]}"; do
+      s=${s#"$w"}
+      s=${s%"$w"}
+    done
+    [ "$s" != "$prev" ] || break
+  done
+  TRIMMED=$s
+}
+keyring_keys() { # spec -> KEYRING_KEYS (trimmed, non-empty entries)
+  local LC_ALL=C remaining="$1"
+  KEYRING_KEYS=()
+  while :; do
+    go_trim_space "${remaining%%,*}"
+    [ -z "$TRIMMED" ] || KEYRING_KEYS+=("$TRIMMED")
+    case "$remaining" in
+      *,*) remaining=${remaining#*,} ;;
+      *) break ;;
+    esac
+  done
+  TRIMMED=
+}
+# gameid.ValidGameID: ^[a-z][a-z0-9]{1,23}$ in ASCII, minus the reserved ids.
+# Spelled as explicit character lists so no locale can widen [a-z].
+valid_game_id() { # id -> 0 when valid
+  case "$1" in
+    gs | map | dungeon | other) return 1 ;;
+    [abcdefghijklmnopqrstuvwxyz]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!abcdefghijklmnopqrstuvwxyz0123456789]*) return 1 ;;
+  esac
+  [ "${#1}" -ge 2 ] && [ "${#1}" -le 24 ]
+}
+# The gateway's session.ParseGames, so this check covers exactly the games the
+# gateway will serve: blank (after strings.TrimSpace) = cuvara only; otherwise
+# split on ',', trim each entry the same way, fold duplicates, and refuse any
+# entry that is not a valid game id -- an empty entry included, because the
+# gateway refuses to start on one too.
+parse_games() { # raw -> GAMES_LIST; 1 on an invalid entry
+  local LC_ALL=C remaining="$1" game seen other
+  GAMES_LIST=()
+  go_trim_space "$remaining"
+  if [ -z "$TRIMMED" ]; then
+    GAMES_LIST=(cuvara)
+    return 0
+  fi
+  while :; do
+    go_trim_space "${remaining%%,*}"
+    game=$TRIMMED
+    if ! valid_game_id "$game"; then
+      echo "ERROR: gateway-config's games has an invalid entry '$game'; the gateway refuses to start on it." >&2
+      return 1
+    fi
+    seen=0
+    for other in ${GAMES_LIST[@]+"${GAMES_LIST[@]}"}; do
+      if [ "$other" = "$game" ]; then seen=1; fi
+    done
+    if [ "$seen" -eq 0 ]; then GAMES_LIST+=("$game"); fi
+    case "$remaining" in
+      *,*) remaining=${remaining#*,} ;;
+      *) break ;;
+    esac
+  done
+}
+join_key_name() { # game -> the gateway's rpg-app-secrets key for its join keyring
+  if [ "$1" = cuvara ]; then echo join-token-secret; else echo "join-token-secret-$1"; fi
+}
+# Pure comparison over already-read specs, so it can be exercised without a
+# cluster. Reports every conflict (each game, each game pair, once) and returns 1
+# if there was any.
+check_join_keyrings() { # jwt-spec, then (game, join-spec) pairs -> 0, or 1 after naming every conflict
+  local jwt_spec="$1" game setting key other i pair shares_jwt fail=0 reported=" "
+  local -a jwt_keys=() owner_games=() owner_keys=()
+  shift
+  keyring_keys "$jwt_spec"
+  jwt_keys=(${KEYRING_KEYS[@]+"${KEYRING_KEYS[@]}"})
+  while [ "$#" -ge 2 ]; do
+    game="$1"
+    setting=$(join_key_name "$game")
+    keyring_keys "$2"
+    shift 2
+    if [ "${#KEYRING_KEYS[@]}" -eq 0 ]; then
+      echo "ERROR: game $game: rpg-app-secrets' $setting is missing or has no non-empty key." >&2
+      if [ "$game" != cuvara ]; then
+        echo "  $game is listed in gateway-config's games, so this deploy must serve it:" >&2
+        echo "  add $setting to rpg-k8s-realtime/rpg-app-secrets, or remove $game from games." >&2
+      fi
+      fail=1
+      continue
+    fi
+    shares_jwt=0
+    for key in "${KEYRING_KEYS[@]}"; do
+      for other in ${jwt_keys[@]+"${jwt_keys[@]}"}; do
+        if [ "$key" = "$other" ]; then shares_jwt=1; fi
+      done
+      for ((i = 0; i < ${#owner_keys[@]}; i++)); do
+        if [ "${owner_games[i]}" != "$game" ] && [ "${owner_keys[i]}" = "$key" ]; then
+          pair="${owner_games[i]}/$game"
+          case "$reported" in
+            *" $pair "*) ;;
+            *)
+              echo "ERROR: games ${owner_games[i]} and $game share a join key" \
+                "($(join_key_name "${owner_games[i]}") and $setting in rpg-app-secrets)." >&2
+              echo "  Either game's servers could mint join tokens the other game's servers accept (ADR-33 D7)." >&2
+              reported="$reported$pair "
+              fail=1
+              ;;
+          esac
+        fi
+      done
+      owner_games+=("$game")
+      owner_keys+=("$key")
+    done
+    if [ "$shares_jwt" -eq 1 ]; then
+      echo "ERROR: game $game: rpg-app-secrets' $setting shares a key with its jwt-secret." >&2
+      echo "  Every game-server pod of $game holds that key and could mint gateway tokens for any user and game." >&2
+      fail=1
+    fi
+  done
+  KEYRING_KEYS=()
+  return "$fail"
+}
+keyrings_equal() { # spec spec -> 0 when both parse to the same ordered key list
+  local i
+  local -a first=()
+  keyring_keys "$1"
+  first=(${KEYRING_KEYS[@]+"${KEYRING_KEYS[@]}"})
+  keyring_keys "$2"
+  if [ "${#first[@]}" -ne "${#KEYRING_KEYS[@]}" ]; then
+    KEYRING_KEYS=()
+    return 1
+  fi
+  for ((i = 0; i < ${#first[@]}; i++)); do
+    if [ "${first[i]}" != "${KEYRING_KEYS[i]}" ]; then
+      KEYRING_KEYS=()
+      return 1
+    fi
+  done
+  KEYRING_KEYS=()
+}
+app_secret_key() { # namespace key -> decoded rpg-app-secrets value, empty when absent
+  $K get secret rpg-app-secrets -n "$1" -o "jsonpath={.data.$2}" 2>/dev/null | base64 -d 2>/dev/null || true
+}
+
+gw_games=$($K get configmap gateway-config -n rpg-k8s-realtime -o 'jsonpath={.data.games}' 2>/dev/null || true)
+if ! parse_games "$gw_games"; then
+  exit 1
+fi
+# cuvara's join-token-secret is checked even when `games` leaves cuvara out: the
+# default fleet in rpg-k8s-realtime is deployed by this script regardless, and
+# its pods hold that key.
+join_args=(cuvara "$(app_secret_key rpg-k8s-realtime join-token-secret)")
+checked_games=cuvara
+for game in "${GAMES_LIST[@]}"; do
+  if [ "$game" != cuvara ]; then
+    checked_games="$checked_games, $game"
+    join_args+=("$game" "$(app_secret_key rpg-k8s-realtime "join-token-secret-$game")")
+  fi
+done
+if ! check_join_keyrings "$gw_jwt" "${join_args[@]}"; then
+  unset join_args
+  exit 1
+fi
+unset join_args
+# Each non-default game's fleet must receive the keyring the gateway signs its
+# join tokens with. The fleet reads `join-token-secret` from the rpg-app-secrets
+# in its own namespace, a separate copy nothing else compares; a mismatch comes
+# up healthy and refuses every join to that game.
+for game in "${GAMES_LIST[@]}"; do
+  if [ "$game" = cuvara ]; then continue; fi
+  game_ns="rpg-k8s-realtime-$game"
+  if ! $K get secret rpg-app-secrets -n "$game_ns" >/dev/null 2>&1; then
+    echo "ERROR: game $game is listed in gateway-config's games, but secret $game_ns/rpg-app-secrets is absent." >&2
+    echo "  The game's Secret must be applied first: render it with" >&2
+    echo "    python deploy/k8s/games/render.py --game $game --nakama-tls off --print secret-template" >&2
+    echo "  fill a copy OUTSIDE the repo (its join-token-secret = rpg-k8s-realtime/rpg-app-secrets'" >&2
+    echo "  join-token-secret-$game) and apply it." >&2
+    exit 1
+  fi
+  if ! keyrings_equal "$(app_secret_key "$game_ns" join-token-secret)" \
+    "$(app_secret_key rpg-k8s-realtime "join-token-secret-$game")"; then
+    echo "ERROR: game $game: $game_ns/rpg-app-secrets' join-token-secret does not equal" >&2
+    echo "  rpg-k8s-realtime/rpg-app-secrets' join-token-secret-$game (compared key by key, in order)." >&2
+    echo "  The gateway signs $game's join tokens with the latter; its fleet verifies with the former." >&2
+    exit 1
+  fi
+done
+echo "checked: the join keyrings of $checked_games each have a key and share none with jwt-secret"
+echo "         or with each other; each non-default game's fleet Secret holds the gateway's keyring"
+unset game game_ns gw_games checked_games KEYRING_KEYS TRIMMED
+# END app-secret and join-keyring checks
+
 say "apply the data tier (rpg-k8s-data)"
 $K apply -k "$HERE/data"
 
@@ -469,78 +734,66 @@ done
 #
 # So `nakama-config` is the ONE source of truth, and the game server's half is
 # derived from it here rather than maintained in parallel and checked later.
-nk_on=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
-if [ -n "$nk_on" ]; then
-  cur_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
-  # Swap the scheme rather than hardcode a host: the host belongs to the manifest
-  # and must keep coming from there.
-  https_url="https://${cur_url#http://}"
-  case "$cur_url" in https://*) https_url="$cur_url" ;; esac
-  $K patch configmap gameserver-config -n rpg-k8s-realtime --type=merge \
-    -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
-  echo "restored: the meta hop is on in this cluster, so gameserver-config was moved back to"
-  echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
-fi
-
-if ! $K get secret rpg-app-secrets -n rpg-k8s-realtime >/dev/null 2>&1; then
-  echo "ERROR: secret rpg-k8s-realtime/rpg-app-secrets is absent." >&2
-  echo "Fill a copy of app/30-secret-template.yaml OUTSIDE the repo and apply it first." >&2
-  exit 1
-fi
-
-# Asserted here, where both halves exist, and never assumed: they are applied
-# from different places -- the data tier by kustomize, this one out-of-band --
-# so nothing else compares them. A mismatch yields a stack that comes up
-# perfectly healthy and rejects every client login with
-# "local jwt verify: invalid signature". Measured on staging 2026-08-20.
-nk_jwt=$($K get secret nakama -n rpg-k8s-data -o jsonpath='{.data.JWT_SECRET}' 2>/dev/null | base64 -d 2>/dev/null || true)
-gw_jwt=$($K get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath='{.data.jwt-secret}' 2>/dev/null | base64 -d 2>/dev/null || true)
-if [ -z "$nk_jwt" ] || [ "$nk_jwt" != "$gw_jwt" ]; then
-  echo "ERROR: nakama's JWT_SECRET does not equal rpg-app-secrets' jwt-secret." >&2
-  echo "  Nakama signs the gateway token; the gateway verifies it locally." >&2
-  exit 1
-fi
-echo "checked: nakama's JWT_SECRET matches the gateway's jwt-secret"
-
-# Game-server pods hold only the join secret (ADR-33), so this comparison must
-# happen at deploy time, where both keys are available. Both are comma-separated
-# rotation keyrings at the gateway (shared/jwt ParseKeyring: split on ',', trim
-# whitespace, drop empty entries), so compare them key by key: a join key equal
-# to ANY jwt key lets a game-server pod forge gateway tokens. Never log a value,
-# its length or its position in the list.
-keyring_keys() { # spec -> KEYRING_KEYS (trimmed, non-empty entries)
-  local remaining="$1" key
-  KEYRING_KEYS=()
-  while :; do
-    key=${remaining%%,*}
-    key="${key#"${key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-    [ -z "$key" ] || KEYRING_KEYS+=("$key")
-    case "$remaining" in
-      *,*) remaining=${remaining#*,} ;;
-      *) break ;;
-    esac
+# BEGIN game TLS repair
+# Pure mapping; parse_games already validates ids, but fold duplicates here too.
+rendered_game_namespaces() {
+  local game ns existing seen
+  GAME_NAMESPACES=()
+  for game in ${GAMES_LIST[@]+"${GAMES_LIST[@]}"}; do
+    [ "$game" = cuvara ] && continue
+    ns="rpg-k8s-realtime-$game"
+    seen=0
+    for existing in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+      [ "$existing" = "$ns" ] && seen=1
+    done
+    [ "$seen" -eq 1 ] || GAME_NAMESPACES+=("$ns")
   done
 }
-join_secret=$($K get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath='{.data.join-token-secret}' 2>/dev/null | base64 -d 2>/dev/null || true)
-keyring_keys "$gw_jwt"
-jwt_keys=(${KEYRING_KEYS[@]+"${KEYRING_KEYS[@]}"})
-keyring_keys "$join_secret"
-if [ "${#KEYRING_KEYS[@]}" -eq 0 ]; then
-  echo "ERROR: rpg-app-secrets' join-token-secret has no non-empty key." >&2
-  exit 1
-fi
-for join_key in "${KEYRING_KEYS[@]}"; do
-  for jwt_key in ${jwt_keys[@]+"${jwt_keys[@]}"}; do
-    if [ "$join_key" = "$jwt_key" ]; then
-      echo "ERROR: rpg-app-secrets' join-token-secret must not share a key with its jwt-secret." >&2
-      echo "  A game-server pod holding the join secret could forge gateway tokens if they were equal." >&2
-      exit 1
+rendered_game_namespaces
+nk_on=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+# A listed game must have been rendered even when TLS is off.
+for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+  if ! $K get configmap gameserver-config -n "$game_ns" >/dev/null 2>&1; then
+    game=${game_ns#rpg-k8s-realtime-}
+    echo "ERROR: $game_ns/gameserver-config is absent; render it with" >&2
+    render_tls=off; [ -z "$nk_on" ] || render_tls=on
+    echo "  python deploy/k8s/games/render.py --game $game --nakama-tls $render_tls" >&2
+    exit 1
+  fi
+done
+if [ -n "$nk_on" ]; then
+  if ! $K get secret nakama-tls-pin -n rpg-k8s-realtime >/dev/null 2>&1; then
+    echo "ERROR: nakama-tls-pin Secret is absent in rpg-k8s-realtime." >&2
+    exit 1
+  fi
+  if ! source_pin=$($K get secret nakama-tls-pin -n rpg-k8s-realtime -o 'jsonpath={.data.tls\.crt}' \
+    | base64 -d) || [ -z "$source_pin" ] \
+    || ! grep -Eq '^-----BEGIN CERTIFICATE-----[[:space:]]*$' <<< "$source_pin" \
+    || grep -Eq -- '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' <<< "$source_pin"; then
+    echo "ERROR: source nakama-tls-pin tls.crt must be a readable, nonempty PEM certificate without a private key." >&2
+    exit 1
+  fi
+  for game_ns in rpg-k8s-realtime ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+    cur_url=$($K get configmap gameserver-config -n "$game_ns" -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+    https_url="https://${cur_url#http://}"
+    case "$cur_url" in https://*) https_url="$cur_url" ;; esac
+    $K patch configmap gameserver-config -n "$game_ns" --type=merge \
+      -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
+    if [ "$game_ns" != rpg-k8s-realtime ]; then
+      # Stream only the public certificate; never put its contents in output or argv.
+      if ! printf '%s\n' "$source_pin" | $K create secret generic nakama-tls-pin -n "$game_ns" \
+          --from-file=tls.crt=/dev/stdin --dry-run=client -o yaml | $K apply -f - >/dev/null; then
+        echo "ERROR: could not provision $game_ns/nakama-tls-pin from the source certificate." >&2
+        exit 1
+      fi
+    else
+      echo "restored: the meta hop is on in this cluster, so gameserver-config was moved back to"
+      echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
     fi
   done
-done
-unset join_secret join_key jwt_key jwt_keys KEYRING_KEYS
-echo "checked: rpg-app-secrets' join-token-secret has a key and shares none with its jwt-secret"
+  source_pin=
+fi
+# END game TLS repair
 
 # The two STATIC Nakama keys, asserted for the same reason as the JWT above: this
 # Secret is applied out-of-band, so nothing else looks at it, and a value left at
@@ -689,6 +942,7 @@ fi
 # `BadRequest code=-1 Client sent an HTTP request to an HTTPS server`, logged as a
 # warning, with no counter and no alert. Nobody notices until a player asks where
 # their gold went.
+# BEGIN game TLS check
 nk_cert_path=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
 nk_key_path=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-key-path}' 2>/dev/null || true)
 nk_secret=$($K get secret nakama-tls -n rpg-k8s-data -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
@@ -740,8 +994,42 @@ else
     echo "  a pin on a plaintext hop protects nothing while reading as though it does." >&2
     exit 1
   fi
+  case "$nk_url" in
+    https://*)
+      echo "ERROR: gameserver-config uses https but Nakama terminates no TLS." >&2
+      exit 1
+      ;;
+  esac
   echo "checked: the meta hop is plaintext (no TLS paths in nakama-config) -- ADR-24's default"
 fi
+
+
+# Check every rendered game, including plaintext mismatches the repair must not hide.
+for game_ns in ${GAME_NAMESPACES[@]+"${GAME_NAMESPACES[@]}"}; do
+  if ! $K get configmap gameserver-config -n "$game_ns" >/dev/null 2>&1; then
+    game=${game_ns#rpg-k8s-realtime-}
+    echo "ERROR: $game_ns/gameserver-config is absent; render it with" >&2
+    render_tls=off; [ -z "$nk_cert_path" ] || render_tls=on
+    echo "  python deploy/k8s/games/render.py --game $game --nakama-tls $render_tls" >&2
+    exit 1
+  fi
+  game_url=$($K get configmap gameserver-config -n "$game_ns" -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+  game_pin=$($K get configmap gameserver-config -n "$game_ns" -o 'jsonpath={.data.nakama-tls-pin}' 2>/dev/null || true)
+  if [ -n "$nk_cert_path" ]; then
+    case "$game_url" in https://*) ;; *) echo "ERROR: $game_ns has a non-https nakama-url while Nakama uses TLS." >&2; exit 1 ;; esac
+    if [ -z "$game_pin" ] || ! $K get secret nakama-tls-pin -n "$game_ns" >/dev/null 2>&1; then
+      echo "ERROR: $game_ns needs a nakama-tls-pin and its Secret when Nakama uses TLS." >&2
+      exit 1
+    fi
+  else
+    case "$game_url" in https://*) echo "ERROR: $game_ns uses https while Nakama has no TLS." >&2; exit 1 ;; esac
+    if [ -n "$game_pin" ]; then
+      echo "ERROR: $game_ns sets nakama-tls-pin while Nakama has no TLS." >&2
+      exit 1
+    fi
+  fi
+done
+# END game TLS check
 
 render_image "$HERE/app/40-gateway.yaml" "rpg-mmo/gateway:develop" "${pre_gw:-$GATEWAY_IMAGE}" \
   | $K apply -f -

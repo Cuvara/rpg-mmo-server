@@ -125,7 +125,7 @@ if [ "$SCRATCH" -eq 1 ]; then
 		# ADVERTISED to clients in MsgEnterWorldResp.ServerAddr — must be the
 		# PUBLISHED port, not the in-container listen port.
 		echo "GAMESERVER_PUBLIC_ADDR=:9300"
-		echo "GAME_DB_URL=postgres://\${POSTGRES_GAME_USER:-game}:\${POSTGRES_GAME_PASSWORD:-localdev}@localhost:6433/\${POSTGRES_GAME_DB:-gamestate}?sslmode=disable"
+		echo "GAME_DB_URL=postgres://\${POSTGRES_GAME_APP_USER:-gamestate}:\${POSTGRES_GAME_APP_PASSWORD:-localdev-app}@localhost:6433/\${POSTGRES_GAME_DB:-gamestate}?sslmode=disable"
 		# Own image tags, so building a scratch stack from a branch never retags the
 		# images the default stack recreates from (`:dev`).
 		echo "GATEWAY_IMAGE=${GATEWAY_IMAGE:-rpg-mmo/gateway:scratch}"
@@ -217,24 +217,55 @@ done
 # lists (shared/jwt ParseKeyring), so a join key equal to ANY JWT key lets a
 # game-server pod forge gateway tokens. Never include values, their lengths or
 # their positions in diagnostics: these logs are deploy output.
+
+# Go's strings.TrimSpace, byte for byte and in any locale. [[:space:]] is not:
+# its members depend on the locale, so under LC_ALL=C a leading U+00A0 survived
+# here while the gateway trimmed it, and a key shared with jwt-secret passed this
+# check and then stopped the gateway after workloads were applied. The list is
+# exactly what Go's unicode.IsSpace accepts (ASCII \t \n \v \f \r and space;
+# U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F,
+# U+3000), as UTF-8 bytes, stripped from both ends until none is left. Only
+# whole sequences match, as Go decodes them; inner whitespace is kept. CR goes
+# in through a variable and a plain array assignment: Cygwin/MSYS bash drops a CR
+# written as a $'\r' word in any array assignment, and any CR at all in a
+# `local -a name=(...)` one, which would silently stop CR from being trimmed (the
+# parity test caught it).
+go_trim_space() { # string -> TRIMMED
+	local LC_ALL=C s="$1" prev w cr
+	local -a ws
+	cr=$'\r'
+	ws=($'\t' $'\n' $'\v' $'\f' "$cr" ' '
+	  $'\xc2\x85' $'\xc2\xa0' $'\xe1\x9a\x80'
+	  $'\xe2\x80\x80' $'\xe2\x80\x81' $'\xe2\x80\x82' $'\xe2\x80\x83' $'\xe2\x80\x84'
+	  $'\xe2\x80\x85' $'\xe2\x80\x86' $'\xe2\x80\x87' $'\xe2\x80\x88' $'\xe2\x80\x89'
+	  $'\xe2\x80\x8a' $'\xe2\x80\xa8' $'\xe2\x80\xa9' $'\xe2\x80\xaf' $'\xe2\x81\x9f'
+	  $'\xe3\x80\x80')
+	while :; do
+	  prev=$s
+	  for w in "${ws[@]}"; do
+	    s=${s#"$w"}
+	    s=${s%"$w"}
+	  done
+	  [ "$s" != "$prev" ] || break
+	done
+	TRIMMED=$s
+}
 keyring_keys() { # spec -> KEYRING_KEYS (trimmed, non-empty entries)
-	local remaining="$1" key
+	local LC_ALL=C remaining="$1"
 	KEYRING_KEYS=()
 	while :; do
-		key=${remaining%%,*}
-		# Same rule as ParseKeyring: trim surrounding whitespace, drop empties.
-		key="${key#"${key%%[![:space:]]*}"}"
-		key="${key%"${key##*[![:space:]]}"}"
-		[ -z "$key" ] || KEYRING_KEYS+=("$key")
+		go_trim_space "${remaining%%,*}"
+		[ -z "$TRIMMED" ] || KEYRING_KEYS+=("$TRIMMED")
 		case "$remaining" in
 		*,*) remaining=${remaining#*,} ;;
 		*) break ;;
 		esac
 	done
+	TRIMMED=
 }
 
-check_join_keyring() { # variable-name value (compares against JWT_KEYS)
-	local name="$1" join jwt
+check_join_keyring() { # variable-name value (compares against JWT_KEYS and prior join settings)
+	local name="$1" join jwt i
 	keyring_keys "$2"
 	if [ "${#KEYRING_KEYS[@]}" -eq 0 ]; then
 		echo "ERROR: $name must contain a non-empty join-token key, distinct from JWT_SECRET." >&2
@@ -248,11 +279,20 @@ check_join_keyring() { # variable-name value (compares against JWT_KEYS)
 				return 1
 			fi
 		done
+		for ((i=0; i<${#JOIN_KEYS[@]}; i++)); do
+			if [ "$name" != "${JOIN_OWNERS[i]}" ] && [ "$join" = "${JOIN_KEYS[i]}" ]; then
+				echo "ERROR: ${JOIN_OWNERS[i]} and $name share a join key." >&2
+				return 1
+			fi
+		done
+		JOIN_KEYS+=("$join")
+		JOIN_OWNERS+=("$name")
 	done
 }
 
 check_secrets() {
 	local name
+	local -a JOIN_KEYS=() JOIN_OWNERS=()
 	keyring_keys "${JWT_SECRET:-dev-secret-change-me}"
 	JWT_KEYS=(${KEYRING_KEYS[@]+"${KEYRING_KEYS[@]}"})
 	check_join_keyring JOIN_TOKEN_SECRET "${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}" || return 1
@@ -262,7 +302,7 @@ check_secrets() {
 		[ "$name" != JOIN_TOKEN_SECRET_ ] || continue
 		check_join_keyring "$name" "${!name}" || return 1
 	done < <(compgen -A variable JOIN_TOKEN_SECRET_ || true)
-	echo "checked: JOIN_TOKEN_SECRET and set per-game join secrets are non-empty and share no key with JWT_SECRET"
+	echo "checked: JOIN_TOKEN_SECRET and set per-game join secrets are non-empty and share no key with JWT_SECRET or each other"
 }
 
 # This subcommand stops before host probes, docker, compose or network access.

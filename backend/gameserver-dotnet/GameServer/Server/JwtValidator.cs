@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using GameServer.Games;
 
 namespace GameServer.Server;
 
@@ -9,7 +9,7 @@ namespace GameServer.Server;
 /// Lightweight HS256 JWT validator. No external dependencies (AOT-friendly).
 /// Matches the Go gateway's JWT verification using a shared secret.
 /// </summary>
-public static partial class JwtValidator
+public static class JwtValidator
 {
     /// <summary>Decoded JWT claims relevant to the game server.</summary>
     /// <param name="UserId">The <c>sub</c> claim: the authenticated account.</param>
@@ -26,44 +26,10 @@ public static partial class JwtValidator
     public record JwtClaims(string UserId, string ServerId, long Exp, string Jti = "", string CharacterId = "",
         string GameId = "");
 
-    /// <summary>Clock skew tolerance for expiration checks (seconds).</summary>
+    /// <summary>Clock skew tolerance for exp, iat and nbf checks (seconds).</summary>
     public const int ClockSkewSeconds = 5;
 
-    /// <summary>Internal JSON model for the JWT claims payload.</summary>
-    private sealed class JwtClaimsJson
-    {
-        [JsonPropertyName("sub")]
-        public string? UserId { get; set; }
-
-        [JsonPropertyName("sid")]
-        public string? ServerId { get; set; }
-
-        [JsonPropertyName("jti")]
-        public string? Jti { get; set; }
-
-        [JsonPropertyName("cid")]
-        public string? CharacterId { get; set; }
-
-        [JsonPropertyName("gid")]
-        public string? GameId { get; set; }
-
-        [JsonPropertyName("exp")]
-        public long Exp { get; set; }
-    }
-
-    /// <summary>Internal JSON model for the JWT header.</summary>
-    private sealed class JwtHeaderJson
-    {
-        [JsonPropertyName("alg")]
-        public string? Alg { get; set; }
-
-        [JsonPropertyName("typ")]
-        public string? Typ { get; set; }
-    }
-
-    [JsonSerializable(typeof(JwtClaimsJson))]
-    [JsonSerializable(typeof(JwtHeaderJson))]
-    private partial class JwtJsonContext : JsonSerializerContext;
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     /// <summary>
     /// Why a verification failed. The distinction matters for
@@ -76,7 +42,7 @@ public static partial class JwtValidator
     {
         /// <summary>Token verified.</summary>
         Ok,
-        /// <summary>Empty token/secret, wrong segment count, bad base64, bad JSON, wrong alg, or missing sub.</summary>
+        /// <summary>Malformed encoding, unsupported header, invalid claims, or empty token/secret.</summary>
         Invalid,
         /// <summary>Well-formed token, but the HMAC did not match this secret.</summary>
         BadSignature,
@@ -94,6 +60,9 @@ public static partial class JwtValidator
     /// Verify an HS256 JWT token and extract claims, reporting why it failed.
     /// </summary>
     public static JwtClaims? Verify(string token, string secret, out VerifyStatus status)
+        => Verify(token, secret, DateTimeOffset.UtcNow.ToUnixTimeSeconds(), out status);
+
+    internal static JwtClaims? Verify(string token, string secret, long nowUnixSeconds, out VerifyStatus status)
     {
         status = VerifyStatus.Invalid;
 
@@ -105,10 +74,12 @@ public static partial class JwtValidator
 
         try
         {
-            // Verify header declares HS256
+            // Refuse alternate encodings and unsupported headers before HMAC work,
+            // matching Go shared/jwt and the shared C1-C7 golden contract.
             var headerBytes = Base64UrlDecode(parts[0]);
-            var header = JsonSerializer.Deserialize(headerBytes, JwtJsonContext.Default.JwtHeaderJson);
-            if (header?.Alg != "HS256") return null;
+            var claimsBytes = Base64UrlDecode(parts[1]);
+            var actualSig = Base64UrlDecode(parts[2]);
+            if (actualSig.Length != 32 || !VerifyHeader(headerBytes)) return null;
 
             // Verify signature
             byte[] signingInput = Encoding.ASCII.GetBytes($"{parts[0]}.{parts[1]}");
@@ -120,46 +91,140 @@ public static partial class JwtValidator
                 expectedSig = hmac.ComputeHash(signingInput);
             }
 
-            byte[] actualSig = Base64UrlDecode(parts[2]);
             if (!CryptographicOperations.FixedTimeEquals(expectedSig, actualSig))
             {
                 status = VerifyStatus.BadSignature;
                 return null;
             }
 
-            // Decode claims
-            var claimsBytes = Base64UrlDecode(parts[1]);
-            var claims = JsonSerializer.Deserialize(claimsBytes, JwtJsonContext.Default.JwtClaimsJson);
-            if (claims == null || string.IsNullOrEmpty(claims.UserId))
-                return null;
+            var claims = ReadClaims(claimsBytes, nowUnixSeconds);
+            if (claims == null) return null;
 
-            // Check expiration with clock skew tolerance
-            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            if (claims.Exp > 0 && now - ClockSkewSeconds > claims.Exp)
+            // Only otherwise valid claims may report Expired: keyrings stop on it.
+            if (nowUnixSeconds - ClockSkewSeconds > claims.Exp)
             {
                 status = VerifyStatus.Expired;
                 return null;
             }
 
             status = VerifyStatus.Ok;
-            return new JwtClaims(claims.UserId, claims.ServerId ?? "", claims.Exp, claims.Jti ?? "",
-                claims.CharacterId ?? "", claims.GameId ?? "");
+            return claims;
         }
-        catch
+        catch (Exception error) when (error is JsonException or FormatException or DecoderFallbackException or InvalidOperationException)
         {
             return null;
         }
     }
 
-    /// <summary>Decode a Base64Url-encoded string to bytes.</summary>
+    private static bool VerifyHeader(byte[] json)
+    {
+        var reader = ReadObject(json);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        string alg = "", typ = "";
+        while (ReadMember(ref reader, names, out string name))
+        {
+            switch (name)
+            {
+                case "alg": alg = ReadString(ref reader); break;
+                case "typ": typ = ReadString(ref reader); break;
+                case "crit": return false;
+                default: reader.Skip(); break;
+            }
+        }
+        return alg == "HS256" && typ == "JWT";
+    }
+
+    private static JwtClaims? ReadClaims(byte[] json, long nowUnixSeconds)
+    {
+        var reader = ReadObject(json);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        string sub = "", sid = "", jti = "", cid = "", gid = "";
+        long exp = 0, iat = 0, nbf = long.MinValue;
+        while (ReadMember(ref reader, names, out string name))
+        {
+            switch (name)
+            {
+                case "sub": sub = ReadString(ref reader); break;
+                case "sid": sid = ReadString(ref reader); break;
+                case "jti": jti = ReadString(ref reader); break;
+                case "cid": cid = ReadString(ref reader); break;
+                case "gid": gid = ReadString(ref reader); break;
+                case "exp": exp = ReadInteger(ref reader); break;
+                case "iat": iat = ReadInteger(ref reader); break;
+                case "nbf": nbf = ReadInteger(ref reader); break;
+                default: reader.Skip(); break;
+            }
+        }
+
+        if (sub.Length == 0 || exp <= 0) return null;
+        // Empty and explicit default gid remain accepted for existing test tokens;
+        // issuers omit the default game (ADR-33).
+        if (gid.Length != 0 && !GameId.IsValidGameId(gid)) return null;
+        long latest = nowUnixSeconds + ClockSkewSeconds;
+        if (iat < 0 || iat > latest || nbf > latest) return null;
+        return new JwtClaims(sub, sid, exp, jti, cid, gid);
+    }
+
+    // A reader walk keeps type and duplicate checks explicit without reflection
+    // or generated model defaults hiding missing/null claims under NativeAOT.
+    private static Utf8JsonReader ReadObject(byte[] json)
+    {
+        // Skip() does not decode unknown strings, so validate their UTF-8 too.
+        StrictUtf8.GetCharCount(json);
+        var reader = new Utf8JsonReader(json, new JsonReaderOptions { MaxDepth = 10_000 });
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
+            throw new JsonException("JWT header and payload must be JSON objects.");
+        return reader;
+    }
+
+    private static bool ReadMember(ref Utf8JsonReader reader, HashSet<string> names, out string name)
+    {
+        name = "";
+        if (!reader.Read()) throw new JsonException("Unclosed JWT object.");
+        if (reader.TokenType == JsonTokenType.EndObject)
+        {
+            if (reader.Read()) throw new JsonException("Trailing JSON after JWT object.");
+            return false;
+        }
+        if (reader.TokenType != JsonTokenType.PropertyName)
+            throw new JsonException("Expected JWT member name.");
+        name = reader.GetString()!;
+        if (!names.Add(name) || !reader.Read())
+            throw new JsonException("Duplicate or incomplete JWT member.");
+        return true;
+    }
+
+    private static string ReadString(ref Utf8JsonReader reader)
+    {
+        if (reader.TokenType != JsonTokenType.String)
+            throw new JsonException("JWT claim must be a string.");
+        return reader.GetString()!;
+    }
+
+    private static long ReadInteger(ref Utf8JsonReader reader)
+    {
+        // TryGetInt64 also refuses fractional and exponent JSON number forms.
+        if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt64(out long value))
+            throw new JsonException("JWT date must be a signed 64-bit JSON integer.");
+        return value;
+    }
+
+    /// <summary>Decode canonical unpadded base64url, including zero unused bits.</summary>
     private static byte[] Base64UrlDecode(string input)
     {
+        foreach (char c in input)
+            if (!(c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_'))
+                throw new FormatException("JWT segment contains a non-base64url character.");
         string s = input.Replace('-', '+').Replace('_', '/');
         switch (s.Length % 4)
         {
             case 2: s += "=="; break;
             case 3: s += "="; break;
+            case 1: throw new FormatException("Invalid base64url length.");
         }
-        return Convert.FromBase64String(s);
+        byte[] decoded = Convert.FromBase64String(s);
+        string canonical = Convert.ToBase64String(decoded).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        if (canonical != input) throw new FormatException("Non-canonical base64url segment.");
+        return decoded;
     }
 }

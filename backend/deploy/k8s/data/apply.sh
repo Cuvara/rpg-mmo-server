@@ -6,7 +6,7 @@
 #   KUBE_CONTEXT=... NS=... ./apply.sh
 #
 # Why a script and not plain `kubectl apply -k .`: the gamestate initdb
-# ConfigMap is generated from deploy/db/init-gamestate.sql, which lives above
+# and default-role ConfigMaps are generated from deploy/db files, which live above
 # this directory, and kustomize refuses file sources above its root. Everything
 # else is ordinary kustomize. See README.md §The initdb ConfigMap.
 set -euo pipefail
@@ -30,6 +30,11 @@ echo "==> gamestate-initdb ConfigMap (from ../../db/init-gamestate.sql)"
 $K create namespace "${NS}" --dry-run=client -o yaml | $K apply -f -
 $K -n "${NS}" create configmap gamestate-initdb \
   --from-file=10-init-gamestate.sql="${HERE}/../../db/init-gamestate.sql" \
+  --dry-run=client -o yaml | $K -n "${NS}" apply -f -
+
+# The manual default-role Job mounts the original script, not a copied version.
+$K -n "${NS}" create configmap gamestate-default-role \
+  --from-file=provision-default-role.sh="${HERE}/../../db/provision-default-role.sh" \
   --dry-run=client -o yaml | $K -n "${NS}" apply -f -
 
 $K apply -k "${HERE}"

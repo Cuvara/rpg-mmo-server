@@ -60,12 +60,16 @@ VERIFY_FLEET="rpg-k8s-realtime/map-servers-dotnet-k8s"
 
 failures=0
 run_case() { # name expected-verdict fas-json
-  local name="$1" want="$2"
+  local name="$1" want="$2" result=OK
   FIXTURE_FAS="$3"
   _verdict=""; _msg=""
   check_no_single_map_autoscaler || true
+  if [ "${_verdict:-}" != "$want" ]; then
+    result=MISMATCH
+    failures=$((failures+1))
+  fi
   printf '%-52s want=%-4s got=%-4s %s\n' "$name" "$want" "${_verdict:-NONE}" \
-    "$([ "${_verdict:-}" = "$want" ] && echo OK || { echo MISMATCH; failures=$((failures+1)); })"
+    "$result"
   printf '    %s\n\n' "${_msg//$'\n'/$'\n'    }"
 }
 

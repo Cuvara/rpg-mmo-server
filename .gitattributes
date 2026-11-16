@@ -1,0 +1,2 @@
+*.sh text eol=lf
+backend/shared/testdata/jwt/vectors.json text eol=lf

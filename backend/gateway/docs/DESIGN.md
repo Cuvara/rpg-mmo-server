@@ -24,9 +24,9 @@ Map ids are chosen per game, so collisions are expected, not exotic.
   (`JOIN_TOKEN_SECRET_<GAME>`). `For(game)` never falls back to `cuvara`'s keys: a
   fallback would let every game's servers verify every other game's tokens. A
   configured game without one is refused with `game not routable` before lookup.
-  Startup warns on a missing secret, on a game secret equal to `JWT_SECRET`, and when
-  any rotation key is shared between two games' join secrets; warnings, because a
-  dev stack legitimately reuses values.
+  Startup warns on a missing secret (the game stays unroutable). A key shared
+  between `JWT_SECRET` and any join keyring, or between two games' join keyrings, is
+  **fatal** (MG-02, see "Two secrets, not one").
 - **Lookup is by (game, map).** `FindServerGame` → `FindByGameAndMapID`, whose
   non-default index is `servers:map:{game}:{map_id}` while `cuvara` keeps
   `servers:map:{map_id}`. Next to the existing "entry serves another map" check,
@@ -71,7 +71,7 @@ Map ids are chosen per game, so collisions are expected, not exotic.
   servers), plus `ALLOCATOR_FLEET_MAP_<GAME>` when allocation is on.
 - The game server compares `gid` with its own game and refuses a mismatch with
   `Token is for a different game` (ADR-33 leg 2). The per-game join secret is defence
-  in depth on top of that check, which is why a shared key is warned about.
+  in depth on top of that check. A shared key is refused at startup (MG-02).
 - Fixed in passing: an expired session cleared the connection identity but left its
   `(game, user)` entry in `userConns`; `checkSession` now untracks it like teardown.
 
@@ -184,9 +184,13 @@ connect timeout per attempt. Detection without consumption bought nothing.
 ### Decision — evict on consumption, and fix the watcher's error split first
 
 `Gateway.OnEvent` now recognises `Type == registry.ServerDownChannel` and calls
-`RegistryService.Evict(ctx, serverID)`: untrack in the watcher, `Deregister`
-from the store (which removes the entry and its map-index membership), with a
-wrapped `storage.ErrNotFound` treated as success. Eviction is **idempotent** —
+`RegistryService.Evict(ctx, gameID, serverID)` with the event's normalised `game_id`
+(absent = `cuvara`). Evict calls `DeregisterForGame` on the store, which atomically
+removes the entry and its map-index membership only when the stored owning game
+matches (ADR-33; MG-03 in `backend/docs/MULTI-GAME-CROSS-REVIEW.md`), and untracks
+the watcher entry only for that game (`UntrackServerForGame`). An absent entry is
+success; an entry now owned by another game is left untouched and logged, so a stale
+`server_down` of game A can never delete game B's registration of the same server id. Eviction is **idempotent** —
 duplicate events and multiple consuming gateway instances are harmless — and it
 is deliberately **not a deny-list**: a server that re-registers or resumes
 heartbeating afterwards is alive by definition and becomes assignable again
@@ -876,9 +880,23 @@ the gateway. Sharing them meant a compromised pod could mint auth tokens for any
 user. Split, it can at most mint join tokens — which only get you into a game
 server you already are.
 
-The fallback (unset → reuse `JWT_SECRET`) exists because the C# game server
-cannot yet read `JOIN_TOKEN_SECRET`; turning the split on unilaterally would
-break every join. The start-up warning is the reminder.
+There is no fallback any more: the C# game server reads `JOIN_TOKEN_SECRET`
+and both sides refuse to start without it.
+
+**Key separation is enforced, not advised (MG-02).** The split above is only as
+good as the key sets it separates, and keyrings carry rotation entries. Before,
+the gateway compared `JWT_SECRET` with each join setting as a whole string and
+only warned, so `JWT_SECRET=auth-new,auth-old` next to
+`JOIN_TOKEN_SECRET_EMBER=join-ember,auth-old` started cleanly and handed every
+ember pod a key that mints auth tokens for any user and any game. Now
+`checkKeyringSeparation` (`cmd/gateway/keyring_separation.go`) splits every
+keyring with the parser's semantics (`keyringKeys`, kept in step with
+`sharedjwt.ParseKeyring` by a parity test) and refuses to start when any key is
+in `JWT_SECRET` and a join keyring, or in the join keyrings of two games. It runs
+before the metrics listener and any backend wiring, and its error names
+settings and games only. It is fatal rather than a warning because no stack has
+a legitimate reason to share these keys, and a warning is what let the review's
+configuration through. A key repeated inside one keyring is not an error.
 
 Keyrings are parsed once in `New` and stored, not parsed per request —
 `AssignMapKeyring` exists precisely so `EnterWorld` does no string splitting.

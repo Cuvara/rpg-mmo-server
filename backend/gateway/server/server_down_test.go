@@ -5,12 +5,61 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
+
+func TestOnEvent_StaleServerDownPreservesNewGameOwner(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewMemoryServerRegistryWithTTL(time.Second)
+	watcher := registry.NewRegistryWatcher(mem, registry.NewMemoryPubSub(), logger.New("error"))
+	reg := registry.NewRegistryService(mem, registry.WithWatcher(watcher))
+	gw := New(session.NewSessionManager(storage.NewMemorySessionStore()), reg, testSecret, logger.New("error"))
+	info := storage.ServerInfo{GameID: "cuvara", ServerID: "ember-one", MapID: "forest", Addr: "10.0.0.1:9000", Capacity: 100}
+	if err := reg.RegisterServer(ctx, info); err != nil {
+		t.Fatal(err)
+	}
+	// Wait until the original heartbeat has expired, while it remains tracked.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := mem.GetServer(ctx, info.ServerID)
+		if errors.Is(err, storage.ErrNotFound) {
+			break
+		}
+		if err != nil || time.Now().After(deadline) {
+			t.Fatalf("waiting for expiry: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	info.GameID = "ember"
+	if err := reg.RegisterServer(ctx, info); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, payload := range []string{`{"game_id":"cuvara","server_id":"ember-one"}`, `{"server_id":"ember-one"}`} {
+		gw.OnEvent(storage.Event{Type: registry.ServerDownChannel, Payload: []byte(payload)})
+		if watcher.KnownCount() != 1 {
+			t.Fatalf("watcher lost ember after %s", payload)
+		}
+		if got, err := reg.FindServerGame(ctx, "ember", info.MapID); err != nil || got.GameID != "ember" || got.ServerID != info.ServerID {
+			t.Fatalf("FindServerGame after %s = (%+v, %v)", payload, got, err)
+		}
+		if got, err := reg.GetServer(ctx, info.ServerID); err != nil || got.GameID != "ember" {
+			t.Fatalf("GetServer after %s = (%+v, %v)", payload, got, err)
+		}
+	}
+	gw.OnEvent(storage.Event{Type: registry.ServerDownChannel, Payload: []byte(`{"game_id":"ember","server_id":"ember-one"}`)})
+	if _, err := reg.GetServer(ctx, info.ServerID); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetServer after matching event: %v", err)
+	}
+	if watcher.KnownCount() != 0 {
+		t.Error("watcher retained server after matching event")
+	}
+}
 
 // newServerDownFixture builds a gateway (no listener needed — OnEvent is called
 // directly, as the relay would) over a memory registry pre-loaded with srv1.

@@ -815,16 +815,12 @@ Verification cost is O(keys) HMAC-SHA256 computations in the worst case, which i
 why a keyring is meant to hold two secrets during a rotation window, not an
 archive of every secret ever used.
 
-### Known behavioural difference from the Go verifier
+### JWT parser parity
 
-One drift predates this change and is **not** rotation-related, but it is worth
-recording: Go's `jwt.Verify` rejects a token whose `exp` claim is absent (its
-zero value is in the past), and it additionally requires the header's `typ` to be
-`JWT`; the C# validator only enforces `exp` when it is greater than zero, and
-checks only `alg`. Both only ever *accept more* than the Go side, and the gateway
-always emits `exp` and `typ`, so no gateway-produced token is affected. Tightening
-it would change nothing for real traffic and is left alone rather than risking a
-behaviour change on the join path.
+Go and C# enforce the same JWT contract using shared golden vectors; see
+`docs/API.md`, "Join-token JWT validation". Both accept explicit empty `gid` and
+`gid: "cuvara"` for existing tokens in `JwtCharacterClaimTests` and
+`JoinGameIdTests.MatchingGame_Joins`, respectively, retaining the claim value.
 
 Coverage: `GameServer.Tests/Server/JwtKeyringTests.cs` (keyring semantics) and
 `GameServer.Tests/Server/JoinTokenSecretTests.cs` (the real handshake for
@@ -1521,11 +1517,13 @@ for an annotated type, and only the **reflection-based resolver** consults
    `AgonesSdk` (`AgonesJsonContext`), `ContentLoader` (`ContentJsonContext`),
    `GameManifest` (`ManifestJsonContext`), `EventPublisher` (`EventJsonContext`),
    `KickEvents` (`KickJsonContext`), `MapLoader` (`MapJsonContext`), `NakamaClient`
-   (`NakamaJsonContext`, eight calls), `MetricsEndpoint` (`ServerStatusContext`) and two in
-   `JwtValidator` (`JwtJsonContext`): 17 calls in 9 files, counted 2026-11-13 with
+   (`NakamaJsonContext`, eight calls) and `MetricsEndpoint` (`ServerStatusContext`):
+   15 calls in 8 files after the JWT parity change, counted with
    `grep -rn --include='*.cs' "JsonSerializer\." GameServer/ | grep -v '///'`, which drops
    doc-comment lines (one, in `Content/ContentJson.cs`, names `JsonSerializer.Deserialize`
-   without calling it). No call passes a `JsonSerializerOptions` or
+   without calling it). `JwtValidator` now walks `Utf8JsonReader` directly for
+   explicit duplicate-member and claim-type checks; it makes no serializer calls.
+   No call passes a `JsonSerializerOptions` or
    names a type without its `JsonTypeInfo`. Some serialised types do hold ordinary
    collections (`ServerStatus.InputsRejectedByReason` is a `Dictionary<string, long>`),
    and the source generator emits code for those itself; none is a Pooled type (fact 4).

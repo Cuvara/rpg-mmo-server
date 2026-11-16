@@ -5,7 +5,51 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- `k8s/dev-up.sh` now checks the join keyring of every game in gateway-config's
+  `games`, not only cuvara's: it refuses the deploy when any join key equals a
+  `jwt-secret` key, when two games share a join key, when a listed game has no
+  `join-token-secret-<game>`, or when a game namespace's `rpg-app-secrets`
+  `join-token-secret` differs from the gateway's `join-token-secret-<game>`.
+  Keys are split and trimmed exactly like the gateway (Go `strings.TrimSpace`,
+  any locale). Messages name games and Secret keys only (MULTI-GAME-CROSS-REVIEW MG-02).
+- `stack.sh check-secrets` also refuses keys shared between the default and
+  per-game join keyrings, with Go-compatible whitespace trimming in any locale.
+- `k8s/dev-up.sh` refuses an empty, unreadable or non-PEM source `tls.crt`, or
+  a certificate bundle containing a private key, before copying it into game namespaces.
+- MG-01: the default game `cuvara` no longer connects as the PostgreSQL bootstrap superuser. New `db/provision-default-role.sh` (idempotent, superuser connection) creates the restricted login `gamestate` (NOSUPERUSER, NOINHERIT, 20 connections), moves ownership of the existing `gamestate` database and its non-system objects to it in place (no copy, no `REASSIGN OWNED`), revokes PUBLIC CONNECT on the other databases and fails if the role can reach another database or has role memberships. Compose and k8s game DSNs, `.env.example`, `stack.sh`, `k3s/setup-dev.sh` and the Agones secret example now use it; the bootstrap user stays for provisioning, backups/restores and administrative migrations. Upgrade: compose runs the one-shot `postgres-game-roles` on every `up`; k8s runs the manual `default-role` Job (ConfigMap `gamestate-default-role` from `k8s/data/apply.sh`, `GAMESTATE_ROLE_PASSWORD` in Secret `postgres-game`); a bare host runs the script with `PSQL_CMD`. Roles relying on PUBLIC CONNECT lose new connections to other databases. Rollback: point `GAME_DB_URL` back at the bootstrap user. Tests: `provision_test.sh` 59/0, `default_role_test.sh` 118/0, `default_role_live_test.sh` 24/0/0 (a throwaway postgres:16.4-alpine container; shows in-place upgrade with data present and isolation in both directions). Unverified: nothing was applied to a cluster or host. In CD's `DEPLOY_MODE=host`, `GAME_DB_URL` is the game server's own DSN and also feeds `--migrate-only`; it is an operator-set secret this change cannot change, so it must name `gamestate` (`docs/VPS-SETUP.md`, `docs/DATABASE.md`). CD does not set `POSTGRES_GAME_APP_PASSWORD` yet, so CD stacks use the compose default. See `docs/DATABASE.md`.
+
 ### Fixed
+- CD stops waiting for the role provisioner after 300 seconds and points operators to its logs.
+- CD waits for the `postgres-game-roles` one-shot to exit successfully before migrations;
+  missing containers, wait errors and nonzero job exits stop deployment with a clear error.
+- `db/provision-default-role.sh` uses `POSTGRES_GAME_DB` (default `gamestate`) for database
+  ownership, grants, isolation checks and the DSN hint. It validates and quotes the identifier;
+  compose and the k8s Job pass the same database setting used for their admin connection.
+- Renderer examples and `dev-up.sh` diagnostics include a usable TLS choice. The CLI requires
+  `--nakama-tls` for manifests and `--out`, while standalone Secret/gateway snippets may omit it.
+- Cluster verification strips line-ending CRs from Python output on Windows, preventing false
+  autoscaler failures and preserving field parsing in the other cluster checks.
+- Root `.gitattributes` pins shell scripts to LF so Windows checkouts remain usable as mounts.
+- Deployment scripts and test harnesses added or edited by the multi-game fixes are executable.
+- MG-04: rendering a non-default game no longer puts it on plaintext Nakama when the stack's
+  Nakama terminates TLS. `k8s/games/render.py` requires `--nakama-tls on|off` for manifests and `--out` (the stack's
+  decision: `rpg-k8s-data/nakama-config` key `tls-cert-path` set means on) and optional
+  `--nakama-url` / `--nakama-tls-pin`. With TLS on it writes an `https://` URL and the pin
+  `/etc/nakama-tls/tls.crt` into the game's `gameserver-config`, and the manifests header names
+  the `nakama-tls-pin` Secret the game namespace needs. With TLS off it writes `http://` and an
+  empty pin. Any mismatch (TLS on with http or without an absolute pin, TLS off with https or a
+  pin, another scheme, no host, whitespace) is refused with exit 2. `render()` keeps a Python
+  default of off, so `k3s/validate-manifests.py` is unchanged. New test:
+  `k8s/games/test_render.py`.
+- MG-04: `k8s/dev-up.sh` repairs and checks the meta-hop TLS settings in every rendered game
+  namespace (`rpg-k8s-realtime-<game>` for each non-default game in `gateway-config` `games`), not
+  only `rpg-k8s-realtime`. With TLS on it patches each namespace's `gameserver-config` to https plus
+  the pin and copies the public certificate in `rpg-k8s-realtime/nakama-tls-pin` into each game
+  namespace without printing it. It refuses a listed game whose `gameserver-config` is absent, a
+  missing source pin Secret, and (TLS off) any https URL or pin in any namespace. New offline test
+  with a fake kubectl: `k8s/games/tests/dev_up_tls_test.sh`. `k8s/games/README.md` also documents
+  the per-game join keyring onboarding step from MG-02.
 - Comments only: `k8s/data/secrets.example.yaml` no longer names the game server as a reader of
   `JWT_SECRET` (only the gateway and Nakama read it), and `k8s/app/40-gateway.yaml` no longer
   refers to a literal `GAMES` entry in the `render.py` gateway-env snippet, which it does not emit.
@@ -27,7 +71,7 @@ additions below.
 
 #### Changed
 - Monitoring groups by `(game, map_id)`, never by `map_id` alone (D3: a map id is only unique within a game). `monitoring/dashboards/rpg-gameplay.json`: tick p99 `by (le, game, map_id)` and players online `by (game, map_id)`, legends `<game>/<map_id>`. `monitoring/alerts.yaml`: `NakamaRewardsNotLanding` and `NakamaRewardPathSilent` group `by (game, map_id)`, join `on (game, map_id)` and name `<game>/<map_id>` in their annotations. `docs/MONITORING.md` says so, and its metric tables now match `GameServer/Observability/GameMetrics.cs` (every `gameserver_*` series carries `map_id` and `game`) and `gateway/metrics` (`game` on `gateway_auth_total`, `gateway_enter_world_total`, `gateway_allocations_total` and `gateway_session_checks_total`; unverified or unconfigured ids count as `game="other"`).
-- `render.py --print gateway-env` no longer emits a `GAMES` env entry: `40-gateway.yaml` already reads `GAMES` from `gateway-config` and a second variable of the same name would duplicate it. The value is returned as `gateway-games` and printed in the snippet header as the `kubectl patch configmap gateway-config` command; `validate-manifests.py` asserts the snippet has no `GAMES` entry and that `gateway-games` lists the game.
+- `render.py --game <game> --nakama-tls off --print gateway-env` no longer emits a `GAMES` env entry: `40-gateway.yaml` already reads `GAMES` from `gateway-config` and a second variable of the same name would duplicate it. The value is returned as `gateway-games` and printed in the snippet header as the `kubectl patch configmap gateway-config` command; `validate-manifests.py` asserts the snippet has no `GAMES` entry and that `gateway-games` lists the game.
 - `publish-images.yml` refuses an extra image tag longer than 103 characters (was 128), leaving room for the `<game>-` prefix within Docker's 128-character limit.
 - Job names changed: `publish-images.yml`'s single `Build & push gateway + gameserver-dotnet` job is now `Resolve revision and tags`, `Build & push gateway` and `Build & push gameserver-dotnet (<game>)`; `cd.yml`'s `Build & push container images` gains a ` (<game>)` suffix. A branch-protection rule naming the old checks must be updated.
 
@@ -45,7 +89,7 @@ additions below.
 - `JWT_SECRET` from every game-server pod and the compose game server: `agones/fleet-map-dotnet-dev.yaml`, `k8s/app/50-fleet-map.yaml`, `k8s/app/60-fleet-dungeon.yaml`, and the game-server services in `docker-compose.yml` and `docker-compose.override.yml`. A compromised game-server pod holding it could sign a gateway token for any user and any `gid`, authenticate to the gateway, and receive a legitimate join token for another game; a per-game join secret does not stop that (ADR-33 D7, owner decision 5, decided for every stack including the single-game one). The gateway and Nakama still receive `JWT_SECRET`. The game server holds only `JOIN_TOKEN_SECRET`, still mandatory.
 
 #### Added
-- Deploy-time check that the join secret differs from `JWT_SECRET`, which the game server can no longer make at startup. `k8s/dev-up.sh` reads `rpg-app-secrets`' `join-token-secret` and `jwt-secret` as the comma-separated keyrings the gateway parses (split on `,`, whitespace trimmed, empty entries dropped) and compares them key by key: it refuses a join keyring with no non-empty key or with any key equal to any `jwt-secret` key, so a rotation list `new,<jwt>` or a `jwt-secret` of `new,old` with join `old` is refused. It runs next to the existing Nakama/gateway `JWT_SECRET` comparison. `./stack.sh check-secrets` makes the compose check offline (no docker, compose or network) against the loaded `.env` with compose's `:-` defaults: `JWT_SECRET` and `JOIN_TOKEN_SECRET` are both read as keyrings and compared key by key, so every whitespace-trimmed key of `JOIN_TOKEN_SECRET` must differ from every key of the effective `JWT_SECRET` keyring, and any set `JOIN_TOKEN_SECRET_<GAME>` must be a non-empty keyring sharing no key with it (the gateway does not read the per-game variables yet). `./stack.sh up` runs the same check before building or starting anything. Diagnostics name variables and keys, never values. Offline test: `k8s/verify/tests/secret_check_test.sh` covers both halves: the compose cases run `stack.sh check-secrets` on temporary copies, and the k8s cases extract only the read-only check block of `dev-up.sh` (which applies resources before reaching its checks) and run it against a fake `kubectl` on a nonexistent context; `k8s/data/README.md` documents the same dry run.
+- Deploy-time check that the join secret differs from `JWT_SECRET`, which the game server can no longer make at startup. `k8s/dev-up.sh` reads `rpg-app-secrets`' `join-token-secret` and `jwt-secret` as the comma-separated keyrings the gateway parses (split on `,`, whitespace trimmed, empty entries dropped) and compares them key by key: it refuses a join keyring with no non-empty key or with any key equal to any `jwt-secret` key, so a rotation list `new,<jwt>` or a `jwt-secret` of `new,old` with join `old` is refused. It runs with the Nakama/gateway `JWT_SECRET` comparison before the first workload apply; only the data and app namespaces are applied first. `./stack.sh check-secrets` makes the compose check offline (no docker, compose or network) against the loaded `.env` with compose's `:-` defaults: `JWT_SECRET` and `JOIN_TOKEN_SECRET` are both read as keyrings and compared key by key, so every whitespace-trimmed key of `JOIN_TOKEN_SECRET` must differ from every key of the effective `JWT_SECRET` keyring, and any set `JOIN_TOKEN_SECRET_<GAME>` must be a non-empty keyring sharing no key with it or any other join setting. `./stack.sh up` runs the same check before building or starting anything. Diagnostics name variables and keys, never values. Offline test: `k8s/verify/tests/secret_check_test.sh` covers both halves: the compose cases run `stack.sh check-secrets` on temporary copies, and the k8s cases extract only the read-only check block of `dev-up.sh` (which imports images and applies namespaces before its checks) and run it against a fake `kubectl` on a nonexistent context; `k8s/data/README.md` documents the same dry run.
 - `db/provision-gamestate.sh <game>`: human-run, db-schema-write-gated provisioning of one non-default game's database and login role `gamestate_<game>` on the shared game PostgreSQL instance (ADR-33 D5). It validates the game id (`^[a-z][a-z0-9]{1,23}$`, reserved ids refused, `cuvara` refused because it keeps the existing `gamestate` database), makes the role the database owner with restricted attributes, sets `CONNECTION LIMIT` on both role and database (default 20, `--connection-limit N`) so one game cannot take the shared instance's connections (D7), revokes PUBLIC CONNECT/TEMPORARY on the new database, and fails if the role can still connect to any other database (`--revoke-public-connect` hardens those). The role password is read by psql with `\getenv` from `GAMESTATE_ROLE_PASSWORD` and never appears in argv, SQL text, output or the `--dry-run` preview. Never part of deploy or boot automation, and not run against any database in this change. Offline test with a fake psql: `db/tests/provision_test.sh`. Documented in `docs/DATABASE.md`.
 
 #### Changed
@@ -140,6 +184,12 @@ additions below.
   the limit.
 
 ### Changed
+- `k8s/dev-up.sh` runs its app-secret and join-keyring checks before the first
+  workload apply; only the data and app namespaces are applied before them.
+- `k8s/verify/tests/secret_check_test.sh` extracts the check between the
+  `# BEGIN/END app-secret and join-keyring checks` markers and covers the per-game,
+  ordering and Unicode-trim cases.
+- CI runs the six offline deploy contract suites on Ubuntu without services or secrets.
 - **Host UDP buffer limits for the KCP game socket.** `scripts/bootstrap-vps.sh` writes
   `/etc/sysctl.d/90-rpg-kcp.conf` (`net.core.rmem_max` / `wmem_max` = 8 MiB); `stack.sh` warns
   when the host caps them below 4 MiB; `NETWORKING.md` documents the requirement (also for k8s

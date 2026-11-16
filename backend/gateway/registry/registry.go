@@ -787,22 +787,32 @@ func (s *RegistryService) DeregisterServer(ctx context.Context, serverID string)
 }
 
 // Evict removes a server the gateway has learned is dead (a consumed
-// server_down event) from the registry and from the watcher's tracked set, so
-// FindServer stops handing out its address immediately instead of waiting out
-// the registry TTL.
+// server_down event of gameID; empty means the default game) from the registry
+// and from the watcher's tracked set, so FindServer stops handing out its
+// address immediately instead of waiting out the registry TTL.
 //
-// It is idempotent: evicting a server that is already gone is a success, not an
-// error — the watcher that published the event has usually seen the entry
-// missing already, and several gateway instances consume the same event. It
-// deliberately does not deny-list the ServerID: a server that re-registers (or
-// resumes heartbeating) after an eviction is alive by definition and must
-// become assignable again through the normal Register/FindServer path.
-func (s *RegistryService) Evict(ctx context.Context, serverID string) error {
-	if s.watcher != nil {
-		s.watcher.UntrackServer(serverID)
-	}
-	if err := s.reg.Deregister(ctx, serverID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+// It acts only on gameID's registration (MG-03): a stale event of game A never
+// deletes or untracks game B's live registration of the same server id, which
+// is a successful no-op. Evicting a server that is already gone is also a
+// success, because several gateway instances consume the same event. It does
+// not deny-list the ServerID: a server that re-registers after an eviction is
+// alive and becomes assignable again through the normal path.
+func (s *RegistryService) Evict(ctx context.Context, gameID, serverID string) error {
+	gameID = constants.GameOrDefault(gameID)
+	if err := s.reg.DeregisterForGame(ctx, gameID, serverID); err != nil {
+		if errors.Is(err, storage.ErrGameMismatch) {
+			if s.log != nil {
+				s.log.Warn("ignored server_down for a server id now owned by another game",
+					"game_id", gameID, "server_id", serverID)
+			}
+			return nil
+		}
+		// DeregisterForGame reports an absent entry as success, so any other
+		// error is a store fault.
 		return fmt.Errorf("evict server %s: %w", serverID, err)
+	}
+	if s.watcher != nil {
+		s.watcher.UntrackServerForGame(gameID, serverID)
 	}
 	return nil
 }
