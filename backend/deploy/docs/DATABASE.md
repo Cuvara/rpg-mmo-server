@@ -137,7 +137,10 @@ The default game `cuvara` no longer connects with the PostgreSQL bootstrap
 superuser. Its game servers use the non-superuser login **`gamestate`**, which
 owns only the database `gamestate`. The bootstrap user (`POSTGRES_GAME_USER`,
 `game` by default) is for provisioning, backups/restores and administrative
-migrations only; it appears in no game server DSN. The role name is fixed:
+migrations only; it appears in no game server DSN the compose, k8s and
+Agones manifests build. In CD's `DEPLOY_MODE=host`, `GAME_DB_URL` is the game
+server's own DSN, an operator-set secret this repo cannot change: it must name
+`gamestate` (see `VPS-SETUP.md`). The role name is fixed:
 `POSTGRES_GAME_APP_USER` must be `gamestate`.
 
 `db/provision-default-role.sh` converges an **existing** `gamestate` database
@@ -192,8 +195,11 @@ objects are owned by it. A migration run as the bootstrap user (for example
 `--migrate-only` with the bootstrap DSN) leaves new objects owned by the
 bootstrap user; the default privileges above give `gamestate` ALL on new
 `public` tables and sequences, but other object kinds need a rerun of the
-script. The DSN that CD's `--migrate-only` step uses is an operator setting
-this change does not alter.
+script. CD's `--migrate-only` step uses `GAME_DB_URL`. In `DEPLOY_MODE=host`
+that is also the game server's DSN, so it must name `gamestate`, which owns
+`gamestate` and can migrate it; this is an operator-set secret that this
+change documents but cannot change. Running migrations as the bootstrap user
+applies only where `--migrate-only` is given its own DSN.
 
 **Isolation, both directions.** From the `gamestate` login, connecting to
 `postgres` or to any `gamestate_<game>` database is refused, and the role
@@ -324,9 +330,10 @@ already run. Add a new one.
 ### Running by hand
 
 ```bash
-# apply pending migrations and exit (this is what CD runs). Administrative
-# migrations may use the bootstrap user; see "Default game's restricted login".
-gameserver-dotnet --migrate-only --game-db-url 'postgres://game:...@host:5433/gamestate?sslmode=disable'
+# apply pending migrations and exit (this is what CD runs, with GAME_DB_URL).
+# Use the app role gamestate: it owns the database. A bootstrap-user run is an
+# administrative exception; see "Default game's restricted login".
+gameserver-dotnet --migrate-only --game-db-url 'postgres://gamestate:...@host:5433/gamestate?sslmode=disable'
 
 # from source
 cd backend/gameserver-dotnet
@@ -448,12 +455,20 @@ currency live in the meta DB and are unaffected.
    ```bash
    backend/deploy/db/restore.sh --file <dump> --db gamestate --yes
    ```
-6. **Re-apply migrations** — the dump is from whenever it was taken, the binary
+6. **Rerun `provision-default-role.sh`** before migrations or any server start.
+   `restore.sh` restores as the bootstrap user with `--no-owner --no-privileges`,
+   so every restored object is owned by `game` and carries no grants for
+   `gamestate`; the script moves ownership and grants back to the app role.
+   - compose: `docker compose up postgres-game-roles`
+   - k8s: delete and re-apply Job `default-role` (`k8s/data/`)
+   - host: run `db/provision-default-role.sh` with `PSQL_CMD` pointing at an
+     administrative connection and `GAMESTATE_ROLE_PASSWORD` exported
+7. **Re-apply migrations** — the dump is from whenever it was taken, the binary
    may be newer:
    ```bash
    /opt/rpg-mmo/bin/gameserver-dotnet --migrate-only --game-db-url "$GAME_DB_URL"
    ```
-7. **Start the servers, verify, then drop the scratch DB:**
+8. **Start the servers, verify, then drop the scratch DB:**
    ```bash
    sudo systemctl start rpg-gameserver
    /opt/rpg-mmo/bin/smoketest        # end-to-end through the gateway

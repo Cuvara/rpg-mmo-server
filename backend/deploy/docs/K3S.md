@@ -875,8 +875,8 @@ that resolves nowhere else, and 5433 is the *host-side published* mapping of
 way any other host process does — host alias, published port:
 
 ```
-# compose (in-network)   postgres://game:localdev@postgres-game:5432/gamestate?sslmode=disable
-# pod on k3d             postgres://game:localdev@host.k3d.internal:5433/gamestate?sslmode=disable
+# compose (in-network)   postgres://gamestate:localdev-app@postgres-game:5432/gamestate?sslmode=disable
+# pod on k3d             postgres://gamestate:localdev-app@host.k3d.internal:5433/gamestate?sslmode=disable
 # pod on docker-desktop   (no correct value — see below)
 ```
 
